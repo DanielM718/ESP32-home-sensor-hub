@@ -13,8 +13,8 @@ if TYPE_CHECKING:
 
 
 SUPPORTED_RANGES: dict[str, tuple[str, str]] = {
-    "1h": ("-1h", "1m"),
-    "24h": ("-24h", "10m"),
+    "1h": ("-1h", "15m"),
+    "24h": ("-24h", "15m"),
     "7d": ("-7d", "1h"),
     "30d": ("-30d", "6h"),
 }
