@@ -1,0 +1,36 @@
+[Unit]
+Description=Home Sensor MQTT to InfluxDB Bridge
+Documentation=file:/opt/home-sensor/server/docs/OPERATIONS.md
+Wants=network-online.target
+After=network-online.target mosquitto.service influxdb.service
+
+[Service]
+Type=exec
+User=home-sensor
+Group=home-sensor
+WorkingDirectory=/opt/home-sensor/server/backend
+EnvironmentFile=/opt/home-sensor/server/backend/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/home-sensor/server/backend/.venv/bin/python -m bridge.mqtt_bridge
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=30s
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

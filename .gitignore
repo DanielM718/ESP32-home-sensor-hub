@@ -1,0 +1,107 @@
+# macOS and filesystem metadata
+.DS_Store
+.AppleDouble
+.LSOverride
+.directory
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Editor and local IDE state
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+*.bak
+*.tmp
+*.user
+*.workspace
+*.suo
+*.sln.docstates
+
+# Logs and local diagnostics
+*.log
+logs/
+
+# Local secrets and deployment environment
+.env
+.env.*
+!.env.example
+!**/.env.example
+**/main/wifi_cred.h
+**/main/app_config.h
+!**/main/wifi_cred.example.h
+!**/main/app_config.example.h
+
+# ESP-IDF build and generated files
+build/
+**/build/
+sdkconfig
+sdkconfig.old
+dependencies.lock
+managed_components/
+**/managed_components/
+components/.idf/
+**/components/.idf/
+.espressif/
+flasher_args.json
+flash_args
+*.bin
+*.elf
+*.map
+*.hex
+*.uf2
+*.o
+*.obj
+*.a
+*.out
+*.exe
+compile_commands.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+CTestTestfile.cmake
+
+# Language server state
+.clangd
+.clangd/
+.ccls-cache/
+
+# Python
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+*.egg-info/
+build-python/
+dist/
+
+# Node/frontend tooling, if added later
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Keep project configuration templates and source-controlled defaults
+!requirements.txt
+!**/requirements.txt
+!sdkconfig.defaults
+!**/sdkconfig.defaults
+!CMakeLists.txt
+!**/CMakeLists.txt
+!**/main/
+!**/include/
+!**/components/
+!**/partitions*.csv
+!**/*partition*.csv

@@ -1,0 +1,14 @@
+# Home Sensor Mosquitto ACL.
+#
+# Install path on Raspberry Pi:
+#   /etc/mosquitto/acl.d/home-sensor.acl
+#
+# With acl_file configured, clients only have access to listed topics.
+
+user home_sensor_gateway
+topic write home/sensors/+
+topic write home/air/+
+
+user home_sensor_bridge
+topic read home/sensors/+
+topic read home/air/+

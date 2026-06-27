@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Home Sensor Dashboard</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <h1>Home Sensor Dashboard</h1>
+        <p id="last-updated" class="subtle">Waiting for readings</p>
+      </div>
+      <div class="header-actions">
+        <span id="connection-state" class="status-pill status-loading">Loading</span>
+        <button id="refresh-button" class="icon-button" type="button" title="Refresh now" aria-label="Refresh now">R</button>
+      </div>
+    </header>
+
+    <main class="dashboard-shell">
+      <section class="toolbar" aria-label="Time range">
+        <div class="segmented-control" role="group" aria-label="History range">
+          <button class="range-button" type="button" data-range="1h">1h</button>
+          <button class="range-button is-active" type="button" data-range="24h">24h</button>
+          <button class="range-button" type="button" data-range="7d">7d</button>
+          <button class="range-button" type="button" data-range="30d">30d</button>
+        </div>
+      </section>
+
+      <section id="error-banner" class="error-banner" hidden></section>
+
+      <section>
+        <div class="section-heading">
+          <h2>Current Readings</h2>
+        </div>
+        <div id="current-grid" class="current-grid" aria-live="polite"></div>
+      </section>
+
+      <section class="chart-grid" aria-label="Historical readings">
+        <article class="chart-panel">
+          <div class="section-heading">
+            <h2>Temperature</h2>
+            <span class="unit">deg C</span>
+          </div>
+          <div class="chart-frame">
+            <canvas id="temperature-chart"></canvas>
+          </div>
+        </article>
+
+        <article class="chart-panel">
+          <div class="section-heading">
+            <h2>Humidity</h2>
+            <span class="unit">%</span>
+          </div>
+          <div class="chart-frame">
+            <canvas id="humidity-chart"></canvas>
+          </div>
+        </article>
+
+        <article class="chart-panel">
+          <div class="section-heading">
+            <h2>Battery</h2>
+            <span class="unit">mV</span>
+          </div>
+          <div class="chart-frame">
+            <canvas id="battery-chart"></canvas>
+          </div>
+        </article>
+
+        <article class="chart-panel">
+          <div class="section-heading">
+            <h2>Air Quality</h2>
+            <span class="unit">CO2 / PM2.5</span>
+          </div>
+          <div class="chart-frame">
+            <canvas id="air-chart"></canvas>
+          </div>
+        </article>
+      </section>
+
+      <section>
+        <div class="section-heading">
+          <h2>Node Status</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Node</th>
+                <th>Type</th>
+                <th>Status</th>
+                <th>Last Seen</th>
+                <th>Battery</th>
+                <th>Flags</th>
+              </tr>
+            </thead>
+            <tbody id="nodes-table"></tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <script src="{{ url_for('static', filename='vendor/chart.umd.min.js') }}"></script>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+  </body>
+</html>

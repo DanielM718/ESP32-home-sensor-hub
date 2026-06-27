@@ -1,0 +1,277 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=common.sh
+source "${SCRIPT_DIR}/common.sh"
+
+PROJECT_ROOT="${PROJECT_ROOT:-/opt/home-sensor/server}"
+SERVICE_USER="${SERVICE_USER:-home-sensor}"
+ENV_FILE="${ENV_FILE:-${PROJECT_ROOT}/backend/.env}"
+INFLUXDB_URL="${INFLUXDB_URL:-http://127.0.0.1:8086}"
+INFLUXDB_ORG="${INFLUXDB_ORG:-home}"
+INFLUXDB_BUCKET="${INFLUXDB_BUCKET:-environment}"
+INFLUXDB_RETENTION="${INFLUXDB_RETENTION:-0}"
+INFLUXDB_ADMIN_USERNAME="${INFLUXDB_ADMIN_USERNAME:-admin}"
+INFLUXDB_ADMIN_PASSWORD="${INFLUXDB_ADMIN_PASSWORD:-}"
+INFLUXDB_ADMIN_TOKEN="${INFLUXDB_ADMIN_TOKEN:-}"
+
+usage() {
+  cat <<USAGE
+Usage: sudo scripts/setup_influxdb.sh [options]
+
+Initialize InfluxDB OSS v2 and create scoped application tokens.
+
+Options:
+  --url URL                InfluxDB URL. Default: http://127.0.0.1:8086
+  --org ORG                Organization. Default: home
+  --bucket BUCKET          Bucket. Default: environment
+  --retention DURATION     Retention duration. Default: 0 (infinite)
+  --admin-user USER        Initial admin username. Default: admin
+  --env-file PATH          Backend environment file to update
+  -h, --help               Show this help
+
+Set INFLUXDB_ADMIN_PASSWORD and INFLUXDB_ADMIN_TOKEN in the shell to avoid
+interactive prompts. The admin token is used during setup only and is not stored
+in backend/.env.
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --url)
+      INFLUXDB_URL="${2:-}"
+      [[ -n "${INFLUXDB_URL}" ]] || die "--url requires a value"
+      shift 2
+      ;;
+    --org)
+      INFLUXDB_ORG="${2:-}"
+      [[ -n "${INFLUXDB_ORG}" ]] || die "--org requires a value"
+      shift 2
+      ;;
+    --bucket)
+      INFLUXDB_BUCKET="${2:-}"
+      [[ -n "${INFLUXDB_BUCKET}" ]] || die "--bucket requires a value"
+      shift 2
+      ;;
+    --retention)
+      INFLUXDB_RETENTION="${2:-}"
+      [[ -n "${INFLUXDB_RETENTION}" ]] || die "--retention requires a value"
+      shift 2
+      ;;
+    --admin-user)
+      INFLUXDB_ADMIN_USERNAME="${2:-}"
+      [[ -n "${INFLUXDB_ADMIN_USERNAME}" ]] || die "--admin-user requires a value"
+      shift 2
+      ;;
+    --env-file)
+      ENV_FILE="${2:-}"
+      [[ -n "${ENV_FILE}" ]] || die "--env-file requires a path"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      die "Unknown option: $1"
+      ;;
+  esac
+done
+
+require_linux
+require_root
+require_command influx
+require_command python3
+
+prompt_secret() {
+  local prompt="$1"
+  local value
+  read -r -s -p "${prompt}" value
+  printf '\n' >&2
+  printf '%s' "${value}"
+}
+
+generate_token() {
+  python3 - <<'PY'
+import secrets
+print(secrets.token_urlsafe(48))
+PY
+}
+
+ensure_admin_credentials() {
+  if [[ -z "${INFLUXDB_ADMIN_PASSWORD}" ]]; then
+    INFLUXDB_ADMIN_PASSWORD="$(prompt_secret "InfluxDB admin password: ")"
+  fi
+
+  [[ -n "${INFLUXDB_ADMIN_PASSWORD}" ]] || die "InfluxDB admin password cannot be empty"
+
+  if [[ -z "${INFLUXDB_ADMIN_TOKEN}" ]]; then
+    INFLUXDB_ADMIN_TOKEN="$(generate_token)"
+    warn "Generated an admin token for setup. Store it in a password manager now."
+    printf '%s\n' "${INFLUXDB_ADMIN_TOKEN}"
+  fi
+}
+
+influx_cli_ready() {
+  influx ping --host "${INFLUXDB_URL}" >/dev/null 2>&1
+}
+
+admin_token_works() {
+  influx bucket list \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" >/dev/null 2>&1
+}
+
+setup_influxdb_if_needed() {
+  if admin_token_works; then
+    log "InfluxDB already accepts the provided admin token"
+    return
+  fi
+
+  log "Running initial InfluxDB setup"
+  influx setup \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --bucket "${INFLUXDB_BUCKET}" \
+    --retention "${INFLUXDB_RETENTION}" \
+    --username "${INFLUXDB_ADMIN_USERNAME}" \
+    --password "${INFLUXDB_ADMIN_PASSWORD}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" \
+    --force
+}
+
+bucket_id() {
+  influx bucket list \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" \
+    --name "${INFLUXDB_BUCKET}" \
+    --json \
+    | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if isinstance(data, dict):
+    data = data.get("buckets", [])
+for bucket in data:
+    if bucket.get("name"):
+        print(bucket["id"])
+        raise SystemExit(0)
+raise SystemExit("bucket not found")
+'
+}
+
+ensure_bucket() {
+  if bucket_id >/dev/null 2>&1; then
+    return
+  fi
+
+  log "Creating bucket ${INFLUXDB_BUCKET}"
+  influx bucket create \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" \
+    --name "${INFLUXDB_BUCKET}" \
+    --retention "${INFLUXDB_RETENTION}" >/dev/null
+}
+
+create_scoped_token() {
+  local description="$1"
+  shift
+
+  influx auth create \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" \
+    --description "${description}" \
+    --json \
+    "$@" \
+    | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if isinstance(data, list):
+    data = data[0] if data else {}
+token = data.get("token") or data.get("Token")
+if not token:
+    raise SystemExit("token not found in influx auth create output")
+print(token)
+'
+}
+
+set_env_value() {
+  local key="$1"
+  local value="$2"
+
+  install -d -m 0750 -o root -g "${SERVICE_USER}" "$(dirname "${ENV_FILE}")"
+  if [[ ! -f "${ENV_FILE}" ]]; then
+    install -m 0640 -o root -g "${SERVICE_USER}" "${PROJECT_ROOT}/backend/.env.example" "${ENV_FILE}"
+  fi
+
+  python3 - "${ENV_FILE}" "${key}" "${value}" <<'PY'
+from pathlib import Path
+import sys
+
+path = Path(sys.argv[1])
+key = sys.argv[2]
+value = sys.argv[3]
+
+lines = path.read_text().splitlines() if path.exists() else []
+prefix = f"{key}="
+updated = False
+next_lines = []
+
+for line in lines:
+    if line.startswith(prefix):
+        next_lines.append(f"{key}={value}")
+        updated = True
+    else:
+        next_lines.append(line)
+
+if not updated:
+    next_lines.append(f"{key}={value}")
+
+path.write_text("\n".join(next_lines) + "\n")
+PY
+
+  chown root:"${SERVICE_USER}" "${ENV_FILE}"
+  chmod 0640 "${ENV_FILE}"
+}
+
+ensure_admin_credentials
+
+log "Waiting for InfluxDB at ${INFLUXDB_URL}"
+for _ in $(seq 1 30); do
+  if influx_cli_ready; then
+    break
+  fi
+  sleep 2
+done
+influx_cli_ready || die "InfluxDB did not respond to influx ping"
+
+setup_influxdb_if_needed
+
+admin_token_works || die "InfluxDB admin token could not list buckets after setup"
+ensure_bucket
+BUCKET_ID="$(bucket_id)"
+[[ -n "${BUCKET_ID}" ]] || die "Unable to determine bucket ID for ${INFLUXDB_BUCKET}"
+log "Using bucket ${INFLUXDB_BUCKET} (${BUCKET_ID})"
+
+log "Creating scoped application tokens"
+WRITE_TOKEN="$(create_scoped_token "home-sensor bridge write ${INFLUXDB_BUCKET}" --write-bucket "${BUCKET_ID}")"
+READ_TOKEN="$(create_scoped_token "home-sensor dashboard read ${INFLUXDB_BUCKET}" --read-bucket "${BUCKET_ID}")"
+
+set_env_value INFLUXDB_URL "${INFLUXDB_URL}"
+set_env_value INFLUXDB_ORG "${INFLUXDB_ORG}"
+set_env_value INFLUXDB_BUCKET "${INFLUXDB_BUCKET}"
+set_env_value INFLUXDB_TOKEN "${WRITE_TOKEN}"
+set_env_value INFLUXDB_WRITE_TOKEN "${WRITE_TOKEN}"
+set_env_value INFLUXDB_READ_TOKEN "${READ_TOKEN}"
+
+log "InfluxDB setup complete"
+log "backend/.env now contains scoped application tokens"

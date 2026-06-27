@@ -1,0 +1,106 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    command: ["mosquitto", "-c", "/mosquitto/config/docker-mosquitto.conf"]
+    ports:
+      - "127.0.0.1:1883:1883"
+    volumes:
+      - ./config/mosquitto/docker-mosquitto.conf:/mosquitto/config/docker-mosquitto.conf:ro
+      - ./config/mosquitto/home-sensor.acl:/mosquitto/config/home-sensor.acl:ro
+      - mosquitto-data:/mosquitto/data
+      - mosquitto-log:/mosquitto/log
+      - mosquitto-config:/mosquitto/config-runtime
+    restart: unless-stopped
+
+  influxdb:
+    image: influxdb:2
+    ports:
+      - "127.0.0.1:8086:8086"
+    environment:
+      DOCKER_INFLUXDB_INIT_MODE: setup
+      DOCKER_INFLUXDB_INIT_USERNAME: ${INFLUXDB_ADMIN_USERNAME:-admin}
+      DOCKER_INFLUXDB_INIT_PASSWORD: ${INFLUXDB_ADMIN_PASSWORD:-change-this-influxdb-password}
+      DOCKER_INFLUXDB_INIT_ORG: ${INFLUXDB_ORG:-home}
+      DOCKER_INFLUXDB_INIT_BUCKET: ${INFLUXDB_BUCKET:-environment}
+      DOCKER_INFLUXDB_INIT_RETENTION: ${INFLUXDB_RETENTION:-0}
+      DOCKER_INFLUXDB_INIT_ADMIN_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+    volumes:
+      - influxdb-data:/var/lib/influxdb2
+      - influxdb-config:/etc/influxdb2
+    restart: unless-stopped
+
+  bridge:
+    build:
+      context: .
+    command: ["python", "-m", "bridge.mqtt_bridge"]
+    depends_on:
+      - mosquitto
+      - influxdb
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MQTT_HOST: mosquitto
+      MQTT_PORT: 1883
+      MQTT_KEEPALIVE_SECONDS: 60
+      MQTT_CLIENT_ID: home-sensor-bridge
+      MQTT_QOS: 1
+      MQTT_MAX_PAYLOAD_BYTES: 4096
+      MQTT_USERNAME: ${MQTT_USERNAME:-home_sensor_bridge}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-change-this-mqtt-password}
+      MQTT_SENSOR_TOPIC: home/sensors/+
+      MQTT_AIR_TOPIC: home/air/+
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-home}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-environment}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_WRITE_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_READ_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+    restart: unless-stopped
+
+  dashboard:
+    build:
+      context: .
+    command: ["gunicorn", "--workers", "2", "--bind", "0.0.0.0:8080", "app.web:create_app()"]
+    depends_on:
+      - influxdb
+    ports:
+      - "127.0.0.1:8080:8080"
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      NODE_STALE_AFTER_SECONDS: ${NODE_STALE_AFTER_SECONDS:-1800}
+      MQTT_USERNAME: ${MQTT_USERNAME:-home_sensor_bridge}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-change-this-mqtt-password}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-home}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-environment}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_WRITE_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_READ_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:latest
+    depends_on:
+      - influxdb
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-change-this-grafana-password}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-home}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-environment}
+      INFLUXDB_READ_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./config/grafana/provisioning/datasources/home-sensor-influxdb.docker.yml:/etc/grafana/provisioning/datasources/home-sensor-influxdb.yml:ro
+      - ./config/grafana/provisioning/dashboards/home-sensor-dashboards.yml:/etc/grafana/provisioning/dashboards/home-sensor-dashboards.yml:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards/home-sensor:ro
+    restart: unless-stopped
+
+volumes:
+  grafana-data:
+  influxdb-config:
+  influxdb-data:
+  mosquitto-config:
+  mosquitto-data:
+  mosquitto-log:

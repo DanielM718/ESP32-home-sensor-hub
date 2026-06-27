@@ -1,0 +1,26 @@
+{
+  // Example only. Merge these ideas into your existing Tailnet policy.
+  // Replace users and groups with your real Tailnet identities.
+
+  "tagOwners": {
+    "tag:home-sensor": ["autogroup:admin"]
+  },
+
+  "grants": [
+    {
+      "src": ["autogroup:admin"],
+      "dst": ["tag:home-sensor"],
+      "ip": ["tcp:22", "tcp:8080", "tcp:3000"]
+    }
+  ],
+
+  "ssh": [
+    {
+      "action": "check",
+      "src": ["autogroup:admin"],
+      "dst": ["tag:home-sensor"],
+      "users": ["root", "autogroup:nonroot"],
+      "checkPeriod": "1h"
+    }
+  ]
+}
