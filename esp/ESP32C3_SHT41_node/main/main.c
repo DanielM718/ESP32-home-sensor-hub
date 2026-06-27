@@ -20,7 +20,8 @@
 
 #define NODE_ID 1
 #define ESPNOW_CHANNEL 6
-#define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL)
+//#define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
+#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing
 #define ESPNOW_SEND_TIMEOUT_MS 500
 
 // Seeed XIAO ESP32-C3 common I2C pins are D4/SDA = GPIO6 and D5/SCL = GPIO7.
@@ -28,11 +29,12 @@
 #define I2C_SDA_GPIO GPIO_NUM_6
 #define I2C_SCL_GPIO GPIO_NUM_7
 #define I2C_FREQ_HZ 100000
+#define I2C_XFER_TIMEOUT_MS 100
 
 #define USER_LED_GPIO GPIO_NUM_10
 #define SHT41_I2C_ADDR 0x44
 #define SHT41_CMD_HIGH_PRECISION_NO_HEATER 0xFD
-#define SHT41_MEASUREMENT_DELAY_MS 10
+#define SHT41_MEASUREMENT_DELAY_MS 30
 
 #define STATUS_SHT41_OK BIT0
 #define STATUS_ESPNOW_SEND_ATTEMPTED BIT1
@@ -121,30 +123,48 @@ static esp_err_t i2c_init(void)
     return ESP_OK;
 }
 
+static esp_err_t sht41_probe(void)
+{
+    esp_err_t err = i2c_master_probe(i2c_bus, SHT41_I2C_ADDR, I2C_XFER_TIMEOUT_MS);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "SHT41 probe OK at I2C address 0x%02x", SHT41_I2C_ADDR);
+    } else {
+        ESP_LOGW(TAG, "SHT41 probe failed at I2C address 0x%02x: %s",
+                 SHT41_I2C_ADDR, esp_err_to_name(err));
+    }
+
+    return err;
+}
+
 static esp_err_t sht41_read(float *temp_c, float *rh)
 {
     uint8_t command = SHT41_CMD_HIGH_PRECISION_NO_HEATER;
     uint8_t data[6] = {0};
     esp_err_t err = i2c_master_transmit(sht41_dev, &command, sizeof(command),
-                                        pdMS_TO_TICKS(100));
+                                        I2C_XFER_TIMEOUT_MS);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SHT41 command transmit failed: %s", esp_err_to_name(err));
         return err;
     }
 
     vTaskDelay(pdMS_TO_TICKS(SHT41_MEASUREMENT_DELAY_MS));
 
-    err = i2c_master_receive(sht41_dev, data, sizeof(data), pdMS_TO_TICKS(100));
+    err = i2c_master_receive(sht41_dev, data, sizeof(data), I2C_XFER_TIMEOUT_MS);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "SHT41 measurement receive failed after %d ms delay: %s",
+                 SHT41_MEASUREMENT_DELAY_MS, esp_err_to_name(err));
         return err;
     }
 
     if (sht41_crc8(&data[0], 2) != data[2]) {
-        ESP_LOGE(TAG, "SHT41 temperature CRC mismatch");
+        ESP_LOGE(TAG, "SHT41 temperature CRC mismatch: got=0x%02x expected=0x%02x",
+                 data[2], sht41_crc8(&data[0], 2));
         return ESP_ERR_INVALID_CRC;
     }
 
     if (sht41_crc8(&data[3], 2) != data[5]) {
-        ESP_LOGE(TAG, "SHT41 humidity CRC mismatch");
+        ESP_LOGE(TAG, "SHT41 humidity CRC mismatch: got=0x%02x expected=0x%02x",
+                 data[5], sht41_crc8(&data[3], 2));
         return ESP_ERR_INVALID_CRC;
     }
 
@@ -195,7 +215,7 @@ static void espnow_init(void)
 
     esp_now_peer_info_t peer = {0};
     memcpy(peer.peer_addr, gateway_mac, ESP_NOW_ETH_ALEN);
-    peer.channel = ESPNOW_CHANNEL;
+    peer.channel = 0; // Use the current Wi-Fi channel because this gateway is connected to the router.
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
 
@@ -230,6 +250,11 @@ void app_main(void)
     bool i2c_ready = (err == ESP_OK);
     if (!i2c_ready) {
         ESP_LOGE(TAG, "I2C init failed: %s", esp_err_to_name(err));
+    } else {
+        err = sht41_probe();
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Continuing after SHT41 probe failure to capture read-stage errors");
+        }
     }
 
     sensor_packet_t packet = {
@@ -278,6 +303,6 @@ void app_main(void)
         ESP_LOGE(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(5000));
     enter_deep_sleep();
 }

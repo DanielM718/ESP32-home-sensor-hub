@@ -44,8 +44,14 @@ datasource_rendered() {
 grafana_http_ready() {
   command -v curl >/dev/null 2>&1 || return 1
   local status
-  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${GRAFANA_URL}/api/health")"
-  [[ "${status}" == "200" ]]
+  for _ in $(seq 1 30); do
+    status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' "${GRAFANA_URL}/api/health" || true)"
+    if [[ "${status}" == "200" ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
 }
 
 require_linux

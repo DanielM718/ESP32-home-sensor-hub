@@ -201,7 +201,7 @@ static void espnow_init(void){
     esp_now_peer_info_t peer = {0};
 
     memcpy(peer.peer_addr, broadcast_mac, ESP_NOW_ETH_ALEN);
-    peer.channel = ESPNOW_CHANNEL;
+    peer.channel = 0; // Use the current Wi-Fi channel because this gateway is connected to the router.
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
     ESP_ERROR_CHECK(esp_now_add_peer(&peer));

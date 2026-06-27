@@ -10,5 +10,7 @@
 #define MQTT_USERNAME ""
 #define MQTT_PASSWORD ""
 #define MQTT_QOS 1
+#define MQTT_NETWORK_TIMEOUT_MS 5000
+#define MQTT_RECONNECT_TIMEOUT_MS 5000
 
 #endif

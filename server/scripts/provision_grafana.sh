@@ -80,6 +80,9 @@ else
   warn "Example: sudo grafana cli --homepath /usr/share/grafana admin reset-admin-password '<new-password>'"
 fi
 
+log "Ensuring Grafana data directory ownership"
+chown -R grafana:grafana /var/lib/grafana
+
 if command -v systemctl >/dev/null 2>&1; then
   log "Restarting Grafana"
   systemctl restart grafana-server.service
