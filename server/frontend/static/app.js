@@ -22,6 +22,7 @@ const chartPalette = [
 
 const state = {
   range: "24h",
+  nodeFilter: "all",
   charts: {},
   latestTimer: null,
 };
@@ -37,6 +38,7 @@ document.addEventListener("DOMContentLoaded", () => {
   Chart.defaults.color = "#42534a";
 
   setupRangeButtons();
+  setupNodeFilter();
   document.getElementById("refresh-button").addEventListener("click", refreshAll);
   initializeCharts();
   refreshAll();
@@ -47,12 +49,14 @@ async function refreshAll() {
   clearError();
   setStatus("Loading", "loading");
   try {
+    const readingsUrl = `${API.readings}?${readingsQueryParams().toString()}`;
     const [latest, nodes, readings] = await Promise.all([
       fetchJson(API.latest),
       fetchJson(API.nodes),
-      fetchJson(`${API.readings}?range=${encodeURIComponent(state.range)}`),
+      fetchJson(readingsUrl),
     ]);
 
+    updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderNodes(nodes);
     renderCharts(readings);
@@ -71,6 +75,7 @@ async function refreshLatestOnly() {
       fetchJson(API.nodes),
     ]);
 
+    updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderNodes(nodes);
     setLastUpdated(latest.generated_at || nodes.generated_at);
@@ -80,6 +85,14 @@ async function refreshLatestOnly() {
     setStatus("API error", "error");
     showError(error.message || "Latest refresh failed");
   }
+}
+
+function setupNodeFilter() {
+  const select = document.getElementById("node-filter");
+  select.addEventListener("change", async () => {
+    state.nodeFilter = select.value;
+    await refreshAll();
+  });
 }
 
 function setupRangeButtons() {
@@ -92,6 +105,15 @@ function setupRangeButtons() {
       await refreshAll();
     });
   }
+}
+
+function readingsQueryParams() {
+  const params = new URLSearchParams({ range: state.range });
+  if (state.nodeFilter !== "all") {
+    params.set("sensor_type", "environment");
+    params.set("node_id", state.nodeFilter);
+  }
+  return params;
 }
 
 async function fetchJson(url) {
@@ -121,6 +143,40 @@ async function fetchJson(url) {
   } finally {
     window.clearTimeout(timeout);
   }
+}
+
+function updateNodeFilterOptions(data) {
+  const select = document.getElementById("node-filter");
+  const nodes = (data.environment || [])
+    .map((reading) => reading.node_id)
+    .filter((nodeId) => nodeId !== undefined && nodeId !== null)
+    .map(String)
+    .sort((left, right) => Number(left) - Number(right));
+  const uniqueNodes = Array.from(new Set(nodes));
+
+  const options = [
+    { value: "all", label: "All environment nodes" },
+    ...uniqueNodes.map((nodeId) => ({ value: nodeId, label: `Node ${nodeId}` })),
+  ];
+
+  if (state.nodeFilter !== "all" && !uniqueNodes.includes(state.nodeFilter)) {
+    options.push({ value: state.nodeFilter, label: `Node ${state.nodeFilter}` });
+  }
+
+  const currentOptions = Array.from(select.options).map((option) => `${option.value}:${option.textContent}`);
+  const nextOptions = options.map((option) => `${option.value}:${option.label}`);
+  if (currentOptions.join("|") === nextOptions.join("|")) {
+    select.value = state.nodeFilter;
+    return;
+  }
+
+  select.replaceChildren(...options.map((option) => {
+    const element = document.createElement("option");
+    element.value = option.value;
+    element.textContent = option.label;
+    return element;
+  }));
+  select.value = state.nodeFilter;
 }
 
 function initializeCharts() {
@@ -266,17 +322,24 @@ function renderNodes(data) {
 
 function renderCharts(data) {
   const series = data.series || [];
-  updateChart(state.charts.temperature, buildDatasets(series, "temperature_c", "Temp C"));
-  updateChart(state.charts.humidity, buildDatasets(series, "humidity", "Humidity %"));
+  const environmentSeries = series.filter((item) => item.sensor_type === "environment");
+  const airQualitySeries = series.filter((item) => item.sensor_type === "air_quality");
+
+  updateChart(state.charts.temperature, buildDatasets(environmentSeries, "temperature_c", "Temp C"));
+  updateChart(state.charts.humidity, buildDatasets(environmentSeries, "humidity", "Humidity %"));
   updateChart(state.charts.battery, buildDatasets(
-    series.filter((item) => item.sensor_type === "environment"),
+    environmentSeries,
     "battery_mv",
     "Battery mV",
   ));
-  updateChart(state.charts.air, [
-    ...buildDatasets(series, "co2", "CO2 ppm"),
-    ...buildDatasets(series, "pm25", "PM2.5"),
-  ]);
+
+  const airDatasets = [
+    ...buildDatasets(airQualitySeries, "co2", "CO2 ppm"),
+    ...buildDatasets(airQualitySeries, "pm25", "PM2.5"),
+  ];
+  const airPanel = document.getElementById("air-chart-panel");
+  airPanel.hidden = airDatasets.length === 0;
+  updateChart(state.charts.air, airDatasets);
 }
 
 function buildDatasets(series, field, suffix) {
