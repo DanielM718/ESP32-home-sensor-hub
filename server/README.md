@@ -67,9 +67,15 @@ Example payload:
   "temperature_c": 24.8,
   "humidity": 41.6,
   "battery_mv": 4058,
-  "status_flags": 0
+  "status_flags": 4
 }
 ```
+
+The SHT41 gateway publishes the complete unsigned `status_flags` value. The
+bridge stores it without masking. Battery bits are `BIT2` measurement valid,
+`BIT3` low battery, and `BIT4` confirmed low-battery shutdown. Historical
+payloads without `status_flags` remain accepted, but their battery status and
+voltage are treated as unavailable.
 
 Future air-quality updates are expected at:
 

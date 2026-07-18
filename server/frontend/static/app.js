@@ -266,20 +266,26 @@ function renderLatest(data) {
 function readingCard(reading) {
   const card = document.createElement("article");
   card.className = "reading-card";
+  const batteryState = batteryStateFor(reading);
+  if (batteryState === "low" || batteryState === "shutdown") {
+    card.classList.add(`battery-${batteryState}`);
+  }
   const title = reading.sensor_type === "environment"
     ? `Node ${reading.node_id}`
     : formatLabel(reading.location || reading.id);
+  const isEnvironment = reading.sensor_type === "environment";
 
   card.innerHTML = `
     <h3>${escapeHtml(title)}</h3>
     <div class="reading-values">
       ${metricHtml("Temp", formatNumber(reading.temperature_c, 1, " C"))}
       ${metricHtml("Humidity", formatNumber(reading.humidity, 1, "%"))}
-      ${reading.battery_mv !== undefined ? metricHtml("Battery", `${reading.battery_mv} mV`) : ""}
+      ${isEnvironment ? metricHtml("Battery", batteryDisplay(reading)) : ""}
       ${reading.co2 !== undefined ? metricHtml("CO2", `${reading.co2} ppm`) : ""}
       ${reading.pm25 !== undefined ? metricHtml("PM2.5", formatNumber(reading.pm25, 1, " ug/m3")) : ""}
-      ${reading.status_flags !== undefined ? metricHtml("Flags", String(reading.status_flags)) : ""}
+      ${isEnvironment ? metricHtml("Flags", statusFlagsDisplay(reading.status_flags)) : ""}
     </div>
+    ${batteryAlertHtml(reading)}
     <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
   `;
   return card;
@@ -308,16 +314,87 @@ function renderNodes(data) {
     const label = node.sensor_type === "environment"
       ? `Node ${node.node_id}`
       : formatLabel(node.location || node.id);
+    const statusClass = nodeStatusClass(node);
     row.innerHTML = `
       <td>${escapeHtml(label)}</td>
       <td>${escapeHtml(formatLabel(node.sensor_type))}</td>
-      <td class="node-${escapeHtml(node.status || "unknown")}">${escapeHtml(node.status || "unknown")}</td>
+      <td class="${escapeHtml(statusClass)}">${escapeHtml(nodeStatusLabel(node))}</td>
       <td>${escapeHtml(relativeTime(node.last_seen))}</td>
-      <td>${node.battery_mv !== undefined ? `${node.battery_mv} mV` : "-"}</td>
-      <td>${node.status_flags !== undefined ? escapeHtml(String(node.status_flags)) : "-"}</td>
+      <td>${node.sensor_type === "environment" ? escapeHtml(batteryDisplay(node)) : "-"}</td>
+      <td>${node.sensor_type === "environment" ? escapeHtml(statusFlagsDisplay(node.status_flags)) : "-"}</td>
     `;
     return row;
   }));
+}
+
+function batteryStateFor(reading) {
+  if (reading.sensor_type !== "environment") {
+    return null;
+  }
+  if (reading.battery_shutdown === true) {
+    return "shutdown";
+  }
+  if (reading.battery_low === true) {
+    return "low";
+  }
+  if (reading.battery_measurement_ok !== true) {
+    return "unavailable";
+  }
+  return "ok";
+}
+
+function batteryDisplay(reading) {
+  if (
+    reading.battery_measurement_ok === true
+    && reading.battery_mv !== undefined
+    && reading.battery_mv !== null
+  ) {
+    return `${reading.battery_mv} mV`;
+  }
+  return "Unavailable";
+}
+
+function statusFlagsDisplay(statusFlags) {
+  return statusFlags === undefined || statusFlags === null
+    ? "Unavailable"
+    : String(statusFlags);
+}
+
+function batteryAlertHtml(reading) {
+  const batteryState = batteryStateFor(reading);
+  if (batteryState === "shutdown") {
+    return '<div class="battery-alert battery-alert-shutdown">Critical: low-battery shutdown confirmed.</div>';
+  }
+  if (batteryState === "low") {
+    return '<div class="battery-alert battery-alert-low">Warning: battery voltage is low.</div>';
+  }
+  if (batteryState === "unavailable") {
+    return '<div class="battery-alert battery-alert-unavailable">Battery measurement unavailable.</div>';
+  }
+  return "";
+}
+
+function nodeStatusLabel(node) {
+  const status = node.status || "unknown";
+  if (node.battery_shutdown === true) {
+    return status === "stale"
+      ? "stale - battery shutdown"
+      : "battery shutdown";
+  }
+  if (node.battery_low === true) {
+    return `${status} - low battery`;
+  }
+  return status;
+}
+
+function nodeStatusClass(node) {
+  if (node.battery_shutdown === true) {
+    return "node-shutdown";
+  }
+  if (node.battery_low === true) {
+    return "node-low";
+  }
+  return `node-${node.status || "unknown"}`;
 }
 
 function renderCharts(data) {

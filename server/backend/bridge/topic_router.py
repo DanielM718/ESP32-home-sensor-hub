@@ -8,6 +8,7 @@ from typing import Any
 from app.models import AirQualityReading, Reading, SensorReading, utc_now
 from app.validation import (
     ValidationError,
+    optional_int,
     parse_json_object,
     required_float,
     required_int,
@@ -62,7 +63,7 @@ def _sensor_reading(
         ),
         humidity=required_float(data, "humidity", min_value=0.0, max_value=100.0),
         battery_mv=required_int(data, "battery_mv", min_value=0, max_value=20_000),
-        status_flags=required_int(
+        status_flags=optional_int(
             data, "status_flags", min_value=0, max_value=4_294_967_295
         ),
         received_at=utc_now(),

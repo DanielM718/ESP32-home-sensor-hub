@@ -5,5 +5,6 @@ idf_component_register(SRCS "main.c"
                            esp_wifi
                            esp_event
                            esp_netif
+                           esp_adc
                            esp_driver_gpio
                            esp_driver_i2c)

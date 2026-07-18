@@ -44,10 +44,20 @@ Then copy or download the Chart.js browser bundle before using the dashboard.
 ## Displayed Data
 
 - current temperature and humidity by node/station
-- battery voltage for battery nodes
-- status flags for battery nodes
+- calibrated battery voltage for battery nodes when `STATUS_BATTERY_OK` is set
+- raw status flags plus decoded battery measurement, low, and shutdown states
 - historical temperature, humidity, battery, CO2, and PM2.5 charts
 - node online/stale status
+
+The current-reading card and node table show battery measurement unavailable
+when `BIT2` is clear or `status_flags` is missing. `BIT3` produces a visible
+low-battery warning, while `BIT4` produces a critical shutdown state. If the
+final shutdown packet later becomes stale, the row remains stale but is labeled
+`stale - battery shutdown`; a node that disappears without `BIT4` remains a
+normal unexplained stale node. The historical battery chart includes only
+points paired with a same-timestamp `STATUS_BATTERY_OK` bit, so legacy records
+without status are not presented as measurements. No battery percentage is
+estimated.
 
 ## Official References
 

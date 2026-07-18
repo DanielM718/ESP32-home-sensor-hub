@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Union
 
+from app.battery_status import STATUS_BATTERY_OK
+
 
 @dataclass(frozen=True)
 class SensorReading:
@@ -17,7 +19,7 @@ class SensorReading:
     temperature_c: float
     humidity: float
     battery_mv: int
-    status_flags: int
+    status_flags: int | None
     received_at: datetime
 
     @property
@@ -34,13 +36,18 @@ class SensorReading:
 
     @property
     def fields(self) -> dict[str, float | int]:
-        return {
+        fields: dict[str, float | int] = {
             "sequence": self.sequence,
             "temperature_c": self.temperature_c,
             "humidity": self.humidity,
-            "battery_mv": self.battery_mv,
-            "status_flags": self.status_flags,
         }
+
+        if self.status_flags is not None:
+            fields["status_flags"] = self.status_flags
+            if self.status_flags & STATUS_BATTERY_OK:
+                fields["battery_mv"] = self.battery_mv
+
+        return fields
 
 
 @dataclass(frozen=True)

@@ -37,9 +37,18 @@ Use pull-ups appropriate for your SEN66 breakout/cable and bus length. Many sens
 
 ## SEN66 Power
 
-The SEN66 is a continuous air-quality module. This firmware keeps it in measurement mode and does not deep sleep between readings.
+The SEN66 node is USB powered. The SEN66 is a continuous air-quality module;
+this firmware keeps it in measurement mode and does not deep sleep between
+readings. It does not use the SHT41 node's battery-divider circuit or initialize
+an ADC for battery monitoring.
 
 Per the Sensirion SEN6x datasheet, SEN63C/SEN65/SEN66 use a 3.15 V to 3.6 V VDD range. For SEN66 measurement mode after startup, size the supply for roughly 90 mA typical, 110 mA max average current, and up to 350 mA peak current pulses. Use a stable 3.3 V rail and verify that the XIAO board, regulator, USB supply, cable, and any carrier board can support that load.
+
+The SEN66 packet has no `battery_mv` field, so no battery value is added merely
+for symmetry with the SHT41 packet. The node does not report a valid battery
+voltage. If a downstream unified schema supplies a zero battery value for this
+node, interpret it as unavailable or not applicable, not as a measured zero,
+and do not associate it with `STATUS_BATTERY_OK`.
 
 ## Local Configuration
 

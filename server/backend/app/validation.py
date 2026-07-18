@@ -53,6 +53,29 @@ def required_int(
     return value
 
 
+def optional_int(
+    data: Mapping[str, Any],
+    key: str,
+    *,
+    min_value: int | None = None,
+    max_value: int | None = None,
+) -> int | None:
+    """Validate an integer field when present, preserving absence as ``None``."""
+
+    if key not in data:
+        return None
+
+    value = data[key]
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValidationError(f"{key} must be an integer")
+
+    if min_value is not None and value < min_value:
+        raise ValidationError(f"{key} must be >= {min_value}")
+    if max_value is not None and value > max_value:
+        raise ValidationError(f"{key} must be <= {max_value}")
+    return value
+
+
 def required_float(
     data: Mapping[str, Any],
     key: str,

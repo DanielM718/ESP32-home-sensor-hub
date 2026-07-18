@@ -8,6 +8,8 @@ import json
 import re
 from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol
 
+from app.battery_status import decode_battery_status
+
 if TYPE_CHECKING:
     from app.config import InfluxSettings
 
@@ -43,6 +45,7 @@ ENVIRONMENT_HISTORY_FIELDS = (
     "temperature_c",
     "humidity",
     "battery_mv",
+    "status_flags",
 )
 AIR_QUALITY_FIELDS = (
     "co2",
@@ -170,31 +173,81 @@ def latest_flux(bucket: str) -> str:
 
 
 def readings_flux(bucket: str, query: ReadingsQuery) -> str:
-    fields = _history_fields(query.sensor_type)
-    filters = [
-        f"r._measurement == {_flux_string(measurement)}"
-        for measurement in _measurements(query.sensor_type)
-    ]
-    lines = [
-        f"from(bucket: {_flux_string(bucket)})",
-        f"  |> range(start: {query.flux_start})",
-        f"  |> filter(fn: (r) => {' or '.join(filters)})",
-        f"  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(fields)}))",
-    ]
+    lines: list[str] = []
+    streams: list[str] = []
+    include_environment = query.sensor_type == SENSOR_TYPE_ENVIRONMENT or (
+        query.sensor_type == SENSOR_TYPE_ALL and query.location is None
+    )
+    include_air_quality = query.sensor_type == SENSOR_TYPE_AIR_QUALITY or (
+        query.sensor_type == SENSOR_TYPE_ALL and query.node_id is None
+    )
 
+    if include_environment:
+        lines.extend(_environment_history_flux(bucket, query))
+        streams.extend(("environmentMetrics", "environmentBattery"))
+
+    if include_air_quality:
+        if lines:
+            lines.append("")
+        lines.extend(_air_quality_history_flux(bucket, query))
+        streams.append("airQuality")
+
+    lines.append("")
+    if len(streams) == 1:
+        lines.append(streams[0])
+    else:
+        lines.append(f"union(tables: [{', '.join(streams)}])")
+    lines.extend(['  |> yield(name: "mean")', ""])
+    return "\n".join(lines)
+
+
+def _environment_history_flux(bucket: str, query: ReadingsQuery) -> list[str]:
+    lines = [
+        'import "bitwise"',
+        "",
+        f"environment = from(bucket: {_flux_string(bucket)})",
+        f"  |> range(start: {query.flux_start})",
+        f"  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)})",
+        f"  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_HISTORY_FIELDS)}))",
+    ]
     if query.node_id is not None:
         lines.append(f"  |> filter(fn: (r) => r.node_id == {_flux_string(str(query.node_id))})")
-    if query.location is not None:
-        lines.append(f"  |> filter(fn: (r) => r.location == {_flux_string(query.location)})")
 
     lines.extend(
         [
-            f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
-            '  |> yield(name: "mean")',
             "",
+            "environmentMetrics = environment",
+            '  |> filter(fn: (r) => r._field == "temperature_c" or r._field == "humidity")',
+            f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
+            "",
+            "environmentBattery = environment",
+            '  |> filter(fn: (r) => r._field == "battery_mv" or r._field == "status_flags")',
+            '  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")',
+            "  |> filter(fn: (r) =>",
+            "    exists r.battery_mv and",
+            "    exists r.status_flags and",
+            "    bitwise.sand(a: r.status_flags, b: 4) > 0",
+            "  )",
+            '  |> map(fn: (r) => ({r with _field: "battery_mv", _value: float(v: r.battery_mv)}))',
+            f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
         ]
     )
-    return "\n".join(lines)
+    return lines
+
+
+def _air_quality_history_flux(bucket: str, query: ReadingsQuery) -> list[str]:
+    lines = [
+        f"airQuality = from(bucket: {_flux_string(bucket)})",
+        f"  |> range(start: {query.flux_start})",
+        f"  |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})",
+        f"  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(AIR_QUALITY_FIELDS)}))",
+    ]
+    if query.location is not None:
+        lines.append(f"  |> filter(fn: (r) => r.location == {_flux_string(query.location)})")
+    lines.append(
+        f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)"
+    )
+    return lines
 
 
 def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
@@ -211,8 +264,14 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
 
         key = (sensor_type, identity)
         item = entities.setdefault(key, _base_entity(record, sensor_type, identity))
-        item[_field(record)] = _json_value(_value(record))
-        item["last_seen"] = _max_iso_time(item.get("last_seen"), _time(record))
+        field = _field(record)
+        record_time = _time(record)
+        item[field] = _json_value(_value(record))
+        item.setdefault("_field_times", {})[field] = record_time
+        item["last_seen"] = _max_iso_time(item.get("last_seen"), record_time)
+
+    for item in entities.values():
+        _finalize_latest_item(item)
 
     return {
         "generated_at": _now_iso(),
@@ -308,11 +367,72 @@ def _node_status(
         "status": status,
     }
 
-    for key in ("node_id", "location", "battery_mv", "status_flags", "sequence"):
+    for key in (
+        "node_id",
+        "location",
+        "battery_mv",
+        "status_flags",
+        "battery_measurement_ok",
+        "battery_low",
+        "battery_shutdown",
+        "sequence",
+    ):
         if key in item:
             result[key] = item[key]
 
+    if status == "stale":
+        result["stale_reason"] = (
+            "battery_shutdown"
+            if item.get("battery_shutdown") is True
+            else "no_recent_reading"
+        )
+    else:
+        result["stale_reason"] = None
+
     return result
+
+
+def _finalize_latest_item(item: dict[str, Any]) -> None:
+    """Add battery semantics without attaching an older flag to a newer packet."""
+
+    field_times = item.pop("_field_times", {})
+    if item.get("sensor_type") != SENSOR_TYPE_ENVIRONMENT:
+        return
+
+    status_flags: int | None = None
+    if _field_is_current(item, field_times, "status_flags"):
+        candidate = item.get("status_flags")
+        if (
+            isinstance(candidate, int)
+            and not isinstance(candidate, bool)
+            and 0 <= candidate <= 4_294_967_295
+        ):
+            status_flags = candidate
+
+    item["status_flags"] = status_flags
+    battery_status = decode_battery_status(status_flags)
+    item.update(battery_status)
+
+    battery_is_current = _field_is_current(item, field_times, "battery_mv")
+    if not battery_is_current or battery_status["battery_measurement_ok"] is not True:
+        item["battery_mv"] = None
+
+
+def _field_is_current(
+    item: Mapping[str, Any],
+    field_times: Mapping[str, Any],
+    field: str,
+) -> bool:
+    field_time = field_times.get(field)
+    last_seen = item.get("last_seen")
+    if field_time is None or last_seen is None:
+        return False
+
+    field_dt = _parse_iso_time(str(field_time))
+    last_seen_dt = _parse_iso_time(str(last_seen))
+    if field_dt is not None and last_seen_dt is not None:
+        return field_dt == last_seen_dt
+    return str(field_time) == str(last_seen)
 
 
 def _base_entity(record: RecordLike, sensor_type: str, identity: str) -> dict[str, Any]:
@@ -327,22 +447,6 @@ def _base_entity(record: RecordLike, sensor_type: str, identity: str) -> dict[st
     else:
         item["location"] = identity
     return item
-
-
-def _measurements(sensor_type: str) -> tuple[str, ...]:
-    if sensor_type == SENSOR_TYPE_ENVIRONMENT:
-        return (ENVIRONMENT_MEASUREMENT,)
-    if sensor_type == SENSOR_TYPE_AIR_QUALITY:
-        return (AIR_QUALITY_MEASUREMENT,)
-    return (ENVIRONMENT_MEASUREMENT, AIR_QUALITY_MEASUREMENT)
-
-
-def _history_fields(sensor_type: str) -> tuple[str, ...]:
-    if sensor_type == SENSOR_TYPE_ENVIRONMENT:
-        return ENVIRONMENT_HISTORY_FIELDS
-    if sensor_type == SENSOR_TYPE_AIR_QUALITY:
-        return AIR_QUALITY_FIELDS
-    return ENVIRONMENT_HISTORY_FIELDS + AIR_QUALITY_FIELDS
 
 
 def _sensor_type_for_measurement(measurement: str) -> str | None:

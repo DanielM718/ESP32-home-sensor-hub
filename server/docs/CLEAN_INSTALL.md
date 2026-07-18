@@ -129,7 +129,7 @@ mosquitto_pub -h 127.0.0.1 -p 1883 \
   -u home_sensor_gateway \
   -P '<gateway-password>' \
   -t 'home/sensors/1' \
-  -m '{"node_id":1,"sequence":1,"temperature_c":24.8,"humidity":41.6,"battery_mv":4058,"status_flags":0}'
+  -m '{"node_id":1,"sequence":1,"temperature_c":24.8,"humidity":41.6,"battery_mv":4058,"status_flags":4}'
 ```
 
 Check the API:

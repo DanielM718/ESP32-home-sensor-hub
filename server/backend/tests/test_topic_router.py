@@ -4,6 +4,11 @@ import json
 import unittest
 
 from app.models import AirQualityReading, SensorReading
+from app.battery_status import (
+    STATUS_BATTERY_LOW,
+    STATUS_BATTERY_OK,
+    STATUS_BATTERY_SHUTDOWN,
+)
 from app.validation import ValidationError
 from bridge.topic_router import reading_from_mqtt_message
 
@@ -23,7 +28,7 @@ class TopicRouterTest(unittest.TestCase):
                     "temperature_c": 24.8,
                     "humidity": 41.6,
                     "battery_mv": 4058,
-                    "status_flags": 0,
+                    "status_flags": STATUS_BATTERY_OK,
                 }
             ),
             max_payload_bytes=4096,
@@ -33,6 +38,74 @@ class TopicRouterTest(unittest.TestCase):
         self.assertEqual(reading.measurement, "environment_reading")
         self.assertEqual(reading.tags["node_id"], "1")
         self.assertEqual(reading.fields["battery_mv"], 4058)
+        self.assertEqual(reading.fields["status_flags"], STATUS_BATTERY_OK)
+
+    def test_sensor_status_flags_are_preserved_without_masking(self) -> None:
+        cases = (
+            0,
+            STATUS_BATTERY_OK,
+            STATUS_BATTERY_OK | STATUS_BATTERY_LOW,
+            STATUS_BATTERY_OK | STATUS_BATTERY_LOW | STATUS_BATTERY_SHUTDOWN,
+            STATUS_BATTERY_OK | (1 << 31),
+        )
+
+        for status_flags in cases:
+            with self.subTest(status_flags=status_flags):
+                reading = reading_from_mqtt_message(
+                    "home/sensors/1",
+                    payload(
+                        {
+                            "node_id": 1,
+                            "sequence": 1523,
+                            "temperature_c": 24.8,
+                            "humidity": 41.6,
+                            "battery_mv": 4058,
+                            "status_flags": status_flags,
+                        }
+                    ),
+                    max_payload_bytes=4096,
+                )
+
+                self.assertEqual(reading.status_flags, status_flags)
+                self.assertEqual(reading.fields["status_flags"], status_flags)
+
+    def test_sensor_message_without_status_flags_is_accepted_as_unavailable(self) -> None:
+        reading = reading_from_mqtt_message(
+            "home/sensors/1",
+            payload(
+                {
+                    "node_id": 1,
+                    "sequence": 1523,
+                    "temperature_c": 24.8,
+                    "humidity": 41.6,
+                    "battery_mv": 4058,
+                }
+            ),
+            max_payload_bytes=4096,
+        )
+
+        self.assertIsNone(reading.status_flags)
+        self.assertNotIn("status_flags", reading.fields)
+        self.assertNotIn("battery_mv", reading.fields)
+
+    def test_zero_battery_without_ok_flag_is_not_stored_as_a_measurement(self) -> None:
+        reading = reading_from_mqtt_message(
+            "home/sensors/1",
+            payload(
+                {
+                    "node_id": 1,
+                    "sequence": 1523,
+                    "temperature_c": 24.8,
+                    "humidity": 41.6,
+                    "battery_mv": 0,
+                    "status_flags": 0,
+                }
+            ),
+            max_payload_bytes=4096,
+        )
+
+        self.assertEqual(reading.fields["status_flags"], 0)
+        self.assertNotIn("battery_mv", reading.fields)
 
     def test_sensor_topic_and_payload_node_must_match(self) -> None:
         with self.assertRaises(ValidationError):
@@ -45,7 +118,7 @@ class TopicRouterTest(unittest.TestCase):
                         "temperature_c": 24.8,
                         "humidity": 41.6,
                         "battery_mv": 4058,
-                        "status_flags": 0,
+                        "status_flags": STATUS_BATTERY_OK,
                     }
                 ),
                 max_payload_bytes=4096,
@@ -62,7 +135,7 @@ class TopicRouterTest(unittest.TestCase):
                         "temperature_c": 24.8,
                         "humidity": 141.6,
                         "battery_mv": 4058,
-                        "status_flags": 0,
+                        "status_flags": STATUS_BATTERY_OK,
                     }
                 ),
                 max_payload_bytes=4096,

@@ -100,6 +100,15 @@ Fields are used for measured values:
 
 This schema keeps future sensor types and rooms additive.
 
+For `environment_reading`, `status_flags` is the raw unsigned SHT41 status
+integer. Its battery bits are `BIT2` measurement valid, `BIT3` low battery, and
+`BIT4` confirmed shutdown. The field may be absent on historical points. The
+bridge writes `battery_mv` only for packets with `BIT2` set, so absence means
+unavailable; a missing field is not a zero-volt measurement. Unknown status
+bits remain stored in the raw integer. Historical queries pair `battery_mv`
+with the same point's `status_flags` and include it only when a bitwise `BIT2`
+test succeeds; existing rows are not rewritten.
+
 See also:
 
 - `server/config/influxdb/schema.md`

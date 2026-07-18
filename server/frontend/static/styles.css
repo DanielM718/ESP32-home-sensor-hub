@@ -209,6 +209,15 @@ select {
   padding: 14px;
 }
 
+.reading-card.battery-low {
+  border-color: #f79009;
+}
+
+.reading-card.battery-shutdown {
+  border-color: var(--danger);
+  box-shadow: 0 0 0 1px rgba(180, 35, 24, 0.12);
+}
+
 .reading-card h3 {
   margin: 0 0 10px;
   font-size: 1rem;
@@ -242,6 +251,29 @@ select {
 .metric-small {
   color: var(--muted);
   font-size: 0.88rem;
+}
+
+.battery-alert {
+  margin: 10px 0 8px;
+  padding: 7px 9px;
+  border-radius: 6px;
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.battery-alert-low {
+  color: var(--warning);
+  background: #fff7ed;
+}
+
+.battery-alert-shutdown {
+  color: var(--danger);
+  background: #fef3f2;
+}
+
+.battery-alert-unavailable {
+  color: var(--muted);
+  background: #f2f4f3;
 }
 
 .chart-grid {
@@ -308,6 +340,16 @@ tbody tr:last-child td {
 .node-unknown {
   color: var(--warning);
   font-weight: 700;
+}
+
+.node-low {
+  color: var(--warning);
+  font-weight: 700;
+}
+
+.node-shutdown {
+  color: var(--danger);
+  font-weight: 800;
 }
 
 @media (max-width: 900px) {

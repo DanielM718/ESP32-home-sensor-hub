@@ -54,7 +54,7 @@ home/sensors/1
 Payload:
 
 ```json
-{"packet_type":"sht41","node_id":1,"sequence":1523,"temperature_c":24.80,"humidity":41.60,"battery_mv":4058,"status_flags":0}
+{"packet_type":"sht41","node_id":1,"sequence":1523,"temperature_c":24.80,"humidity":41.60,"battery_mv":4058,"status_flags":4}
 ```
 
 The current SHT41 wire packet is:
@@ -70,7 +70,22 @@ typedef struct __attribute__((packed)) {
 } sensor_packet_t;
 ```
 
-The gateway validates the received packet length before decoding this struct.
+The gateway validates the received packet length before decoding this struct,
+and a compile-time assertion fixes its wire size at 22 bytes. It publishes the
+complete `uint32_t status_flags` value as an unsigned JSON integer without
+masking, truncating, or reconstructing it.
+
+Known SHT41 battery bits are:
+
+- `BIT2` (`4`): calibrated battery measurement succeeded
+- `BIT3` (`8`): valid battery measurement is below the warning threshold
+- `BIT4` (`16`): low-battery shutdown was confirmed
+
+The bits are independent and consumers must test them with bitwise AND. A
+valid low-battery reading therefore normally carries `BIT2 | BIT3` (`12`), and
+the final shutdown packet carries `BIT2 | BIT3 | BIT4` (`28`). Unknown bits are
+forwarded unchanged. `battery_mv` is usable only when `BIT2` is set; zero with
+`BIT2` clear means unavailable, not a measured zero-volt cell.
 
 ## Raspberry Pi Broker Test
 

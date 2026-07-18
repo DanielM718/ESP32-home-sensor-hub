@@ -29,10 +29,10 @@ All ESP projects are ESP-IDF projects.
 
 - `esp/ESP32_master`: receives ESP-NOW packets from sensor nodes and publishes
   readings to MQTT on the Raspberry Pi.
-- `esp/ESP32C3_SHT41_node`: battery sensor node for SHT41 temperature and
-  humidity readings.
-- `esp/ESP32C3_SEN66_air_quality`: SEN66 air quality node using I2C and
-  ESP-NOW.
+- `esp/ESP32C3_SHT41_node`: battery-powered SHT41 temperature/humidity node
+  with calibrated external-divider voltage measurement.
+- `esp/ESP32C3_SEN66_air_quality`: USB-powered SEN66 air-quality node using I2C
+  and ESP-NOW; it does not monitor battery voltage.
 
 Use ESP-IDF v6.0.1 unless a project README says otherwise.
 
@@ -162,4 +162,5 @@ hardware-aware validation before CI rules are useful.
 - [Repository layout](docs/REPOSITORY_LAYOUT.md)
 - [Git workflow](docs/GIT_WORKFLOW.md)
 - [Development workflow](docs/DEVELOPMENT.md)
+- [SHT41 battery measurement wiring and semantics](docs/SHT41_BATTERY_MEASUREMENT.md)
 - [Server documentation](server/docs)

@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 #include "freertos/FreeRTOS.h"
@@ -17,11 +18,14 @@
 
 #include "driver/gpio.h"
 #include "driver/i2c_master.h"
+#include "esp_adc/adc_cali.h"
+#include "esp_adc/adc_cali_scheme.h"
+#include "esp_adc/adc_oneshot.h"
 
-#define NODE_ID 1
+#define NODE_ID 4
 #define ESPNOW_CHANNEL 6
-//#define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
-#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing
+#define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
+//#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing
 #define ESPNOW_SEND_TIMEOUT_MS 500
 
 // Seeed XIAO ESP32-C3 common I2C pins are D4/SDA = GPIO6 and D5/SCL = GPIO7.
@@ -31,6 +35,20 @@
 #define I2C_FREQ_HZ 100000
 #define I2C_XFER_TIMEOUT_MS 100
 
+#define BATTERY_ADC_GPIO GPIO_NUM_2
+#define BATTERY_ADC_UNIT ADC_UNIT_1
+#define BATTERY_ADC_CHANNEL ADC_CHANNEL_2
+#define BATTERY_ADC_ATTEN ADC_ATTEN_DB_12
+#define BATTERY_R_TOP_OHMS UINT64_C(1000000)
+#define BATTERY_R_BOTTOM_OHMS UINT64_C(1000000)
+#define BATTERY_ADC_SAMPLE_COUNT 32U
+#define BATTERY_ADC_DISCARD_COUNT 4U
+#define BATTERY_ADC_SETTLE_MS 10U
+#define BATTERY_LOW_MV 3400
+#define BATTERY_SHUTDOWN_MV 3200
+#define BATTERY_ABSOLUTE_MIN_MV 2500
+#define BATTERY_LOW_CONFIRMATION_COUNT 2
+
 #define USER_LED_GPIO GPIO_NUM_10
 #define SHT41_I2C_ADDR 0x44
 #define SHT41_CMD_HIGH_PRECISION_NO_HEATER 0xFD
@@ -38,6 +56,9 @@
 
 #define STATUS_SHT41_OK BIT0
 #define STATUS_ESPNOW_SEND_ATTEMPTED BIT1
+#define STATUS_BATTERY_OK BIT2
+#define STATUS_BATTERY_LOW BIT3
+#define STATUS_BATTERY_SHUTDOWN BIT4
 
 static const char *TAG = "ESP32NOW_node";
 
@@ -56,6 +77,7 @@ typedef struct __attribute__((packed)) {
 } sensor_packet_t;
 
 RTC_DATA_ATTR static uint32_t sequence_number = 0;
+RTC_DATA_ATTR static uint8_t low_battery_reading_count = 0;
 
 static i2c_master_bus_handle_t i2c_bus;
 static i2c_master_dev_handle_t sht41_dev;
@@ -91,6 +113,195 @@ static uint8_t sht41_crc8(const uint8_t *data, size_t len)
     }
 
     return crc;
+}
+
+static esp_err_t battery_calibration_create(adc_cali_handle_t *out_handle)
+{
+    if (out_handle == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *out_handle = NULL;
+
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    adc_cali_curve_fitting_config_t config = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .chan = BATTERY_ADC_CHANNEL,
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    return adc_cali_create_scheme_curve_fitting(&config, out_handle);
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    adc_cali_line_fitting_config_t config = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    return adc_cali_create_scheme_line_fitting(&config, out_handle);
+#else
+    ESP_LOGE(TAG, "No ADC calibration scheme is available for this target");
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+static esp_err_t battery_calibration_delete(adc_cali_handle_t handle)
+{
+#if ADC_CALI_SCHEME_CURVE_FITTING_SUPPORTED
+    return adc_cali_delete_scheme_curve_fitting(handle);
+#elif ADC_CALI_SCHEME_LINE_FITTING_SUPPORTED
+    return adc_cali_delete_scheme_line_fitting(handle);
+#else
+    (void)handle;
+    return ESP_ERR_NOT_SUPPORTED;
+#endif
+}
+
+static esp_err_t battery_read_mv(uint16_t *battery_mv)
+{
+    if (battery_mv == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *battery_mv = 0;
+
+    adc_oneshot_unit_handle_t adc_handle = NULL;
+    adc_cali_handle_t cali_handle = NULL;
+    esp_err_t err;
+    uint64_t calibrated_mv_sum = 0;
+    uint64_t midpoint_mv = 0;
+    uint64_t calculated_battery_mv = 0;
+    uint16_t result_mv = 0;
+    unsigned int valid_samples = 0;
+
+    adc_unit_t mapped_unit;
+    adc_channel_t mapped_channel;
+    err = adc_oneshot_io_to_channel(BATTERY_ADC_GPIO, &mapped_unit, &mapped_channel);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery ADC GPIO%d mapping lookup failed: %s",
+                 BATTERY_ADC_GPIO, esp_err_to_name(err));
+        return err;
+    }
+    if (mapped_unit != BATTERY_ADC_UNIT || mapped_channel != BATTERY_ADC_CHANNEL) {
+        ESP_LOGE(TAG,
+                 "Battery ADC mapping mismatch: GPIO%d maps to unit %d channel %d, expected unit %d channel %d",
+                 BATTERY_ADC_GPIO, mapped_unit + 1, mapped_channel,
+                 BATTERY_ADC_UNIT + 1, BATTERY_ADC_CHANNEL);
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    adc_oneshot_unit_init_cfg_t unit_config = {
+        .unit_id = BATTERY_ADC_UNIT,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    err = adc_oneshot_new_unit(&unit_config, &adc_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery ADC unit initialization failed: %s", esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    adc_oneshot_chan_cfg_t channel_config = {
+        .atten = BATTERY_ADC_ATTEN,
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+    };
+    err = adc_oneshot_config_channel(adc_handle, BATTERY_ADC_CHANNEL, &channel_config);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery ADC channel configuration failed: %s", esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    err = battery_calibration_create(&cali_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG,
+                 "Battery ADC calibration unavailable; refusing uncalibrated conversion: %s",
+                 esp_err_to_name(err));
+        goto cleanup;
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(BATTERY_ADC_SETTLE_MS));
+
+    for (unsigned int i = 0; i < BATTERY_ADC_DISCARD_COUNT; i++) {
+        int raw;
+        err = adc_oneshot_read(adc_handle, BATTERY_ADC_CHANNEL, &raw);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Battery ADC discarded sample %u failed: %s",
+                     i + 1U, esp_err_to_name(err));
+            goto cleanup;
+        }
+    }
+
+    for (unsigned int i = 0; i < BATTERY_ADC_SAMPLE_COUNT; i++) {
+        int raw;
+        int calibrated_mv;
+
+        err = adc_oneshot_read(adc_handle, BATTERY_ADC_CHANNEL, &raw);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Battery ADC sample %u failed after %u valid samples: %s",
+                     i + 1U, valid_samples, esp_err_to_name(err));
+            goto cleanup;
+        }
+
+        err = adc_cali_raw_to_voltage(cali_handle, raw, &calibrated_mv);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Battery ADC calibration conversion failed for sample %u: %s",
+                     i + 1U, esp_err_to_name(err));
+            goto cleanup;
+        }
+        if (calibrated_mv < 0) {
+            ESP_LOGE(TAG, "Battery ADC calibration returned negative voltage: %d mV",
+                     calibrated_mv);
+            err = ESP_ERR_INVALID_RESPONSE;
+            goto cleanup;
+        }
+
+        calibrated_mv_sum += (uint64_t)calibrated_mv;
+        valid_samples++;
+    }
+
+    midpoint_mv = (calibrated_mv_sum + (BATTERY_ADC_SAMPLE_COUNT / 2U)) /
+                  BATTERY_ADC_SAMPLE_COUNT;
+    calculated_battery_mv =
+        (midpoint_mv * (BATTERY_R_TOP_OHMS + BATTERY_R_BOTTOM_OHMS) +
+         (BATTERY_R_BOTTOM_OHMS / 2U)) /
+        BATTERY_R_BOTTOM_OHMS;
+    result_mv = calculated_battery_mv > UINT16_MAX
+                    ? UINT16_MAX
+                    : (uint16_t)calculated_battery_mv;
+    err = ESP_OK;
+
+cleanup:
+    if (cali_handle != NULL) {
+        esp_err_t cleanup_err = battery_calibration_delete(cali_handle);
+        if (cleanup_err != ESP_OK) {
+            ESP_LOGE(TAG, "Battery ADC calibration cleanup failed: %s",
+                     esp_err_to_name(cleanup_err));
+            if (err == ESP_OK) {
+                err = cleanup_err;
+            }
+        }
+    }
+    if (adc_handle != NULL) {
+        esp_err_t cleanup_err = adc_oneshot_del_unit(adc_handle);
+        if (cleanup_err != ESP_OK) {
+            ESP_LOGE(TAG, "Battery ADC unit cleanup failed: %s", esp_err_to_name(cleanup_err));
+            if (err == ESP_OK) {
+                err = cleanup_err;
+            }
+        }
+    }
+
+    if (err != ESP_OK) {
+        return err;
+    }
+
+    *battery_mv = result_mv;
+    ESP_LOGI(TAG,
+             "Battery ADC: midpoint=%llu mV whole_battery=%u mV valid_samples=%u calibrated=yes",
+             (unsigned long long)midpoint_mv, (unsigned int)*battery_mv, valid_samples);
+
+    if (*battery_mv > 4300U) {
+        ESP_LOGW(TAG, "Battery reading is suspicious; check wiring and calibration: %u mV",
+                 (unsigned int)*battery_mv);
+    }
+
+    return ESP_OK;
 }
 
 static esp_err_t i2c_init(void)
@@ -231,6 +442,18 @@ static void enter_deep_sleep(void)
     esp_deep_sleep_start();
 }
 
+static void enter_indefinite_deep_sleep(void)
+{
+    ESP_LOGW(TAG,
+             "Low-battery shutdown confirmed: disabling all wakeup sources; timed wakeup is disabled");
+    esp_err_t err = esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to disable deep-sleep wakeup sources: %s", esp_err_to_name(err));
+    }
+    ESP_LOGW(TAG, "Entering indefinite deep sleep; external reset or power cycle is required");
+    esp_deep_sleep_start();
+}
+
 void app_main(void)
 {
     gpio_reset_pin(USER_LED_GPIO);
@@ -243,6 +466,13 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    uint16_t measured_battery_mv = 0;
+    esp_err_t battery_err = battery_read_mv(&measured_battery_mv);
+    if (battery_err != ESP_OK) {
+        ESP_LOGE(TAG, "Battery measurement failed; reporting unavailable: %s",
+                 esp_err_to_name(battery_err));
+    }
 
     wifi_init();
     espnow_init();
@@ -265,6 +495,57 @@ void app_main(void)
         .battery_mv = 0,
         .status_flags = STATUS_ESPNOW_SEND_ATTEMPTED,
     };
+    bool low_battery_shutdown = false;
+
+    if (battery_err == ESP_OK) {
+        packet.battery_mv = measured_battery_mv;
+        packet.status_flags |= STATUS_BATTERY_OK;
+    }
+
+    if (battery_err == ESP_OK &&
+        (packet.status_flags & STATUS_BATTERY_OK) != 0 &&
+        packet.battery_mv != 0) {
+        if (packet.battery_mv <= BATTERY_ABSOLUTE_MIN_MV) {
+            ESP_LOGE(TAG,
+                     "Battery at or below EVE cell absolute discharge cutoff: %u mV (cutoff=%u mV)",
+                     (unsigned int)packet.battery_mv,
+                     (unsigned int)BATTERY_ABSOLUTE_MIN_MV);
+        }
+
+        if (packet.battery_mv < BATTERY_LOW_MV) {
+            packet.status_flags |= STATUS_BATTERY_LOW;
+            ESP_LOGW(TAG, "Battery low: %u mV (warning threshold=%u mV)",
+                     (unsigned int)packet.battery_mv, (unsigned int)BATTERY_LOW_MV);
+        }
+
+        if (packet.battery_mv <= BATTERY_SHUTDOWN_MV) {
+            if (low_battery_reading_count < BATTERY_LOW_CONFIRMATION_COUNT) {
+                low_battery_reading_count++;
+            }
+            ESP_LOGW(TAG,
+                     "Battery shutdown confirmation %u/%u: %u mV (threshold=%u mV)",
+                     (unsigned int)low_battery_reading_count,
+                     (unsigned int)BATTERY_LOW_CONFIRMATION_COUNT,
+                     (unsigned int)packet.battery_mv,
+                     (unsigned int)BATTERY_SHUTDOWN_MV);
+        } else {
+            if (low_battery_reading_count != 0) {
+                ESP_LOGI(TAG, "Battery recovered above shutdown threshold; confirmation count reset");
+            }
+            low_battery_reading_count = 0;
+        }
+
+        if (low_battery_reading_count >= BATTERY_LOW_CONFIRMATION_COUNT) {
+            packet.status_flags |= STATUS_BATTERY_SHUTDOWN;
+            low_battery_shutdown = true;
+            ESP_LOGW(TAG,
+                     "Low-battery shutdown confirmed; this cycle will send the final packet before indefinite sleep");
+        }
+    } else if (battery_err == ESP_OK &&
+               (packet.status_flags & STATUS_BATTERY_OK) != 0 &&
+               packet.battery_mv == 0) {
+        ESP_LOGE(TAG, "Battery measurement returned zero; shutdown evaluation skipped");
+    }
 
     float temp_c = 0.0f;
     float rh = 0.0f;
@@ -303,6 +584,10 @@ void app_main(void)
         ESP_LOGE(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
     }
 
-    vTaskDelay(pdMS_TO_TICKS(5000));
-    enter_deep_sleep();
+    vTaskDelay(pdMS_TO_TICKS(500));
+    if (low_battery_shutdown) {
+        enter_indefinite_deep_sleep();
+    } else {
+        enter_deep_sleep();
+    }
 }

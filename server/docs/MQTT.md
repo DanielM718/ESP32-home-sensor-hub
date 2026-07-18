@@ -41,7 +41,7 @@ home/air/+
   "temperature_c": 24.8,
   "humidity": 41.6,
   "battery_mv": 4058,
-  "status_flags": 0
+  "status_flags": 4
 }
 ```
 
@@ -52,7 +52,23 @@ Required fields:
 - `temperature_c`: number
 - `humidity`: number from 0 to 100
 - `battery_mv`: integer
-- `status_flags`: integer
+
+Optional compatibility field:
+
+- `status_flags`: optional unsigned 32-bit integer for historical compatibility;
+  current SHT41 gateways always publish it
+
+Known SHT41 bits are:
+
+- `BIT2` (`4`): `STATUS_BATTERY_OK`
+- `BIT3` (`8`): `STATUS_BATTERY_LOW`
+- `BIT4` (`16`): `STATUS_BATTERY_SHUTDOWN`
+
+Consumers decode these with bitwise AND, so combinations `12` and `28` retain
+the measurement-valid bit. Unknown bits are allowed and preserved. A
+`battery_mv` value is valid only when `BIT2` is set. Zero with `BIT2` clear, or
+any battery value in a historical message without `status_flags`, is
+unavailable rather than a measured zero-volt battery.
 
 ## Air-Quality Payload
 
@@ -167,7 +183,7 @@ mosquitto_sub -h 127.0.0.1 -p 1883 -u home_sensor_bridge -P '<bridge-password>' 
 Publish a test sensor update as the gateway user:
 
 ```bash
-mosquitto_pub -h 127.0.0.1 -p 1883 -u home_sensor_gateway -P '<gateway-password>' -t 'home/sensors/1' -m '{"node_id":1,"sequence":1,"temperature_c":24.8,"humidity":41.6,"battery_mv":4058,"status_flags":0}'
+mosquitto_pub -h 127.0.0.1 -p 1883 -u home_sensor_gateway -P '<gateway-password>' -t 'home/sensors/1' -m '{"node_id":1,"sequence":1,"temperature_c":24.8,"humidity":41.6,"battery_mv":4058,"status_flags":4}'
 ```
 
 Expected result: the subscriber receives the JSON payload. The bridge user should

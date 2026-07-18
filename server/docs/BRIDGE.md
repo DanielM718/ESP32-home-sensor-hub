@@ -41,7 +41,17 @@ Required sensor fields:
 - `temperature_c`
 - `humidity`
 - `battery_mv`
-- `status_flags`
+
+`status_flags` is required from current gateways but optional at the bridge
+boundary for historical compatibility. When present, it must be an unsigned
+32-bit integer and is written to InfluxDB unchanged; the bridge never masks
+unknown bits. When absent, the InfluxDB point omits `status_flags` instead of
+inventing zero.
+
+The bridge writes `battery_mv` only when `status_flags & (1 << 2)` is nonzero.
+If the valid bit is clear or status is unavailable, temperature, humidity, and
+sequence are still stored, but no battery-voltage field is written. This
+prevents a placeholder zero from becoming a physical zero-volt measurement.
 
 Air-quality topics must be:
 

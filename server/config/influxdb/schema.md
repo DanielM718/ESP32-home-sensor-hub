@@ -35,8 +35,15 @@ Fields:
 Line protocol shape:
 
 ```text
-environment_reading,node_id=1,topic=home/sensors/1,sensor_type=environment temperature_c=24.8,humidity=41.6,battery_mv=4058i,status_flags=0i,sequence=1523i
+environment_reading,node_id=1,topic=home/sensors/1,sensor_type=environment temperature_c=24.8,humidity=41.6,battery_mv=4058i,status_flags=4i,sequence=1523i
 ```
+
+`status_flags` is stored as the unmasked integer received from MQTT. Known
+battery bits are `BIT2` measurement valid, `BIT3` low, and `BIT4` shutdown.
+Historical points may omit `status_flags`; points without `BIT2` also omit
+`battery_mv`, representing unavailable status/voltage without fabricating a
+zero measurement. No schema or historical-data migration is required because
+InfluxDB fields are additive and optional per point.
 
 ### `air_quality_reading`
 

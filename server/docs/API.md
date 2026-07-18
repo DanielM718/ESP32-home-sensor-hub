@@ -49,7 +49,10 @@ Response shape:
       "temperature_c": 24.8,
       "humidity": 41.6,
       "battery_mv": 4058,
-      "status_flags": 0,
+      "status_flags": 4,
+      "battery_measurement_ok": true,
+      "battery_low": false,
+      "battery_shutdown": false,
       "sequence": 1523
     }
   ],
@@ -81,7 +84,7 @@ Response shape:
 {
   "generated_at": "2026-01-01T12:00:00Z",
   "range": "24h",
-  "window": "10m",
+  "window": "15m",
   "sensor_type": "all",
   "series": [
     {
@@ -102,6 +105,11 @@ Response shape:
 }
 ```
 
+Environment history pivots each raw `battery_mv` together with the
+same-timestamp `status_flags` and applies a bitwise `BIT2` test before
+downsampling. Battery points with missing status or a clear valid bit are
+omitted from `/api/readings`; temperature and humidity history is unaffected.
+
 ### `GET /api/nodes`
 
 Returns node/station status based on latest readings and
@@ -121,12 +129,29 @@ Returns node/station status based on latest readings and
       "age_seconds": 60,
       "status": "online",
       "battery_mv": 4058,
-      "status_flags": 0,
+      "status_flags": 4,
+      "battery_measurement_ok": true,
+      "battery_low": false,
+      "battery_shutdown": false,
+      "stale_reason": null,
       "sequence": 1523
     }
   ]
 }
 ```
+
+For environment nodes, both `/api/latest` and `/api/nodes` expose the raw
+`status_flags` integer plus decoded `battery_measurement_ok`, `battery_low`, and
+`battery_shutdown` booleans. Decoding uses independent bitwise tests for
+`BIT2`, `BIT3`, and `BIT4`; combined or unknown bits do not prevent known bits
+from being recognized.
+
+When the latest packet has no `status_flags`, all four status values are JSON
+`null`. When `battery_measurement_ok` is not `true`, `battery_mv` is also
+`null`, including a raw placeholder zero with `BIT2` clear. A stale node has
+`stale_reason` set to `battery_shutdown` when its final packet carried `BIT4`,
+or `no_recent_reading` otherwise. The primary `status` remains `stale` in both
+cases so stale-node detection is not suppressed.
 
 ## Error Responses
 
