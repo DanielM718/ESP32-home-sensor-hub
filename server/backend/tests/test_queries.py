@@ -88,6 +88,16 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn("bitwise.sand(a: r.status_flags, b: 4) > 0", flux)
         self.assertNotIn("r.status_flags == 4", flux)
 
+        battery_value_map = (
+            '|> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))'
+        )
+        battery_field_map = '|> map(fn: (r) => ({r with _field: "battery_mv"}))'
+        value_map_index = flux.index(battery_value_map)
+        aggregate_index = flux.index("|> aggregateWindow", value_map_index)
+        field_map_index = flux.index(battery_field_map)
+        self.assertLess(value_map_index, aggregate_index)
+        self.assertLess(aggregate_index, field_map_index)
+
     def test_all_history_unions_valid_environment_battery_and_air_quality(self) -> None:
         query = readings_query_from_params({"range": "7d"})
 

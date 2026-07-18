@@ -228,8 +228,11 @@ def _environment_history_flux(bucket: str, query: ReadingsQuery) -> list[str]:
             "    exists r.status_flags and",
             "    bitwise.sand(a: r.status_flags, b: 4) > 0",
             "  )",
-            '  |> map(fn: (r) => ({r with _field: "battery_mv", _value: float(v: r.battery_mv)}))',
+            '  |> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))',
             f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
+            # aggregateWindow drops non-group-key columns added after pivot, so
+            # restore _field after aggregation for the Python record parser.
+            '  |> map(fn: (r) => ({r with _field: "battery_mv"}))',
         ]
     )
     return lines
