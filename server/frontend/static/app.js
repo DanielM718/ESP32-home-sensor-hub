@@ -8,6 +8,15 @@ const API = {
 
 const POLL_INTERVAL_MS = 7000;
 const FETCH_TIMEOUT_MS = 8000;
+const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
+
+const ENVIRONMENT_STATUS_FLAGS = [
+  { mask: 1 << 0, label: "SHT41 read OK", className: "ok" },
+  { mask: 1 << 1, label: "ESP-NOW send attempted", className: "info" },
+  { mask: 1 << 2, label: "Battery measurement OK", className: "ok" },
+  { mask: 1 << 3, label: "Low battery", className: "warning" },
+  { mask: 1 << 4, label: "Battery shutdown", className: "danger" },
+];
 
 const chartPalette = [
   "#0f766e",
@@ -25,6 +34,8 @@ const state = {
   nodeFilter: "all",
   charts: {},
   latestTimer: null,
+  fullRefreshInFlight: false,
+  latestRefreshInFlight: false,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -46,15 +57,21 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 
 async function refreshAll() {
+  if (state.fullRefreshInFlight || state.latestRefreshInFlight) {
+    return;
+  }
+
+  state.fullRefreshInFlight = true;
+  setRefreshButtonBusy(true);
   clearError();
   setStatus("Loading", "loading");
   try {
     const readingsUrl = `${API.readings}?${readingsQueryParams().toString()}`;
-    const [latest, nodes, readings] = await Promise.all([
+    const [latest, readings] = await Promise.all([
       fetchJson(API.latest),
-      fetchJson(API.nodes),
       fetchJson(readingsUrl),
     ]);
+    const nodes = await nodesForLatest(latest);
 
     updateNodeFilterOptions(latest);
     renderLatest(latest);
@@ -65,15 +82,21 @@ async function refreshAll() {
   } catch (error) {
     setStatus("API error", "error");
     showError(error.message || "Dashboard refresh failed");
+  } finally {
+    state.fullRefreshInFlight = false;
+    setRefreshButtonBusy(false);
   }
 }
 
 async function refreshLatestOnly() {
+  if (state.fullRefreshInFlight || state.latestRefreshInFlight) {
+    return;
+  }
+
+  state.latestRefreshInFlight = true;
   try {
-    const [latest, nodes] = await Promise.all([
-      fetchJson(API.latest),
-      fetchJson(API.nodes),
-    ]);
+    const latest = await fetchJson(API.latest);
+    const nodes = await nodesForLatest(latest);
 
     updateNodeFilterOptions(latest);
     renderLatest(latest);
@@ -84,7 +107,18 @@ async function refreshLatestOnly() {
   } catch (error) {
     setStatus("API error", "error");
     showError(error.message || "Latest refresh failed");
+  } finally {
+    state.latestRefreshInFlight = false;
   }
+}
+
+async function nodesForLatest(latest) {
+  if (Array.isArray(latest.nodes)) {
+    return { nodes: latest.nodes, generated_at: latest.generated_at };
+  }
+
+  // Compatibility fallback while the frontend and backend are being upgraded.
+  return await fetchJson(API.nodes);
 }
 
 function setupNodeFilter() {
@@ -136,10 +170,15 @@ async function fetchJson(url) {
       } catch (_error) {
         // Keep the HTTP status message.
       }
-      throw new Error(message);
+      throw new Error(`${url}: ${message}`);
     }
 
     return await response.json();
+  } catch (error) {
+    if (error.name === "AbortError") {
+      throw new Error(`${url}: request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`);
+    }
+    throw error;
   } finally {
     window.clearTimeout(timeout);
   }
@@ -283,7 +322,7 @@ function readingCard(reading) {
       ${isEnvironment ? metricHtml("Battery", batteryDisplay(reading)) : ""}
       ${reading.co2 !== undefined ? metricHtml("CO2", `${reading.co2} ppm`) : ""}
       ${reading.pm25 !== undefined ? metricHtml("PM2.5", formatNumber(reading.pm25, 1, " ug/m3")) : ""}
-      ${isEnvironment ? metricHtml("Flags", statusFlagsDisplay(reading.status_flags)) : ""}
+      ${isEnvironment ? statusFlagsMetricHtml(reading) : ""}
     </div>
     ${batteryAlertHtml(reading)}
     <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
@@ -321,7 +360,7 @@ function renderNodes(data) {
       <td class="${escapeHtml(statusClass)}">${escapeHtml(nodeStatusLabel(node))}</td>
       <td>${escapeHtml(relativeTime(node.last_seen))}</td>
       <td>${node.sensor_type === "environment" ? escapeHtml(batteryDisplay(node)) : "-"}</td>
-      <td>${node.sensor_type === "environment" ? escapeHtml(statusFlagsDisplay(node.status_flags)) : "-"}</td>
+      <td>${node.sensor_type === "environment" ? statusFlagsHtml(node) : "-"}</td>
     `;
     return row;
   }));
@@ -354,10 +393,71 @@ function batteryDisplay(reading) {
   return "Unavailable";
 }
 
-function statusFlagsDisplay(statusFlags) {
-  return statusFlags === undefined || statusFlags === null
-    ? "Unavailable"
-    : String(statusFlags);
+function statusFlagsMetricHtml(reading) {
+  return `
+    <div class="metric metric-flags">
+      <span class="metric-label">Status flags</span>
+      ${statusFlagsHtml(reading)}
+    </div>
+  `;
+}
+
+function statusFlagsHtml(reading) {
+  const statusFlags = normalizedStatusFlags(reading.status_flags);
+  if (statusFlags === null) {
+    return `
+      <div class="status-flags">
+        <span class="flags-raw">Raw: unavailable</span>
+        <span class="flag-chip flag-unavailable">Battery state unavailable</span>
+      </div>
+    `;
+  }
+
+  const chips = ENVIRONMENT_STATUS_FLAGS
+    .filter((flag) => (statusFlags & flag.mask) !== 0)
+    .map((flag) => (
+      `<span class="flag-chip flag-${flag.className}">${escapeHtml(flag.label)} (BIT${bitIndex(flag.mask)})</span>`
+    ));
+
+  if ((statusFlags & (1 << 2)) === 0) {
+    chips.push('<span class="flag-chip flag-unavailable">Battery measurement unavailable</span>');
+  } else if ((statusFlags & ((1 << 3) | (1 << 4))) === 0) {
+    chips.push('<span class="flag-chip flag-ok">No battery alert</span>');
+  }
+
+  const unknownMask = (statusFlags & (~KNOWN_ENVIRONMENT_STATUS_MASK)) >>> 0;
+  if (unknownMask !== 0) {
+    chips.push(
+      `<span class="flag-chip flag-info">Unknown bits ${escapeHtml(hex32(unknownMask))}</span>`,
+    );
+  }
+
+  if (chips.length === 0) {
+    chips.push('<span class="flag-chip flag-info">No flags set</span>');
+  }
+
+  return `
+    <div class="status-flags">
+      <span class="flags-raw">Raw: ${statusFlags} (${hex32(statusFlags)})</span>
+      <span class="flag-chip-list">${chips.join("")}</span>
+    </div>
+  `;
+}
+
+function normalizedStatusFlags(value) {
+  const statusFlags = Number(value);
+  if (!Number.isInteger(statusFlags) || statusFlags < 0 || statusFlags > 0xffffffff) {
+    return null;
+  }
+  return statusFlags >>> 0;
+}
+
+function hex32(value) {
+  return `0x${(value >>> 0).toString(16).toUpperCase().padStart(8, "0")}`;
+}
+
+function bitIndex(mask) {
+  return 31 - Math.clz32(mask);
 }
 
 function batteryAlertHtml(reading) {
@@ -476,6 +576,13 @@ function setStatus(text, stateName) {
   const element = document.getElementById("connection-state");
   element.textContent = text;
   element.className = `status-pill status-${stateName}`;
+}
+
+function setRefreshButtonBusy(isBusy) {
+  const button = document.getElementById("refresh-button");
+  button.disabled = isBusy;
+  button.setAttribute("aria-busy", String(isBusy));
+  button.title = isBusy ? "Refresh in progress" : "Refresh now";
 }
 
 function setLastUpdated(value) {

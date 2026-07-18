@@ -345,6 +345,23 @@ def nodes_response(
     }
 
 
+def latest_with_node_status(
+    latest: Mapping[str, Any],
+    *,
+    stale_after_seconds: int,
+) -> dict[str, Any]:
+    """Attach node status derived from an existing latest-value snapshot."""
+
+    response = dict(latest)
+    node_payload = nodes_response(
+        latest,
+        stale_after_seconds=stale_after_seconds,
+    )
+    response["stale_after_seconds"] = stale_after_seconds
+    response["nodes"] = node_payload["nodes"]
+    return response
+
+
 def _node_status(
     item: dict[str, Any],
     now: datetime,

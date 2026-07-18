@@ -92,6 +92,26 @@ curl http://127.0.0.1:8080/api/nodes
 Expected result: `/api/health` returns `{"status":"ok"}` and the data endpoints
 return JSON from InfluxDB.
 
+If the dashboard briefly reports `backend query failed`, the Flask process is
+still responsive enough to return an HTTP 503; this message alone does not mean
+the server is hung. Identify the failing endpoint and its duration with:
+
+```bash
+for path in api/health api/latest 'api/readings?range=24h' api/nodes; do
+  curl --silent --show-error --output /dev/null \
+    --write-out "${path} HTTP %{http_code} in %{time_total}s\n" \
+    "http://127.0.0.1:8080/${path}"
+done
+sudo journalctl -u home-sensor-dashboard.service --since '10 minutes ago' --no-pager
+sudo systemctl show home-sensor-dashboard.service \
+  --property=ActiveState,SubState,NRestarts,MemoryCurrent,CPUUsageNSec
+```
+
+The browser error now includes the endpoint that failed. The journal contains
+the underlying InfluxDB exception and traceback. A fast `/api/health` response
+with a slow or failing data endpoint indicates an InfluxDB/query problem rather
+than a hung Gunicorn process.
+
 The same checks are wrapped in:
 
 ```bash

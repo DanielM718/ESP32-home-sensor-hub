@@ -56,9 +56,27 @@ Response shape:
       "sequence": 1523
     }
   ],
-  "air_quality": []
+  "air_quality": [],
+  "stale_after_seconds": 1800,
+  "nodes": [
+    {
+      "id": "1",
+      "sensor_type": "environment",
+      "node_id": 1,
+      "status": "online",
+      "status_flags": 4,
+      "battery_measurement_ok": true,
+      "battery_low": false,
+      "battery_shutdown": false
+    }
+  ]
 }
 ```
+
+The `nodes` snapshot is derived from the same latest-value query used for the
+current readings. This lets the dashboard update current readings and node
+status with one InfluxDB query instead of immediately repeating it through
+`/api/nodes`. The standalone `/api/nodes` endpoint remains supported.
 
 ### `GET /api/readings`
 

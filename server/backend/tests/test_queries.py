@@ -11,6 +11,7 @@ from app.battery_status import (
 )
 from app.queries import (
     QueryValidationError,
+    latest_with_node_status,
     latest_response,
     nodes_response,
     readings_flux,
@@ -274,6 +275,36 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(node["status"], "stale")
         self.assertEqual(node["stale_reason"], "battery_shutdown")
         self.assertTrue(node["battery_shutdown"])
+
+    def test_latest_snapshot_includes_node_status_without_another_query(self) -> None:
+        latest = {
+            "generated_at": "2026-01-01T12:00:00Z",
+            "environment": [
+                {
+                    "id": "1",
+                    "sensor_type": "environment",
+                    "node_id": 1,
+                    "last_seen": "2026-01-01T11:59:00Z",
+                    "battery_mv": 4058,
+                    "status_flags": STATUS_BATTERY_OK,
+                    "battery_measurement_ok": True,
+                    "battery_low": False,
+                    "battery_shutdown": False,
+                }
+            ],
+            "air_quality": [],
+        }
+
+        response = latest_with_node_status(latest, stale_after_seconds=1800)
+
+        self.assertEqual(response["stale_after_seconds"], 1800)
+        self.assertEqual(len(response["nodes"]), 1)
+        self.assertEqual(response["nodes"][0]["status"], "online")
+        self.assertEqual(response["nodes"][0]["status_flags"], STATUS_BATTERY_OK)
+        self.assertTrue(response["nodes"][0]["battery_measurement_ok"])
+        self.assertFalse(response["nodes"][0]["battery_low"])
+        self.assertFalse(response["nodes"][0]["battery_shutdown"])
+        self.assertNotIn("nodes", latest)
 
 
 def _latest_environment_node(

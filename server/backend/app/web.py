@@ -13,6 +13,7 @@ from app.config import AppSettings, ConfigError, configure_logging, load_setting
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
+    latest_with_node_status,
     readings_query_from_params,
 )
 
@@ -60,7 +61,14 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/api/latest")
     def latest() -> Any:
-        return jsonify(_repository().latest())
+        latest_payload = _repository().latest()
+        stale_after_seconds = int(current_app.config["NODE_STALE_AFTER_SECONDS"])
+        return jsonify(
+            latest_with_node_status(
+                latest_payload,
+                stale_after_seconds=stale_after_seconds,
+            )
+        )
 
     @app.get("/api/readings")
     def readings() -> Any:

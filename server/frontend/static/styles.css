@@ -103,6 +103,11 @@ select {
   border-color: var(--accent);
 }
 
+.icon-button:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+
 .dashboard-shell {
   width: min(1440px, 100%);
   margin: 0 auto;
@@ -246,6 +251,63 @@ select {
   overflow-wrap: anywhere;
   font-size: 1.25rem;
   font-weight: 750;
+}
+
+.metric-flags {
+  grid-column: 1 / -1;
+}
+
+.status-flags {
+  display: grid;
+  gap: 5px;
+  min-width: 220px;
+  white-space: normal;
+}
+
+.flags-raw {
+  color: var(--muted);
+  font: 600 0.78rem/1.3 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.flag-chip-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.flag-chip {
+  display: inline-flex;
+  width: fit-content;
+  padding: 2px 7px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 750;
+  line-height: 1.45;
+}
+
+.flag-ok {
+  color: var(--ok);
+  background: #ecfdf3;
+}
+
+.flag-info {
+  color: #175cd3;
+  background: #eff8ff;
+}
+
+.flag-warning {
+  color: var(--warning);
+  background: #fff7ed;
+}
+
+.flag-danger {
+  color: var(--danger);
+  background: #fef3f2;
+}
+
+.flag-unavailable {
+  color: var(--muted);
+  background: #f2f4f3;
 }
 
 .metric-small {

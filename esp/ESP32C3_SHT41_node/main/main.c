@@ -22,7 +22,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 
-#define NODE_ID 4
+#define NODE_ID 1//4
 #define ESPNOW_CHANNEL 6
 #define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
 //#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing

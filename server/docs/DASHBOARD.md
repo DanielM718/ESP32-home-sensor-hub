@@ -36,10 +36,14 @@ Then copy or download the Chart.js browser bundle before using the dashboard.
 ## Behavior
 
 - `/` renders the dashboard.
-- `/api/latest` is polled every 7 seconds for current readings.
-- `/api/nodes` is polled every 7 seconds for node status.
+- `/api/latest` is polled every 7 seconds for current readings and node status.
+- `/api/nodes` remains available to API clients, but the dashboard uses the node
+  snapshot included with `/api/latest` to avoid repeating the same InfluxDB
+  latest-value query.
 - `/api/readings` is refreshed when the selected range changes.
 - Supported ranges are `1h`, `24h`, `7d`, and `30d`.
+- Refreshes do not overlap: the periodic poll waits while a full refresh is in
+  progress, and the refresh button is disabled until its query completes.
 
 ## Displayed Data
 
@@ -58,6 +62,12 @@ normal unexplained stale node. The historical battery chart includes only
 points paired with a same-timestamp `STATUS_BATTERY_OK` bit, so legacy records
 without status are not presented as measurements. No battery percentage is
 estimated.
+
+The status display always retains the raw unsigned integer in decimal and
+hexadecimal, then labels every known SHT41 bit: `BIT0` SHT41 read OK, `BIT1`
+ESP-NOW send attempted, `BIT2` battery measurement OK, `BIT3` low battery, and
+`BIT4` confirmed battery shutdown. Any additional bits are shown as an unknown
+hexadecimal mask rather than discarded.
 
 ## Official References
 
