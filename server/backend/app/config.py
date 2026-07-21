@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import logging
 import os
 from pathlib import Path
@@ -38,6 +38,15 @@ class InfluxSettings:
     bucket: str
     write_token: str
     read_token: str
+    live_bucket: str = "environment_live"
+
+
+@dataclass(frozen=True)
+class AirQualitySettings:
+    expected_publish_seconds: int = 5
+    stale_after_seconds: int = 20
+    rolling_minimum_coverage_percent: int = 75
+    recovery_lookback_minutes: int = 30
 
 
 @dataclass(frozen=True)
@@ -46,6 +55,7 @@ class AppSettings:
     node_stale_after_seconds: int
     mqtt: MqttSettings
     influx: InfluxSettings
+    air_quality: AirQualitySettings = field(default_factory=AirQualitySettings)
 
 
 def load_settings(env_file: Path | None = DEFAULT_ENV_FILE) -> AppSettings:
@@ -84,6 +94,21 @@ def load_settings(env_file: Path | None = DEFAULT_ENV_FILE) -> AppSettings:
             bucket=_get_env("INFLUXDB_BUCKET", "environment"),
             write_token=write_token,
             read_token=read_token,
+            live_bucket=_get_env("INFLUXDB_LIVE_BUCKET", "environment_live"),
+        ),
+        air_quality=AirQualitySettings(
+            expected_publish_seconds=_get_int(
+                "SEN66_EXPECTED_PUBLISH_SECONDS", 5, min_value=1, max_value=60
+            ),
+            stale_after_seconds=_get_int(
+                "SEN66_STALE_AFTER_SECONDS", 20, min_value=5, max_value=3600
+            ),
+            rolling_minimum_coverage_percent=_get_int(
+                "SEN66_24H_MINIMUM_COVERAGE_PERCENT", 75, min_value=50, max_value=100
+            ),
+            recovery_lookback_minutes=_get_int(
+                "SEN66_RECOVERY_LOOKBACK_MINUTES", 30, min_value=15, max_value=180
+            ),
         ),
     )
 

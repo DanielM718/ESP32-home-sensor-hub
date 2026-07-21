@@ -6,6 +6,9 @@
 #include <string.h>
 
 #include "esp_log.h"
+#include "esp_random.h"
+#include "esp_system.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs_flash.h"
@@ -39,8 +42,9 @@
 #define APP_SENSOR_REINIT_AFTER_ERRORS 3U
 #endif
 
-#define DEFAULT_MEASUREMENT_INTERVAL_MS 5000U
-#define MINIMUM_MEASUREMENT_INTERVAL_MS 1000U
+#define DEFAULT_SENSOR_POLL_INTERVAL_MS 1000U
+#define DEFAULT_MQTT_PUBLISH_INTERVAL_MS 5000U
+#define MINIMUM_SENSOR_POLL_INTERVAL_MS 1000U
 #define MQTT_TOPIC_MAX_LEN 96U
 #define MQTT_PAYLOAD_MAX_LEN 512U
 
@@ -54,8 +58,8 @@
                                     SEN66_VALUE_NOX_VALID |              \
                                     SEN66_VALUE_CO2_VALID)
 
-// These flags are diagnostic metadata. The server stores the nine required
-// measurements and safely ignores additional JSON fields.
+// These flags are diagnostic metadata. The server stores them with the
+// measurements and uses value validity independently.
 #define APP_STATUS_I2C_READY (1UL << 0)
 #define APP_STATUS_MEASUREMENT_STARTED (1UL << 1)
 #define APP_STATUS_DATA_READY (1UL << 2)
@@ -72,11 +76,14 @@ typedef struct {
     sen66_t sensor;
     uint32_t base_status_flags;
     uint32_t consecutive_read_errors;
+    int64_t sensor_started_at_us;
 } app_context_t;
 
 static app_context_t app_context;
 static char mqtt_topic[MQTT_TOPIC_MAX_LEN];
 static uint32_t sequence_number;
+static uint32_t boot_id;
+static uint32_t reset_reason;
 
 static bool string_is_set(const char *value)
 {
@@ -98,17 +105,36 @@ static esp_err_t init_nvs(void)
     return err;
 }
 
-static uint32_t measurement_interval_ms(void)
+static uint32_t sensor_poll_interval_ms(void)
 {
-    if (APP_MEASUREMENT_INTERVAL_MS < MINIMUM_MEASUREMENT_INTERVAL_MS) {
+#ifdef APP_SENSOR_POLL_INTERVAL_MS
+    if (APP_SENSOR_POLL_INTERVAL_MS < MINIMUM_SENSOR_POLL_INTERVAL_MS) {
         ESP_LOGW(TAG,
-                 "APP_MEASUREMENT_INTERVAL_MS=%u is below the SEN66 sampling interval; using %u ms",
-                 (unsigned int)APP_MEASUREMENT_INTERVAL_MS,
-                 DEFAULT_MEASUREMENT_INTERVAL_MS);
-        return DEFAULT_MEASUREMENT_INTERVAL_MS;
+                 "APP_SENSOR_POLL_INTERVAL_MS=%u is below the SEN66 sampling interval; using %u ms",
+                 (unsigned int)APP_SENSOR_POLL_INTERVAL_MS,
+                 DEFAULT_SENSOR_POLL_INTERVAL_MS);
+        return DEFAULT_SENSOR_POLL_INTERVAL_MS;
     }
+    return APP_SENSOR_POLL_INTERVAL_MS;
+#else
+    return DEFAULT_SENSOR_POLL_INTERVAL_MS;
+#endif
+}
 
-    return APP_MEASUREMENT_INTERVAL_MS;
+static uint32_t mqtt_publish_interval_ms(void)
+{
+#ifdef APP_MQTT_PUBLISH_INTERVAL_MS
+    const uint32_t configured = APP_MQTT_PUBLISH_INTERVAL_MS;
+#elif defined(APP_MEASUREMENT_INTERVAL_MS)
+    // Backward compatibility for ignored local app_config.h files created
+    // before polling and publishing became separate settings.
+    const uint32_t configured = APP_MEASUREMENT_INTERVAL_MS;
+#else
+    const uint32_t configured = DEFAULT_MQTT_PUBLISH_INTERVAL_MS;
+#endif
+    return configured < MINIMUM_SENSOR_POLL_INTERVAL_MS
+        ? DEFAULT_MQTT_PUBLISH_INTERVAL_MS
+        : configured;
 }
 
 static bool location_is_valid(const char *location)
@@ -241,6 +267,7 @@ static esp_err_t initialize_sensor(app_context_t *context)
         return err;
     }
     context->base_status_flags |= APP_STATUS_MEASUREMENT_STARTED;
+    context->sensor_started_at_us = esp_timer_get_time();
 
     err = wait_for_first_sample(&context->sensor);
     if (err != ESP_OK) {
@@ -350,7 +377,7 @@ static bool measurement_is_server_compatible(const sen66_measurement_t *measurem
 {
     if ((measurement->valid_flags & SEN66_REQUIRED_VALID_FLAGS) != SEN66_REQUIRED_VALID_FLAGS) {
         ESP_LOGW(TAG,
-                 "Skipping incomplete SEN66 sample: valid=0x%03" PRIx32 " required=0x%03" PRIx32,
+                 "Incomplete SEN66 sample will publish unavailable values as null: valid=0x%03" PRIx32 " required=0x%03" PRIx32,
                  measurement->valid_flags,
                  (uint32_t)SEN66_REQUIRED_VALID_FLAGS);
         return false;
@@ -358,20 +385,25 @@ static bool measurement_is_server_compatible(const sen66_measurement_t *measurem
 
     const bool ranges_are_valid =
         isfinite(measurement->pm1_ug_m3) && measurement->pm1_ug_m3 >= 0.0f &&
+        measurement->pm1_ug_m3 <= 1000.0f &&
         isfinite(measurement->pm25_ug_m3) && measurement->pm25_ug_m3 >= 0.0f &&
+        measurement->pm25_ug_m3 <= 1000.0f &&
         isfinite(measurement->pm4_ug_m3) && measurement->pm4_ug_m3 >= 0.0f &&
+        measurement->pm4_ug_m3 <= 1000.0f &&
         isfinite(measurement->pm10_ug_m3) && measurement->pm10_ug_m3 >= 0.0f &&
-        isfinite(measurement->voc_index) && measurement->voc_index >= 0.0f &&
+        measurement->pm10_ug_m3 <= 1000.0f &&
+        isfinite(measurement->voc_index) && measurement->voc_index >= 1.0f &&
         measurement->voc_index <= 500.0f &&
-        isfinite(measurement->nox_index) && measurement->nox_index >= 0.0f &&
+        isfinite(measurement->nox_index) && measurement->nox_index >= 1.0f &&
         measurement->nox_index <= 500.0f &&
-        isfinite(measurement->temperature_c) && measurement->temperature_c >= -80.0f &&
-        measurement->temperature_c <= 125.0f &&
+        isfinite(measurement->temperature_c) && measurement->temperature_c >= -10.0f &&
+        measurement->temperature_c <= 50.0f &&
         isfinite(measurement->humidity_rh) && measurement->humidity_rh >= 0.0f &&
-        measurement->humidity_rh <= 100.0f;
+        measurement->humidity_rh <= 90.0f &&
+        measurement->co2_ppm <= 40000U;
 
     if (!ranges_are_valid) {
-        ESP_LOGW(TAG, "Skipping SEN66 sample containing an out-of-range value");
+        ESP_LOGW(TAG, "Out-of-range SEN66 values will publish as null");
     }
     return ranges_are_valid;
 }
@@ -396,8 +428,49 @@ static uint32_t add_device_status(const sen66_t *sensor, uint32_t status_flags)
     return status_flags;
 }
 
+static void format_float_json(char *buffer,
+                              size_t buffer_size,
+                              bool valid,
+                              float value,
+                              float minimum,
+                              float maximum,
+                              unsigned int decimal_places)
+{
+    if (!valid || !isfinite(value) || value < minimum || value > maximum) {
+        snprintf(buffer, buffer_size, "null");
+        return;
+    }
+    snprintf(buffer, buffer_size, "%.*f", (int)decimal_places, value);
+}
+
+static void format_uint_json(char *buffer,
+                             size_t buffer_size,
+                             bool valid,
+                             uint16_t value,
+                             uint32_t maximum)
+{
+    if (!valid || value > maximum) {
+        snprintf(buffer, buffer_size, "null");
+        return;
+    }
+    snprintf(buffer, buffer_size, "%u", (unsigned int)value);
+}
+
+static void format_index_json(char *buffer,
+                              size_t buffer_size,
+                              bool valid,
+                              float value)
+{
+    if (!valid || !isfinite(value) || value < 1.0f || value > 500.0f) {
+        snprintf(buffer, buffer_size, "null");
+        return;
+    }
+    snprintf(buffer, buffer_size, "%ld", lroundf(value));
+}
+
 static void publish_measurement(const sen66_measurement_t *measurement,
-                                uint32_t status_flags)
+                                uint32_t status_flags,
+                                int64_t sensor_started_at_us)
 {
     if (mqtt_transport_wifi_is_connected()) {
         status_flags |= APP_STATUS_WIFI_CONNECTED;
@@ -411,29 +484,82 @@ static void publish_measurement(const sen66_measurement_t *measurement,
 
     const uint32_t sequence = sequence_number++;
     status_flags |= APP_STATUS_MQTT_PUBLISH_ATTEMPTED;
-    const long voc_index = lroundf(measurement->voc_index);
-    const long nox_index = lroundf(measurement->nox_index);
+    const uint32_t sensor_uptime_s = (uint32_t)(
+        (esp_timer_get_time() - sensor_started_at_us) / 1000000LL);
+    char co2_json[16];
+    char pm1_json[24];
+    char pm25_json[24];
+    char pm4_json[24];
+    char pm10_json[24];
+    char voc_index_json[16];
+    char nox_index_json[16];
+    char temperature_json[24];
+    char humidity_json[24];
+    char sraw_voc_json[8] = "null";
+    char sraw_nox_json[8] = "null";
+
+    format_uint_json(co2_json, sizeof(co2_json),
+                     measurement_field_is_valid(measurement, SEN66_VALUE_CO2_VALID),
+                     measurement->co2_ppm, 40000U);
+    format_float_json(pm1_json, sizeof(pm1_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_PM1_VALID),
+                      measurement->pm1_ug_m3, 0.0f, 1000.0f, 1U);
+    format_float_json(pm25_json, sizeof(pm25_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_PM25_VALID),
+                      measurement->pm25_ug_m3, 0.0f, 1000.0f, 1U);
+    format_float_json(pm4_json, sizeof(pm4_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_PM4_VALID),
+                      measurement->pm4_ug_m3, 0.0f, 1000.0f, 1U);
+    format_float_json(pm10_json, sizeof(pm10_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_PM10_VALID),
+                      measurement->pm10_ug_m3, 0.0f, 1000.0f, 1U);
+    format_index_json(voc_index_json, sizeof(voc_index_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_VOC_VALID),
+                      measurement->voc_index);
+    format_index_json(nox_index_json, sizeof(nox_index_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_NOX_VALID),
+                      measurement->nox_index);
+    format_float_json(temperature_json, sizeof(temperature_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_TEMPERATURE_VALID),
+                      measurement->temperature_c, -10.0f, 50.0f, 2U);
+    format_float_json(humidity_json, sizeof(humidity_json),
+                      measurement_field_is_valid(measurement, SEN66_VALUE_HUMIDITY_VALID),
+                      measurement->humidity_rh, 0.0f, 90.0f, 2U);
+    if (measurement_field_is_valid(measurement, SEN66_VALUE_SRAW_VOC_VALID)) {
+        snprintf(sraw_voc_json, sizeof(sraw_voc_json), "%u", measurement->sraw_voc);
+    }
+    if (measurement_field_is_valid(measurement, SEN66_VALUE_SRAW_NOX_VALID)) {
+        snprintf(sraw_nox_json, sizeof(sraw_nox_json), "%u", measurement->sraw_nox);
+    }
 
     char payload[MQTT_PAYLOAD_MAX_LEN];
     int written = snprintf(
         payload,
         sizeof(payload),
-        "{\"co2\":%u,\"pm1\":%.1f,\"pm25\":%.1f,\"pm4\":%.1f,\"pm10\":%.1f,"
-        "\"voc_index\":%ld,\"nox_index\":%ld,\"temperature_c\":%.2f,\"humidity\":%.2f,"
-        "\"packet_type\":\"sen66\",\"schema_version\":1,\"firmware_version\":\"%s\","
-        "\"node_id\":%u,\"sequence\":%" PRIu32 ",\"status_flags\":%" PRIu32 "}",
-        (unsigned int)measurement->co2_ppm,
-        measurement->pm1_ug_m3,
-        measurement->pm25_ug_m3,
-        measurement->pm4_ug_m3,
-        measurement->pm10_ug_m3,
-        voc_index,
-        nox_index,
-        measurement->temperature_c,
-        measurement->humidity_rh,
+        "{\"co2\":%s,\"pm1\":%s,\"pm25\":%s,\"pm4\":%s,\"pm10\":%s,"
+        "\"voc_index\":%s,\"nox_index\":%s,\"temperature_c\":%s,\"humidity\":%s,"
+        "\"sraw_voc\":%s,\"sraw_nox\":%s,"
+        "\"packet_type\":\"sen66\",\"schema_version\":2,\"firmware_version\":\"%s\","
+        "\"node_id\":%u,\"boot_id\":%" PRIu32 ",\"sequence\":%" PRIu32 ","
+        "\"sensor_uptime_s\":%" PRIu32 ",\"reset_reason\":%" PRIu32 ","
+        "\"status_flags\":%" PRIu32 "}",
+        co2_json,
+        pm1_json,
+        pm25_json,
+        pm4_json,
+        pm10_json,
+        voc_index_json,
+        nox_index_json,
+        temperature_json,
+        humidity_json,
+        sraw_voc_json,
+        sraw_nox_json,
         APP_FIRMWARE_VERSION,
         (unsigned int)APP_NODE_ID,
+        boot_id,
         sequence,
+        sensor_uptime_s,
+        reset_reason,
         status_flags);
 
     if (written < 0 || written >= (int)sizeof(payload)) {
@@ -458,7 +584,7 @@ static void publish_measurement(const sen66_measurement_t *measurement,
              status_flags);
 }
 
-static void read_and_publish_sample(app_context_t *context)
+static void read_and_maybe_publish_sample(app_context_t *context, bool publish_due)
 {
     uint32_t status_flags = context->base_status_flags;
     bool ready = false;
@@ -484,27 +610,43 @@ static void read_and_publish_sample(app_context_t *context)
 
     context->consecutive_read_errors = 0;
     status_flags |= APP_STATUS_MEASUREMENT_READ_OK;
-    log_measurement(&measurement);
-    status_flags = add_device_status(&context->sensor, status_flags);
-
-    if (!measurement_is_server_compatible(&measurement)) {
-        return;
+    err = sen66_read_measured_raw_values(&context->sensor, &measurement);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "SEN66 optional raw-gas read failed: %s", esp_err_to_name(err));
     }
+    log_measurement(&measurement);
 
-    publish_measurement(&measurement, status_flags);
+    (void)measurement_is_server_compatible(&measurement);
+
+    if (publish_due) {
+        status_flags = add_device_status(&context->sensor, status_flags);
+        publish_measurement(&measurement, status_flags, context->sensor_started_at_us);
+    }
 }
 
 static void measurement_task(void *arg)
 {
     app_context_t *context = (app_context_t *)arg;
-    const uint32_t interval_ms = measurement_interval_ms();
+    const uint32_t poll_interval_ms = sensor_poll_interval_ms();
+    const uint32_t publish_interval_ms = mqtt_publish_interval_ms();
     TickType_t last_wake = xTaskGetTickCount();
+    int64_t next_publish_us = esp_timer_get_time();
 
-    ESP_LOGI(TAG, "SEN66 measurement task started: interval=%" PRIu32 " ms", interval_ms);
+    ESP_LOGI(TAG,
+             "SEN66 task started: poll=%" PRIu32 " ms publish=%" PRIu32 " ms",
+             poll_interval_ms,
+             publish_interval_ms);
 
     while (true) {
-        read_and_publish_sample(context);
-        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(interval_ms));
+        const int64_t now_us = esp_timer_get_time();
+        const bool publish_due = now_us >= next_publish_us;
+        if (publish_due) {
+            do {
+                next_publish_us += ((int64_t)publish_interval_ms * 1000LL);
+            } while (next_publish_us <= now_us);
+        }
+        read_and_maybe_publish_sample(context, publish_due);
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(poll_interval_ms));
     }
 }
 
@@ -519,6 +661,8 @@ void app_main(void)
 #endif
 
     ESP_ERROR_CHECK(init_nvs());
+    boot_id = esp_random();
+    reset_reason = (uint32_t)esp_reset_reason();
     start_network_transport();
 
     memset(&app_context, 0, sizeof(app_context));

@@ -12,6 +12,7 @@ from app.battery_status import (
 from app.queries import (
     AIR_QUALITY_FIELDS,
     QueryValidationError,
+    air_quality_context_response,
     latest_flux,
     latest_with_node_status,
     latest_response,
@@ -71,7 +72,7 @@ class QueryHelpersTest(unittest.TestCase):
 
         self.assertIn('from(bucket: "environment")', flux)
         self.assertIn('r.location == "printer_room"', flux)
-        self.assertIn("aggregateWindow(every: 15m", flux)
+        self.assertIn("aggregateWindow(every: 1m", flux)
 
     def test_air_quality_queries_include_every_sen66_field(self) -> None:
         query = readings_query_from_params(
@@ -85,6 +86,15 @@ class QueryHelpersTest(unittest.TestCase):
             for field in AIR_QUALITY_FIELDS:
                 with self.subTest(field=field):
                     self.assertIn(f'"{field}"', flux)
+
+    def test_latest_context_finds_active_events_older_than_a_day(self) -> None:
+        from app.queries import air_quality_context_flux
+
+        flux = air_quality_context_flux("environment", "environment_live")
+
+        self.assertIn("activeEventStates", flux)
+        self.assertIn("|> range(start: 0)", flux)
+        self.assertIn('r._field == "state" and r._value == "active"', flux)
 
     def test_environment_history_requires_matching_battery_ok_flag(self) -> None:
         query = readings_query_from_params(
@@ -119,10 +129,12 @@ class QueryHelpersTest(unittest.TestCase):
 
         flux = readings_flux("environment", query)
 
-        self.assertIn(
-            "union(tables: [environmentMetrics, environmentBattery, airQuality])",
-            flux,
-        )
+        self.assertIn("environmentMetrics", flux)
+        self.assertIn("environmentBattery", flux)
+        self.assertIn("airAggregateMean", flux)
+        self.assertIn("airAggregateMax", flux)
+        self.assertIn("legacyAirMean", flux)
+        self.assertIn("union(tables:", flux)
 
     def test_all_history_with_node_filter_excludes_air_quality(self) -> None:
         query = readings_query_from_params({"node_id": "1"})
@@ -194,6 +206,54 @@ class QueryHelpersTest(unittest.TestCase):
                 "humidity": 42.3,
             },
         )
+
+    def test_latest_response_does_not_reuse_older_raw_diagnostic_ticks(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        values = {
+            "location": "printer_room",
+            "topic": "home/air/printer_room",
+            "sensor_type": "air_quality",
+        }
+        records = _air_quality_records(now)
+        records.append(
+            FakeRecord("air_quality_reading", "sample_valid", True, now, values)
+        )
+        records.append(
+            FakeRecord(
+                "air_quality_reading",
+                "sraw_voc",
+                24000,
+                now - timedelta(seconds=5),
+                values,
+            )
+        )
+
+        station = latest_response(records)["air_quality"][0]
+
+        self.assertIsNone(station["sraw_voc"])
+
+    def test_latest_response_does_not_reuse_older_invalid_flag(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        values = {
+            "location": "printer_room",
+            "topic": "home/air/printer_room",
+            "sensor_type": "air_quality",
+        }
+        records = _air_quality_records(now)
+        records.append(
+            FakeRecord(
+                "air_quality_reading",
+                "sample_valid",
+                False,
+                now - timedelta(seconds=5),
+                values,
+            )
+        )
+
+        station = latest_response(records)["air_quality"][0]
+
+        self.assertIsNone(station["sample_valid"])
+        self.assertEqual(station["co2"], 721)
 
     def test_air_quality_history_tolerates_missing_legacy_fields(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -314,6 +374,22 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(response["nodes"][0]["age_seconds"], 1800)
         self.assertEqual(response["nodes"][0]["stale_reason"], "no_recent_reading")
 
+    def test_air_quality_node_uses_publish_rate_stale_timeout(self) -> None:
+        generated = datetime(2026, 1, 1, 12, 1, tzinfo=timezone.utc)
+        latest = latest_response(
+            _air_quality_records(generated - timedelta(seconds=25))
+        )
+        latest["generated_at"] = generated.isoformat()
+
+        response = nodes_response(
+            latest,
+            stale_after_seconds=1800,
+            air_quality_stale_after_seconds=20,
+        )
+
+        self.assertEqual(response["nodes"][0]["status"], "stale")
+        self.assertEqual(response["air_quality_stale_after_seconds"], 20)
+
     def test_nodes_response_preserves_confirmed_shutdown_while_stale(self) -> None:
         latest = {
             "generated_at": "2026-01-01T12:30:00Z",
@@ -373,6 +449,128 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertFalse(response["nodes"][0]["battery_low"])
         self.assertFalse(response["nodes"][0]["battery_shutdown"])
         self.assertNotIn("nodes", latest)
+
+    def test_context_keeps_simultaneous_event_types_separate(self) -> None:
+        now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)
+        base_values = {
+            "location": "office",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+        }
+        records = [
+            FakeRecord(
+                "air_quality_reading",
+                "sample_valid",
+                True,
+                now,
+                base_values,
+            )
+        ]
+        for event_type, metric in (
+            ("voc_action_level", "voc_index"),
+            ("voc_rapid_rise", "voc_index"),
+        ):
+            event_values = {
+                **base_values,
+                "event_type": event_type,
+                "metric": metric,
+            }
+            records.append(
+                FakeRecord(
+                    "air_quality_event",
+                    "state",
+                    "active",
+                    now,
+                    event_values,
+                )
+            )
+
+        response = air_quality_context_response(
+            records,
+            expected_publish_seconds=5,
+            minimum_coverage_percent=75,
+        )
+
+        active = response["locations"]["office"]["active_events"]
+        self.assertEqual(
+            {event["event_type"] for event in active},
+            {"voc_action_level", "voc_rapid_rise"},
+        )
+
+    def test_current_summary_excludes_all_fields_from_invalid_samples(self) -> None:
+        now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)
+        values = {
+            "location": "office",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+        }
+        records = [
+            FakeRecord("air_quality_reading", "sample_valid", True, now, values),
+            FakeRecord("air_quality_reading", "co2", 700, now, values),
+            FakeRecord("air_quality_reading", "voc_index", 100, now, values),
+            FakeRecord(
+                "air_quality_reading",
+                "sample_valid",
+                False,
+                now + timedelta(seconds=5),
+                values,
+            ),
+            FakeRecord(
+                "air_quality_reading",
+                "co2",
+                5000,
+                now + timedelta(seconds=5),
+                values,
+            ),
+            FakeRecord(
+                "air_quality_reading",
+                "voc_index",
+                200,
+                now + timedelta(seconds=5),
+                values,
+            ),
+        ]
+
+        response = air_quality_context_response(
+            records,
+            expected_publish_seconds=5,
+            minimum_coverage_percent=75,
+        )
+
+        summary = response["locations"]["office"]["current_15m"]
+        self.assertEqual(summary["sample_count"], 2)
+        self.assertEqual(summary["valid_sample_count"], 1)
+        self.assertEqual(summary["invalid_sample_count"], 1)
+        self.assertEqual(summary["co2_mean"], 700)
+        self.assertEqual(summary["co2_max"], 700)
+        self.assertEqual(summary["voc_index_mean"], 100)
+        self.assertEqual(summary["voc_duration_above_150_seconds"], 0)
+
+    def test_overall_status_includes_direct_co2_exposure_warning_only_when_relevant(self) -> None:
+        from app.queries import _overall_air_quality_status
+
+        normal = _overall_air_quality_status(
+            {
+                "co2": {"severity": "good", "category": "Effective"},
+                "co2_occupational": {
+                    "severity": "informational",
+                    "category": "Below occupational values",
+                },
+            }
+        )
+        dangerous = _overall_air_quality_status(
+            {
+                "co2": {"severity": "very_poor", "category": "Ventilate"},
+                "co2_occupational": {
+                    "severity": "hazardous",
+                    "category": "At or above NIOSH IDLH numeric value",
+                },
+            }
+        )
+
+        self.assertEqual(normal["driving_metric"], "co2")
+        self.assertEqual(dangerous["driving_metric"], "co2_occupational")
+        self.assertEqual(dangerous["severity"], "hazardous")
 
 
 def _latest_environment_node(

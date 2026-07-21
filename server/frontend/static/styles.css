@@ -247,6 +247,18 @@ select {
   border-radius: 7px;
 }
 
+.air-station-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.air-station-heading h3 {
+  margin-bottom: 3px;
+}
+
 .air-metric-group h4 {
   margin: 0 0 8px;
   color: var(--muted);
@@ -260,6 +272,167 @@ select {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px 12px;
 }
+
+.air-metric-group .reading-values {
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  align-items: stretch;
+}
+
+.air-metric-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 11px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-left-width: 4px;
+  border-radius: 7px;
+}
+
+.metric-card-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.interpretation-status,
+.authority-label {
+  display: inline-flex;
+  width: fit-content;
+  font-size: 0.76rem;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.interpretation-status {
+  padding: 2px 7px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  text-align: right;
+}
+
+.authority-label {
+  color: var(--muted);
+}
+
+.metric-explanation,
+.metric-details p,
+.advanced-diagnostics p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.metric-context {
+  display: grid;
+  gap: 2px;
+  padding: 7px;
+  color: #34463d;
+  background: #f3f7f5;
+  border-radius: 5px;
+  font-size: 0.76rem;
+}
+
+.reading-warning {
+  display: block;
+  padding: 5px 7px;
+  color: var(--warning);
+  background: #fff7ed;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.metric-details,
+.advanced-diagnostics {
+  margin-top: 3px;
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
+.metric-details summary,
+.advanced-diagnostics summary {
+  color: var(--accent-strong);
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.metric-details[open],
+.advanced-diagnostics[open] {
+  padding-top: 4px;
+}
+
+.metric-details a {
+  color: var(--accent-strong);
+}
+
+.advanced-diagnostics {
+  padding: 10px;
+  background: #f8faf9;
+  border: 1px solid #e8eeea;
+  border-radius: 7px;
+}
+
+.advanced-diagnostics dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 8px;
+  margin: 9px 0 0;
+}
+
+.advanced-diagnostics dl div {
+  min-width: 0;
+}
+
+.advanced-diagnostics dt {
+  color: var(--muted);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+
+.advanced-diagnostics dd {
+  margin: 0;
+  font-weight: 750;
+}
+
+.severity-good,
+.severity-excellent {
+  color: var(--ok);
+  background: #ecfdf3;
+}
+
+.severity-informational {
+  color: #175cd3;
+  background: #eff8ff;
+}
+
+.severity-moderate {
+  color: var(--warning);
+  background: #fff7ed;
+}
+
+.severity-poor,
+.severity-very_poor,
+.severity-hazardous {
+  color: var(--danger);
+  background: #fef3f2;
+}
+
+.severity-unavailable {
+  color: var(--muted);
+  background: #f2f4f3;
+}
+
+.severity-border-good,
+.severity-border-excellent { border-left-color: var(--ok); }
+.severity-border-informational { border-left-color: #175cd3; }
+.severity-border-moderate { border-left-color: var(--warning); }
+.severity-border-poor,
+.severity-border-very_poor,
+.severity-border-hazardous { border-left-color: var(--danger); }
+.severity-border-unavailable { border-left-color: var(--muted); }
 
 .metric {
   min-width: 0;
@@ -372,6 +545,13 @@ select {
   margin-bottom: 22px;
 }
 
+.history-tier {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+}
+
 .chart-panel {
   padding: 14px;
   min-width: 0;
@@ -478,5 +658,11 @@ tbody tr:last-child td {
 
   .range-button {
     padding-inline: 8px;
+  }
+
+  .air-station-heading,
+  .metric-card-heading {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }

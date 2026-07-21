@@ -105,6 +105,12 @@ SEN66 set: temperature, relative humidity, CO2, PM1.0, PM2.5, PM4.0, PM10, VOC
 Index, and NOx Index. The dashboard groups these into climate, gas/index, and
 particulate sections and treats missing historical fields as unavailable.
 
+High-resolution SEN66 data is bounded to 72 hours in `environment_live`.
+UTC-aligned 15-minute summaries and sparse event episodes remain in the existing
+long-term `environment` bucket. Threshold authority, warm-up semantics, storage
+schemas, compatibility, and deployment are documented in
+[`docs/SEN66_AIR_QUALITY.md`](docs/SEN66_AIR_QUALITY.md).
+
 ## REST API
 
 The Flask service reads historical and latest data from InfluxDB only. It does

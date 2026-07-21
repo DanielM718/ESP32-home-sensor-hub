@@ -11,7 +11,8 @@ SEN66 -> I2C -> XIAO ESP32-C3 -> Wi-Fi/MQTT -> Raspberry Pi
 ```
 
 The Raspberry Pi MQTT bridge is the data-contract authority. It validates the
-payload, assigns receive time, and writes all nine measurements to InfluxDB.
+payload, assigns receive time, writes bounded live samples, and builds long-term
+15-minute aggregates and event records.
 
 ## Hardware
 
@@ -32,7 +33,7 @@ payload, assigns receive time, and writes all nine measurements to InfluxDB.
 The SEN66 has substantial current peaks. Use a stable 3.3 V supply path capable
 of the module's documented average and peak current, and check whether the
 specific cable or breakout already supplies I2C pull-ups. See the
-[Sensirion SEN6x datasheet](https://sensirion.com/media/documents/FAFC548D/670CCB6F/Sensirion_Datasheet_SEN6x.pdf)
+[Sensirion SEN6x datasheet](https://sensirion.com/media/documents/FAFC548D/693FBB15/PS_DS_SEN6x.pdf)
 for electrical limits.
 
 ## Local Configuration
@@ -84,38 +85,47 @@ Example payload:
   "nox_index": 12,
   "temperature_c": 24.5,
   "humidity": 42.3,
+  "sraw_voc": 24100,
+  "sraw_nox": 19300,
   "packet_type": "sen66",
-  "schema_version": 1,
-  "firmware_version": "2.0.0",
+  "schema_version": 2,
+  "firmware_version": "2.1.0",
   "node_id": 100,
+  "boot_id": 2712847316,
   "sequence": 42,
-  "status_flags": 255
+  "sensor_uptime_s": 3600,
+  "reset_reason": 1,
+  "status_flags": 479
 }
 ```
 
-The first nine fields are required by `server/backend/bridge/topic_router.py`.
-The bridge currently requires integer CO2, VOC index, and NOx index values, so
+Current firmware normally supplies all nine primary fields. The bridge requires
+integer CO2, VOC index, and NOx index values when available, so
 the firmware rounds the sensor's VOC/NOx decimal indices to the nearest integer.
 Particulate matter is in `ug/m3`, temperature in degrees Celsius, relative
-humidity in percent, and CO2 in ppm. The bridge ignores the additional metadata
-fields while retaining forward compatibility.
+humidity in percent, and CO2 in ppm. Raw gas values are unsigned diagnostic
+ticks, not concentrations. The bridge stores the applicable metadata for
+deduplication, warm-up, reset, and diagnostics.
 
 The firmware does not create a timestamp. The bridge uses Raspberry Pi receive
 time, which avoids depending on an unsynchronized ESP32 clock.
 
-The server requires a complete nine-field sample. SEN66 unknown sentinels,
-non-finite values, and out-of-range values are logged and not published. This
-is especially relevant during startup: CO2 may be unavailable for roughly six
-seconds and NOx for roughly eleven seconds.
+SEN66 unknown sentinels, non-finite values, and out-of-range values are logged
+and published as JSON `null` while valid uptime/status metadata remains present.
+The server records such a packet as invalid without converting it to zero. This
+is especially relevant during startup: measured CO2 is unavailable for roughly
+22–24 seconds and NOx for roughly 10–11 seconds.
 
 ## Runtime Behavior
 
 1. Initialize NVS, Wi-Fi station mode, and the MQTT client.
 2. Reconnect Wi-Fi and MQTT automatically after a disconnect.
 3. Wait for the SEN66 power-up interval, initialize I2C, and probe `0x6B`.
-4. Start continuous measurement and poll the data-ready flag.
-5. Read all nine words and verify each Sensirion CRC-8 byte.
-6. Publish complete samples at the configured interval, default five seconds.
+4. Start continuous measurement and poll the data-ready flag every second.
+5. Read all nine values plus optional raw gas ticks and verify every Sensirion
+   CRC-8 byte.
+6. Publish the newest sample at a separately configured interval, default five
+   seconds.
 7. Reinitialize the sensor after repeated I2C or read failures.
 
 Sensor measurement continues even while MQTT is unavailable. Samples are not
@@ -136,8 +146,12 @@ Diagnostic `status_flags` are included as metadata:
 | 7 | MQTT connected |
 | 8 | MQTT publish attempted |
 
-The server does not currently store SEN66 status metadata; it stores the nine
-validated measurements.
+Bit 5 makes the server mark the packet invalid and create/update the
+`sensor_invalid` event. Other metadata is stored with the live point.
+
+The complete source-backed interpretation, warm-up, aggregation, retention, and
+event contract is in
+[`server/docs/SEN66_AIR_QUALITY.md`](../../server/docs/SEN66_AIR_QUALITY.md).
 
 ## Build
 

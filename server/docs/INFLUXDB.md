@@ -16,9 +16,11 @@ Official references:
 
 ```text
 Organization: home
-Bucket: environment
+Long-term bucket: environment
+Live bucket: environment_live
 URL: http://127.0.0.1:8086
-Retention: 0 (infinite)
+Long-term retention: 0 (infinite)
+Live retention: 72h
 ```
 
 Scoped application tokens are stored in `server/backend/.env` on the Raspberry
@@ -60,7 +62,9 @@ sudo /opt/home-sensor/server/scripts/setup_influxdb.sh \
   --url http://127.0.0.1:8086 \
   --org home \
   --bucket environment \
-  --retention 0
+  --retention 0 \
+  --live-bucket environment_live \
+  --live-retention 72h
 ```
 
 Verify the setup:
@@ -71,10 +75,13 @@ sudo /opt/home-sensor/server/scripts/verify_influxdb.sh
 
 ## Measurements
 
-Initial measurements:
+Measurements:
 
-- `environment_reading`
-- `air_quality_reading`
+- `environment/environment_reading`: long-term SHT41 node samples
+- `environment_live/air_quality_reading`: high-resolution SEN66 samples
+- `environment/air_quality_15m`: long-term SEN66 aggregates
+- `environment/air_quality_event`: long-term sparse event episodes
+- `environment/air_quality_reading`: legacy raw SEN66 history, left untouched
 
 Tags are used for low-cardinality dimensions:
 
@@ -98,7 +105,10 @@ Fields are used for measured values:
 - `voc_index`
 - `nox_index`
 
-This schema keeps future sensor types and rooms additive.
+The API unions legacy raw history with new aggregates. Creating the live bucket
+does not modify or delete the existing bucket, so this is an additive migration.
+The bridge write token can write both buckets and read the live bucket for
+restart recovery; dashboard/Grafana credentials can read both.
 
 For `environment_reading`, `status_flags` is the raw unsigned SHT41 status
 integer. Its battery bits are `BIT2` measurement valid, `BIT3` low battery, and
@@ -116,3 +126,4 @@ See also:
 - `server/docs/BRIDGE.md`
 - `server/docs/API.md`
 - `server/docs/GRAFANA.md`
+- `server/docs/SEN66_AIR_QUALITY.md`

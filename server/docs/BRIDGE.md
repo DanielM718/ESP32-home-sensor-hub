@@ -19,7 +19,10 @@ cd /opt/home-sensor/server/backend
 - Subscribe to `home/sensors/+` and `home/air/+`.
 - Validate every JSON payload before storage.
 - Convert valid messages into typed readings.
-- Write readings to InfluxDB OSS v2.
+- Write environmental samples to long-term storage and SEN66 samples to bounded
+  live storage.
+- Build UTC-aligned 15-minute SEN66 aggregates and sparse threshold/change
+  events in long-term storage.
 - Log invalid messages and skip them.
 
 The bridge never publishes sensor data and never reads directly from ESP-NOW.
@@ -61,7 +64,7 @@ home/air/<location>
 
 The location must be a stable slug containing letters, numbers, `_`, or `-`.
 
-Required air-quality fields:
+Current firmware publishes these air-quality fields:
 
 - `co2`
 - `pm1`
@@ -73,7 +76,11 @@ Required air-quality fields:
 - `temperature_c`
 - `humidity`
 
-These names match the SEN66 firmware payload exactly. The bridge intentionally
+These names match the SEN66 firmware payload exactly. An absent, null,
+non-finite, or out-of-range measured value makes the sample invalid; valid
+metadata is still stored with `sample_valid=false`, but the bad field is omitted
+and never treated as zero. Malformed JSON and invalid topic identity are rejected.
+The bridge intentionally
 does not accept alternate spellings such as `co2_ppm`, `pm1_0`, `pm2_5`, or
 `pm4_0`, because silently supporting two schemas would make field-name mistakes
 harder to detect. CO2, VOC Index, and NOx Index are integers. PM values are
@@ -83,15 +90,24 @@ harder to detect. CO2, VOC Index, and NOx Index are integers. PM values are
 
 The bridge writes:
 
-- `environment_reading`
-- `air_quality_reading`
+- `environment/environment_reading`
+- `environment_live/air_quality_reading`
+- `environment/air_quality_15m`
+- `environment/air_quality_event`
 
 Each reading uses the Pi receive time as the InfluxDB timestamp because the MQTT
 payload contract does not include a trusted sensor timestamp.
 
-`AirQualityReading.fields` writes all nine values into one
-`air_quality_reading` point. The existing `SensorReading` path and
-`home/sensors/+` subscription are independent and unchanged.
+The live point includes any available firmware metadata and raw gas ticks. The
+aggregate pipeline deduplicates schema-v2 `(boot_id, sequence)` identities but
+does not de-duplicate reboot-reset legacy sequences without a boot ID. It accepts
+unique out-of-order samples only while their window is open, flushes the current
+window with an accurate partial/completed flag plus active-event state on SIGTERM,
+restores permanent active events, and
+reconstructs the last 30 minutes from the live bucket at startup.
+The existing `SensorReading` path and `home/sensors/+` subscription remain
+independent. Full policy and schemas are in
+[`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).
 
 ## Full SEN66 Round-Trip Test
 
@@ -133,7 +149,10 @@ MQTT_AIR_TOPIC=home/air/+
 INFLUXDB_URL=http://127.0.0.1:8086
 INFLUXDB_ORG=home
 INFLUXDB_BUCKET=environment
+INFLUXDB_LIVE_BUCKET=environment_live
 INFLUXDB_WRITE_TOKEN=...
+SEN66_EXPECTED_PUBLISH_SECONDS=5
+SEN66_RECOVERY_LOOKBACK_MINUTES=30
 ```
 
 Official references:

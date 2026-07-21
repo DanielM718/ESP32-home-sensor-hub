@@ -13,6 +13,8 @@ INFLUXDB_URL="${INFLUXDB_URL:-http://127.0.0.1:8086}"
 INFLUXDB_ORG="${INFLUXDB_ORG:-home}"
 INFLUXDB_BUCKET="${INFLUXDB_BUCKET:-environment}"
 INFLUXDB_RETENTION="${INFLUXDB_RETENTION:-0}"
+INFLUXDB_LIVE_BUCKET="${INFLUXDB_LIVE_BUCKET:-environment_live}"
+INFLUXDB_LIVE_RETENTION="${INFLUXDB_LIVE_RETENTION:-72h}"
 INFLUXDB_ADMIN_USERNAME="${INFLUXDB_ADMIN_USERNAME:-admin}"
 INFLUXDB_ADMIN_PASSWORD="${INFLUXDB_ADMIN_PASSWORD:-}"
 INFLUXDB_ADMIN_TOKEN="${INFLUXDB_ADMIN_TOKEN:-}"
@@ -28,6 +30,8 @@ Options:
   --org ORG                Organization. Default: home
   --bucket BUCKET          Bucket. Default: environment
   --retention DURATION     Retention duration. Default: 0 (infinite)
+  --live-bucket BUCKET     High-resolution SEN66 bucket. Default: environment_live
+  --live-retention PERIOD  High-resolution retention. Default: 72h
   --admin-user USER        Initial admin username. Default: admin
   --env-file PATH          Backend environment file to update
   -h, --help               Show this help
@@ -58,6 +62,16 @@ while [[ $# -gt 0 ]]; do
     --retention)
       INFLUXDB_RETENTION="${2:-}"
       [[ -n "${INFLUXDB_RETENTION}" ]] || die "--retention requires a value"
+      shift 2
+      ;;
+    --live-bucket)
+      INFLUXDB_LIVE_BUCKET="${2:-}"
+      [[ -n "${INFLUXDB_LIVE_BUCKET}" ]] || die "--live-bucket requires a value"
+      shift 2
+      ;;
+    --live-retention)
+      INFLUXDB_LIVE_RETENTION="${2:-}"
+      [[ -n "${INFLUXDB_LIVE_RETENTION}" ]] || die "--live-retention requires a value"
       shift 2
       ;;
     --admin-user)
@@ -144,11 +158,12 @@ setup_influxdb_if_needed() {
 }
 
 bucket_id() {
+  local bucket_name="$1"
   influx bucket list \
     --host "${INFLUXDB_URL}" \
     --org "${INFLUXDB_ORG}" \
     --token "${INFLUXDB_ADMIN_TOKEN}" \
-    --name "${INFLUXDB_BUCKET}" \
+    --name "${bucket_name}" \
     --json \
     | python3 -c '
 import json
@@ -166,17 +181,19 @@ raise SystemExit("bucket not found")
 }
 
 ensure_bucket() {
-  if bucket_id >/dev/null 2>&1; then
+  local bucket_name="$1"
+  local retention="$2"
+  if bucket_id "${bucket_name}" >/dev/null 2>&1; then
     return
   fi
 
-  log "Creating bucket ${INFLUXDB_BUCKET}"
+  log "Creating bucket ${bucket_name} with retention ${retention}"
   influx bucket create \
     --host "${INFLUXDB_URL}" \
     --org "${INFLUXDB_ORG}" \
     --token "${INFLUXDB_ADMIN_TOKEN}" \
-    --name "${INFLUXDB_BUCKET}" \
-    --retention "${INFLUXDB_RETENTION}" >/dev/null
+    --name "${bucket_name}" \
+    --retention "${retention}" >/dev/null
 }
 
 create_scoped_token() {
@@ -257,18 +274,29 @@ influx_cli_ready || die "InfluxDB did not respond to influx ping"
 setup_influxdb_if_needed
 
 admin_token_works || die "InfluxDB admin token could not list buckets after setup"
-ensure_bucket
-BUCKET_ID="$(bucket_id)"
+ensure_bucket "${INFLUXDB_BUCKET}" "${INFLUXDB_RETENTION}"
+ensure_bucket "${INFLUXDB_LIVE_BUCKET}" "${INFLUXDB_LIVE_RETENTION}"
+BUCKET_ID="$(bucket_id "${INFLUXDB_BUCKET}")"
+LIVE_BUCKET_ID="$(bucket_id "${INFLUXDB_LIVE_BUCKET}")"
 [[ -n "${BUCKET_ID}" ]] || die "Unable to determine bucket ID for ${INFLUXDB_BUCKET}"
+[[ -n "${LIVE_BUCKET_ID}" ]] || die "Unable to determine bucket ID for ${INFLUXDB_LIVE_BUCKET}"
 log "Using bucket ${INFLUXDB_BUCKET} (${BUCKET_ID})"
+log "Using live bucket ${INFLUXDB_LIVE_BUCKET} (${LIVE_BUCKET_ID})"
 
 log "Creating scoped application tokens"
-WRITE_TOKEN="$(create_scoped_token "home-sensor bridge write ${INFLUXDB_BUCKET}" --write-bucket "${BUCKET_ID}")"
-READ_TOKEN="$(create_scoped_token "home-sensor dashboard read ${INFLUXDB_BUCKET}" --read-bucket "${BUCKET_ID}")"
+WRITE_TOKEN="$(create_scoped_token "home-sensor bridge tiered write/recovery" \
+  --write-bucket "${BUCKET_ID}" \
+  --write-bucket "${LIVE_BUCKET_ID}" \
+  --read-bucket "${LIVE_BUCKET_ID}")"
+READ_TOKEN="$(create_scoped_token "home-sensor dashboard tiered read" \
+  --read-bucket "${BUCKET_ID}" \
+  --read-bucket "${LIVE_BUCKET_ID}")"
 
 set_env_value INFLUXDB_URL "${INFLUXDB_URL}"
 set_env_value INFLUXDB_ORG "${INFLUXDB_ORG}"
 set_env_value INFLUXDB_BUCKET "${INFLUXDB_BUCKET}"
+set_env_value INFLUXDB_LIVE_BUCKET "${INFLUXDB_LIVE_BUCKET}"
+set_env_value INFLUXDB_LIVE_RETENTION "${INFLUXDB_LIVE_RETENTION}"
 set_env_value INFLUXDB_TOKEN "${WRITE_TOKEN}"
 set_env_value INFLUXDB_WRITE_TOKEN "${WRITE_TOKEN}"
 set_env_value INFLUXDB_READ_TOKEN "${READ_TOKEN}"

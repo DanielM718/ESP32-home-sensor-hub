@@ -157,7 +157,10 @@ class TopicRouterTest(unittest.TestCase):
         self.assertEqual(reading.measurement, "air_quality_reading")
         self.assertEqual(reading.tags["location"], "sen66_test")
         self.assertEqual(
-            reading.fields,
+            {field: reading.fields[field] for field in (
+                "co2", "pm1", "pm25", "pm4", "pm10", "voc_index",
+                "nox_index", "temperature_c", "humidity",
+            )},
             {
                 "co2": 612,
                 "pm1": 1.2,
@@ -170,8 +173,10 @@ class TopicRouterTest(unittest.TestCase):
                 "humidity": 42.1,
             },
         )
+        self.assertTrue(reading.fields["sample_valid"])
+        self.assertEqual(reading.fields["sequence"], 1)
 
-    def test_air_quality_message_requires_complete_sen66_measurements(self) -> None:
+    def test_air_quality_message_preserves_incomplete_sample_as_invalid(self) -> None:
         incomplete_payload = {
             "co2": 721,
             "pm1": 1.1,
@@ -183,12 +188,16 @@ class TopicRouterTest(unittest.TestCase):
             "humidity": 42.3,
         }
 
-        with self.assertRaises(ValidationError):
-            reading_from_mqtt_message(
-                "home/air/printer_room",
-                payload(incomplete_payload),
-                max_payload_bytes=4096,
-            )
+        reading = reading_from_mqtt_message(
+            "home/air/printer_room",
+            payload(incomplete_payload),
+            max_payload_bytes=4096,
+        )
+
+        self.assertFalse(reading.sample_valid)
+        self.assertIsNone(reading.nox_index)
+        self.assertNotIn("nox_index", reading.fields)
+        self.assertFalse(reading.fields["sample_valid"])
 
     def test_air_quality_location_must_be_slug(self) -> None:
         with self.assertRaises(ValidationError):

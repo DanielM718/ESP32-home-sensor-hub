@@ -18,6 +18,7 @@
 #define SEN66_STOP_MEASUREMENT_DELAY_MS 1400U
 #define SEN66_GET_DATA_READY_DELAY_MS 20U
 #define SEN66_READ_MEASURED_VALUES_DELAY_MS 20U
+#define SEN66_READ_MEASURED_RAW_VALUES_DELAY_MS 20U
 #define SEN66_READ_DEVICE_STATUS_DELAY_MS 20U
 
 #define SEN66_UNKNOWN_UINT16 0xFFFFU
@@ -27,6 +28,7 @@
 #define SEN66_CMD_STOP_MEASUREMENT 0x0104
 #define SEN66_CMD_GET_DATA_READY 0x0202
 #define SEN66_CMD_READ_MEASURED_VALUES 0x0300
+#define SEN66_CMD_READ_MEASURED_RAW_VALUES 0x0405
 #define SEN66_CMD_READ_DEVICE_STATUS 0xD206
 #define SEN66_CMD_READ_AND_CLEAR_DEVICE_STATUS 0xD210
 #define SEN66_CMD_GET_PRODUCT_NAME 0xD014
@@ -46,6 +48,8 @@
 #define SEN66_VALUE_VOC_VALID (1UL << 6)
 #define SEN66_VALUE_NOX_VALID (1UL << 7)
 #define SEN66_VALUE_CO2_VALID (1UL << 8)
+#define SEN66_VALUE_SRAW_VOC_VALID (1UL << 9)
+#define SEN66_VALUE_SRAW_NOX_VALID (1UL << 10)
 
 typedef struct {
     i2c_master_bus_handle_t bus_handle;
@@ -62,6 +66,8 @@ typedef struct {
     int16_t voc_index_x10;
     int16_t nox_index_x10;
     uint16_t co2_ppm;
+    uint16_t sraw_voc;
+    uint16_t sraw_nox;
 
     float pm1_ug_m3;
     float pm25_ug_m3;
@@ -105,6 +111,8 @@ esp_err_t sen66_start_continuous_measurement(const sen66_t *sensor);
 esp_err_t sen66_stop_measurement(const sen66_t *sensor);
 esp_err_t sen66_get_data_ready(const sen66_t *sensor, bool *ready);
 esp_err_t sen66_read_measured_values(const sen66_t *sensor, sen66_measurement_t *measurement);
+esp_err_t sen66_read_measured_raw_values(const sen66_t *sensor,
+                                         sen66_measurement_t *measurement);
 esp_err_t sen66_read_device_status(const sen66_t *sensor, uint32_t *device_status);
 esp_err_t sen66_read_and_clear_device_status(const sen66_t *sensor, uint32_t *device_status);
 

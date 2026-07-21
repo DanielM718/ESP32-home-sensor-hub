@@ -14,25 +14,25 @@ const AIR_QUALITY_METRIC_GROUPS = [
   {
     label: "Climate",
     metrics: [
-      { field: "temperature_c", label: "Temperature", digits: 1, suffix: " °C" },
-      { field: "humidity", label: "Relative humidity", digits: 1, suffix: "%" },
+      { field: "temperature_c", interpretation: "temperature_c", label: "Temperature", digits: 1, suffix: " °C" },
+      { field: "humidity", interpretation: "humidity", label: "Relative humidity", digits: 1, suffix: "%" },
     ],
   },
   {
     label: "Gas and indices",
     metrics: [
-      { field: "co2", label: "CO₂", digits: 0, suffix: " ppm" },
-      { field: "voc_index", label: "VOC Index", digits: 0, suffix: " index" },
-      { field: "nox_index", label: "NOx Index", digits: 0, suffix: " index" },
+      { field: "co2", interpretation: "co2", label: "CO₂", digits: 0, suffix: " ppm" },
+      { field: "voc_index", interpretation: "voc_index", label: "VOC Index", digits: 0, suffix: "" },
+      { field: "nox_index", interpretation: "nox_index", label: "NOx Index", digits: 0, suffix: "" },
     ],
   },
   {
     label: "Particulate matter",
     metrics: [
-      { field: "pm1", label: "PM1.0", digits: 1, suffix: " µg/m³" },
-      { field: "pm25", label: "PM2.5", digits: 1, suffix: " µg/m³" },
-      { field: "pm4", label: "PM4.0", digits: 1, suffix: " µg/m³" },
-      { field: "pm10", label: "PM10", digits: 1, suffix: " µg/m³" },
+      { field: "pm1", interpretation: "pm1", label: "PM1.0", digits: 1, suffix: " µg/m³" },
+      { field: "pm25", interpretation: "pm25_current", label: "PM2.5", digits: 1, suffix: " µg/m³" },
+      { field: "pm4", interpretation: "pm4", label: "PM4.0", digits: 1, suffix: " µg/m³" },
+      { field: "pm10", interpretation: "pm10_current", label: "PM10", digits: 1, suffix: " µg/m³" },
     ],
   },
 ];
@@ -170,9 +170,12 @@ function setupRangeButtons() {
 
 function readingsQueryParams() {
   const params = new URLSearchParams({ range: state.range });
-  if (state.nodeFilter !== "all") {
+  if (state.nodeFilter.startsWith("environment:")) {
     params.set("sensor_type", "environment");
-    params.set("node_id", state.nodeFilter);
+    params.set("node_id", state.nodeFilter.split(":", 2)[1]);
+  } else if (state.nodeFilter.startsWith("air_quality:")) {
+    params.set("sensor_type", "air_quality");
+    params.set("location", state.nodeFilter.split(":", 2)[1]);
   }
   return params;
 }
@@ -213,20 +216,27 @@ async function fetchJson(url) {
 
 function updateNodeFilterOptions(data) {
   const select = document.getElementById("node-filter");
-  const nodes = (data.environment || [])
-    .map((reading) => reading.node_id)
-    .filter((nodeId) => nodeId !== undefined && nodeId !== null)
-    .map(String)
-    .sort((left, right) => Number(left) - Number(right));
-  const uniqueNodes = Array.from(new Set(nodes));
+  const environmentNodes = (data.environment || [])
+    .filter((reading) => reading.node_id !== undefined && reading.node_id !== null)
+    .map((reading) => ({
+      value: `environment:${reading.node_id}`,
+      label: `Node ${reading.node_id}`,
+    }));
+  const airStations = (data.air_quality || [])
+    .filter((reading) => reading.location)
+    .map((reading) => ({
+      value: `air_quality:${reading.location}`,
+      label: `SEN66 · ${formatLabel(reading.location)}`,
+    }));
+  const sensorOptions = [...environmentNodes, ...airStations];
 
   const options = [
     { value: "all", label: "All sensors" },
-    ...uniqueNodes.map((nodeId) => ({ value: nodeId, label: `Node ${nodeId}` })),
+    ...sensorOptions,
   ];
 
-  if (state.nodeFilter !== "all" && !uniqueNodes.includes(state.nodeFilter)) {
-    options.push({ value: state.nodeFilter, label: `Node ${state.nodeFilter}` });
+  if (state.nodeFilter !== "all" && !sensorOptions.some((item) => item.value === state.nodeFilter)) {
+    options.push({ value: state.nodeFilter, label: state.nodeFilter });
   }
 
   const currentOptions = Array.from(select.options).map((option) => `${option.value}:${option.textContent}`);
@@ -362,12 +372,23 @@ function readingCard(reading) {
 
   if (!isEnvironment) {
     card.classList.add("reading-card-air");
+    const overall = reading.overall_status || {};
     card.innerHTML = `
-      <h3>${escapeHtml(title)}</h3>
+      <div class="air-station-heading">
+        <div>
+          <h3>${escapeHtml(title)}</h3>
+          <span class="authority-label">SEN66 · live 5-second feed</span>
+        </div>
+        <span class="interpretation-status severity-${escapeHtml(overall.severity || "unavailable")}">
+          Room summary: ${escapeHtml(overall.category || "Unavailable")}
+          ${overall.driving_metric ? ` · driven by ${escapeHtml(formatLabel(overall.driving_metric))}` : ""}
+        </span>
+      </div>
       <div class="air-reading-groups">
         ${AIR_QUALITY_METRIC_GROUPS.map((group) => airMetricGroupHtml(reading, group)).join("")}
       </div>
-      <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
+      ${advancedDiagnosticsHtml(reading)}
+      <div class="metric-small">Station updated ${escapeHtml(relativeTime(reading.last_seen))}</div>
     `;
     return card;
   }
@@ -388,10 +409,7 @@ function readingCard(reading) {
 
 function airMetricGroupHtml(reading, group) {
   const metrics = group.metrics
-    .map((metric) => metricHtml(
-      metric.label,
-      formatNumber(reading[metric.field], metric.digits, metric.suffix),
-    ))
+    .map((metric) => airMetricHtml(reading, metric))
     .join("");
 
   return `
@@ -399,6 +417,129 @@ function airMetricGroupHtml(reading, group) {
       <h4>${escapeHtml(group.label)}</h4>
       <div class="reading-values">${metrics}</div>
     </section>
+  `;
+}
+
+function airMetricHtml(reading, metric) {
+  const interpretation = (reading.interpretations || {})[metric.interpretation] || {};
+  const value = formatNumber(reading[metric.field], metric.digits, metric.suffix);
+  const severity = interpretation.severity || "unavailable";
+  const warnings = [];
+  if (interpretation.is_stale) {
+    warnings.push('<span class="reading-warning">Stale — status withheld</span>');
+  }
+  if (reading.sample_valid === false) {
+    warnings.push('<span class="reading-warning">Latest sensor sample invalid — status withheld</span>');
+  }
+  if (interpretation.is_warming_up) {
+    warnings.push('<span class="reading-warning">Sensor warming up / adapting</span>');
+  }
+  const activeEvents = (reading.active_events || [])
+    .filter((event) => event.metric === metric.field)
+    .map((event) => formatLabel(event.event_type));
+  if (activeEvents.length) {
+    warnings.push(`<span class="reading-warning">Active event: ${escapeHtml(activeEvents.join(", "))}</span>`);
+  }
+
+  return `
+    <article class="air-metric-card severity-border-${escapeHtml(severity)}"
+      aria-label="${escapeHtml(metric.label)}: ${escapeHtml(value)}; ${escapeHtml(interpretation.category || "Unavailable")}">
+      <div class="metric-card-heading">
+        <span class="metric-label">${escapeHtml(metric.label)}</span>
+        <span class="interpretation-status severity-${escapeHtml(severity)}">${escapeHtml(interpretation.category || "Unavailable")}</span>
+      </div>
+      <span class="metric-value">${escapeHtml(value)}</span>
+      <span class="authority-label">${escapeHtml(interpretation.framework || "Interpretation unavailable")}</span>
+      <p class="metric-explanation">${escapeHtml(interpretation.explanation || "No valid current interpretation.")}</p>
+      ${airMetricStatsHtml(reading, metric)}
+      ${warnings.join("")}
+      <span class="metric-small">Updated ${escapeHtml(relativeTime(interpretation.updated_at || reading.last_seen))}</span>
+      <details class="metric-details">
+        <summary>Source and limitations</summary>
+        <p><strong>${escapeHtml(interpretation.source_name || "Source unavailable")}</strong> — ${escapeHtml(interpretation.source_document || "")}, revision ${escapeHtml(interpretation.source_revision || "unknown")}.</p>
+        <p>${escapeHtml(interpretation.limitation || "")}</p>
+        ${interpretation.source_url ? `<a href="${escapeHtml(interpretation.source_url)}" target="_blank" rel="noopener noreferrer">Open primary source</a>` : ""}
+      </details>
+    </article>
+  `;
+}
+
+function airMetricStatsHtml(reading, metric) {
+  const summary = reading.summary_15m || {};
+  const stats = [];
+  const mean = summary[`${metric.field}_mean`];
+  const maximum = summary[`${metric.field}_max`];
+  const minimum = summary[`${metric.field}_min`];
+  if (mean !== undefined) {
+    stats.push(`15m mean ${formatNumber(mean, metric.digits, metric.suffix)}`);
+  }
+  if (["co2", "pm1", "pm25", "pm4", "pm10", "voc_index", "nox_index"].includes(metric.field)
+      && maximum !== undefined) {
+    stats.push(`15m max ${formatNumber(maximum, metric.digits, metric.suffix)}`);
+  }
+  if (metric.field === "voc_index" && minimum !== undefined) {
+    stats.push(`15m min ${formatNumber(minimum, 0, "")}`);
+    if (reading.voc_index !== undefined && reading.voc_index !== null) {
+      stats.push(`current − 100: ${signedNumber(Number(reading.voc_index) - 100, 0)}`);
+    }
+  }
+  const change = summary[`${metric.field}_change_from_previous_window`];
+  if (["voc_index", "nox_index"].includes(metric.field) && change !== undefined) {
+    stats.push(`vs previous 15m: ${signedNumber(change, 1)}`);
+  }
+  const trend = summary[`${metric.field}_trend`];
+  if (trend) {
+    stats.push(`trend ${trend}`);
+  }
+  if (["pm25", "pm10"].includes(metric.field)) {
+    const rolling = reading.rolling_24h || {};
+    const average = rolling[`${metric.field}_average`];
+    stats.push(average === undefined || average === null
+      ? `24h estimate unavailable (${formatNumber(rolling.sample_coverage_percent, 0, "% coverage")})`
+      : `24h avg ${formatNumber(average, 1, " µg/m³")} (${formatNumber(rolling.sample_coverage_percent, 0, "% coverage")})`);
+    const epa = (reading.interpretations || {})[`${metric.field}_24h`];
+    const who = (reading.interpretations || {})[`${metric.field}_who_24h`];
+    if (epa) {
+      stats.push(`EPA: ${epa.category}`);
+    }
+    if (who) {
+      stats.push(`WHO: ${who.category}`);
+    }
+  }
+  if (metric.field === "voc_index") {
+    stats.push(`time ≥150: ${formatDuration(summary.voc_duration_above_150_seconds)}`);
+  }
+  if (metric.field === "nox_index") {
+    stats.push(`time ≥20: ${formatDuration(summary.nox_duration_above_20_seconds)}`);
+  }
+  if (["voc_index", "nox_index"].includes(metric.field)) {
+    const active = (reading.active_events || []).some((event) => event.metric === metric.field);
+    stats.push(active ? "event active" : "no active event");
+  }
+  if (metric.field === "co2") {
+    const exposure = (reading.interpretations || {}).co2_occupational;
+    if (exposure) {
+      stats.push(`exposure context: ${exposure.category}`);
+    }
+  }
+  if (!stats.length) {
+    return '<div class="metric-context">15-minute context is collecting.</div>';
+  }
+  return `<div class="metric-context">${stats.map((item) => `<span>${escapeHtml(item)}</span>`).join("")}</div>`;
+}
+
+function advancedDiagnosticsHtml(reading) {
+  return `
+    <details class="advanced-diagnostics">
+      <summary>Advanced SEN66 diagnostics</summary>
+      <p>SRAW values are raw sensor ticks, not pollutant concentrations. They are not converted to ppm, ppb, or µg/m³.</p>
+      <dl>
+        <div><dt>SRAW_VOC</dt><dd>${escapeHtml(formatNumber(reading.sraw_voc, 0, " ticks"))}</dd></div>
+        <div><dt>SRAW_NOx</dt><dd>${escapeHtml(formatNumber(reading.sraw_nox, 0, " ticks"))}</dd></div>
+        <div><dt>Sensor uptime</dt><dd>${escapeHtml(formatDuration(reading.sensor_uptime_s))}</dd></div>
+        <div><dt>Boot ID</dt><dd>${escapeHtml(reading.boot_id ?? "-")}</dd></div>
+      </dl>
+    </details>
   `;
 }
 
@@ -574,6 +715,10 @@ function renderCharts(data) {
   const environmentSeries = series.filter((item) => item.sensor_type === "environment");
   const airQualitySeries = series.filter((item) => item.sensor_type === "air_quality");
   const climateSeries = [...environmentSeries, ...airQualitySeries];
+  const tier = data.data_tier === "live_1m"
+    ? "Short range: 1-minute means from bounded high-resolution live samples"
+    : "Long range: persistent 15-minute aggregates (legacy raw history remains included)";
+  document.getElementById("history-tier").textContent = tier;
 
   updateChart(state.charts.temperature, buildDatasets(climateSeries, "temperature_c", "Temp °C"));
   updateChart(state.charts.humidity, buildDatasets(climateSeries, "humidity", "Humidity %"));
@@ -584,25 +729,57 @@ function renderCharts(data) {
   ));
 
   const gasDatasets = [
-    ...buildDatasets(airQualitySeries, "co2", "CO₂ ppm", { colorOffset: 0 }),
-    ...buildDatasets(airQualitySeries, "voc_index", "VOC Index", {
+    ...buildDatasets(airQualitySeries, "co2", "CO₂ mean (ppm)", { colorOffset: 0 }),
+    ...buildDatasets(airQualitySeries, "co2_max", "CO₂ maximum (ppm)", {
+      colorOffset: 0, hidden: true, borderDash: [5, 4],
+    }),
+    ...buildDatasets(airQualitySeries, "co2_p95", "CO₂ p95 (ppm)", {
+      colorOffset: 0, hidden: true, borderDash: [2, 3],
+    }),
+    ...buildDatasets(airQualitySeries, "voc_index", "VOC Index mean", {
       colorOffset: 2,
       yAxisID: "yIndex",
     }),
-    ...buildDatasets(airQualitySeries, "nox_index", "NOx Index", {
+    ...buildDatasets(airQualitySeries, "voc_index_max", "VOC Index maximum", {
+      colorOffset: 2, yAxisID: "yIndex", hidden: true, borderDash: [5, 4],
+    }),
+    ...buildDatasets(airQualitySeries, "voc_index_p95", "VOC Index p95", {
+      colorOffset: 2, yAxisID: "yIndex", hidden: true, borderDash: [2, 3],
+    }),
+    ...buildDatasets(airQualitySeries, "nox_index", "NOx Index mean", {
       colorOffset: 4,
       yAxisID: "yIndex",
     }),
+    ...buildDatasets(airQualitySeries, "nox_index_max", "NOx Index maximum", {
+      colorOffset: 4, yAxisID: "yIndex", hidden: true, borderDash: [5, 4],
+    }),
+    ...buildDatasets(airQualitySeries, "nox_index_p95", "NOx Index p95", {
+      colorOffset: 4, yAxisID: "yIndex", hidden: true, borderDash: [2, 3],
+    }),
+    ...eventDatasets(data.events || [], ["co2", "voc_index", "nox_index"]),
   ];
   const gasPanel = document.getElementById("gas-chart-panel");
   gasPanel.hidden = gasDatasets.length === 0;
   updateChart(state.charts.gas, gasDatasets);
 
   const particulateDatasets = [
-    ...buildDatasets(airQualitySeries, "pm1", "PM1.0", { colorOffset: 0 }),
-    ...buildDatasets(airQualitySeries, "pm25", "PM2.5", { colorOffset: 2 }),
-    ...buildDatasets(airQualitySeries, "pm4", "PM4.0", { colorOffset: 4 }),
-    ...buildDatasets(airQualitySeries, "pm10", "PM10", { colorOffset: 6 }),
+    ...buildDatasets(airQualitySeries, "pm1", "PM1.0 mean", { colorOffset: 0 }),
+    ...buildDatasets(airQualitySeries, "pm25", "PM2.5 mean", { colorOffset: 2 }),
+    ...buildDatasets(airQualitySeries, "pm25_max", "PM2.5 maximum", {
+      colorOffset: 2, hidden: true, borderDash: [5, 4],
+    }),
+    ...buildDatasets(airQualitySeries, "pm25_p95", "PM2.5 p95", {
+      colorOffset: 2, hidden: true, borderDash: [2, 3],
+    }),
+    ...buildDatasets(airQualitySeries, "pm4", "PM4.0 mean", { colorOffset: 4 }),
+    ...buildDatasets(airQualitySeries, "pm10", "PM10 mean", { colorOffset: 6 }),
+    ...buildDatasets(airQualitySeries, "pm10_max", "PM10 maximum", {
+      colorOffset: 6, hidden: true, borderDash: [5, 4],
+    }),
+    ...buildDatasets(airQualitySeries, "pm10_p95", "PM10 p95", {
+      colorOffset: 6, hidden: true, borderDash: [2, 3],
+    }),
+    ...eventDatasets(data.events || [], ["pm25", "pm10"]),
   ];
   const particulatePanel = document.getElementById("particulate-chart-panel");
   particulatePanel.hidden = particulateDatasets.length === 0;
@@ -634,9 +811,37 @@ function buildDatasets(series, field, suffix, options = {}) {
         borderColor: chartPalette[(colorOffset + index) % chartPalette.length],
         backgroundColor: chartPalette[(colorOffset + index) % chartPalette.length],
         yAxisID,
+        hidden: Boolean(options.hidden),
+        borderDash: options.borderDash || [],
+        showLine: true,
+        spanGaps: true,
       };
     })
     .filter(Boolean);
+}
+
+function eventDatasets(events, metrics) {
+  const byMetric = new Map();
+  for (const event of events) {
+    if (!metrics.includes(event.metric) || event.trigger_value === undefined) {
+      continue;
+    }
+    const list = byMetric.get(event.metric) || [];
+    list.push({ time: event.time, value: event.trigger_value });
+    byMetric.set(event.metric, list);
+  }
+  return Array.from(byMetric.entries()).map(([metric, points], index) => ({
+    label: `${formatLabel(metric)} event`,
+    data: points,
+    borderColor: chartPalette[(index + 5) % chartPalette.length],
+    backgroundColor: chartPalette[(index + 5) % chartPalette.length],
+    yAxisID: ["voc_index", "nox_index"].includes(metric) ? "yIndex" : "y",
+    hidden: false,
+    borderDash: [],
+    showLine: false,
+    spanGaps: false,
+    pointRadius: 5,
+  }));
 }
 
 function updateChart(chart, datasets) {
@@ -650,7 +855,11 @@ function updateChart(chart, datasets) {
       borderColor: dataset.borderColor,
       backgroundColor: dataset.backgroundColor,
       yAxisID: dataset.yAxisID,
-      spanGaps: true,
+      hidden: dataset.hidden,
+      borderDash: dataset.borderDash,
+      showLine: dataset.showLine,
+      spanGaps: dataset.spanGaps,
+      pointRadius: dataset.pointRadius ?? 0,
     };
   });
   chart.update();
@@ -740,6 +949,28 @@ function formatNumber(value, digits, suffix) {
     return "-";
   }
   return `${Number(value).toFixed(digits)}${suffix}`;
+}
+
+function signedNumber(value, digits) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) {
+    return "-";
+  }
+  return `${number >= 0 ? "+" : ""}${number.toFixed(digits)}`;
+}
+
+function formatDuration(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "unavailable";
+  }
+  if (seconds < 60) {
+    return `${Math.round(seconds)}s`;
+  }
+  if (seconds < 3600) {
+    return `${Math.round(seconds / 60)}m`;
+  }
+  return `${(seconds / 3600).toFixed(1)}h`;
 }
 
 function formatLabel(value) {

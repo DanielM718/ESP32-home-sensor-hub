@@ -87,7 +87,9 @@ The backend lives in `server/` and includes:
 - systemd units and install scripts
 
 See [server/README.md](server/README.md) and the detailed documentation in
-[server/docs](server/docs).
+[server/docs](server/docs). The source-backed SEN66 interpretation, aggregation,
+event, retention, migration, and deployment contract is documented in
+[server/docs/SEN66_AIR_QUALITY.md](server/docs/SEN66_AIR_QUALITY.md).
 
 ## Home Assistant
 

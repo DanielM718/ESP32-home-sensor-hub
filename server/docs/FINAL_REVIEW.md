@@ -59,5 +59,6 @@ InfluxDB, Grafana, Tailscale, Flask, and systemd were not started on the Mac.
   exact installed Grafana version.
 - Mosquitto TLS is documented as optional hardening, not enabled by default, to
   preserve ESP32 gateway compatibility.
-- InfluxDB retention defaults to infinite; adjust retention/downsampling later
-  if data volume grows.
+- The original review used infinite SEN66 raw retention. This has been superseded
+  by the 72-hour live bucket plus long-term aggregates/events documented in
+  `server/docs/SEN66_AIR_QUALITY.md`.

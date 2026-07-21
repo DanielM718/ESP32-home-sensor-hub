@@ -75,10 +75,13 @@ unavailable rather than a measured zero-volt battery.
 ```json
 {
   "packet_type": "sen66",
-  "schema_version": 1,
-  "firmware_version": "2.0.0",
+  "schema_version": 2,
+  "firmware_version": "2.1.0",
   "node_id": 100,
   "sequence": 42,
+  "boot_id": 2712847316,
+  "sensor_uptime_s": 3600,
+  "reset_reason": 1,
   "status_flags": 255,
   "co2": 721,
   "pm1": 1.1,
@@ -87,16 +90,24 @@ unavailable rather than a measured zero-volt battery.
   "pm10": 5.2,
   "voc_index": 88,
   "nox_index": 12,
+  "sraw_voc": 24100,
+  "sraw_nox": 19300,
   "temperature_c": 24.5,
   "humidity": 42.3
 }
 ```
 
-All nine fields shown above are required. CO2, VOC index, and NOx index must be
-integers. PM values, temperature, and humidity are JSON numbers. The bridge
-ignores unknown fields for storage compatibility and logs malformed JSON,
-missing required fields, and out-of-range values. It assigns Raspberry Pi
-receive time; stations do not include a trusted timestamp.
+Current firmware publishes all nine primary fields. CO2, VOC index, and NOx
+index are integers; PM values, temperature, and humidity are JSON numbers. A
+missing, null, non-finite, or out-of-range primary field produces an invalid
+sample with the bad field omitted rather than a fabricated zero. Malformed JSON
+or an invalid topic is rejected. The bridge assigns Raspberry Pi receive time;
+stations do not include a trusted wall-clock timestamp.
+
+Firmware schema v2 intentionally emits JSON `null` for an unavailable measured
+value while retaining uptime, boot, sequence, reset, and status metadata. The
+bridge persists that as `sample_valid=false` and omits the unavailable numeric
+field.
 
 The fields and units are:
 
@@ -112,10 +123,17 @@ The fields and units are:
 | `voc_index` | VOC Index | index |
 | `nox_index` | NOx Index | index |
 
-`packet_type`, `schema_version`, `firmware_version`, `node_id`, `sequence`, and
-`status_flags` are current SEN66 firmware metadata. The bridge accepts and
-ignores them. The measurement keys are `co2`, `pm1`, `pm25`, `pm4`, and `pm10`,
+`packet_type`, `schema_version`, `firmware_version`, `node_id`, `sequence`,
+`status_flags`, `boot_id`, `sensor_uptime_s`, and `reset_reason` are current
+SEN66 firmware metadata. The bridge stores the applicable metadata for
+deduplication, warm-up, reset, and diagnostics. `sraw_voc` and `sraw_nox` are
+optional 0–65,534 diagnostic ticks (65,535 is the unavailable sentinel), not
+concentrations. The measurement keys are `co2`, `pm1`, `pm25`, `pm4`, and `pm10`,
 not alternate spellings such as `co2_ppm`, `pm1_0`, `pm2_5`, or `pm4_0`.
+
+The SEN66 is polled every second while MQTT publishes the newest sample every
+five seconds by default. `APP_SENSOR_POLL_INTERVAL_MS` and
+`APP_MQTT_PUBLISH_INTERVAL_MS` configure those independent cadences.
 
 ## Broker Security
 

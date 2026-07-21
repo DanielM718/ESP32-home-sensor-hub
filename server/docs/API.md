@@ -102,6 +102,14 @@ is percent relative humidity, CO2 is ppm, particulate fields are micrograms per
 cubic metre, and VOC/NOx are unitless indices. Older InfluxDB data may omit
 fields that were not stored at the time; omitted fields do not fail the request.
 
+Each air-quality station also includes `interpretations`, `overall_status`,
+`summary_15m`, `previous_15m`, `rolling_24h`, and `active_events`. Every metric
+interpretation exposes category, severity, framework, threshold type, averaging
+period, source document/revision/URL, explanation, limitation, update timestamp,
+stale state, warm-up state, and whether the category is official or heuristic. Invalid,
+stale, and coverage-insufficient values are explicitly unavailable. Raw SRAW
+ticks and reset/uptime metadata are diagnostic fields, not concentrations.
+
 ### `GET /api/readings`
 
 Returns historical series for charts.
@@ -128,6 +136,7 @@ Response shape:
   "range": "24h",
   "window": "15m",
   "sensor_type": "all",
+  "data_tier": "15m_aggregate_with_legacy_fallback",
   "series": [
     {
       "id": "1",
@@ -163,7 +172,8 @@ Response shape:
         }
       ]
     }
-  ]
+  ],
+  "events": []
 }
 ```
 
@@ -171,10 +181,13 @@ Environment history pivots each raw `battery_mv` together with the
 same-timestamp `status_flags` and applies a bitwise `BIT2` test before
 downsampling. Battery points with missing status or a clear valid bit are
 omitted from `/api/readings`; temperature and humidity history is unaffected.
-Air-quality history applies the same range/window to all nine SEN66 fields with
-`aggregateWindow(..., fn: mean, createEmpty: false)`. A historical point
-contains only fields present in that window, so legacy and partially populated
-data remain valid JSON and render as gaps rather than invented zeroes.
+For `range=1h`, air-quality history is downsampled to one-minute display points
+from the bounded live bucket and reports `data_tier=live_1m`. Longer ranges use
+stored UTC-aligned 15-minute statistics and union pre-migration raw history as a
+fallback. Mean and maximum fields remain distinct, while sparse event episodes
+are returned separately in `events`. A historical point contains only fields
+present in that window, so legacy and partially populated data remain valid JSON
+and render as gaps rather than invented zeroes.
 
 ### `GET /api/nodes`
 

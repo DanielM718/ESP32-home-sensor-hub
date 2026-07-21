@@ -86,8 +86,10 @@ The generated dashboard is titled `Home Sensor Environment` and includes:
 - latest battery voltage stat panel
 - latest node status table
 
-The Flux queries target the `environment_reading` and `air_quality_reading`
-measurements created by the bridge.
+The environmental panels query long-term `environment_reading`. The air-quality
+overview unions long-term `air_quality_15m` mean/max series with recent
+`environment_live/air_quality_reading`, preserving visibility across the
+migration boundary. The InfluxDB read token is scoped to both buckets.
 
 ## Access
 

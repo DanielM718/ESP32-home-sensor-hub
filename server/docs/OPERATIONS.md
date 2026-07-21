@@ -100,7 +100,10 @@ After InfluxDB setup, run:
 ```
 
 It checks the `influx` and `influxd` commands, InfluxDB ping, systemd service
-registration, and access to the configured bucket using the backend token.
+registration, and access to both the configured long-term and live buckets.
+SEN66 high-resolution points appear in `environment_live`; wait through a UTC
+quarter-hour to verify `air_quality_15m` in `environment`, or follow the exact
+queries in [`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).
 
 ## Dashboard API Smoke Test
 

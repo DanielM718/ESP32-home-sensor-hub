@@ -154,7 +154,7 @@ http://<raspberry-pi-ip>:8080
 Remote access must use Tailscale. Do not forward ports from the public internet
 to Mosquitto, InfluxDB, Grafana, or Flask.
 
-## Redeploy The SEN66 Dashboard Update
+## Redeploy The SEN66 Data-Pipeline Update
 
 The active native deployment is `/opt/home-sensor/server`. The repository's
 `install.sh` is the authoritative deployment method: it copies the `server/`
@@ -165,7 +165,7 @@ systemd units. The unit files confirm these service names and runtime split:
 - `home-sensor-bridge.service`: MQTT subscriptions and InfluxDB writes
 - `home-sensor-dashboard.service`: Gunicorn, Flask API, and static dashboard
 - `mosquitto.service`, `influxdb.service`, and `grafana-server.service`: separate
-  platform services not changed by this update
+  platform services; the Grafana dashboard is reprovisioned after this update
 
 From the repository root on the development machine, copy the current server
 tree to the Pi:
@@ -198,17 +198,29 @@ updated directly inside the active path, run that step explicitly:
 sudo /opt/home-sensor/server/scripts/bootstrap_python.sh
 ```
 
-Only the dashboard service needs a restart for this patch; the current bridge
-already subscribes to and stores all SEN66 fields:
+Create the bounded live bucket and replace the application tokens with scopes
+for both buckets. The existing long-term bucket and data are preserved:
 
 ```bash
-sudo systemctl restart home-sensor-dashboard.service
-sudo systemctl status home-sensor-dashboard.service --no-pager
-sudo systemctl status home-sensor-bridge.service --no-pager
+sudo env \
+  INFLUXDB_ADMIN_PASSWORD='<existing-admin-password>' \
+  INFLUXDB_ADMIN_TOKEN='<existing-admin-token>' \
+  /opt/home-sensor/server/scripts/setup_influxdb.sh \
+    --bucket environment --retention 0 \
+    --live-bucket environment_live --live-retention 72h
+sudo /opt/home-sensor/server/scripts/provision_grafana.sh
 ```
 
-Do not restart Mosquitto, InfluxDB, or Grafana. Follow the affected service log
-and inspect the bridge log while running the MQTT test:
+Both application services must restart because the bridge now owns live writes,
+aggregation, event detection, and restart recovery:
+
+```bash
+sudo systemctl restart home-sensor-bridge.service home-sensor-dashboard.service
+sudo systemctl status home-sensor-bridge.service home-sensor-dashboard.service --no-pager
+```
+
+Do not restart Mosquitto or InfluxDB. Follow both application logs while running
+the MQTT test:
 
 ```bash
 sudo journalctl -u home-sensor-dashboard.service -f
@@ -254,15 +266,15 @@ git log --oneline -5
 git revert --no-edit <bad-commit>
 ```
 
-Copy and install the reverted `server/` tree with the same commands above,
-then restart only the dashboard service:
+Copy and install the reverted `server/` tree with the same commands above, then
+restart both application services:
 
 ```bash
-sudo systemctl restart home-sensor-dashboard.service
-sudo systemctl status home-sensor-dashboard.service --no-pager
-sudo journalctl -u home-sensor-dashboard.service --since '10 minutes ago' --no-pager
+sudo systemctl restart home-sensor-bridge.service home-sensor-dashboard.service
+sudo systemctl status home-sensor-bridge.service home-sensor-dashboard.service --no-pager
+sudo journalctl -u home-sensor-bridge.service -u home-sensor-dashboard.service \
+  --since '10 minutes ago' --no-pager
 ```
 
-If a later deployment also changes `server/backend/bridge/`, restart
-`home-sensor-bridge.service` after both deployment and rollback. That is not
-necessary for this dashboard-only code change.
+The complete compatibility, retention, verification, and firmware deployment
+checklist is in [`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).

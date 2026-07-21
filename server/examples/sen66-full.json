@@ -1,9 +1,12 @@
 {
   "packet_type": "sen66",
-  "schema_version": 1,
+  "schema_version": 2,
   "firmware_version": "test",
   "node_id": 100,
+  "boot_id": 424242,
   "sequence": 1,
+  "sensor_uptime_s": 7200,
+  "reset_reason": 1,
   "status_flags": 0,
   "co2": 612,
   "pm1": 1.2,
@@ -12,6 +15,8 @@
   "pm10": 4.8,
   "voc_index": 87,
   "nox_index": 2,
+  "sraw_voc": 25000,
+  "sraw_nox": 20000,
   "temperature_c": 24.5,
   "humidity": 42.1
 }

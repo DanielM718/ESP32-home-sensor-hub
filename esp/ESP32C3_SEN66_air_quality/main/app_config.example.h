@@ -7,7 +7,7 @@
 // git so Wi-Fi and MQTT credentials stay local.
 
 #define APP_NODE_ID 100U
-#define APP_FIRMWARE_VERSION "2.0.0"
+#define APP_FIRMWARE_VERSION "2.1.0"
 
 // APP_LOCATION becomes the final topic segment: home/air/<location>.
 // The server accepts 1-64 letters, digits, underscores, or hyphens.
@@ -30,9 +30,11 @@
 #define APP_I2C_SCL_GPIO GPIO_NUM_7
 #define APP_I2C_FREQ_HZ 100000U
 
-// SEN66 produces a new sample once per second. Publishing every five seconds
-// keeps traffic modest while maintaining useful air-quality resolution.
-#define APP_MEASUREMENT_INTERVAL_MS 5000U
+// Keep the official one-second SEN66 read cadence separate from MQTT traffic.
+// The gas algorithms run in the SEN66; five-second MQTT packets retain a
+// responsive live view while avoiding unnecessary network/database work.
+#define APP_SENSOR_POLL_INTERVAL_MS 1000U
+#define APP_MQTT_PUBLISH_INTERVAL_MS 5000U
 #define APP_MEASUREMENT_TASK_STACK_SIZE 4096U
 #define APP_MEASUREMENT_TASK_PRIORITY 5U
 #define APP_SENSOR_INIT_RETRY_MS 5000U

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import math
 from typing import Any
 
 from app.models import AirQualityReading, Reading, SensorReading, utc_now
@@ -81,16 +82,63 @@ def _air_quality_reading(
     return AirQualityReading(
         topic=topic,
         location=location,
-        co2=required_int(data, "co2", min_value=0, max_value=100_000),
-        pm1=required_float(data, "pm1", min_value=0.0, max_value=100_000.0),
-        pm25=required_float(data, "pm25", min_value=0.0, max_value=100_000.0),
-        pm4=required_float(data, "pm4", min_value=0.0, max_value=100_000.0),
-        pm10=required_float(data, "pm10", min_value=0.0, max_value=100_000.0),
-        voc_index=required_int(data, "voc_index", min_value=0, max_value=500),
-        nox_index=required_int(data, "nox_index", min_value=0, max_value=500),
-        temperature_c=required_float(
-            data, "temperature_c", min_value=-80.0, max_value=125.0
-        ),
-        humidity=required_float(data, "humidity", min_value=0.0, max_value=100.0),
+        co2=_sensor_int(data, "co2", 0, 40_000),
+        pm1=_sensor_float(data, "pm1", 0.0, 1_000.0),
+        pm25=_sensor_float(data, "pm25", 0.0, 1_000.0),
+        pm4=_sensor_float(data, "pm4", 0.0, 1_000.0),
+        pm10=_sensor_float(data, "pm10", 0.0, 1_000.0),
+        voc_index=_sensor_int(data, "voc_index", 1, 500),
+        nox_index=_sensor_int(data, "nox_index", 1, 500),
+        temperature_c=_sensor_float(data, "temperature_c", -10.0, 50.0),
+        humidity=_sensor_float(data, "humidity", 0.0, 90.0),
         received_at=utc_now(),
+        node_id=_metadata_int(data, "node_id", 1, 4_294_967_295),
+        sequence=_metadata_int(data, "sequence", 0, 4_294_967_295),
+        status_flags=_metadata_int(data, "status_flags", 0, 4_294_967_295),
+        firmware_version=_metadata_string(data, "firmware_version", 64),
+        schema_version=_metadata_int(data, "schema_version", 1, 65_535),
+        boot_id=_metadata_int(data, "boot_id", 0, 4_294_967_295),
+        sensor_uptime_s=_metadata_int(data, "sensor_uptime_s", 0, 4_294_967_295),
+        reset_reason=_metadata_int(data, "reset_reason", 0, 255),
+        sraw_voc=_metadata_int(data, "sraw_voc", 0, 65_534),
+        sraw_nox=_metadata_int(data, "sraw_nox", 0, 65_534),
     )
+
+
+def _sensor_float(
+    data: dict[str, Any], key: str, minimum: float, maximum: float
+) -> float | None:
+    """Return a valid sensor value, preserving bad/missing samples as unavailable."""
+
+    value = data.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    result = float(value)
+    if not math.isfinite(result) or result < minimum or result > maximum:
+        return None
+    return result
+
+
+def _sensor_int(
+    data: dict[str, Any], key: str, minimum: int, maximum: int
+) -> int | None:
+    value = data.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
+
+
+def _metadata_int(
+    data: dict[str, Any], key: str, minimum: int, maximum: int
+) -> int | None:
+    value = data.get(key)
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if minimum <= value <= maximum else None
+
+
+def _metadata_string(data: dict[str, Any], key: str, maximum_length: int) -> str | None:
+    value = data.get(key)
+    if not isinstance(value, str) or not value or len(value) > maximum_length:
+        return None
+    return value

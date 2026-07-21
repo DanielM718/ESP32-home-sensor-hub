@@ -13,6 +13,7 @@ from app.config import AppSettings, ConfigError, configure_logging, load_setting
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
+    latest_with_air_quality_context,
     latest_with_node_status,
     readings_query_from_params,
 )
@@ -42,8 +43,13 @@ def create_app(
         static_url_path="/static",
         template_folder=str(FRONTEND_DIR / "templates"),
     )
-    app.config["REPOSITORY"] = repository or InfluxReadRepository(settings.influx)
+    app.config["REPOSITORY"] = repository or InfluxReadRepository(
+        settings.influx,
+        expected_publish_seconds=settings.air_quality.expected_publish_seconds,
+        minimum_coverage_percent=settings.air_quality.rolling_minimum_coverage_percent,
+    )
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
+    app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = settings.air_quality.stale_after_seconds
 
     register_routes(app)
     register_error_handlers(app)
@@ -61,12 +67,23 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/api/latest")
     def latest() -> Any:
-        latest_payload = _repository().latest()
+        repository = _repository()
+        latest_payload = repository.latest()
+        context_method = getattr(repository, "air_quality_context", None)
+        context = context_method() if callable(context_method) else {"locations": {}}
+        latest_payload = latest_with_air_quality_context(
+            latest_payload,
+            context,
+            stale_after_seconds=int(current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]),
+        )
         stale_after_seconds = int(current_app.config["NODE_STALE_AFTER_SECONDS"])
         return jsonify(
             latest_with_node_status(
                 latest_payload,
                 stale_after_seconds=stale_after_seconds,
+                air_quality_stale_after_seconds=int(
+                    current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]
+                ),
             )
         )
 
@@ -78,7 +95,14 @@ def register_routes(app: Flask) -> None:
     @app.get("/api/nodes")
     def nodes() -> Any:
         stale_after_seconds = int(current_app.config["NODE_STALE_AFTER_SECONDS"])
-        return jsonify(_repository().nodes(stale_after_seconds=stale_after_seconds))
+        return jsonify(
+            _repository().nodes(
+                stale_after_seconds=stale_after_seconds,
+                air_quality_stale_after_seconds=int(
+                    current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]
+                ),
+            )
+        )
 
 
 def register_error_handlers(app: Flask) -> None:

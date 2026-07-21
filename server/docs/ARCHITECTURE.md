@@ -52,16 +52,20 @@ through Tailscale.
 
 ## Storage Contract
 
-InfluxDB bucket:
+InfluxDB buckets:
 
 ```text
-environment
+environment_live (72-hour high-resolution SEN66 data)
+environment (long-term data)
 ```
 
 Measurements:
 
 - `environment_reading`
-- `air_quality_reading`
+- `air_quality_reading` (live bucket; legacy copies may remain long-term)
+- `air_quality_15m` (long-term)
+- `air_quality_event` (long-term)
 
-The MQTT bridge validates incoming messages before writing. The Flask API and
-Grafana read only from InfluxDB.
+The MQTT bridge validates incoming messages, writes live data, and derives
+aggregates/events before long-term writes. The Flask API and Grafana read only
+from InfluxDB. See [`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).

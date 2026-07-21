@@ -51,7 +51,10 @@ Then copy or download the Chart.js browser bundle before using the dashboard.
 - calibrated battery voltage for battery nodes when `STATUS_BATTERY_OK` is set
 - raw status flags plus decoded battery measurement, low, and shutdown states
 - all nine current SEN66 values, grouped as climate, gas/indices, and
-  particulate matter
+  particulate matter, with plain-language status and source authority
+- station summary driven transparently by the worst available current pollutant
+- stale/invalid/warm-up visibility, last-update age, 15-minute mean/max/trend,
+  rolling 24-hour PM context, and active-event state
 - historical temperature and humidity for both SHT41 nodes and SEN66 stations
 - a SEN66 gas/index chart for CO2, VOC Index, and NOx Index
 - a SEN66 particulate chart for PM1.0, PM2.5, PM4.0, and PM10
@@ -63,6 +66,19 @@ CO2 parts per million (`ppm`), particulate mass concentration (`µg/m³`), and
 unitless VOC/NOx `index` values. The gas chart gives CO2 and the two indices
 separate axes so the lower index values remain readable. Particulate sizes
 share one chart because they use the same unit.
+
+The current dashboard does not label every threshold as a regulatory limit.
+EPA PM breakpoints, WHO PM guidelines, Sensirion index guidance, a CO2
+ventilation heuristic, a separate occupational CO2 comparison, and
+temperature/RH context each name their framework and limitations. Source links
+are expandable per metric. PM cards distinguish instantaneous provisional
+context from coverage-qualified rolling 24-hour context. Historical charts
+show average and maximum series separately, keep sparse event markers
+unconnected, and label whether the response came from one-minute live data or
+15-minute aggregate/legacy fallback.
+Stored p95 series for CO2, PM2.5, PM10, VOC Index, and NOx Index are available as
+hidden legend toggles on long-range charts, alongside hidden maxima; primary
+means remain visible by default to keep the graphs readable.
 
 Old air-quality records that contain only a subset of these fields remain
 supported. Current cards show `-` for a missing value, chart datasets are

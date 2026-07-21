@@ -13,6 +13,7 @@
 #define SEN66_CRC_POLYNOMIAL 0x31
 #define SEN66_CRC_INIT 0xFF
 #define SEN66_MEASURED_VALUE_WORDS 9
+#define SEN66_MEASURED_RAW_VALUE_WORDS 5
 #define SEN66_DEVICE_STATUS_WORDS 2
 
 static const char *TAG = "SEN66";
@@ -410,6 +411,41 @@ esp_err_t sen66_read_measured_values(const sen66_t *sensor, sen66_measurement_t 
     return ESP_OK;
 }
 
+esp_err_t sen66_read_measured_raw_values(const sen66_t *sensor,
+                                         sen66_measurement_t *measurement)
+{
+    if (measurement == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    uint16_t words[SEN66_MEASURED_RAW_VALUE_WORDS] = {0};
+    esp_err_t err = sen66_read_words(sensor,
+                                     SEN66_CMD_READ_MEASURED_RAW_VALUES,
+                                     words,
+                                     SEN66_MEASURED_RAW_VALUE_WORDS,
+                                     SEN66_READ_MEASURED_RAW_VALUES_DELAY_MS);
+    if (err != ESP_OK) {
+        measurement->sraw_voc = SEN66_UNKNOWN_UINT16;
+        measurement->sraw_nox = SEN66_UNKNOWN_UINT16;
+        measurement->valid_flags &= ~(SEN66_VALUE_SRAW_VOC_VALID |
+                                      SEN66_VALUE_SRAW_NOX_VALID);
+        return err;
+    }
+
+    // Words 0/1 are raw RH/T and word 4 is non-interpolated CO2.  The main
+    // dashboard does not need duplicates of the compensated outputs, so only
+    // the documented raw gas ticks are exposed as advanced diagnostics.
+    measurement->sraw_voc = words[2];
+    measurement->sraw_nox = words[3];
+    if (sen66_u16_is_known(measurement->sraw_voc)) {
+        measurement->valid_flags |= SEN66_VALUE_SRAW_VOC_VALID;
+    }
+    if (sen66_u16_is_known(measurement->sraw_nox)) {
+        measurement->valid_flags |= SEN66_VALUE_SRAW_NOX_VALID;
+    }
+    return ESP_OK;
+}
+
 esp_err_t sen66_read_device_status(const sen66_t *sensor, uint32_t *device_status)
 {
     if (device_status == NULL) {
@@ -451,4 +487,3 @@ esp_err_t sen66_read_and_clear_device_status(const sen66_t *sensor, uint32_t *de
     *device_status = ((uint32_t)words[0] << 16) | words[1];
     return ESP_OK;
 }
-
