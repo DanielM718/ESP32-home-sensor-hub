@@ -6,7 +6,7 @@ CONFIG_IDF_TARGET="esp32c3"
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
 
-# Wi-Fi/ESP-NOW pulls in enough code that the default 1 MB app partition leaves
+# Wi-Fi/MQTT pulls in enough code that the default 1 MB app partition leaves
 # little growth room. The ESP-IDF large single-app partition is 1.5 MB and still
 # avoids adding a project-specific partition CSV.
 # CONFIG_PARTITION_TABLE_SINGLE_APP is not set

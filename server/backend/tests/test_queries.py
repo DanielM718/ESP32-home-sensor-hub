@@ -10,12 +10,15 @@ from app.battery_status import (
     STATUS_BATTERY_SHUTDOWN,
 )
 from app.queries import (
+    AIR_QUALITY_FIELDS,
     QueryValidationError,
+    latest_flux,
     latest_with_node_status,
     latest_response,
     nodes_response,
     readings_flux,
     readings_query_from_params,
+    readings_response,
 )
 
 
@@ -69,6 +72,19 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn('from(bucket: "environment")', flux)
         self.assertIn('r.location == "printer_room"', flux)
         self.assertIn("aggregateWindow(every: 15m", flux)
+
+    def test_air_quality_queries_include_every_sen66_field(self) -> None:
+        query = readings_query_from_params(
+            {"range": "24h", "sensor_type": "air_quality"}
+        )
+
+        for flux in (
+            latest_flux("environment"),
+            readings_flux("environment", query),
+        ):
+            for field in AIR_QUALITY_FIELDS:
+                with self.subTest(field=field):
+                    self.assertIn(f'"{field}"', flux)
 
     def test_environment_history_requires_matching_battery_ok_flag(self) -> None:
         query = readings_query_from_params(
@@ -156,6 +172,48 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIsNone(node["battery_low"])
         self.assertIsNone(node["battery_shutdown"])
         self.assertIsNone(node["battery_mv"])
+
+    def test_latest_response_returns_every_sen66_field(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+        station = latest_response(_air_quality_records(now))["air_quality"][0]
+
+        self.assertEqual(station["location"], "printer_room")
+        self.assertEqual(station["topic"], "home/air/printer_room")
+        self.assertEqual(
+            {field: station[field] for field in AIR_QUALITY_FIELDS},
+            {
+                "co2": 721,
+                "pm1": 1.1,
+                "pm25": 2.8,
+                "pm4": 3.5,
+                "pm10": 5.2,
+                "voc_index": 88,
+                "nox_index": 12,
+                "temperature_c": 24.5,
+                "humidity": 42.3,
+            },
+        )
+
+    def test_air_quality_history_tolerates_missing_legacy_fields(self) -> None:
+        now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        records = [
+            record
+            for record in _air_quality_records(now)
+            if record.field in {"temperature_c", "humidity", "co2", "pm25"}
+        ]
+        query = readings_query_from_params(
+            {"range": "24h", "sensor_type": "air_quality"}
+        )
+
+        response = readings_response(records, query)
+
+        self.assertEqual(len(response["series"]), 1)
+        point = response["series"][0]["points"][0]
+        self.assertEqual(point["co2"], 721)
+        self.assertEqual(point["pm25"], 2.8)
+        self.assertNotIn("pm1", point)
+        self.assertNotIn("voc_index", point)
 
     def test_latest_response_decodes_battery_status_bits(self) -> None:
         cases = (
@@ -353,6 +411,29 @@ def _environment_records(
 
     return [
         FakeRecord("environment_reading", field, value, now, values)
+        for field, value in fields
+    ]
+
+
+def _air_quality_records(now: datetime) -> list[FakeRecord]:
+    values = {
+        "location": "printer_room",
+        "topic": "home/air/printer_room",
+        "sensor_type": "air_quality",
+    }
+    fields: list[tuple[str, object]] = [
+        ("co2", 721),
+        ("pm1", 1.1),
+        ("pm25", 2.8),
+        ("pm4", 3.5),
+        ("pm10", 5.2),
+        ("voc_index", 88),
+        ("nox_index", 12),
+        ("temperature_c", 24.5),
+        ("humidity", 42.3),
+    ]
+    return [
+        FakeRecord("air_quality_reading", field, value, now, values)
         for field, value in fields
     ]
 

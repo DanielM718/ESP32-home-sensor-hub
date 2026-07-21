@@ -13,6 +13,7 @@ MOSQUITTO_ACL_TARGET="/etc/mosquitto/acl.d/home-sensor.acl"
 MOSQUITTO_PASSWORD_FILE="/etc/mosquitto/passwd"
 GATEWAY_USER="${MQTT_GATEWAY_USERNAME:-home_sensor_gateway}"
 BRIDGE_USER="${MQTT_USERNAME:-home_sensor_bridge}"
+HOME_ASSISTANT_USER="${HOME_ASSISTANT_MQTT_USERNAME:-home_assistant}"
 
 usage() {
   cat <<USAGE
@@ -23,6 +24,8 @@ Install Mosquitto and the home sensor broker configuration.
 Options:
   --gateway-user USER      Gateway MQTT username. Default: home_sensor_gateway
   --bridge-user USER       Bridge MQTT username. Default: home_sensor_bridge
+  --home-assistant-user USER
+                           Home Assistant username. Default: home_assistant
   -h, --help               Show this help
 USAGE
 }
@@ -37,6 +40,11 @@ while [[ $# -gt 0 ]]; do
     --bridge-user)
       BRIDGE_USER="${2:-}"
       [[ -n "${BRIDGE_USER}" ]] || die "--bridge-user requires a value"
+      shift 2
+      ;;
+    --home-assistant-user)
+      HOME_ASSISTANT_USER="${2:-}"
+      [[ -n "${HOME_ASSISTANT_USER}" ]] || die "--home-assistant-user requires a value"
       shift 2
       ;;
     -h|--help)
@@ -55,7 +63,7 @@ require_command apt-get
 
 [[ -f "${MOSQUITTO_CONF_SOURCE}" ]] || die "Missing Mosquitto config: ${MOSQUITTO_CONF_SOURCE}"
 
-for username in "${GATEWAY_USER}" "${BRIDGE_USER}"; do
+for username in "${GATEWAY_USER}" "${BRIDGE_USER}" "${HOME_ASSISTANT_USER}"; do
   [[ "${username}" != *:* ]] || die "MQTT usernames must not contain ':'"
   [[ "${username}" != *[[:space:]]* ]] || die "MQTT usernames must not contain whitespace"
 done
@@ -80,6 +88,11 @@ topic write home/air/+
 user ${BRIDGE_USER}
 topic read home/sensors/+
 topic read home/air/+
+
+user ${HOME_ASSISTANT_USER}
+topic read home/sensors/+
+topic read home/air/+
+topic readwrite homeassistant/#
 ACL
 chown root:root "${MOSQUITTO_ACL_TARGET}"
 chmod 0644 "${MOSQUITTO_ACL_TARGET}"

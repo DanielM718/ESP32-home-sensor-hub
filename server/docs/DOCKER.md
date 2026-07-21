@@ -37,9 +37,13 @@ Create Mosquitto users in the named config volume:
 ```bash
 docker compose run --rm mosquitto mosquitto_passwd -c /mosquitto/config-runtime/passwd home_sensor_gateway
 docker compose run --rm mosquitto mosquitto_passwd /mosquitto/config-runtime/passwd home_sensor_bridge
+docker compose run --rm mosquitto mosquitto_passwd /mosquitto/config-runtime/passwd home_assistant
 ```
 
 Use the same bridge password in `.env` as `MQTT_PASSWORD`.
+The optional isolated Home Assistant deployment uses the dedicated
+`home_assistant` password in `/opt/home-assistant/.env`; do not reuse the bridge
+password.
 
 Start the stack:
 

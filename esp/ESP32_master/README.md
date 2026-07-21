@@ -131,16 +131,8 @@ or version field.
 Future packet formats should include explicit packet type/version metadata and
 add a new handler entry in `PACKET_HANDLERS`.
 
-A future SEN66 air quality packet could publish to a topic such as:
-
-```text
-home/air/printer_room
-```
-
-Example payload:
-
-```json
-{"packet_type":"sen66","node_id":100,"sequence":42,"co2":721,"pm1":1.10,"pm25":2.80,"pm4":3.50,"pm10":5.20,"voc_index":88,"nox_index":12,"temperature_c":24.50,"humidity":42.30,"status_flags":0}
-```
-
 Do not change the existing SHT41 packet layout when adding future packet types.
+
+The USB-powered SEN66 station is not a gateway packet type. It connects to
+Wi-Fi itself and publishes directly to `home/air/<location>`, so no SEN66
+decoder belongs in this gateway.

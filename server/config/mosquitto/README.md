@@ -3,7 +3,8 @@
 Generated files:
 
 - `home-sensor.conf`: broker listener, authentication, ACL, persistence, and logging defaults
-- `home-sensor.acl`: least-privilege topic access for gateway and bridge users
+- `home-sensor.acl`: least-privilege topic access for gateway, bridge, and the
+  optional Home Assistant consumer/discovery publisher
 
 Install locations on the Raspberry Pi:
 

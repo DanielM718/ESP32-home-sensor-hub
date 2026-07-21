@@ -1,0 +1,194 @@
+# Helpers used by the disabled example automations in automations.yaml.
+# Automatic: environmental rules may control the plug.
+# Manual: only the matching Manual power helper controls the plug.
+# Disabled: the plug is forced off and automatic/manual commands are ignored.
+
+input_select:
+  dehumidifier_control_mode:
+    name: Dehumidifier control mode
+    options:
+      - Automatic
+      - Manual
+      - Disabled
+    initial: Disabled
+    icon: mdi:water-percent
+  ventilation_control_mode:
+    name: Ventilation control mode
+    options:
+      - Automatic
+      - Manual
+      - Disabled
+    initial: Disabled
+    icon: mdi:fan
+  filament_dryer_control_mode:
+    name: Filament dryer control mode
+    options:
+      - Automatic
+      - Manual
+      - Disabled
+    initial: Disabled
+    icon: mdi:radiator
+
+input_boolean:
+  dehumidifier_manual_power:
+    name: Dehumidifier manual power
+    initial: false
+    icon: mdi:power
+  ventilation_manual_power:
+    name: Ventilation manual power
+    initial: false
+    icon: mdi:power
+  filament_dryer_manual_power:
+    name: Filament dryer manual power
+    initial: false
+    icon: mdi:power
+  filament_dryer_ran_today:
+    name: Filament dryer ran today
+    icon: mdi:calendar-check
+
+input_number:
+  controlled_sensor_stale_timeout:
+    name: Controlled sensor stale timeout
+    min: 5
+    max: 120
+    step: 5
+    initial: 30
+    unit_of_measurement: min
+    mode: box
+    icon: mdi:timer-alert-outline
+
+  dehumidifier_humidity_on:
+    name: Dehumidifier humidity on threshold
+    min: 20
+    max: 90
+    step: 1
+    initial: 55
+    unit_of_measurement: "%"
+    mode: box
+  dehumidifier_humidity_off:
+    name: Dehumidifier humidity off threshold
+    min: 10
+    max: 80
+    step: 1
+    initial: 45
+    unit_of_measurement: "%"
+    mode: box
+  dehumidifier_max_runtime:
+    name: Dehumidifier maximum runtime
+    min: 15
+    max: 720
+    step: 15
+    initial: 240
+    unit_of_measurement: min
+    mode: box
+
+  ventilation_pm25_on:
+    name: Ventilation PM2.5 on threshold
+    min: 1
+    max: 250
+    step: 1
+    initial: 35
+    unit_of_measurement: "µg/m³"
+    mode: box
+  ventilation_pm25_off:
+    name: Ventilation PM2.5 off threshold
+    min: 0
+    max: 200
+    step: 1
+    initial: 20
+    unit_of_measurement: "µg/m³"
+    mode: box
+  ventilation_co2_on:
+    name: Ventilation CO2 on threshold
+    min: 500
+    max: 5000
+    step: 50
+    initial: 1200
+    unit_of_measurement: ppm
+    mode: box
+  ventilation_co2_off:
+    name: Ventilation CO2 off threshold
+    min: 400
+    max: 4500
+    step: 50
+    initial: 900
+    unit_of_measurement: ppm
+    mode: box
+  ventilation_voc_on:
+    name: Ventilation VOC Index on threshold
+    min: 1
+    max: 500
+    step: 5
+    initial: 150
+    unit_of_measurement: index
+    mode: box
+  ventilation_voc_off:
+    name: Ventilation VOC Index off threshold
+    min: 0
+    max: 450
+    step: 5
+    initial: 100
+    unit_of_measurement: index
+    mode: box
+  ventilation_max_runtime:
+    name: Ventilation maximum runtime
+    min: 15
+    max: 720
+    step: 15
+    initial: 240
+    unit_of_measurement: min
+    mode: box
+
+  filament_dryer_humidity_on:
+    name: Filament dryer humidity on threshold
+    min: 5
+    max: 80
+    step: 1
+    initial: 20
+    unit_of_measurement: "%"
+    mode: box
+  filament_dryer_humidity_off:
+    name: Filament dryer humidity off threshold
+    min: 1
+    max: 70
+    step: 1
+    initial: 15
+    unit_of_measurement: "%"
+    mode: box
+  filament_dryer_max_runtime:
+    name: Filament dryer maximum runtime
+    min: 15
+    max: 480
+    step: 15
+    initial: 240
+    unit_of_measurement: min
+    mode: box
+
+  device_start_wait:
+    name: Device start verification wait
+    min: 5
+    max: 600
+    step: 5
+    initial: 60
+    unit_of_measurement: s
+    mode: box
+  device_start_minimum_power:
+    name: Device start minimum power
+    min: 0
+    max: 1000
+    step: 1
+    initial: 10
+    unit_of_measurement: W
+    mode: box
+
+input_datetime:
+  filament_dryer_start_time:
+    name: Filament dryer start time
+    has_date: false
+    has_time: true
+    initial: "08:00:00"
+
+input_button:
+  reset_filament_dryer_daily_lockout:
+    name: Reset filament dryer daily lockout
+    icon: mdi:calendar-refresh

@@ -1,0 +1,403 @@
+# EXAMPLES ONLY: every automation is disabled until entity IDs, thresholds,
+# appliance suitability, and safe behavior have been verified on site.
+# Discovery defaults used below assume SHT41 node 1 and SEN66 location "office".
+
+- id: home_sensor_dehumidifier_on
+  alias: "Example - humidity dehumidifier on"
+  description: "Automatic mode: require fresh humidity above the on threshold for five minutes."
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.sht41_node_1_humidity
+      above: input_number.dehumidifier_humidity_on
+      for: "00:05:00"
+  conditions:
+    - condition: state
+      entity_id: input_select.dehumidifier_control_mode
+      state: Automatic
+    - condition: state
+      entity_id: binary_sensor.sht41_node_1_online
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ states('input_number.dehumidifier_humidity_on') | float(55) >
+           states('input_number.dehumidifier_humidity_off') | float(45) }}
+    - condition: template
+      value_template: >-
+        {{ as_timestamp(now()) -
+           as_timestamp(states('sensor.sht41_node_1_last_packet'), 0) <
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.printer_room_dehumidifier
+    - delay:
+        minutes: "{{ states('input_number.dehumidifier_max_runtime') | int(240) }}"
+    - condition: state
+      entity_id: input_select.dehumidifier_control_mode
+      state: Automatic
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_room_dehumidifier
+    - action: persistent_notification.create
+      data:
+        title: Home Sensor safety stop
+        message: Dehumidifier reached its configured maximum automatic runtime.
+        notification_id: home_sensor_dehumidifier_max_runtime
+
+- id: home_sensor_dehumidifier_off
+  alias: "Example - humidity dehumidifier off"
+  description: "Automatic mode: require humidity below the off threshold for five minutes."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.sht41_node_1_humidity
+      below: input_number.dehumidifier_humidity_off
+      for: "00:05:00"
+  conditions:
+    - condition: state
+      entity_id: input_select.dehumidifier_control_mode
+      state: Automatic
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_room_dehumidifier
+
+- id: home_sensor_dehumidifier_stale_safety
+  alias: "Example - stale dehumidifier sensor safety"
+  description: "Fail closed in every control mode if the associated sensor is unavailable or stale."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.sht41_node_1_humidity
+      to: unavailable
+    - trigger: time_pattern
+      minutes: "/1"
+  conditions:
+    - condition: state
+      entity_id: switch.printer_room_dehumidifier
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ not has_value('sensor.sht41_node_1_humidity') or
+           as_timestamp(now()) -
+           as_timestamp(states('sensor.sht41_node_1_last_packet'), 0) >=
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_room_dehumidifier
+    - action: persistent_notification.create
+      data:
+        title: Home Sensor stale-data warning
+        message: Dehumidifier was turned off because its humidity reading is unavailable or stale.
+        notification_id: home_sensor_dehumidifier_stale
+
+- id: home_sensor_dehumidifier_manual_mode
+  alias: "Example - dehumidifier mode and manual control"
+  description: "Manual commands are honored only in Manual; Disabled always forces off."
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id:
+        - input_select.dehumidifier_control_mode
+        - input_boolean.dehumidifier_manual_power
+  actions:
+    - choose:
+        - conditions:
+            - condition: state
+              entity_id: input_select.dehumidifier_control_mode
+              state: Disabled
+          sequence:
+            - action: switch.turn_off
+              target:
+                entity_id: switch.printer_room_dehumidifier
+        - conditions:
+            - condition: state
+              entity_id: input_select.dehumidifier_control_mode
+              state: Manual
+          sequence:
+            - action: "switch.turn_{{ 'on' if is_state('input_boolean.dehumidifier_manual_power', 'on') else 'off' }}"
+              target:
+                entity_id: switch.printer_room_dehumidifier
+
+- id: home_sensor_ventilation_on
+  alias: "Example - air quality ventilation on"
+  description: "Automatic mode: start if PM2.5, CO2, or VOC Index stays high for five minutes."
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: template
+      value_template: >-
+        {{ states('sensor.sen66_office_pm2_5') | float(-1) >
+             states('input_number.ventilation_pm25_on') | float(35) or
+           states('sensor.sen66_office_carbon_dioxide') | float(-1) >
+             states('input_number.ventilation_co2_on') | float(1200) or
+           states('sensor.sen66_office_voc_index') | float(-1) >
+             states('input_number.ventilation_voc_on') | float(150) }}
+      for: "00:05:00"
+  conditions:
+    - condition: state
+      entity_id: input_select.ventilation_control_mode
+      state: Automatic
+    - condition: state
+      entity_id: binary_sensor.sen66_office_online
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ as_timestamp(now()) -
+           as_timestamp(states('sensor.sen66_office_last_packet'), 0) <
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: switch.turn_on
+      target:
+        entity_id: switch.printer_ventilation
+    - delay:
+        minutes: "{{ states('input_number.ventilation_max_runtime') | int(240) }}"
+    - condition: state
+      entity_id: input_select.ventilation_control_mode
+      state: Automatic
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_ventilation
+    - action: persistent_notification.create
+      data:
+        title: Home Sensor safety stop
+        message: Ventilation reached its configured maximum automatic runtime.
+        notification_id: home_sensor_ventilation_max_runtime
+
+- id: home_sensor_ventilation_off
+  alias: "Example - air quality ventilation off"
+  description: "Stop only after every air-quality reading remains below its off threshold for ten minutes."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: template
+      value_template: >-
+        {{ has_value('sensor.sen66_office_pm2_5') and
+           has_value('sensor.sen66_office_carbon_dioxide') and
+           has_value('sensor.sen66_office_voc_index') and
+           states('sensor.sen66_office_pm2_5') | float(9999) <
+             states('input_number.ventilation_pm25_off') | float(20) and
+           states('sensor.sen66_office_carbon_dioxide') | float(9999) <
+             states('input_number.ventilation_co2_off') | float(900) and
+           states('sensor.sen66_office_voc_index') | float(9999) <
+             states('input_number.ventilation_voc_off') | float(100) }}
+      for: "00:10:00"
+  conditions:
+    - condition: state
+      entity_id: input_select.ventilation_control_mode
+      state: Automatic
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_ventilation
+
+- id: home_sensor_ventilation_stale_safety
+  alias: "Example - stale ventilation sensor safety"
+  description: "Fail closed if any controlling SEN66 reading is unavailable or stale."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id:
+        - sensor.sen66_office_pm2_5
+        - sensor.sen66_office_carbon_dioxide
+        - sensor.sen66_office_voc_index
+      to: unavailable
+    - trigger: time_pattern
+      minutes: "/1"
+  conditions:
+    - condition: state
+      entity_id: switch.printer_ventilation
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ not has_value('sensor.sen66_office_pm2_5') or
+           not has_value('sensor.sen66_office_carbon_dioxide') or
+           not has_value('sensor.sen66_office_voc_index') or
+           as_timestamp(now()) -
+           as_timestamp(states('sensor.sen66_office_last_packet'), 0) >=
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.printer_ventilation
+    - action: persistent_notification.create
+      data:
+        title: Home Sensor stale-data warning
+        message: Ventilation was turned off because an air-quality reading is unavailable or stale.
+        notification_id: home_sensor_ventilation_stale
+
+- id: home_sensor_ventilation_manual_mode
+  alias: "Example - ventilation mode and manual control"
+  description: "Manual commands are honored only in Manual; Disabled always forces off."
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id:
+        - input_select.ventilation_control_mode
+        - input_boolean.ventilation_manual_power
+  actions:
+    - choose:
+        - conditions:
+            - condition: state
+              entity_id: input_select.ventilation_control_mode
+              state: Disabled
+          sequence:
+            - action: switch.turn_off
+              target:
+                entity_id: switch.printer_ventilation
+        - conditions:
+            - condition: state
+              entity_id: input_select.ventilation_control_mode
+              state: Manual
+          sequence:
+            - action: "switch.turn_{{ 'on' if is_state('input_boolean.ventilation_manual_power', 'on') else 'off' }}"
+              target:
+                entity_id: switch.printer_ventilation
+
+- id: home_sensor_filament_dryer_schedule
+  alias: "Example - daily conditional filament dryer"
+  description: "At the configured time, run once per day only when fresh humidity is above threshold."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: time
+      at: input_datetime.filament_dryer_start_time
+  conditions:
+    - condition: state
+      entity_id: input_select.filament_dryer_control_mode
+      state: Automatic
+    - condition: state
+      entity_id: input_boolean.filament_dryer_ran_today
+      state: "off"
+    - condition: state
+      entity_id: binary_sensor.sht41_node_1_online
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ states('sensor.sht41_node_1_humidity') | float(-1) >
+           states('input_number.filament_dryer_humidity_on') | float(20) }}
+    - condition: template
+      value_template: >-
+        {{ as_timestamp(now()) -
+           as_timestamp(states('sensor.sht41_node_1_last_packet'), 0) <
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: input_boolean.turn_on
+      target:
+        entity_id: input_boolean.filament_dryer_ran_today
+    - action: switch.turn_on
+      target:
+        entity_id: switch.filament_dryer
+    - delay:
+        minutes: "{{ states('input_number.filament_dryer_max_runtime') | int(240) }}"
+    - condition: state
+      entity_id: input_select.filament_dryer_control_mode
+      state: Automatic
+    - action: switch.turn_off
+      target:
+        entity_id: switch.filament_dryer
+
+- id: home_sensor_filament_dryer_early_off
+  alias: "Example - filament dryer humidity recovery"
+  description: "Automatic mode: stop early after humidity stays below the off threshold for five minutes."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: numeric_state
+      entity_id: sensor.sht41_node_1_humidity
+      below: input_number.filament_dryer_humidity_off
+      for: "00:05:00"
+  conditions:
+    - condition: state
+      entity_id: input_select.filament_dryer_control_mode
+      state: Automatic
+    - condition: state
+      entity_id: switch.filament_dryer
+      state: "on"
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.filament_dryer
+
+- id: home_sensor_filament_dryer_daily_reset
+  alias: "Example - reset filament dryer daily lockout"
+  description: "Reset shortly after midnight; the helper restores across restarts."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: time
+      at: "00:05:00"
+    - trigger: state
+      entity_id: input_button.reset_filament_dryer_daily_lockout
+  actions:
+    - action: input_boolean.turn_off
+      target:
+        entity_id: input_boolean.filament_dryer_ran_today
+
+- id: home_sensor_filament_dryer_stale_safety
+  alias: "Example - stale filament dryer sensor safety"
+  description: "Fail closed in every mode when filament humidity is unavailable or stale."
+  initial_state: false
+  mode: single
+  triggers:
+    - trigger: state
+      entity_id: sensor.sht41_node_1_humidity
+      to: unavailable
+    - trigger: time_pattern
+      minutes: "/1"
+  conditions:
+    - condition: state
+      entity_id: switch.filament_dryer
+      state: "on"
+    - condition: template
+      value_template: >-
+        {{ not has_value('sensor.sht41_node_1_humidity') or
+           as_timestamp(now()) -
+           as_timestamp(states('sensor.sht41_node_1_last_packet'), 0) >=
+           states('input_number.controlled_sensor_stale_timeout') | float(30) * 60 }}
+  actions:
+    - action: switch.turn_off
+      target:
+        entity_id: switch.filament_dryer
+    - action: persistent_notification.create
+      data:
+        title: Home Sensor stale-data warning
+        message: Filament dryer was turned off because its humidity reading is unavailable or stale.
+        notification_id: home_sensor_filament_dryer_stale
+
+- id: home_sensor_filament_dryer_manual_mode
+  alias: "Example - filament dryer mode and manual control"
+  description: "Manual commands are honored only in Manual; Disabled always forces off."
+  initial_state: false
+  mode: restart
+  triggers:
+    - trigger: state
+      entity_id:
+        - input_select.filament_dryer_control_mode
+        - input_boolean.filament_dryer_manual_power
+  actions:
+    - choose:
+        - conditions:
+            - condition: state
+              entity_id: input_select.filament_dryer_control_mode
+              state: Disabled
+          sequence:
+            - action: switch.turn_off
+              target:
+                entity_id: switch.filament_dryer
+        - conditions:
+            - condition: state
+              entity_id: input_select.filament_dryer_control_mode
+              state: Manual
+          sequence:
+            - action: "switch.turn_{{ 'on' if is_state('input_boolean.filament_dryer_manual_power', 'on') else 'off' }}"
+              target:
+                entity_id: switch.filament_dryer

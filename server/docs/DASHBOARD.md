@@ -50,8 +50,24 @@ Then copy or download the Chart.js browser bundle before using the dashboard.
 - current temperature and humidity by node/station
 - calibrated battery voltage for battery nodes when `STATUS_BATTERY_OK` is set
 - raw status flags plus decoded battery measurement, low, and shutdown states
-- historical temperature, humidity, battery, CO2, and PM2.5 charts
+- all nine current SEN66 values, grouped as climate, gas/indices, and
+  particulate matter
+- historical temperature and humidity for both SHT41 nodes and SEN66 stations
+- a SEN66 gas/index chart for CO2, VOC Index, and NOx Index
+- a SEN66 particulate chart for PM1.0, PM2.5, PM4.0, and PM10
+- historical battery voltage for SHT41 battery nodes
 - node online/stale status
+
+Dashboard units are degrees Celsius (`°C`), relative humidity percent (`%`),
+CO2 parts per million (`ppm`), particulate mass concentration (`µg/m³`), and
+unitless VOC/NOx `index` values. The gas chart gives CO2 and the two indices
+separate axes so the lower index values remain readable. Particulate sizes
+share one chart because they use the same unit.
+
+Old air-quality records that contain only a subset of these fields remain
+supported. Current cards show `-` for a missing value, chart datasets are
+created only when a field has at least one numeric point, and absent fields do
+not hide the station or affect the SHT41 display.
 
 The current-reading card and node table show battery measurement unavailable
 when `BIT2` is clear or `status_flags` is missing. `BIT3` produces a visible

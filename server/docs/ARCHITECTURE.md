@@ -6,15 +6,12 @@ ESP-NOW behavior are external.
 ## Data Flow
 
 ```text
-Battery ESP32-C3 sensor nodes
-        |
-        | ESP-NOW
-        v
-Master ESP32 gateway
-        |
-        | MQTT JSON publish
-        v
-Mosquitto on Raspberry Pi
+Battery ESP32-C3 nodes -- ESP-NOW --> Master ESP32 gateway --+
+                                                              |
+USB-powered SEN66 -------- direct Wi-Fi/MQTT JSON ------------+
+                                                              |
+                                                              v
+                                                  Mosquitto on Raspberry Pi
         |
         | authenticated subscribe
         v
@@ -44,7 +41,7 @@ Grafana analytics       Flask REST API          Future services
 
 ## Ports
 
-- `1883`: MQTT on LAN for the ESP32 gateway only.
+- `1883`: MQTT on LAN for the ESP32 gateway and direct-MQTT stations.
 - `8086`: InfluxDB local/LAN administration; not public.
 - `3000`: Grafana LAN/Tailscale.
 - `8080`: Flask dashboard LAN/Tailscale.

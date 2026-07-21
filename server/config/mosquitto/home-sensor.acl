@@ -12,3 +12,10 @@ topic write home/air/+
 user home_sensor_bridge
 topic read home/sensors/+
 topic read home/air/+
+
+# Home Assistant and its discovery companion share this least-privilege account.
+# They consume existing readings and exchange discovery/health messages only.
+user home_assistant
+topic read home/sensors/+
+topic read home/air/+
+topic readwrite homeassistant/#

@@ -10,6 +10,33 @@ const POLL_INTERVAL_MS = 7000;
 const FETCH_TIMEOUT_MS = 8000;
 const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
 
+const AIR_QUALITY_METRIC_GROUPS = [
+  {
+    label: "Climate",
+    metrics: [
+      { field: "temperature_c", label: "Temperature", digits: 1, suffix: " °C" },
+      { field: "humidity", label: "Relative humidity", digits: 1, suffix: "%" },
+    ],
+  },
+  {
+    label: "Gas and indices",
+    metrics: [
+      { field: "co2", label: "CO₂", digits: 0, suffix: " ppm" },
+      { field: "voc_index", label: "VOC Index", digits: 0, suffix: " index" },
+      { field: "nox_index", label: "NOx Index", digits: 0, suffix: " index" },
+    ],
+  },
+  {
+    label: "Particulate matter",
+    metrics: [
+      { field: "pm1", label: "PM1.0", digits: 1, suffix: " µg/m³" },
+      { field: "pm25", label: "PM2.5", digits: 1, suffix: " µg/m³" },
+      { field: "pm4", label: "PM4.0", digits: 1, suffix: " µg/m³" },
+      { field: "pm10", label: "PM10", digits: 1, suffix: " µg/m³" },
+    ],
+  },
+];
+
 const ENVIRONMENT_STATUS_FLAGS = [
   { mask: 1 << 0, label: "SHT41 read OK", className: "ok" },
   { mask: 1 << 1, label: "ESP-NOW send attempted", className: "info" },
@@ -194,7 +221,7 @@ function updateNodeFilterOptions(data) {
   const uniqueNodes = Array.from(new Set(nodes));
 
   const options = [
-    { value: "all", label: "All environment nodes" },
+    { value: "all", label: "All sensors" },
     ...uniqueNodes.map((nodeId) => ({ value: nodeId, label: `Node ${nodeId}` })),
   ];
 
@@ -219,13 +246,30 @@ function updateNodeFilterOptions(data) {
 }
 
 function initializeCharts() {
-  state.charts.temperature = createLineChart("temperature-chart", "Temperature C");
+  state.charts.temperature = createLineChart("temperature-chart", "Temperature °C");
   state.charts.humidity = createLineChart("humidity-chart", "Humidity %");
   state.charts.battery = createLineChart("battery-chart", "Battery mV");
-  state.charts.air = createLineChart("air-chart", "Air quality");
+  state.charts.gas = createLineChart("gas-chart", "SEN66 gas and indices", {
+    y: {
+      beginAtZero: false,
+      position: "left",
+      title: { display: true, text: "CO₂ (ppm)" },
+      grid: { color: "#edf2ef" },
+    },
+    yIndex: {
+      beginAtZero: false,
+      position: "right",
+      title: { display: true, text: "VOC / NOx index" },
+      grid: { drawOnChartArea: false },
+    },
+  });
+  state.charts.particulate = createLineChart(
+    "particulate-chart",
+    "SEN66 particulate matter",
+  );
 }
 
-function createLineChart(canvasId, title) {
+function createLineChart(canvasId, title, yScales = null) {
   const context = document.getElementById(canvasId).getContext("2d");
   return new Chart(context, {
     type: "line",
@@ -265,12 +309,14 @@ function createLineChart(canvasId, title) {
             display: false,
           },
         },
-        y: {
-          beginAtZero: false,
-          grid: {
-            color: "#edf2ef",
+        ...(yScales || {
+          y: {
+            beginAtZero: false,
+            grid: {
+              color: "#edf2ef",
+            },
           },
-        },
+        }),
       },
       elements: {
         line: {
@@ -314,20 +360,46 @@ function readingCard(reading) {
     : formatLabel(reading.location || reading.id);
   const isEnvironment = reading.sensor_type === "environment";
 
+  if (!isEnvironment) {
+    card.classList.add("reading-card-air");
+    card.innerHTML = `
+      <h3>${escapeHtml(title)}</h3>
+      <div class="air-reading-groups">
+        ${AIR_QUALITY_METRIC_GROUPS.map((group) => airMetricGroupHtml(reading, group)).join("")}
+      </div>
+      <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
+    `;
+    return card;
+  }
+
   card.innerHTML = `
     <h3>${escapeHtml(title)}</h3>
     <div class="reading-values">
-      ${metricHtml("Temp", formatNumber(reading.temperature_c, 1, " C"))}
+      ${metricHtml("Temp", formatNumber(reading.temperature_c, 1, " °C"))}
       ${metricHtml("Humidity", formatNumber(reading.humidity, 1, "%"))}
-      ${isEnvironment ? metricHtml("Battery", batteryDisplay(reading)) : ""}
-      ${reading.co2 !== undefined ? metricHtml("CO2", `${reading.co2} ppm`) : ""}
-      ${reading.pm25 !== undefined ? metricHtml("PM2.5", formatNumber(reading.pm25, 1, " ug/m3")) : ""}
-      ${isEnvironment ? statusFlagsMetricHtml(reading) : ""}
+      ${metricHtml("Battery", batteryDisplay(reading))}
+      ${statusFlagsMetricHtml(reading)}
     </div>
     ${batteryAlertHtml(reading)}
     <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
   `;
   return card;
+}
+
+function airMetricGroupHtml(reading, group) {
+  const metrics = group.metrics
+    .map((metric) => metricHtml(
+      metric.label,
+      formatNumber(reading[metric.field], metric.digits, metric.suffix),
+    ))
+    .join("");
+
+  return `
+    <section class="air-metric-group" aria-label="${escapeHtml(group.label)}">
+      <h4>${escapeHtml(group.label)}</h4>
+      <div class="reading-values">${metrics}</div>
+    </section>
+  `;
 }
 
 function metricHtml(label, value) {
@@ -501,25 +573,45 @@ function renderCharts(data) {
   const series = data.series || [];
   const environmentSeries = series.filter((item) => item.sensor_type === "environment");
   const airQualitySeries = series.filter((item) => item.sensor_type === "air_quality");
+  const climateSeries = [...environmentSeries, ...airQualitySeries];
 
-  updateChart(state.charts.temperature, buildDatasets(environmentSeries, "temperature_c", "Temp C"));
-  updateChart(state.charts.humidity, buildDatasets(environmentSeries, "humidity", "Humidity %"));
+  updateChart(state.charts.temperature, buildDatasets(climateSeries, "temperature_c", "Temp °C"));
+  updateChart(state.charts.humidity, buildDatasets(climateSeries, "humidity", "Humidity %"));
   updateChart(state.charts.battery, buildDatasets(
     environmentSeries,
     "battery_mv",
     "Battery mV",
   ));
 
-  const airDatasets = [
-    ...buildDatasets(airQualitySeries, "co2", "CO2 ppm"),
-    ...buildDatasets(airQualitySeries, "pm25", "PM2.5"),
+  const gasDatasets = [
+    ...buildDatasets(airQualitySeries, "co2", "CO₂ ppm", { colorOffset: 0 }),
+    ...buildDatasets(airQualitySeries, "voc_index", "VOC Index", {
+      colorOffset: 2,
+      yAxisID: "yIndex",
+    }),
+    ...buildDatasets(airQualitySeries, "nox_index", "NOx Index", {
+      colorOffset: 4,
+      yAxisID: "yIndex",
+    }),
   ];
-  const airPanel = document.getElementById("air-chart-panel");
-  airPanel.hidden = airDatasets.length === 0;
-  updateChart(state.charts.air, airDatasets);
+  const gasPanel = document.getElementById("gas-chart-panel");
+  gasPanel.hidden = gasDatasets.length === 0;
+  updateChart(state.charts.gas, gasDatasets);
+
+  const particulateDatasets = [
+    ...buildDatasets(airQualitySeries, "pm1", "PM1.0", { colorOffset: 0 }),
+    ...buildDatasets(airQualitySeries, "pm25", "PM2.5", { colorOffset: 2 }),
+    ...buildDatasets(airQualitySeries, "pm4", "PM4.0", { colorOffset: 4 }),
+    ...buildDatasets(airQualitySeries, "pm10", "PM10", { colorOffset: 6 }),
+  ];
+  const particulatePanel = document.getElementById("particulate-chart-panel");
+  particulatePanel.hidden = particulateDatasets.length === 0;
+  updateChart(state.charts.particulate, particulateDatasets);
 }
 
-function buildDatasets(series, field, suffix) {
+function buildDatasets(series, field, suffix, options = {}) {
+  const colorOffset = options.colorOffset || 0;
+  const yAxisID = options.yAxisID || "y";
   return series
     .map((item, index) => {
       const points = (item.points || [])
@@ -539,8 +631,9 @@ function buildDatasets(series, field, suffix) {
       return {
         label: `${labelBase} ${suffix}`,
         data: points,
-        borderColor: chartPalette[index % chartPalette.length],
-        backgroundColor: chartPalette[index % chartPalette.length],
+        borderColor: chartPalette[(colorOffset + index) % chartPalette.length],
+        backgroundColor: chartPalette[(colorOffset + index) % chartPalette.length],
+        yAxisID,
       };
     })
     .filter(Boolean);
@@ -556,6 +649,7 @@ function updateChart(chart, datasets) {
       data: labels.map((time) => valueByTime.get(time) ?? null),
       borderColor: dataset.borderColor,
       backgroundColor: dataset.backgroundColor,
+      yAxisID: dataset.yAxisID,
       spanGaps: true,
     };
   });

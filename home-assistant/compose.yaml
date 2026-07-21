@@ -1,0 +1,32 @@
+name: home-sensor-home-assistant
+
+services:
+  homeassistant:
+    container_name: homeassistant
+    image: ghcr.io/home-assistant/home-assistant:stable
+    network_mode: host
+    environment:
+      TZ: America/New_York
+    volumes:
+      - /opt/home-assistant/config:/config
+      - /etc/localtime:/etc/localtime:ro
+    restart: unless-stopped
+
+  mqtt-discovery:
+    container_name: home-sensor-ha-discovery
+    build:
+      context: ./discovery
+    network_mode: host
+    environment:
+      TZ: America/New_York
+      MQTT_HOST: ${MQTT_HOST:-127.0.0.1}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:?Set MQTT_USERNAME in /opt/home-assistant/.env}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:?Set MQTT_PASSWORD in /opt/home-assistant/.env}
+      MQTT_QOS: ${MQTT_QOS:-1}
+      SENSOR_STALE_AFTER_SECONDS: ${SENSOR_STALE_AFTER_SECONDS:-1800}
+      DISCOVERY_PREFIX: ${DISCOVERY_PREFIX:-homeassistant}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - /opt/home-assistant/discovery-data:/data
+    restart: unless-stopped

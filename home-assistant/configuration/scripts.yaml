@@ -1,0 +1,68 @@
+verify_device_started:
+  alias: Verify a smart-plug device started
+  description: >-
+    Turn on a switch, wait for the appliance-specific startup delay, and warn if
+    the P115 still reports too little power or no usable power reading.
+  mode: parallel
+  max: 4
+  fields:
+    device_name:
+      name: Device name
+      required: true
+      selector:
+        text:
+    switch_entity:
+      name: Switch entity
+      required: true
+      selector:
+        entity:
+          filter:
+            - domain: switch
+    power_sensor:
+      name: Current power sensor
+      required: true
+      selector:
+        entity:
+          filter:
+            - domain: sensor
+              device_class: power
+    wait_seconds:
+      name: Startup wait
+      selector:
+        number:
+          min: 5
+          max: 600
+          unit_of_measurement: s
+    minimum_power_w:
+      name: Minimum expected power
+      selector:
+        number:
+          min: 0
+          max: 1000
+          unit_of_measurement: W
+  sequence:
+    - variables:
+        effective_wait: "{{ wait_seconds | default(states('input_number.device_start_wait'), true) | int(60) }}"
+        effective_minimum: "{{ minimum_power_w | default(states('input_number.device_start_minimum_power'), true) | float(10) }}"
+    - action: switch.turn_on
+      target:
+        entity_id: "{{ switch_entity }}"
+    - delay:
+        seconds: "{{ effective_wait }}"
+    - choose:
+        - conditions:
+            - condition: template
+              value_template: >-
+                {{ not has_value(power_sensor) or
+                   states(power_sensor) | float(0) < effective_minimum }}
+          sequence:
+            - action: persistent_notification.create
+              data:
+                title: Device may have failed to start
+                message: >-
+                  {{ device_name }} was switched on, but after {{ effective_wait }} seconds
+                  its power was {{ states(power_sensor) }} W. Verify the appliance before
+                  retrying. Some appliances legitimately delay their load; tune the wait
+                  and minimum-power helpers for this device.
+                notification_id: >-
+                  home_sensor_start_check_{{ device_name | slugify }}

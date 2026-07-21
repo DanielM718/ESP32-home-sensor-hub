@@ -56,7 +56,24 @@ Response shape:
       "sequence": 1523
     }
   ],
-  "air_quality": [],
+  "air_quality": [
+    {
+      "id": "printer_room",
+      "sensor_type": "air_quality",
+      "location": "printer_room",
+      "topic": "home/air/printer_room",
+      "last_seen": "2026-01-01T11:59:05Z",
+      "temperature_c": 24.5,
+      "humidity": 42.3,
+      "co2": 721,
+      "pm1": 1.1,
+      "pm25": 2.8,
+      "pm4": 3.5,
+      "pm10": 5.2,
+      "voc_index": 88,
+      "nox_index": 12
+    }
+  ],
   "stale_after_seconds": 1800,
   "nodes": [
     {
@@ -77,6 +94,13 @@ The `nodes` snapshot is derived from the same latest-value query used for the
 current readings. This lets the dashboard update current readings and node
 status with one InfluxDB query instead of immediately repeating it through
 `/api/nodes`. The standalone `/api/nodes` endpoint remains supported.
+
+SEN66 field names are identical across MQTT, InfluxDB, `/api/latest`, and
+`/api/readings`: `temperature_c`, `humidity`, `co2`, `pm1`, `pm25`, `pm4`,
+`pm10`, `voc_index`, and `nox_index`. Temperature is degrees Celsius, humidity
+is percent relative humidity, CO2 is ppm, particulate fields are micrograms per
+cubic metre, and VOC/NOx are unitless indices. Older InfluxDB data may omit
+fields that were not stored at the time; omitted fields do not fail the request.
 
 ### `GET /api/readings`
 
@@ -118,6 +142,26 @@ Response shape:
           "battery_mv": 4058
         }
       ]
+    },
+    {
+      "id": "printer_room",
+      "sensor_type": "air_quality",
+      "location": "printer_room",
+      "topic": "home/air/printer_room",
+      "points": [
+        {
+          "time": "2026-01-01T11:50:00Z",
+          "temperature_c": 24.5,
+          "humidity": 42.3,
+          "co2": 721.0,
+          "pm1": 1.1,
+          "pm25": 2.8,
+          "pm4": 3.5,
+          "pm10": 5.2,
+          "voc_index": 88.0,
+          "nox_index": 12.0
+        }
+      ]
     }
   ]
 }
@@ -127,6 +171,10 @@ Environment history pivots each raw `battery_mv` together with the
 same-timestamp `status_flags` and applies a bitwise `BIT2` test before
 downsampling. Battery points with missing status or a clear valid bit are
 omitted from `/api/readings`; temperature and humidity history is unaffected.
+Air-quality history applies the same range/window to all nine SEN66 fields with
+`aggregateWindow(..., fn: mean, createEmpty: false)`. A historical point
+contains only fields present in that window, so legacy and partially populated
+data remain valid JSON and render as gaps rather than invented zeroes.
 
 ### `GET /api/nodes`
 

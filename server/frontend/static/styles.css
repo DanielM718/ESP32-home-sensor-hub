@@ -214,6 +214,10 @@ select {
   padding: 14px;
 }
 
+.reading-card-air {
+  grid-column: 1 / -1;
+}
+
 .reading-card.battery-low {
   border-color: #f79009;
 }
@@ -226,6 +230,29 @@ select {
 .reading-card h3 {
   margin: 0 0 10px;
   font-size: 1rem;
+}
+
+.air-reading-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-bottom: 10px;
+}
+
+.air-metric-group {
+  min-width: 0;
+  padding: 10px;
+  background: #f8faf9;
+  border: 1px solid #e8eeea;
+  border-radius: 7px;
+}
+
+.air-metric-group h4 {
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .reading-values {
@@ -415,6 +442,10 @@ tbody tr:last-child td {
 }
 
 @media (max-width: 900px) {
+  .air-reading-groups {
+    grid-template-columns: 1fr;
+  }
+
   .chart-grid {
     grid-template-columns: 1fr;
   }

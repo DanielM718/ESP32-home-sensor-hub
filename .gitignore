@@ -29,6 +29,13 @@ logs/
 .env.*
 !.env.example
 !**/.env.example
+**/configuration/secrets.yaml
+**/.storage/
+**/home-assistant_v2.db*
+**/home-assistant.log*
+**/home-assistant.log.fault
+**/tts/
+home-assistant/discovery-data/
 **/main/wifi_cred.h
 **/main/app_config.h
 !**/main/wifi_cred.example.h

@@ -153,3 +153,116 @@ http://<raspberry-pi-ip>:8080
 
 Remote access must use Tailscale. Do not forward ports from the public internet
 to Mosquitto, InfluxDB, Grafana, or Flask.
+
+## Redeploy The SEN66 Dashboard Update
+
+The active native deployment is `/opt/home-sensor/server`. The repository's
+`install.sh` is the authoritative deployment method: it copies the `server/`
+tree into that path while preserving `backend/.env` and `backend/.venv`, updates
+the virtual environment from `requirements.txt`, and installs the two Python
+systemd units. The unit files confirm these service names and runtime split:
+
+- `home-sensor-bridge.service`: MQTT subscriptions and InfluxDB writes
+- `home-sensor-dashboard.service`: Gunicorn, Flask API, and static dashboard
+- `mosquitto.service`, `influxdb.service`, and `grafana-server.service`: separate
+  platform services not changed by this update
+
+From the repository root on the development machine, copy the current server
+tree to the Pi:
+
+```bash
+ssh pi@sensor-pi.local 'mkdir -p /tmp/home-sensor-server-update'
+rsync -a \
+  --exclude 'backend/.env' \
+  --exclude 'backend/.venv' \
+  server/ pi@sensor-pi.local:/tmp/home-sensor-server-update/
+```
+
+Then install from the copy on the Pi. `--no-frontend-assets` keeps the existing
+Chart.js bundle because this update does not change that vendor dependency:
+
+```bash
+ssh pi@sensor-pi.local
+cd /tmp/home-sensor-server-update
+sudo ./install.sh \
+  --project-root /opt/home-sensor/server \
+  --no-frontend-assets
+```
+
+No Python dependency version changed, but the installer still runs the exact
+project-supported dependency update through
+`/opt/home-sensor/server/scripts/bootstrap_python.sh`. If files were instead
+updated directly inside the active path, run that step explicitly:
+
+```bash
+sudo /opt/home-sensor/server/scripts/bootstrap_python.sh
+```
+
+Only the dashboard service needs a restart for this patch; the current bridge
+already subscribes to and stores all SEN66 fields:
+
+```bash
+sudo systemctl restart home-sensor-dashboard.service
+sudo systemctl status home-sensor-dashboard.service --no-pager
+sudo systemctl status home-sensor-bridge.service --no-pager
+```
+
+Do not restart Mosquitto, InfluxDB, or Grafana. Follow the affected service log
+and inspect the bridge log while running the MQTT test:
+
+```bash
+sudo journalctl -u home-sensor-dashboard.service -f
+sudo journalctl -u home-sensor-bridge.service -f
+```
+
+In a separate terminal, watch the broker and run the full synthetic test:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 \
+  -u home_sensor_bridge -P '<bridge-password>' \
+  -t 'home/air/#' -v
+
+MQTT_PUBLISH_PASSWORD='<gateway-password>' \
+  /opt/home-sensor/server/scripts/verify_sen66.sh
+```
+
+Confirm the API response directly:
+
+```bash
+curl --silent --show-error http://127.0.0.1:8080/api/latest \
+  | python3 -m json.tool
+curl --silent --show-error \
+  'http://127.0.0.1:8080/api/readings?range=1h&sensor_type=air_quality&location=sen66_test' \
+  | python3 -m json.tool
+/opt/home-sensor/server/scripts/verify_api.sh
+```
+
+Open the dashboard over the LAN at `http://sensor-pi.local:8080` or
+`http://<raspberry-pi-ip>:8080`.
+
+### Rollback
+
+The default installer copies files into `/opt/home-sensor/server`, so rollback
+the source Git checkout and deploy it again rather than running Git commands in
+the active deployment directory. From the source checkout, inspect the recent
+history and create a revert commit for the bad deployment:
+
+```bash
+cd /path/to/sensor_home
+git status
+git log --oneline -5
+git revert --no-edit <bad-commit>
+```
+
+Copy and install the reverted `server/` tree with the same commands above,
+then restart only the dashboard service:
+
+```bash
+sudo systemctl restart home-sensor-dashboard.service
+sudo systemctl status home-sensor-dashboard.service --no-pager
+sudo journalctl -u home-sensor-dashboard.service --since '10 minutes ago' --no-pager
+```
+
+If a later deployment also changes `server/backend/bridge/`, restart
+`home-sensor-bridge.service` after both deployment and rollback. That is not
+necessary for this dashboard-only code change.

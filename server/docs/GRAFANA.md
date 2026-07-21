@@ -15,7 +15,7 @@ Milestone 8 adds provisioning files for:
 - InfluxDB datasource
 - environmental sensor dashboard
 - battery/status panels
-- air-quality dashboard panels for future stations
+- air-quality dashboard panels
 
 Generated files:
 
@@ -82,7 +82,7 @@ The generated dashboard is titled `Home Sensor Environment` and includes:
 - temperature by node
 - humidity by node
 - battery voltage by node
-- air-quality overview for future stations
+- air-quality overview for direct-MQTT stations
 - latest battery voltage stat panel
 - latest node status table
 

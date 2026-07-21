@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import unittest
 
 from app.models import AirQualityReading, SensorReading
@@ -11,6 +12,9 @@ from app.battery_status import (
 )
 from app.validation import ValidationError
 from bridge.topic_router import reading_from_mqtt_message
+
+
+SEN66_FIXTURE = Path(__file__).resolve().parents[2] / "examples" / "sen66-full.json"
 
 
 def payload(data: dict[str, object]) -> bytes:
@@ -142,28 +146,49 @@ class TopicRouterTest(unittest.TestCase):
             )
 
     def test_air_quality_message_is_validated(self) -> None:
+        firmware_payload = json.loads(SEN66_FIXTURE.read_text(encoding="utf-8"))
         reading = reading_from_mqtt_message(
-            "home/air/printer_room",
-            payload(
-                {
-                    "co2": 721,
-                    "pm1": 1.1,
-                    "pm25": 2.8,
-                    "pm4": 3.5,
-                    "pm10": 5.2,
-                    "voc_index": 88,
-                    "nox_index": 12,
-                    "temperature_c": 24.5,
-                    "humidity": 42.3,
-                }
-            ),
+            "home/air/sen66_test",
+            payload(firmware_payload),
             max_payload_bytes=4096,
         )
 
         self.assertIsInstance(reading, AirQualityReading)
         self.assertEqual(reading.measurement, "air_quality_reading")
-        self.assertEqual(reading.tags["location"], "printer_room")
-        self.assertEqual(reading.fields["co2"], 721)
+        self.assertEqual(reading.tags["location"], "sen66_test")
+        self.assertEqual(
+            reading.fields,
+            {
+                "co2": 612,
+                "pm1": 1.2,
+                "pm25": 2.4,
+                "pm4": 3.1,
+                "pm10": 4.8,
+                "voc_index": 87,
+                "nox_index": 2,
+                "temperature_c": 24.5,
+                "humidity": 42.1,
+            },
+        )
+
+    def test_air_quality_message_requires_complete_sen66_measurements(self) -> None:
+        incomplete_payload = {
+            "co2": 721,
+            "pm1": 1.1,
+            "pm25": 2.8,
+            "pm4": 3.5,
+            "pm10": 5.2,
+            "voc_index": 88,
+            "temperature_c": 24.5,
+            "humidity": 42.3,
+        }
+
+        with self.assertRaises(ValidationError):
+            reading_from_mqtt_message(
+                "home/air/printer_room",
+                payload(incomplete_payload),
+                max_payload_bytes=4096,
+            )
 
     def test_air_quality_location_must_be_slug(self) -> None:
         with self.assertRaises(ValidationError):

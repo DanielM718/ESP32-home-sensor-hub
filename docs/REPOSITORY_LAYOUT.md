@@ -9,6 +9,7 @@ sensor_home/
 │   ├── ESP32C3_SHT41_node/
 │   └── ESP32C3_SEN66_air_quality/
 ├── server/
+├── home-assistant/
 ├── docs/
 ├── .editorconfig
 ├── .gitignore
@@ -67,6 +68,17 @@ Do not commit:
 - Python virtual environments
 - Python caches
 - Local runtime logs
+
+## Home Assistant
+
+The `home-assistant/` directory contains repository-managed templates for an
+independent Compose deployment. The Raspberry Pi installer copies these to
+`/opt/home-assistant`; persistent configuration and credentials remain there,
+outside `/opt/home-sensor/server`.
+
+Commit Compose/configuration templates, discovery source/tests, operations
+scripts, examples, and documentation. Do not commit `.env`, `secrets.yaml`,
+`.storage`, Home Assistant databases/logs, or `discovery-data/`.
 
 ## VS Code
 

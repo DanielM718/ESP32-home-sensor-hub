@@ -20,22 +20,20 @@ This repository directory owns only the Raspberry Pi backend:
 - Tailscale access documentation
 - native Raspberry Pi deployment scripts
 
-The ESP32 sensor node and master gateway firmware are external to this backend.
-This backend subscribes to MQTT messages already published by the gateway and
-does not implement ESP-NOW, publish sensor data, or modify gateway protocol.
+The ESP32 sensor-node and master-gateway firmware are external to this backend.
+This backend subscribes to MQTT messages published by the gateway and by direct
+Wi-Fi/MQTT stations. It does not implement ESP-NOW, publish sensor data, or
+modify gateway protocol.
 
 ## Target Architecture
 
 ```text
-Battery ESP32-C3 nodes
-        |
-      ESP-NOW
-        |
-Master ESP32 gateway
-        |
- Wi-Fi + MQTT publish
-        |
-Raspberry Pi 4
+Battery ESP32-C3 nodes -- ESP-NOW --> Master ESP32 gateway --+
+                                                              |
+USB-powered SEN66 -------- direct Wi-Fi + MQTT ---------------+
+                                                              |
+                                                              v
+                                                        Raspberry Pi 4
         |
  Mosquitto MQTT broker
         |
@@ -77,7 +75,7 @@ bridge stores it without masking. Battery bits are `BIT2` measurement valid,
 payloads without `status_flags` remain accepted, but their battery status and
 voltage are treated as unavailable.
 
-Future air-quality updates are expected at:
+Direct-MQTT air-quality updates are expected at:
 
 ```text
 home/air/<location>
@@ -99,10 +97,15 @@ Example payload:
 }
 ```
 
-The bridge will validate incoming JSON before writing to InfluxDB. Invalid
+The bridge validates incoming JSON before writing to InfluxDB. Invalid
 messages are logged and ignored.
 
-## Planned REST API
+The bridge, InfluxDB query layer, Flask API, and web dashboard support the full
+SEN66 set: temperature, relative humidity, CO2, PM1.0, PM2.5, PM4.0, PM10, VOC
+Index, and NOx Index. The dashboard groups these into climate, gas/index, and
+particulate sections and treats missing historical fields as unavailable.
+
+## REST API
 
 The Flask service reads historical and latest data from InfluxDB only. It does
 not read directly from MQTT.
@@ -111,7 +114,7 @@ not read directly from MQTT.
 - `GET /api/readings`
 - `GET /api/nodes`
 
-The frontend will be served at:
+The frontend is served at:
 
 ```text
 http://sensor-pi.local:8080

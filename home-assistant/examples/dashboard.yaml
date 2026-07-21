@@ -1,0 +1,67 @@
+# Import this as a dashboard only after replacing example entity IDs with the
+# IDs shown in Settings > Devices & services > MQTT and TP-Link Smart Home.
+title: Home Sensor Operations
+views:
+  - title: Current state
+    path: current-state
+    icon: mdi:home-thermometer
+    cards:
+      - type: entities
+        title: SHT41 node 1
+        entities:
+          - entity: binary_sensor.sht41_node_1_online
+          - entity: sensor.sht41_node_1_last_packet
+          - entity: sensor.sht41_node_1_temperature
+          - entity: sensor.sht41_node_1_humidity
+          - entity: sensor.sht41_node_1_battery_voltage
+          - entity: binary_sensor.sht41_node_1_battery_low
+          - entity: sensor.sht41_node_1_status_flags
+      - type: entities
+        title: SEN66 office
+        entities:
+          - entity: binary_sensor.sen66_office_online
+          - entity: sensor.sen66_office_last_packet
+          - entity: sensor.sen66_office_temperature
+          - entity: sensor.sen66_office_humidity
+          - entity: sensor.sen66_office_carbon_dioxide
+          - entity: sensor.sen66_office_pm1
+          - entity: sensor.sen66_office_pm2_5
+          - entity: sensor.sen66_office_pm4
+          - entity: sensor.sen66_office_pm10
+          - entity: sensor.sen66_office_voc_index
+          - entity: sensor.sen66_office_nox_index
+          - entity: binary_sensor.sen66_office_device_status_warning
+      - type: entities
+        title: Tapo controls and energy
+        entities:
+          - entity: switch.printer_room_dehumidifier
+          - entity: sensor.printer_room_dehumidifier_current_power
+          - entity: sensor.printer_room_dehumidifier_today_energy
+          - entity: switch.printer_ventilation
+          - entity: sensor.printer_ventilation_current_power
+          - entity: switch.filament_dryer
+          - entity: sensor.filament_dryer_current_power
+      - type: entities
+        title: Automation controls
+        entities:
+          - entity: input_select.dehumidifier_control_mode
+          - entity: input_boolean.dehumidifier_manual_power
+          - entity: input_number.dehumidifier_humidity_on
+          - entity: input_number.dehumidifier_humidity_off
+          - entity: input_number.dehumidifier_max_runtime
+          - entity: input_select.ventilation_control_mode
+          - entity: input_boolean.ventilation_manual_power
+          - entity: input_select.filament_dryer_control_mode
+          - entity: input_boolean.filament_dryer_manual_power
+          - entity: input_datetime.filament_dryer_start_time
+          - entity: input_boolean.filament_dryer_ran_today
+      - type: logbook
+        title: Recent control activity
+        hours_to_show: 24
+        entities:
+          - switch.printer_room_dehumidifier
+          - switch.printer_ventilation
+          - switch.filament_dryer
+          - automation.example_humidity_dehumidifier_on
+          - automation.example_air_quality_ventilation_on
+          - automation.example_daily_conditional_filament_dryer

@@ -23,7 +23,7 @@
         <label class="filter-control">
           <span>Charts</span>
           <select id="node-filter">
-            <option value="all">All environment nodes</option>
+            <option value="all">All sensors</option>
           </select>
         </label>
         <div class="segmented-control" role="group" aria-label="History range">
@@ -47,7 +47,7 @@
         <article class="chart-panel">
           <div class="section-heading">
             <h2>Temperature</h2>
-            <span class="unit">deg C</span>
+            <span class="unit">&deg;C</span>
           </div>
           <div class="chart-frame">
             <canvas id="temperature-chart"></canvas>
@@ -74,13 +74,23 @@
           </div>
         </article>
 
-        <article id="air-chart-panel" class="chart-panel">
+        <article id="gas-chart-panel" class="chart-panel">
           <div class="section-heading">
-            <h2>Air Quality</h2>
-            <span class="unit">CO2 / PM2.5</span>
+            <h2>SEN66 Gas and Indices</h2>
+            <span class="unit">ppm / index</span>
           </div>
           <div class="chart-frame">
-            <canvas id="air-chart"></canvas>
+            <canvas id="gas-chart"></canvas>
+          </div>
+        </article>
+
+        <article id="particulate-chart-panel" class="chart-panel">
+          <div class="section-heading">
+            <h2>SEN66 Particulate Matter</h2>
+            <span class="unit">&micro;g/m&sup3;</span>
+          </div>
+          <div class="chart-frame">
+            <canvas id="particulate-chart"></canvas>
           </div>
         </article>
       </section>

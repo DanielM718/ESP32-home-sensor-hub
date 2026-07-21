@@ -53,6 +53,12 @@ Flash with the serial port for the connected board:
 idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
+On macOS, enumerate current ports with `ls /dev/cu.* /dev/tty.*`; XIAO ESP32-C3
+boards commonly appear as `/dev/tty.usbmodem*`. If the ESP-IDF VS Code extension
+reports an undefined `path`, first run `ESP-IDF: Select Current ESP-IDF Version`,
+then `ESP-IDF: Set Espressif Device Target`, and finally `ESP-IDF: Select Port to
+Use`. An explicit `idf.py -p <port>` command bypasses editor serial metadata.
+
 Generated ESP-IDF files stay local and are ignored by Git.
 
 ## Backend Development

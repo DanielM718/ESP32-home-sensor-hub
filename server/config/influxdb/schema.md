@@ -47,7 +47,7 @@ InfluxDB fields are additive and optional per point.
 
 ### `air_quality_reading`
 
-Used for future room-level air-quality stations.
+Used for direct-MQTT room-level air-quality stations such as the SEN66 node.
 
 Tags:
 

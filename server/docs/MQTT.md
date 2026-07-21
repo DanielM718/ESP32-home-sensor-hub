@@ -1,8 +1,8 @@
 # MQTT Contract
 
 Mosquitto runs on the Raspberry Pi and receives messages from the master ESP32
-gateway. The Python bridge subscribes to broker topics and writes validated
-messages to InfluxDB.
+gateway and direct-MQTT stations such as the SEN66 node. The Python bridge
+subscribes to broker topics and writes validated messages to InfluxDB.
 
 Official references:
 
@@ -19,13 +19,13 @@ Temperature and humidity nodes:
 home/sensors/<node_id>
 ```
 
-Future air-quality stations:
+Air-quality stations:
 
 ```text
 home/air/<location>
 ```
 
-The bridge will subscribe to:
+The bridge subscribes to:
 
 ```text
 home/sensors/+
@@ -74,6 +74,12 @@ unavailable rather than a measured zero-volt battery.
 
 ```json
 {
+  "packet_type": "sen66",
+  "schema_version": 1,
+  "firmware_version": "2.0.0",
+  "node_id": 100,
+  "sequence": 42,
+  "status_flags": 255,
   "co2": 721,
   "pm1": 1.1,
   "pm25": 2.8,
@@ -86,8 +92,30 @@ unavailable rather than a measured zero-volt battery.
 }
 ```
 
-The bridge will ignore unknown fields for storage compatibility and log malformed
-JSON, missing required fields, and out-of-range values.
+All nine fields shown above are required. CO2, VOC index, and NOx index must be
+integers. PM values, temperature, and humidity are JSON numbers. The bridge
+ignores unknown fields for storage compatibility and logs malformed JSON,
+missing required fields, and out-of-range values. It assigns Raspberry Pi
+receive time; stations do not include a trusted timestamp.
+
+The fields and units are:
+
+| MQTT / InfluxDB / API field | Reading | Unit |
+| --- | --- | --- |
+| `temperature_c` | Temperature | °C |
+| `humidity` | Relative humidity | % RH |
+| `co2` | Carbon dioxide | ppm |
+| `pm1` | PM1.0 | µg/m³ |
+| `pm25` | PM2.5 | µg/m³ |
+| `pm4` | PM4.0 | µg/m³ |
+| `pm10` | PM10 | µg/m³ |
+| `voc_index` | VOC Index | index |
+| `nox_index` | NOx Index | index |
+
+`packet_type`, `schema_version`, `firmware_version`, `node_id`, `sequence`, and
+`status_flags` are current SEN66 firmware metadata. The bridge accepts and
+ignores them. The measurement keys are `co2`, `pm1`, `pm25`, `pm4`, and `pm10`,
+not alternate spellings such as `co2_ppm`, `pm1_0`, `pm2_5`, or `pm4_0`.
 
 ## Broker Security
 
@@ -127,14 +155,29 @@ The password file is generated on the Pi and is not committed:
 
 ## Users And ACLs
 
-Two MQTT users are expected:
+Three MQTT users are expected:
 
 - `home_sensor_gateway`: write-only access to `home/sensors/+` and `home/air/+`
 - `home_sensor_bridge`: read-only access to `home/sensors/+` and `home/air/+`
+- `home_assistant`: read-only access to both sensor families and read/write
+  access to `homeassistant/#` for discovery, birth, and derived health topics
 
 The bridge username must match `MQTT_USERNAME` in `server/backend/.env`.
-The gateway username and password must be configured on the external ESP32
-gateway.
+The publishing username and password must be configured on the ESP32 gateway
+and on direct-MQTT stations.
+The Home Assistant password is stored only in `/opt/home-assistant/.env` and in
+Home Assistant's private configuration entry. It is not shared with firmware or
+the bridge.
+
+To add only the Home Assistant account to an existing password file without
+rotating gateway or bridge credentials:
+
+```bash
+sudo /opt/home-sensor/server/scripts/create_mqtt_users.sh --home-assistant-only
+```
+
+See `home-assistant/README.md` at the repository root for the isolated
+deployment, ACL installation, and discovery validation procedure.
 
 ## Raspberry Pi Setup
 
@@ -184,6 +227,30 @@ Publish a test sensor update as the gateway user:
 
 ```bash
 mosquitto_pub -h 127.0.0.1 -p 1883 -u home_sensor_gateway -P '<gateway-password>' -t 'home/sensors/1' -m '{"node_id":1,"sequence":1,"temperature_c":24.8,"humidity":41.6,"battery_mv":4058,"status_flags":4}'
+```
+
+Watch every SEN66 station topic in a separate terminal:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 \
+  -u home_sensor_bridge -P '<bridge-password>' \
+  -t 'home/air/#' -v
+```
+
+Publish a complete fake SEN66 reading using the exact firmware field names:
+
+```bash
+mosquitto_pub -h 127.0.0.1 -p 1883 \
+  -u home_sensor_gateway -P '<gateway-password>' \
+  -t 'home/air/sen66_test' -q 1 \
+  -m '{"packet_type":"sen66","schema_version":1,"firmware_version":"test","node_id":100,"sequence":1,"status_flags":0,"temperature_c":24.5,"humidity":42.1,"co2":612,"pm1":1.2,"pm25":2.4,"pm4":3.1,"pm10":4.8,"voc_index":87,"nox_index":2}'
+```
+
+For an automated MQTT → bridge → InfluxDB → API check, run:
+
+```bash
+MQTT_PUBLISH_PASSWORD='<gateway-password>' \
+  /opt/home-sensor/server/scripts/verify_sen66.sh
 ```
 
 Expected result: the subscriber receives the JSON payload. The bridge user should

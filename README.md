@@ -13,6 +13,7 @@ sensor_home/
 │   ├── ESP32C3_SHT41_node/           ESP32-C3 SHT41 temperature/humidity node
 │   └── ESP32C3_SEN66_air_quality/    ESP32-C3 SEN66 air quality node
 ├── server/                           Raspberry Pi backend and deployment scripts
+├── home-assistant/                   Isolated Home Assistant automation layer
 ├── docs/                             Repository-level development documentation
 ├── .editorconfig                     Shared editor formatting defaults
 ├── .gitignore                        Authoritative repository ignore rules
@@ -32,7 +33,8 @@ All ESP projects are ESP-IDF projects.
 - `esp/ESP32C3_SHT41_node`: battery-powered SHT41 temperature/humidity node
   with calibrated external-divider voltage measurement.
 - `esp/ESP32C3_SEN66_air_quality`: USB-powered SEN66 air-quality node using I2C
-  and ESP-NOW; it does not monitor battery voltage.
+  and direct Wi-Fi/MQTT publishing; it does not use ESP-NOW or monitor battery
+  voltage.
 
 Use ESP-IDF v6.0.1 unless a project README says otherwise.
 
@@ -86,6 +88,14 @@ The backend lives in `server/` and includes:
 
 See [server/README.md](server/README.md) and the detailed documentation in
 [server/docs](server/docs).
+
+## Home Assistant
+
+The optional [Home Assistant automation layer](home-assistant/README.md) is a
+separate Docker Compose deployment under `/opt/home-assistant`. It consumes the
+existing Mosquitto topics for current-state dashboards and automations and uses
+Home Assistant's official TP-Link integration for Tapo P115 plugs. It does not
+replace or modify the bridge, InfluxDB, Grafana, or Flask dashboard runtime.
 
 ## Raspberry Pi Deployment
 

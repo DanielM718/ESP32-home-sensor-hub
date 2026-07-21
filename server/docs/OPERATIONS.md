@@ -50,6 +50,31 @@ Expected result: the bridge logs a successful write at debug level, or no warnin
 at info level. The data should appear in the InfluxDB `environment` bucket as an
 `environment_reading`.
 
+For the full SEN66 path, first watch the air topics:
+
+```bash
+mosquitto_sub -h 127.0.0.1 -p 1883 \
+  -u home_sensor_bridge -P '<bridge-password>' \
+  -t 'home/air/#' -v
+```
+
+Then use the checked-in full payload and wait for all nine fields to reach the
+API:
+
+```bash
+MQTT_PUBLISH_PASSWORD='<gateway-password>' \
+  /opt/home-sensor/server/scripts/verify_sen66.sh
+```
+
+The script publishes to `home/air/sen66_test` by default. It verifies
+temperature, humidity, CO2, all four PM sizes, VOC Index, and NOx Index. Check
+both Python services if it fails:
+
+```bash
+sudo journalctl -u home-sensor-bridge.service --since '10 minutes ago' --no-pager
+sudo journalctl -u home-sensor-dashboard.service --since '10 minutes ago' --no-pager
+```
+
 The base verification script is:
 
 ```bash

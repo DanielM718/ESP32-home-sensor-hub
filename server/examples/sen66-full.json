@@ -1,0 +1,17 @@
+{
+  "packet_type": "sen66",
+  "schema_version": 1,
+  "firmware_version": "test",
+  "node_id": 100,
+  "sequence": 1,
+  "status_flags": 0,
+  "co2": 612,
+  "pm1": 1.2,
+  "pm25": 2.4,
+  "pm4": 3.1,
+  "pm10": 4.8,
+  "voc_index": 87,
+  "nox_index": 2,
+  "temperature_c": 24.5,
+  "humidity": 42.1
+}

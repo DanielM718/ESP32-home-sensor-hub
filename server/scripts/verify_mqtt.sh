@@ -11,6 +11,8 @@ MOSQUITTO_ACL_TARGET="${MOSQUITTO_ACL_TARGET:-/etc/mosquitto/acl.d/home-sensor.a
 MOSQUITTO_PASSWORD_FILE="${MOSQUITTO_PASSWORD_FILE:-/etc/mosquitto/passwd}"
 GATEWAY_USER="${MQTT_GATEWAY_USERNAME:-home_sensor_gateway}"
 BRIDGE_USER="${MQTT_USERNAME:-home_sensor_bridge}"
+HOME_ASSISTANT_USER="${HOME_ASSISTANT_MQTT_USERNAME:-home_assistant}"
+VERIFY_HOME_ASSISTANT_MQTT="${VERIFY_HOME_ASSISTANT_MQTT:-0}"
 FAILED=0
 
 check() {
@@ -60,6 +62,9 @@ check "Mosquitto password file exists" file_exists "${MOSQUITTO_PASSWORD_FILE}"
 check "Mosquitto password file has restricted permissions" password_file_restricted
 check "ACL contains gateway user (${GATEWAY_USER})" acl_has_user "${GATEWAY_USER}"
 check "ACL contains bridge user (${BRIDGE_USER})" acl_has_user "${BRIDGE_USER}"
+if [[ "${VERIFY_HOME_ASSISTANT_MQTT}" == "1" ]]; then
+  check "ACL contains Home Assistant user (${HOME_ASSISTANT_USER})" acl_has_user "${HOME_ASSISTANT_USER}"
+fi
 
 if command -v systemctl >/dev/null 2>&1; then
   check "mosquitto service is known to systemd" mosquitto_service_known

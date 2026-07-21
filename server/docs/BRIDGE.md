@@ -73,6 +73,12 @@ Required air-quality fields:
 - `temperature_c`
 - `humidity`
 
+These names match the SEN66 firmware payload exactly. The bridge intentionally
+does not accept alternate spellings such as `co2_ppm`, `pm1_0`, `pm2_5`, or
+`pm4_0`, because silently supporting two schemas would make field-name mistakes
+harder to detect. CO2, VOC Index, and NOx Index are integers. PM values are
+`µg/m³`, temperature is `°C`, and humidity is `% RH`.
+
 ## InfluxDB Writes
 
 The bridge writes:
@@ -82,6 +88,24 @@ The bridge writes:
 
 Each reading uses the Pi receive time as the InfluxDB timestamp because the MQTT
 payload contract does not include a trusted sensor timestamp.
+
+`AirQualityReading.fields` writes all nine values into one
+`air_quality_reading` point. The existing `SensorReading` path and
+`home/sensors/+` subscription are independent and unchanged.
+
+## Full SEN66 Round-Trip Test
+
+The repository includes `examples/sen66-full.json` and a verification script
+that publishes it, then polls the Flask API until all nine values appear:
+
+```bash
+MQTT_PUBLISH_PASSWORD='<gateway-password>' \
+  /opt/home-sensor/server/scripts/verify_sen66.sh
+```
+
+The default synthetic topic is `home/air/sen66_test`. Override it with
+`SEN66_TEST_LOCATION=<slug>`. A failure directs you to the bridge and dashboard
+logs; it does not fall back to the physical sensor path.
 
 ## Delivery Behavior
 

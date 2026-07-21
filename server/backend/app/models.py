@@ -52,7 +52,7 @@ class SensorReading:
 
 @dataclass(frozen=True)
 class AirQualityReading:
-    """Room-level air-quality reading for future stations."""
+    """Validated room-level air-quality reading."""
 
     topic: str
     location: str
