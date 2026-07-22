@@ -37,8 +37,9 @@ Options:
   -h, --help               Show this help
 
 Set INFLUXDB_ADMIN_PASSWORD and INFLUXDB_ADMIN_TOKEN in the shell to avoid
-interactive prompts. The admin token is used during setup only and is not stored
-in backend/.env.
+interactive prompts. For an initialized instance, the token must have
+organization all-access or operator permissions. It is used during setup only
+and is not stored in backend/.env.
 USAGE
 }
 
@@ -115,6 +116,16 @@ PY
 }
 
 ensure_admin_credentials() {
+  if influxdb_is_setup; then
+    if [[ -z "${INFLUXDB_ADMIN_TOKEN}" ]]; then
+      die "InfluxDB is already initialized; set INFLUXDB_ADMIN_TOKEN to an existing organization all-access or operator token"
+    fi
+    if ! admin_token_works; then
+      die "InfluxDB is already initialized, but INFLUXDB_ADMIN_TOKEN cannot list buckets in organization ${INFLUXDB_ORG}; supply an organization all-access or operator token"
+    fi
+    return
+  fi
+
   if [[ -z "${INFLUXDB_ADMIN_PASSWORD}" ]]; then
     INFLUXDB_ADMIN_PASSWORD="$(prompt_secret "InfluxDB admin password: ")"
   fi
@@ -130,6 +141,19 @@ ensure_admin_credentials() {
 
 influx_cli_ready() {
   influx ping --host "${INFLUXDB_URL}" >/dev/null 2>&1
+}
+
+influxdb_is_setup() {
+  python3 - "${INFLUXDB_URL}" <<'PY'
+import json
+import sys
+from urllib.request import urlopen
+
+url = sys.argv[1].rstrip("/") + "/api/v2/setup"
+with urlopen(url, timeout=5) as response:
+    payload = json.load(response)
+raise SystemExit(0 if payload.get("allowed") is False else 1)
+PY
 }
 
 admin_token_works() {
@@ -260,8 +284,6 @@ PY
   chmod 0640 "${ENV_FILE}"
 }
 
-ensure_admin_credentials
-
 log "Waiting for InfluxDB at ${INFLUXDB_URL}"
 for _ in $(seq 1 30); do
   if influx_cli_ready; then
@@ -271,6 +293,7 @@ for _ in $(seq 1 30); do
 done
 influx_cli_ready || die "InfluxDB did not respond to influx ping"
 
+ensure_admin_credentials
 setup_influxdb_if_needed
 
 admin_token_works || die "InfluxDB admin token could not list buckets after setup"

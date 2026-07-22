@@ -149,6 +149,8 @@ class InfluxWriter:
   |> range(start: 0)
   |> filter(fn: (r) => r._measurement == "air_quality_event")
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+  |> group(columns: ["location", "event_type"])
+  |> last(column: "_time")
   |> filter(fn: (r) => exists r.state and r.state == "active")
   |> sort(columns: ["_time"])
 '''

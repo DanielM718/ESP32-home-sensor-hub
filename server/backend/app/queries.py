@@ -431,7 +431,11 @@ def events_flux(bucket: str, query: ReadingsQuery) -> str:
         lines.append(f"  |> filter(fn: (r) => r.location == {_flux_string(query.location)})")
     lines.extend(
         [
-            '  |> group(columns: ["location", "topic", "event_type", "metric", "_time"])',
+            # Event fields intentionally mix strings (for example, state) and
+            # numbers (for example, peak). Keep each field in a separate Flux
+            # table so operators such as sort never receive conflicting
+            # _value column types.
+            '  |> group(columns: ["location", "topic", "event_type", "metric", "_field", "_time"])',
             "  |> sort(columns: [\"_time\"])",
         ]
     )
@@ -466,7 +470,10 @@ aggregates = from(bucket: {_flux_string(bucket)})
 activeEventStates = from(bucket: {_flux_string(bucket)})
   |> range(start: 0)
   |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_EVENT_MEASUREMENT)})
-  |> filter(fn: (r) => r._field == "state" and r._value == "active")
+  |> filter(fn: (r) => r._field == "state")
+  |> group(columns: ["location", "event_type"])
+  |> last()
+  |> filter(fn: (r) => r._value == "active")
 
 union(tables: [live, aggregates, activeEventStates])
   |> sort(columns: ["_time"])
@@ -551,6 +558,14 @@ def air_quality_context_response(
             expected_publish_seconds=expected_publish_seconds,
             minimum_coverage_percent=float(minimum_coverage_percent),
         )
+        latest_event_states: dict[str, dict[str, Any]] = {}
+        for point in sorted(
+            events.get(location, {}).values(), key=lambda row: row["time"]
+        ):
+            event_type = str(point.get("event_type") or "")
+            if event_type:
+                latest_event_states[event_type] = point
+
         result[location] = {
             "location": location,
             "topic": topics.get(location),
@@ -559,9 +574,7 @@ def air_quality_context_response(
             "rolling_24h": rolling,
             "active_events": [
                 point
-                for point in sorted(
-                    events.get(location, {}).values(), key=lambda row: row["time"]
-                )
+                for point in latest_event_states.values()
                 if point.get("state") == "active"
             ],
         }
@@ -772,7 +785,20 @@ def _events_response(records: Iterable[RecordLike]) -> list[dict[str, Any]]:
             },
         )
         item[_field(record)] = _json_value(_value(record))
-    return sorted(events.values(), key=lambda item: str(item.get("time")))
+    completed: list[dict[str, Any]] = []
+    latest_active: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in sorted(events.values(), key=lambda row: str(row.get("time"))):
+        if item.get("state") == "active":
+            # The detector invariant permits only one active episode for a
+            # location/event type. Retain the newest snapshot if an earlier
+            # restart left orphaned active records behind.
+            latest_active[(str(item["location"]), str(item["event_type"]))] = item
+        else:
+            completed.append(item)
+    return sorted(
+        completed + list(latest_active.values()),
+        key=lambda item: str(item.get("time")),
+    )
 
 
 def nodes_response(

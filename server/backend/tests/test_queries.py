@@ -13,6 +13,7 @@ from app.queries import (
     AIR_QUALITY_FIELDS,
     QueryValidationError,
     air_quality_context_response,
+    events_flux,
     latest_flux,
     latest_with_node_status,
     latest_response,
@@ -94,7 +95,23 @@ class QueryHelpersTest(unittest.TestCase):
 
         self.assertIn("activeEventStates", flux)
         self.assertIn("|> range(start: 0)", flux)
-        self.assertIn('r._field == "state" and r._value == "active"', flux)
+        latest_state = flux.index("|> last()")
+        active_filter = flux.index('r._value == "active"')
+        self.assertLess(latest_state, active_filter)
+        self.assertIn('group(columns: ["location", "event_type"])', flux)
+
+    def test_event_history_separates_mixed_value_types_by_field(self) -> None:
+        query = readings_query_from_params(
+            {"range": "24h", "sensor_type": "air_quality"}
+        )
+
+        flux = events_flux("environment", query)
+
+        self.assertIn(
+            'group(columns: ["location", "topic", "event_type", "metric", "_field", "_time"])',
+            flux,
+        )
+        self.assertIn('|> sort(columns: ["_time"])', flux)
 
     def test_environment_history_requires_matching_battery_ok_flag(self) -> None:
         query = readings_query_from_params(
@@ -274,6 +291,47 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(point["pm25"], 2.8)
         self.assertNotIn("pm1", point)
         self.assertNotIn("voc_index", point)
+
+    def test_history_keeps_only_newest_orphaned_active_event(self) -> None:
+        now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)
+        values = {
+            "location": "office",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+            "event_type": "pm25_current_level",
+            "metric": "pm25",
+        }
+        event_records = []
+        for offset in (0, 15):
+            event_records.extend(
+                (
+                    FakeRecord(
+                        "air_quality_event",
+                        "state",
+                        "active",
+                        now + timedelta(seconds=offset),
+                        values,
+                    ),
+                    FakeRecord(
+                        "air_quality_event",
+                        "trigger_value",
+                        180.0,
+                        now + timedelta(seconds=offset),
+                        values,
+                    ),
+                )
+            )
+        query = readings_query_from_params(
+            {"range": "24h", "sensor_type": "air_quality"}
+        )
+
+        response = readings_response([], query, event_records=event_records)
+
+        self.assertEqual(len(response["events"]), 1)
+        self.assertEqual(
+            response["events"][0]["time"],
+            (now + timedelta(seconds=15)).isoformat().replace("+00:00", "Z"),
+        )
 
     def test_latest_response_decodes_battery_status_bits(self) -> None:
         cases = (
@@ -496,6 +554,47 @@ class QueryHelpersTest(unittest.TestCase):
             {event["event_type"] for event in active},
             {"voc_action_level", "voc_rapid_rise"},
         )
+
+    def test_context_keeps_only_latest_state_for_each_event_type(self) -> None:
+        now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)
+        base_values = {
+            "location": "office",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+            "event_type": "pm25_current_level",
+            "metric": "pm25",
+        }
+        records = [
+            FakeRecord(
+                "air_quality_event",
+                "state",
+                "active",
+                now,
+                base_values,
+            ),
+            FakeRecord(
+                "air_quality_event",
+                "state",
+                "active",
+                now + timedelta(seconds=15),
+                base_values,
+            ),
+            FakeRecord(
+                "air_quality_event",
+                "state",
+                "completed",
+                now + timedelta(seconds=30),
+                base_values,
+            ),
+        ]
+
+        response = air_quality_context_response(
+            records,
+            expected_publish_seconds=5,
+            minimum_coverage_percent=75,
+        )
+
+        self.assertEqual(response["locations"]["office"]["active_events"], [])
 
     def test_current_summary_excludes_all_fields_from_invalid_samples(self) -> None:
         now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)
