@@ -136,7 +136,7 @@ Response shape:
   "range": "24h",
   "window": "15m",
   "sensor_type": "all",
-  "data_tier": "15m_aggregate_with_legacy_fallback",
+  "data_tier": "15m_aggregate",
   "series": [
     {
       "id": "1",
@@ -183,7 +183,9 @@ downsampling. Battery points with missing status or a clear valid bit are
 omitted from `/api/readings`; temperature and humidity history is unaffected.
 For `range=1h`, air-quality history is downsampled to one-minute display points
 from the bounded live bucket and reports `data_tier=live_1m`. Longer ranges use
-stored UTC-aligned 15-minute statistics and union pre-migration raw history as a
+only stored UTC-aligned 15-minute statistics and report
+`data_tier=15m_aggregate`. Pre-migration raw history must be reconciled with the
+maintained backfill before this code is deployed; it is not queried as a runtime
 fallback. Mean and maximum fields remain distinct, while sparse event episodes
 are returned separately in `events`. A historical point contains only fields
 present in that window, so legacy and partially populated data remain valid JSON
@@ -193,6 +195,13 @@ and render as gaps rather than invented zeroes.
 
 Returns node/station status based on latest readings and
 `NODE_STALE_AFTER_SECONDS`.
+
+Latest discovery is bounded: SHT41 nodes remain discoverable for seven days
+(far longer than their normal 15-minute cadence and 30-minute stale threshold),
+while SEN66 stations remain discoverable for 30 minutes (90 times the configured
+20-second stale threshold and equal to the restart-recovery horizon). This keeps
+recently offline devices visibly stale without scanning the full 72-hour raw
+tier per poll.
 
 ```json
 {

@@ -13,6 +13,29 @@ from app.config import InfluxSettings
 from app.models import AirQualityReading, Reading
 
 
+AIR_QUALITY_STORAGE_FIELDS = (
+    "co2",
+    "pm1",
+    "pm25",
+    "pm4",
+    "pm10",
+    "voc_index",
+    "nox_index",
+    "temperature_c",
+    "humidity",
+    "sraw_voc",
+    "sraw_nox",
+    "sequence",
+    "status_flags",
+    "firmware_version",
+    "schema_version",
+    "boot_id",
+    "sensor_uptime_s",
+    "reset_reason",
+    "sample_valid",
+)
+
+
 class InfluxWriter:
     """Synchronous InfluxDB writer used by the MQTT bridge."""
 
@@ -90,13 +113,7 @@ class InfluxWriter:
     def recent_air_quality_readings(self, *, lookback_minutes: int) -> list[AirQualityReading]:
         """Read bounded live samples so an interrupted 15-minute window can resume."""
 
-        fields = (
-            "co2", "pm1", "pm25", "pm4", "pm10", "voc_index", "nox_index",
-            "temperature_c", "humidity", "sraw_voc", "sraw_nox", "node_id",
-            "sequence", "status_flags", "firmware_version", "schema_version",
-            "boot_id", "sensor_uptime_s", "reset_reason", "sample_valid",
-        )
-        field_list = json.dumps(list(fields))
+        field_list = json.dumps(list(AIR_QUALITY_STORAGE_FIELDS))
         flux = f'''from(bucket: {json.dumps(self._settings.live_bucket)})
   |> range(start: -{int(lookback_minutes)}m)
   |> filter(fn: (r) => r._measurement == "air_quality_reading")
@@ -108,38 +125,9 @@ class InfluxWriter:
         readings = []
         for table in tables:
             for record in table.records:
-                values = record.values
-                location = values.get("location")
-                topic = values.get("topic")
-                received_at = values.get("_time")
-                if not location or not topic or not isinstance(received_at, datetime):
-                    continue
-                readings.append(
-                    AirQualityReading(
-                        topic=str(topic),
-                        location=str(location),
-                        co2=_optional_int(values.get("co2")),
-                        pm1=_optional_float(values.get("pm1")),
-                        pm25=_optional_float(values.get("pm25")),
-                        pm4=_optional_float(values.get("pm4")),
-                        pm10=_optional_float(values.get("pm10")),
-                        voc_index=_optional_int(values.get("voc_index")),
-                        nox_index=_optional_int(values.get("nox_index")),
-                        temperature_c=_optional_float(values.get("temperature_c")),
-                        humidity=_optional_float(values.get("humidity")),
-                        received_at=_aware_utc(received_at),
-                        node_id=_optional_int(values.get("node_id") or values.get("node_id_1")),
-                        sequence=_optional_int(values.get("sequence")),
-                        status_flags=_optional_int(values.get("status_flags")),
-                        firmware_version=_optional_string(values.get("firmware_version")),
-                        schema_version=_optional_int(values.get("schema_version")),
-                        boot_id=_optional_int(values.get("boot_id")),
-                        sensor_uptime_s=_optional_int(values.get("sensor_uptime_s")),
-                        reset_reason=_optional_int(values.get("reset_reason")),
-                        sraw_voc=_optional_int(values.get("sraw_voc")),
-                        sraw_nox=_optional_int(values.get("sraw_nox")),
-                    )
-                )
+                reading = air_quality_reading_from_values(record.values)
+                if reading is not None:
+                    readings.append(reading)
         return sorted(readings, key=lambda row: row.received_at)
 
     def active_air_quality_events(self) -> list[dict[str, Any]]:
@@ -179,6 +167,40 @@ def reading_to_point(reading: Reading) -> Point:
     for key, value in reading.fields.items():
         point = point.field(key, value)
     return point.time(reading.received_at)
+
+
+def air_quality_reading_from_values(values: Any) -> AirQualityReading | None:
+    """Rehydrate one pivoted Influx row using the live recovery semantics."""
+
+    location = values.get("location")
+    topic = values.get("topic")
+    received_at = values.get("_time")
+    if not location or not topic or not isinstance(received_at, datetime):
+        return None
+    return AirQualityReading(
+        topic=str(topic),
+        location=str(location),
+        co2=_optional_int(values.get("co2")),
+        pm1=_optional_float(values.get("pm1")),
+        pm25=_optional_float(values.get("pm25")),
+        pm4=_optional_float(values.get("pm4")),
+        pm10=_optional_float(values.get("pm10")),
+        voc_index=_optional_int(values.get("voc_index")),
+        nox_index=_optional_int(values.get("nox_index")),
+        temperature_c=_optional_float(values.get("temperature_c")),
+        humidity=_optional_float(values.get("humidity")),
+        received_at=_aware_utc(received_at),
+        node_id=_optional_int(values.get("node_id") or values.get("node_id_1")),
+        sequence=_optional_int(values.get("sequence")),
+        status_flags=_optional_int(values.get("status_flags")),
+        firmware_version=_optional_string(values.get("firmware_version")),
+        schema_version=_optional_int(values.get("schema_version")),
+        boot_id=_optional_int(values.get("boot_id")),
+        sensor_uptime_s=_optional_int(values.get("sensor_uptime_s")),
+        reset_reason=_optional_int(values.get("reset_reason")),
+        sraw_voc=_optional_int(values.get("sraw_voc")),
+        sraw_nox=_optional_int(values.get("sraw_nox")),
+    )
 
 
 def _optional_int(value: Any) -> int | None:

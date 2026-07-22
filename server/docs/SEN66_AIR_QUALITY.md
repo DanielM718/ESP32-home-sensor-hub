@@ -60,7 +60,8 @@ The sensor, transport, live store, and long-term store now have separate jobs:
 6. Threshold crossings and rapid rises use a separate long-term
    `air_quality_event` measurement.
 7. One-hour graphs use bounded live data at 1-minute display windows. Longer
-   graphs use stored 15-minute aggregates and keep a legacy-raw fallback.
+   graphs use verified stored 15-minute aggregates; legacy raw data is backfilled
+   before deployment rather than scanned as a runtime fallback.
 
 This retains MQTT, InfluxDB OSS v2, Flask, Grafana, systemd, and the Raspberry Pi
 installer. Existing long-term points are not deleted or rewritten.
@@ -337,10 +338,17 @@ Sparse event markers are points and are not connected as if peaks persisted.
   existing environmental nodes, and all pre-migration SEN66 history
 
 The setup script creates the live bucket and new scoped tokens. It does not
-delete, truncate, move, or alter the retention of the existing bucket. Long-term
-queries union aggregate data with legacy raw `air_quality_reading`, so historical
-data remains readable. The migration boundary can contain one partly legacy
-window; coverage and partial metadata make that visible.
+delete or move existing measurements, and it refuses an unexpected retention
+policy unless the operator explicitly requests repair. The maintained
+`migrations.backfill_air_quality_15m` utility reconciles legacy raw history before
+long-range queries switch entirely to aggregates. The migration boundary can
+contain one partial-coverage window; coverage metadata makes that visible.
+
+After verified backfill, one-hour queries read only `environment_live` and
+longer queries read only `environment/air_quality_15m`. Legacy permanent raw
+data is ignored by the application and remains available for rollback until a
+separate, bounded cleanup is explicitly approved. See `docs/INFLUXDB.md` for the
+dry-run, write, verify, cleanup, and rollback commands.
 
 ## Data-volume Estimate per SEN66 Station
 

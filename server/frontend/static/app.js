@@ -717,7 +717,7 @@ function renderCharts(data) {
   const climateSeries = [...environmentSeries, ...airQualitySeries];
   const tier = data.data_tier === "live_1m"
     ? "Short range: 1-minute means from bounded high-resolution live samples"
-    : "Long range: persistent 15-minute aggregates (legacy raw history remains included)";
+    : "Long range: persistent 15-minute aggregates";
   document.getElementById("history-tier").textContent = tier;
 
   updateChart(state.charts.temperature, buildDatasets(climateSeries, "temperature_c", "Temp °C"));

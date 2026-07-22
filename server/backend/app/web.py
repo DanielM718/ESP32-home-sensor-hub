@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import logging
 from pathlib import Path
 from typing import Any
@@ -68,9 +69,16 @@ def register_routes(app: Flask) -> None:
     @app.get("/api/latest")
     def latest() -> Any:
         repository = _repository()
-        latest_payload = repository.latest()
         context_method = getattr(repository, "air_quality_context", None)
-        context = context_method() if callable(context_method) else {"locations": {}}
+        if callable(context_method):
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                latest_future = executor.submit(repository.latest)
+                context_future = executor.submit(context_method)
+                latest_payload = latest_future.result()
+                context = context_future.result()
+        else:
+            latest_payload = repository.latest()
+            context = {"locations": {}}
         latest_payload = latest_with_air_quality_context(
             latest_payload,
             context,

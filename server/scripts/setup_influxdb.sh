@@ -18,6 +18,7 @@ INFLUXDB_LIVE_RETENTION="${INFLUXDB_LIVE_RETENTION:-72h}"
 INFLUXDB_ADMIN_USERNAME="${INFLUXDB_ADMIN_USERNAME:-admin}"
 INFLUXDB_ADMIN_PASSWORD="${INFLUXDB_ADMIN_PASSWORD:-}"
 INFLUXDB_ADMIN_TOKEN="${INFLUXDB_ADMIN_TOKEN:-}"
+REPAIR_EXISTING_RETENTION="${REPAIR_EXISTING_RETENTION:-0}"
 
 usage() {
   cat <<USAGE
@@ -32,6 +33,8 @@ Options:
   --retention DURATION     Retention duration. Default: 0 (infinite)
   --live-bucket BUCKET     High-resolution SEN66 bucket. Default: environment_live
   --live-retention PERIOD  High-resolution retention. Default: 72h
+  --repair-existing-retention
+                           Update an existing bucket whose retention differs
   --admin-user USER        Initial admin username. Default: admin
   --env-file PATH          Backend environment file to update
   -h, --help               Show this help
@@ -74,6 +77,10 @@ while [[ $# -gt 0 ]]; do
       INFLUXDB_LIVE_RETENTION="${2:-}"
       [[ -n "${INFLUXDB_LIVE_RETENTION}" ]] || die "--live-retention requires a value"
       shift 2
+      ;;
+    --repair-existing-retention)
+      REPAIR_EXISTING_RETENTION=1
+      shift
       ;;
     --admin-user)
       INFLUXDB_ADMIN_USERNAME="${2:-}"
@@ -207,7 +214,27 @@ raise SystemExit("bucket not found")
 ensure_bucket() {
   local bucket_name="$1"
   local retention="$2"
-  if bucket_id "${bucket_name}" >/dev/null 2>&1; then
+  local existing_id
+  existing_id="$(bucket_id "${bucket_name}" 2>/dev/null || true)"
+  if [[ -n "${existing_id}" ]]; then
+    local actual_seconds
+    local expected_seconds
+    actual_seconds="$(bucket_retention_seconds "${bucket_name}")"
+    expected_seconds="$(duration_seconds "${retention}")"
+    if [[ "${actual_seconds}" == "${expected_seconds}" ]]; then
+      log "Bucket ${bucket_name} retention is already correct (${retention})"
+      return
+    fi
+    if [[ "${REPAIR_EXISTING_RETENTION}" != "1" ]]; then
+      die "Bucket ${bucket_name} retention is ${actual_seconds}s, expected ${retention} (${expected_seconds}s); rerun with --repair-existing-retention after backing up and reviewing the retention impact"
+    fi
+    warn "Updating bucket ${bucket_name} retention from ${actual_seconds}s to ${retention}"
+    influx bucket update \
+      --host "${INFLUXDB_URL}" \
+      --org "${INFLUXDB_ORG}" \
+      --token "${INFLUXDB_ADMIN_TOKEN}" \
+      --id "${existing_id}" \
+      --retention "${retention}" >/dev/null
     return
   fi
 
@@ -218,6 +245,51 @@ ensure_bucket() {
     --token "${INFLUXDB_ADMIN_TOKEN}" \
     --name "${bucket_name}" \
     --retention "${retention}" >/dev/null
+}
+
+bucket_retention_seconds() {
+  local bucket_name="$1"
+  influx bucket list \
+    --host "${INFLUXDB_URL}" \
+    --org "${INFLUXDB_ORG}" \
+    --token "${INFLUXDB_ADMIN_TOKEN}" \
+    --name "${bucket_name}" \
+    --json \
+    | python3 -c '
+import json
+import sys
+
+data = json.load(sys.stdin)
+if isinstance(data, dict):
+    data = data.get("buckets", [])
+bucket = data[0] if data else {}
+rules = bucket.get("retentionRules") or []
+print(int(rules[0].get("everySeconds", 0)) if rules else 0)
+'
+}
+
+duration_seconds() {
+  local duration="$1"
+  python3 - "${duration}" <<'PY'
+import re
+import sys
+
+value = sys.argv[1]
+if value == "0":
+    print(0)
+    raise SystemExit(0)
+units = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+position = 0
+total = 0
+for match in re.finditer(r"(\d+)([wdhms])", value):
+    if match.start() != position:
+        raise SystemExit(f"unsupported retention duration: {value}")
+    total += int(match.group(1)) * units[match.group(2)]
+    position = match.end()
+if position != len(value) or total <= 0:
+    raise SystemExit(f"unsupported retention duration: {value}")
+print(total)
+PY
 }
 
 create_scoped_token() {

@@ -43,6 +43,19 @@ class PipelineResult:
     event_points: tuple[PointData, ...] = ()
 
 
+@dataclass(frozen=True)
+class BatchAggregationResult:
+    """Completed-window output and accounting for replayed raw samples."""
+
+    aggregate_points: tuple[PointData, ...]
+    raw_sample_count: int
+    accepted_sample_count: int
+    valid_sample_count: int
+    invalid_sample_count: int
+    duplicate_sample_count: int
+    late_sample_count: int
+
+
 @dataclass
 class WindowAccumulator:
     location: str
@@ -413,6 +426,63 @@ class AirQualityPipeline:
         while len(order) > 4096:
             seen.discard(order.popleft())
         return False
+
+
+def aggregate_completed_windows(
+    readings: Iterable[AirQualityReading],
+    *,
+    completed_before: datetime,
+    expected_publish_seconds: int = 5,
+) -> BatchAggregationResult:
+    """Replay raw readings through the live pipeline without creating events.
+
+    The caller must choose a UTC-aligned ``completed_before`` boundary. Only
+    windows ending on or before that boundary are returned, which makes this
+    helper safe for historical backfill as well as regression comparisons.
+    """
+
+    normalized_boundary = completed_before
+    if normalized_boundary.tzinfo is None:
+        normalized_boundary = normalized_boundary.replace(tzinfo=timezone.utc)
+    normalized_boundary = normalized_boundary.astimezone(timezone.utc)
+    boundary = aligned_window_start(normalized_boundary)
+    if boundary != normalized_boundary:
+        raise ValueError("completed_before must be a UTC-aligned 15-minute boundary")
+
+    ordered = sorted(readings, key=lambda reading: reading.received_at)
+    pipeline = AirQualityPipeline(expected_publish_seconds=expected_publish_seconds)
+    points: list[PointData] = []
+    accepted = valid = invalid = duplicates = late = 0
+    for reading in ordered:
+        result = pipeline.process(reading, detect_events=False)
+        points.extend(result.aggregate_points)
+        if result.accepted:
+            accepted += 1
+            if reading.sample_valid:
+                valid += 1
+            else:
+                invalid += 1
+        elif result.duplicate:
+            duplicates += 1
+        elif result.late:
+            late += 1
+
+    points.extend(pipeline.flush_partial(boundary))
+    completed = tuple(
+        point
+        for point in points
+        if point.fields.get("is_partial") is False
+        and point.timestamp + timedelta(seconds=WINDOW_SECONDS) <= boundary
+    )
+    return BatchAggregationResult(
+        aggregate_points=completed,
+        raw_sample_count=len(ordered),
+        accepted_sample_count=accepted,
+        valid_sample_count=valid,
+        invalid_sample_count=invalid,
+        duplicate_sample_count=duplicates,
+        late_sample_count=late,
+    )
 
 
 def aligned_window_start(value: datetime) -> datetime:

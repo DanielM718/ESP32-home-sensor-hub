@@ -4,7 +4,11 @@ from datetime import datetime, timedelta, timezone
 import unittest
 
 from app.models import AirQualityReading
-from bridge.air_quality_pipeline import AirQualityPipeline, aligned_window_start
+from bridge.air_quality_pipeline import (
+    AirQualityPipeline,
+    aggregate_completed_windows,
+    aligned_window_start,
+)
 
 
 BASE = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
@@ -152,6 +156,40 @@ class AirQualityPipelineTest(unittest.TestCase):
         self.assertFalse(point.fields["is_partial"])
         self.assertEqual(point.fields["expected_sample_count"], 180)
         self.assertEqual(point.fields["valid_sample_count"], 1)
+
+    def test_shared_backfill_aggregation_matches_live_output(self) -> None:
+        samples = [reading(0), reading(5, voc_index=120), reading(10, pm25=None)]
+        live = AirQualityPipeline()
+        for sample in samples:
+            live.process(sample)
+        live_point = live.process(reading(900)).aggregate_points[0]
+
+        backfill = aggregate_completed_windows(
+            samples,
+            completed_before=BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(backfill.aggregate_points, (live_point,))
+        self.assertEqual(backfill.valid_sample_count, 2)
+        self.assertEqual(backfill.invalid_sample_count, 1)
+
+    def test_shared_backfill_excludes_incomplete_window(self) -> None:
+        result = aggregate_completed_windows(
+            [reading(905)],
+            completed_before=BASE + timedelta(minutes=15),
+        )
+
+        self.assertFalse(result.aggregate_points)
+
+    def test_shared_backfill_recovery_does_not_double_count_packet(self) -> None:
+        sample = reading(0, sequence=42, boot_id=99)
+        result = aggregate_completed_windows(
+            [sample, sample],
+            completed_before=BASE + timedelta(minutes=15),
+        )
+
+        self.assertEqual(result.aggregate_points[0].fields["sample_count"], 1)
+        self.assertEqual(result.duplicate_sample_count, 1)
 
     def test_threshold_event_has_single_trigger_peak_hysteresis_and_cooldown(self) -> None:
         pipeline = AirQualityPipeline()

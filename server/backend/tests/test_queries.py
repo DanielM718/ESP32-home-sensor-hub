@@ -12,6 +12,7 @@ from app.battery_status import (
 from app.queries import (
     AIR_QUALITY_FIELDS,
     QueryValidationError,
+    air_quality_context_flux,
     air_quality_context_response,
     events_flux,
     latest_flux,
@@ -88,9 +89,38 @@ class QueryHelpersTest(unittest.TestCase):
                 with self.subTest(field=field):
                     self.assertIn(f'"{field}"', flux)
 
-    def test_latest_context_finds_active_events_older_than_a_day(self) -> None:
-        from app.queries import air_quality_context_flux
+    def test_latest_reduces_each_source_before_union(self) -> None:
+        flux = latest_flux("environment", "environment_live")
 
+        environment_start = flux.index("environmentLatest =")
+        air_start = flux.index("airQualityLatest =")
+        union_start = flux.index("union(tables:")
+        environment_section = flux[environment_start:air_start]
+        air_section = flux[air_start:union_start]
+
+        self.assertIn('from(bucket: "environment")', environment_section)
+        self.assertIn("|> range(start: -7d)", environment_section)
+        self.assertIn('r._measurement == "environment_reading"', environment_section)
+        self.assertNotIn('"air_quality_reading"', environment_section)
+        self.assertIn("|> group(", environment_section)
+        self.assertIn("|> last()", environment_section)
+
+        self.assertIn('from(bucket: "environment_live")', air_section)
+        self.assertIn('r._measurement == "air_quality_reading"', air_section)
+        self.assertIn("|> group(", air_section)
+        self.assertIn("|> last()", air_section)
+        self.assertEqual(flux.count("|> last()"), 2)
+        self.assertLess(flux.rindex("|> last()"), union_start)
+
+    def test_latest_live_lookback_is_bounded_and_shorter_than_retention(self) -> None:
+        flux = latest_flux("environment", "environment_live")
+        air_section = flux[flux.index("airQualityLatest ="):]
+
+        self.assertIn("|> range(start: -30m)", air_section)
+        self.assertNotIn("-3d", air_section)
+        self.assertNotIn("-72h", air_section)
+
+    def test_latest_context_finds_active_events_older_than_a_day(self) -> None:
         flux = air_quality_context_flux("environment", "environment_live")
 
         self.assertIn("activeEventStates", flux)
@@ -100,6 +130,20 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertLess(latest_state, active_filter)
         self.assertIn('group(columns: ["location", "event_type"])', flux)
 
+    def test_context_uses_aligned_live_window_and_permanent_aggregates(self) -> None:
+        flux = air_quality_context_flux("environment", "environment_live")
+
+        live_section = flux[flux.index("live ="):flux.index("aggregates =")]
+        aggregate_section = flux[
+            flux.index("aggregates ="):flux.index("activeEventStates =")
+        ]
+        self.assertIn("date.truncate(t: now(), unit: 15m)", live_section)
+        self.assertIn('from(bucket: "environment_live")', live_section)
+        self.assertIn('from(bucket: "environment")', aggregate_section)
+        self.assertIn('r._measurement == "air_quality_15m"', aggregate_section)
+        self.assertIn("|> range(start: -25h)", aggregate_section)
+        self.assertNotIn('|> sort(columns: ["_time"])', flux)
+
     def test_event_history_separates_mixed_value_types_by_field(self) -> None:
         query = readings_query_from_params(
             {"range": "24h", "sensor_type": "air_quality"}
@@ -108,10 +152,10 @@ class QueryHelpersTest(unittest.TestCase):
         flux = events_flux("environment", query)
 
         self.assertIn(
-            'group(columns: ["location", "topic", "event_type", "metric", "_field", "_time"])',
+            'group(columns: ["location", "topic", "event_type", "metric", "_field"])',
             flux,
         )
-        self.assertIn('|> sort(columns: ["_time"])', flux)
+        self.assertNotIn('|> sort(columns: ["_time"])', flux)
 
     def test_environment_history_requires_matching_battery_ok_flag(self) -> None:
         query = readings_query_from_params(
@@ -150,8 +194,35 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn("environmentBattery", flux)
         self.assertIn("airAggregateMean", flux)
         self.assertIn("airAggregateMax", flux)
-        self.assertIn("legacyAirMean", flux)
+        self.assertIn("airAggregateP95", flux)
+        self.assertNotIn("legacyAirMean", flux)
+        self.assertNotIn('r._measurement == "air_quality_reading"', flux)
         self.assertIn("union(tables:", flux)
+
+    def test_one_hour_air_history_uses_only_live_raw_tier(self) -> None:
+        query = readings_query_from_params(
+            {"range": "1h", "sensor_type": "air_quality", "location": "office"}
+        )
+
+        flux = readings_flux(
+            "environment", query, live_bucket="environment_live"
+        )
+
+        self.assertIn('from(bucket: "environment_live")', flux)
+        self.assertNotIn('from(bucket: "environment")', flux)
+        self.assertIn('r._measurement == "air_quality_reading"', flux)
+
+    def test_long_air_histories_use_only_permanent_aggregate_tier(self) -> None:
+        for range_key in ("24h", "7d", "30d"):
+            with self.subTest(range_key=range_key):
+                query = readings_query_from_params(
+                    {"range": range_key, "sensor_type": "air_quality"}
+                )
+                flux = readings_flux(
+                    "environment", query, live_bucket="environment_live"
+                )
+                self.assertIn('r._measurement == "air_quality_15m"', flux)
+                self.assertNotIn('r._measurement == "air_quality_reading"', flux)
 
     def test_all_history_with_node_filter_excludes_air_quality(self) -> None:
         query = readings_query_from_params({"node_id": "1"})

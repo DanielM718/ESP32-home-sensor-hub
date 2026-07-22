@@ -24,7 +24,8 @@ SUPPORTED_RANGES: dict[str, tuple[str, str]] = {
     "30d": ("-30d", "6h"),
 }
 DEFAULT_RANGE = "24h"
-LATEST_LOOKBACK = "-30d"
+ENVIRONMENT_LATEST_LOOKBACK = "-7d"
+AIR_QUALITY_LATEST_LOOKBACK = "-30m"
 SENSOR_TYPE_ALL = "all"
 SENSOR_TYPE_ENVIRONMENT = "environment"
 SENSOR_TYPE_AIR_QUALITY = "air_quality"
@@ -222,24 +223,22 @@ def readings_query_from_params(params: Mapping[str, str | None]) -> ReadingsQuer
 
 
 def latest_flux(bucket: str, live_bucket: str | None = None) -> str:
-    fields = ENVIRONMENT_LATEST_FIELDS + AIR_QUALITY_LATEST_FIELDS
     live_bucket = live_bucket or bucket
-    source = f"""from(bucket: {_flux_string(bucket)})
-  |> range(start: {LATEST_LOOKBACK})
-  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)} or r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
-  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(fields)}))"""
-    if live_bucket != bucket:
-        source = f"""longTerm = {source}
-
-liveAir = from(bucket: {_flux_string(live_bucket)})
-  |> range(start: -3d)
-  |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
-  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(AIR_QUALITY_LATEST_FIELDS)}))
-
-union(tables: [longTerm, liveAir])"""
-    return f"""{source}
+    return f"""environmentLatest = from(bucket: {_flux_string(bucket)})
+  |> range(start: {ENVIRONMENT_LATEST_LOOKBACK})
+  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_LATEST_FIELDS)}))
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
+
+airQualityLatest = from(bucket: {_flux_string(live_bucket)})
+  |> range(start: {AIR_QUALITY_LATEST_LOOKBACK})
+  |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(AIR_QUALITY_LATEST_FIELDS)}))
+  |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
+  |> last()
+
+union(tables: [environmentLatest, airQualityLatest])
 """
 
 
@@ -371,18 +370,6 @@ def _air_quality_history_flux(
         )
         streams.extend(("airAggregateMean", "airAggregateMax", "airAggregateP95"))
 
-    # Compatibility stream: historical raw air_quality_reading points already
-    # in the long-term bucket remain visible after the tiered schema is enabled.
-    lines.append("")
-    lines.extend(
-        _raw_air_streams(
-            "legacyAir",
-            bucket,
-            query,
-            location_filter,
-        )
-    )
-    streams.extend(("legacyAirMean", "legacyAirMax"))
     return lines, streams
 
 
@@ -433,10 +420,9 @@ def events_flux(bucket: str, query: ReadingsQuery) -> str:
         [
             # Event fields intentionally mix strings (for example, state) and
             # numbers (for example, peak). Keep each field in a separate Flux
-            # table so operators such as sort never receive conflicting
-            # _value column types.
-            '  |> group(columns: ["location", "topic", "event_type", "metric", "_field", "_time"])',
-            "  |> sort(columns: [\"_time\"])",
+            # table so mixed _value types never collide. Python orders the
+            # reconstructed event objects, so no database sort is needed.
+            '  |> group(columns: ["location", "topic", "event_type", "metric", "_field"])',
         ]
     )
     return "\n".join(lines) + "\n"
@@ -457,8 +443,10 @@ def air_quality_context_flux(bucket: str, live_bucket: str) -> str:
         for field in AIR_QUALITY_FIELDS + AIR_QUALITY_RAW_FIELDS
         for stat in ("mean", "min", "max", "p95")
     )
-    return f"""live = from(bucket: {_flux_string(live_bucket)})
-  |> range(start: -16m)
+    return f"""import "date"
+
+live = from(bucket: {_flux_string(live_bucket)})
+  |> range(start: date.truncate(t: now(), unit: 15m))
   |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
   |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(AIR_QUALITY_LATEST_FIELDS)}))
 
@@ -476,7 +464,6 @@ activeEventStates = from(bucket: {_flux_string(bucket)})
   |> filter(fn: (r) => r._value == "active")
 
 union(tables: [live, aggregates, activeEventStates])
-  |> sort(columns: ["_time"])
 """
 
 
@@ -759,7 +746,7 @@ def readings_response(
         "range": query.range_key,
         "window": query.window_every,
         "sensor_type": query.sensor_type,
-        "data_tier": "live_1m" if query.range_key == "1h" else "15m_aggregate_with_legacy_fallback",
+        "data_tier": "live_1m" if query.range_key == "1h" else "15m_aggregate",
         "series": _sorted_entities(response_series),
         "events": _events_response(event_records),
     }

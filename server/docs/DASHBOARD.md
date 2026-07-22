@@ -75,7 +75,7 @@ are expandable per metric. PM cards distinguish instantaneous provisional
 context from coverage-qualified rolling 24-hour context. Historical charts
 show average and maximum series separately, keep sparse event markers
 unconnected, and label whether the response came from one-minute live data or
-15-minute aggregate/legacy fallback.
+verified persistent 15-minute aggregate tier.
 Stored p95 series for CO2, PM2.5, PM10, VOC Index, and NOx Index are available as
 hidden legend toggles on long-range charts, alongside hidden maxima; primary
 means remain visible by default to keep the graphs readable.

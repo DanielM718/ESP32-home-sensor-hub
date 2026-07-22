@@ -105,6 +105,12 @@ SEN66 high-resolution points appear in `environment_live`; wait through a UTC
 quarter-hour to verify `air_quality_15m` in `environment`, or follow the exact
 queries in [`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).
 
+For an upgrade with legacy permanent SEN66 raw data, complete the dry-run,
+backup, bounded write, verification-only run, and second idempotency dry-run in
+[`INFLUXDB.md`](INFLUXDB.md) before considering raw cleanup. Cleanup always
+requires a separately reviewed start, stop, predicate, count estimate, verified
+aggregate coverage, rollback backup, and explicit approval.
+
 ## Dashboard API Smoke Test
 
 After the Flask API milestone is installed on the Pi:
