@@ -44,6 +44,12 @@ Then copy or download the Chart.js browser bundle before using the dashboard.
 - Supported ranges are `1h`, `24h`, `7d`, and `30d`.
 - Refreshes do not overlap: the periodic poll waits while a full refresh is in
   progress, and the refresh button is disabled until its query completes.
+- Monitoring metadata and export-job metadata use separate five-second pollers;
+  monitoring previews use a separate 15-second bounded poller. Each controller
+  skips an interval while its own request is active.
+- A one-second display timer derives clocks from server timestamps without
+  writing to the backend. Optional workflow polls pause while the page is
+  hidden and resume on visibility; server work never pauses.
 
 ## Displayed Data
 
@@ -94,6 +100,36 @@ normal unexplained stale node. The historical battery chart includes only
 points paired with a same-timestamp `STATUS_BATTERY_OK` bit, so legacy records
 without status are not presented as measurements. No battery percentage is
 estimated.
+
+## Active Monitoring And Historical Export
+
+The Active Monitoring panel accepts a name, notes, known source checkboxes,
+grouped fields, a duration preset or custom minutes, raw resolution, and long
+or wide CSV. A running card shows authoritative start/deadline, elapsed and
+remaining clocks, sources/fields, bounded recent activity, interval progress,
+automatic-export state, CSV rows, and CSV elapsed time. Stopped/completed
+sessions remain in the recent table across reloads and become downloadable only
+after their export is completed and its final file exists.
+
+The Historical Data Export panel accepts local `datetime-local` values, then
+JavaScript converts each to an ISO 8601 UTC timestamp before sending it. New York
+wall time is therefore not mislabeled as UTC. Jobs show interval, origin,
+phase, truthful work-unit counts, queued/active/total clocks, rows, bytes,
+warnings, zero-data sources, cancellation, download, and deletion actions.
+
+Both forms use the same in-page source inventory derived from the node snapshot
+and the same grouped user-facing fields. When discovery adds a source, only the
+checkbox containers are updated and existing checks are preserved. Ordinary
+seven-second current-reading refreshes never rerender either form, reset
+partially typed names/dates/notes, call a creation route, complete a session,
+or interact with the worker. Workflow errors remain inside their own panel and
+do not stop charts/current readings; ordinary dashboard errors likewise do not
+stop export progress.
+
+The mobile layout collapses forms/status panels and form rows to one column.
+Labels, fieldsets, live regions, normal buttons/links, native date-time inputs,
+and keyboard-operable checkboxes are used without inline JavaScript or blocking
+validation alerts.
 
 The status display always retains the raw unsigned integer in decimal and
 hexadecimal, then labels every known SHT41 bit: `BIT0` SHT41 read OK, `BIT1`

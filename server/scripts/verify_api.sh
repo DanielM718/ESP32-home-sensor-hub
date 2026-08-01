@@ -35,6 +35,8 @@ check "dashboard API health endpoint responds" http_ok /api/health
 check "latest readings endpoint responds" http_ok /api/latest
 check "historical readings endpoint responds" http_ok '/api/readings?range=24h'
 check "nodes endpoint responds" http_ok /api/nodes
+check "monitoring sessions endpoint responds" http_ok /api/monitoring/sessions
+check "export jobs endpoint responds" http_ok /api/exports
 
 if [[ "${FAILED}" == "0" ]]; then
   log "Dashboard API verification passed"

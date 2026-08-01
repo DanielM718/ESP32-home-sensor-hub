@@ -50,12 +50,29 @@ class AirQualitySettings:
 
 
 @dataclass(frozen=True)
+class MonitoringExportSettings:
+    """Durable local state and bounded worker behavior."""
+
+    database_path: Path = Path("/tmp/home-sensor-monitoring.sqlite3")
+    output_dir: Path = Path("/tmp/home-sensor-exports")
+    raw_retention_seconds: int = 72 * 60 * 60
+    raw_chunk_seconds: int = 60 * 60
+    aggregate_chunk_seconds: int = 24 * 60 * 60
+    worker_poll_seconds: int = 2
+    lease_seconds: int = 300
+    heartbeat_seconds: int = 30
+
+
+@dataclass(frozen=True)
 class AppSettings:
     log_level: str
     node_stale_after_seconds: int
     mqtt: MqttSettings
     influx: InfluxSettings
     air_quality: AirQualitySettings = field(default_factory=AirQualitySettings)
+    monitoring_exports: MonitoringExportSettings = field(
+        default_factory=MonitoringExportSettings
+    )
 
 
 def load_settings(env_file: Path | None = DEFAULT_ENV_FILE) -> AppSettings:
@@ -66,6 +83,9 @@ def load_settings(env_file: Path | None = DEFAULT_ENV_FILE) -> AppSettings:
 
     write_token = _get_first_required("INFLUXDB_WRITE_TOKEN", "INFLUXDB_TOKEN")
     read_token = _get_env("INFLUXDB_READ_TOKEN", os.getenv("INFLUXDB_TOKEN", ""))
+    raw_retention_seconds = _get_duration_seconds(
+        "INFLUXDB_LIVE_RETENTION", "72h", min_value=60 * 60
+    )
 
     return AppSettings(
         log_level=_get_env("LOG_LEVEL", "INFO"),
@@ -108,6 +128,33 @@ def load_settings(env_file: Path | None = DEFAULT_ENV_FILE) -> AppSettings:
             ),
             recovery_lookback_minutes=_get_int(
                 "SEN66_RECOVERY_LOOKBACK_MINUTES", 30, min_value=15, max_value=180
+            ),
+        ),
+        monitoring_exports=MonitoringExportSettings(
+            database_path=_get_path(
+                "MONITORING_DB_PATH", "/var/lib/home-sensor/monitoring.sqlite3"
+            ),
+            output_dir=_get_path(
+                "EXPORT_OUTPUT_DIR", "/var/lib/home-sensor/exports"
+            ),
+            raw_retention_seconds=raw_retention_seconds,
+            raw_chunk_seconds=_get_int(
+                "EXPORT_RAW_CHUNK_SECONDS", 3600, min_value=300, max_value=21600
+            ),
+            aggregate_chunk_seconds=_get_int(
+                "EXPORT_AGGREGATE_CHUNK_SECONDS",
+                86400,
+                min_value=3600,
+                max_value=604800,
+            ),
+            worker_poll_seconds=_get_int(
+                "EXPORT_WORKER_POLL_SECONDS", 2, min_value=1, max_value=60
+            ),
+            lease_seconds=_get_int(
+                "EXPORT_WORKER_LEASE_SECONDS", 300, min_value=60, max_value=3600
+            ),
+            heartbeat_seconds=_get_int(
+                "EXPORT_WORKER_HEARTBEAT_SECONDS", 30, min_value=5, max_value=300
             ),
         ),
     )
@@ -168,3 +215,25 @@ def _get_int(
     if max_value is not None and value > max_value:
         raise ConfigError(f"{name} must be <= {max_value}")
     return value
+
+
+def _get_path(name: str, default: str) -> Path:
+    value = Path(_get_env(name, default)).expanduser()
+    if not value.is_absolute():
+        raise ConfigError(f"{name} must be an absolute path")
+    return value
+
+
+def _get_duration_seconds(name: str, default: str, *, min_value: int) -> int:
+    raw = _get_env(name, default).lower()
+    multipliers = {"s": 1, "m": 60, "h": 3600, "d": 86400}
+    suffix = raw[-1:] if raw else ""
+    number = raw[:-1] if suffix in multipliers else raw
+    multiplier = multipliers.get(suffix, 1)
+    try:
+        seconds = int(number) * multiplier
+    except ValueError as exc:
+        raise ConfigError(f"{name} must be a duration such as 72h") from exc
+    if seconds < min_value:
+        raise ConfigError(f"{name} must be at least {min_value} seconds")
+    return seconds

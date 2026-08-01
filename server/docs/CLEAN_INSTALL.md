@@ -29,6 +29,8 @@ This copies the project to:
 
 It also creates the `home-sensor` user, Python virtual environment, frontend
 Chart.js asset, `.env` file, and systemd unit files.
+It also creates persistent `/var/lib/home-sensor` monitoring/export storage
+without placing runtime data in the deployment tree.
 
 ## 3. Edit Secrets
 
@@ -117,6 +119,7 @@ Verify:
 ```bash
 sudo /opt/home-sensor/server/scripts/install_systemd_units.sh --enable --start
 sudo systemctl status home-sensor-bridge.service --no-pager
+sudo systemctl status home-sensor-export-worker.service --no-pager
 sudo systemctl status home-sensor-dashboard.service --no-pager
 ```
 
@@ -159,6 +162,7 @@ If any check fails, inspect service logs:
 
 ```bash
 sudo journalctl -u home-sensor-bridge.service -n 100 --no-pager
+sudo journalctl -u home-sensor-export-worker.service -n 100 --no-pager
 sudo journalctl -u home-sensor-dashboard.service -n 100 --no-pager
 sudo journalctl -u mosquitto.service -n 100 --no-pager
 sudo journalctl -u influxdb.service -n 100 --no-pager

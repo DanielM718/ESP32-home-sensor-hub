@@ -11,6 +11,7 @@ ENABLE_SERVICES=0
 START_SERVICES=0
 UNITS=(
   home-sensor-bridge.service
+  home-sensor-export-worker.service
   home-sensor-dashboard.service
 )
 

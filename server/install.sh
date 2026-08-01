@@ -11,6 +11,7 @@ PROJECT_ROOT="${PROJECT_ROOT:-/opt/home-sensor/server}"
 INSTALL_ENABLE_SERVICES="${INSTALL_ENABLE_SERVICES:-1}"
 INSTALL_START_SERVICES="${INSTALL_START_SERVICES:-0}"
 INSTALL_FRONTEND_ASSETS="${INSTALL_FRONTEND_ASSETS:-1}"
+APPLICATION_DATA_DIR="${APPLICATION_DATA_DIR:-/var/lib/home-sensor}"
 
 usage() {
   cat <<USAGE
@@ -77,6 +78,11 @@ log "Service user: ${SERVICE_USER}"
 "${SCRIPT_DIR}/scripts/install_base_packages.sh"
 "${SCRIPT_DIR}/scripts/create_service_user.sh"
 
+log "Preparing persistent monitoring and export storage"
+install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" "${APPLICATION_DATA_DIR}"
+install -d -m 0700 -o "${SERVICE_USER}" -g "${SERVICE_USER}" \
+  "${APPLICATION_DATA_DIR}/exports"
+
 if [[ "${SCRIPT_DIR}" != "${PROJECT_ROOT}" ]]; then
   require_command rsync
   log "Copying project files into ${PROJECT_ROOT}"
@@ -85,6 +91,9 @@ if [[ "${SCRIPT_DIR}" != "${PROJECT_ROOT}" ]]; then
   rsync -a \
     --exclude 'backend/.env' \
     --exclude 'backend/.venv' \
+    --exclude 'backend/.pytest_cache/' \
+    --exclude '.ruff_cache/' \
+    --exclude '.coverage' \
     --exclude '__pycache__/' \
     "${SCRIPT_DIR}/" "${PROJECT_ROOT}/"
 else

@@ -11,12 +11,21 @@ from flask import Flask, current_app, jsonify, render_template, request
 from werkzeug.exceptions import HTTPException
 
 from app.config import AppSettings, ConfigError, configure_logging, load_settings
+from app.export_queries import InfluxExportQueryRepository
+from app.persistence import MonitoringExportStore
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
     latest_with_air_quality_context,
     latest_with_node_status,
     readings_query_from_params,
+)
+from app.workflow_routes import register_workflow_routes
+from app.workflow_services import ExportService, MonitoringService, utc_now
+from app.workflows import (
+    WorkflowConflictError,
+    WorkflowNotFoundError,
+    WorkflowValidationError,
 )
 
 
@@ -28,6 +37,9 @@ FRONTEND_DIR = SERVER_ROOT / "frontend"
 def create_app(
     settings: AppSettings | None = None,
     repository: Any | None = None,
+    monitoring_store: MonitoringExportStore | None = None,
+    export_query_repository: Any | None = None,
+    clock: Any | None = None,
 ) -> Flask:
     """Create the Flask WSGI application."""
 
@@ -44,15 +56,43 @@ def create_app(
         static_url_path="/static",
         template_folder=str(FRONTEND_DIR / "templates"),
     )
-    app.config["REPOSITORY"] = repository or InfluxReadRepository(
+    read_repository = repository or InfluxReadRepository(
         settings.influx,
         expected_publish_seconds=settings.air_quality.expected_publish_seconds,
         minimum_coverage_percent=settings.air_quality.rolling_minimum_coverage_percent,
     )
+    app.config["REPOSITORY"] = read_repository
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
     app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = settings.air_quality.stale_after_seconds
+    app.config["MONITORING_MAX_DURATION_SECONDS"] = (
+        settings.monitoring_exports.raw_retention_seconds
+    )
+
+    store = monitoring_store or MonitoringExportStore(
+        settings.monitoring_exports.database_path,
+        settings.monitoring_exports.output_dir,
+    )
+    store.initialize()
+    export_queries = export_query_repository or InfluxExportQueryRepository(
+        settings.influx
+    )
+    current_clock = clock or utc_now
+    export_service = ExportService(
+        store,
+        clock=current_clock,
+        raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
+    )
+    app.config["EXPORT_SERVICE"] = export_service
+    app.config["MONITORING_SERVICE"] = MonitoringService(
+        store,
+        export_service,
+        export_queries,
+        clock=current_clock,
+        max_duration_seconds=settings.monitoring_exports.raw_retention_seconds,
+    )
 
     register_routes(app)
+    register_workflow_routes(app)
     register_error_handlers(app)
     return app
 
@@ -114,6 +154,18 @@ def register_routes(app: Flask) -> None:
 
 
 def register_error_handlers(app: Flask) -> None:
+    @app.errorhandler(WorkflowValidationError)
+    def workflow_validation_error(exc: WorkflowValidationError) -> Any:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+    @app.errorhandler(WorkflowNotFoundError)
+    def workflow_not_found_error(exc: WorkflowNotFoundError) -> Any:
+        return jsonify({"error": "not_found", "message": str(exc)}), 404
+
+    @app.errorhandler(WorkflowConflictError)
+    def workflow_conflict_error(exc: WorkflowConflictError) -> Any:
+        return jsonify({"error": "conflict", "message": str(exc)}), 409
+
     @app.errorhandler(QueryValidationError)
     def query_validation_error(exc: QueryValidationError) -> Any:
         return jsonify({"error": "bad_request", "message": str(exc)}), 400

@@ -337,6 +337,16 @@ Sparse event markers are points and are not connected as if peaks persisted.
 - `environment`: infinite by default; `air_quality_15m`, `air_quality_event`,
   existing environmental nodes, and all pre-migration SEN66 history
 
+The dashboard export engine exposes these tiers explicitly. `raw` reads
+SEN66 `air_quality_reading` only from `environment_live` and never substitutes
+an aggregate for expired samples; intervals extending beyond 72 hours complete
+with a retention warning and may be header-only. `15m` reads the actual
+`air_quality_15m` measurement from `environment`, exporting stored `*_mean`
+field names and marking every row `data_tier=15m`. Environment/SHT41 nodes have
+no stored 15-minute measurement: they are available in `raw`, while a mixed
+`15m` request reports those sources as zero-data instead of inventing an
+aggregate. Automatic raw/aggregate merging is intentionally not implemented.
+
 The setup script creates the live bucket and new scoped tokens. It does not
 delete or move existing measurements, and it refuses an unexpected retention
 policy unless the operator explicitly requests repair. The maintained

@@ -10,6 +10,8 @@ SERVICE_USER="${SERVICE_USER:-home-sensor}"
 PROJECT_ROOT="${PROJECT_ROOT:-/opt/home-sensor/server}"
 VENV_DIR="${PROJECT_ROOT}/backend/.venv"
 ENV_FILE="${PROJECT_ROOT}/backend/.env"
+APPLICATION_DATA_DIR="${APPLICATION_DATA_DIR:-/var/lib/home-sensor}"
+EXPORT_OUTPUT_DIR="${EXPORT_OUTPUT_DIR:-${APPLICATION_DATA_DIR}/exports}"
 FAILED=0
 
 check() {
@@ -49,6 +51,15 @@ env_permissions_restricted() {
   [[ "${mode}" == "640" && "${owner}" == "root" && "${group}" == "${SERVICE_USER}" ]]
 }
 
+data_dir_permissions_restricted() {
+  [[ -d "$1" ]] || return 1
+  local mode owner group
+  mode="$(stat -c '%a' "$1")"
+  owner="$(stat -c '%U' "$1")"
+  group="$(stat -c '%G' "$1")"
+  [[ "${mode}" == "700" && "${owner}" == "${SERVICE_USER}" && "${group}" == "${SERVICE_USER}" ]]
+}
+
 require_linux
 
 check "service user exists (${SERVICE_USER})" user_exists "${SERVICE_USER}"
@@ -58,13 +69,18 @@ check "backend env permissions are root:${SERVICE_USER} 0640" env_permissions_re
 check "virtual environment exists" dir_exists "${VENV_DIR}"
 check "virtual environment python exists" file_exists "${VENV_DIR}/bin/python"
 check "requirements file exists" file_exists "${PROJECT_ROOT}/requirements.txt"
+check "application data directory is ${SERVICE_USER}:${SERVICE_USER} 0700" data_dir_permissions_restricted "${APPLICATION_DATA_DIR}"
+check "export directory is ${SERVICE_USER}:${SERVICE_USER} 0700" data_dir_permissions_restricted "${EXPORT_OUTPUT_DIR}"
 check "bridge unit source exists" file_exists "${PROJECT_ROOT}/systemd/home-sensor-bridge.service"
+check "export worker unit source exists" file_exists "${PROJECT_ROOT}/systemd/home-sensor-export-worker.service"
 check "dashboard unit source exists" file_exists "${PROJECT_ROOT}/systemd/home-sensor-dashboard.service"
 check "bridge unit is installed" unit_installed home-sensor-bridge.service
+check "export worker unit is installed" unit_installed home-sensor-export-worker.service
 check "dashboard unit is installed" unit_installed home-sensor-dashboard.service
 
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --no-pager status home-sensor-bridge.service >/dev/null 2>&1 || true
+  systemctl --no-pager status home-sensor-export-worker.service >/dev/null 2>&1 || true
   systemctl --no-pager status home-sensor-dashboard.service >/dev/null 2>&1 || true
 fi
 

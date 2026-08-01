@@ -12,6 +12,8 @@ Security defaults for the Raspberry Pi backend:
 - Do not expose ports directly to the public internet.
 - Use systemd hardening options where compatible with the services.
 - Use Python logging for production services.
+- Keep monitoring metadata and exports under service-owned
+  `/var/lib/home-sensor`, never under the web static directory.
 
 ## Secrets
 
@@ -80,4 +82,16 @@ The generated systemd units include conservative hardening defaults:
 - empty Linux capability bounding set
 
 The Python services are designed to write logs to journald and avoid writing to
-the application tree at runtime.
+the application tree at runtime. The dashboard and dedicated export worker have
+write access only to `/var/lib/home-sensor` under `ProtectSystem=strict`.
+The installer sets the directory/export directory to mode `0700`; SQLite is
+created mode `0600` and uses local WAL sidecars.
+
+Monitoring/export APIs accept only allowlisted UUIDs, source types, source
+identities, fields, resolution, and format. Flux strings are built from checked
+values, SQLite statements are parameterized, output paths are derived from job
+UUIDs inside the configured directory, and API responses never expose those
+paths. Download serves only a completed `.csv`, never a `.part`. User-facing
+attachment names are sanitized and text cells receive spreadsheet-formula
+protection. These routes inherit the existing LAN/Tailscale-only deployment
+assumption; do not publish them through Funnel or router port forwarding.

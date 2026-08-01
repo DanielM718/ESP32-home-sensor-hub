@@ -109,6 +109,40 @@ services:
       INFLUXDB_READ_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
       SEN66_EXPECTED_PUBLISH_SECONDS: ${SEN66_EXPECTED_PUBLISH_SECONDS:-5}
       SEN66_STALE_AFTER_SECONDS: ${SEN66_STALE_AFTER_SECONDS:-20}
+      MONITORING_DB_PATH: /var/lib/home-sensor/monitoring.sqlite3
+      EXPORT_OUTPUT_DIR: /var/lib/home-sensor/exports
+    volumes:
+      - monitoring-data:/var/lib/home-sensor
+    restart: unless-stopped
+
+  export-worker:
+    build:
+      context: .
+    command: ["python", "-m", "app.export_worker"]
+    depends_on:
+      influxdb-live-bucket:
+        condition: service_completed_successfully
+    environment:
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      MQTT_USERNAME: ${MQTT_USERNAME:-home_sensor_bridge}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-change-this-mqtt-password}
+      INFLUXDB_URL: http://influxdb:8086
+      INFLUXDB_ORG: ${INFLUXDB_ORG:-home}
+      INFLUXDB_BUCKET: ${INFLUXDB_BUCKET:-environment}
+      INFLUXDB_LIVE_BUCKET: ${INFLUXDB_LIVE_BUCKET:-environment_live}
+      INFLUXDB_LIVE_RETENTION: ${INFLUXDB_LIVE_RETENTION:-72h}
+      INFLUXDB_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_WRITE_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      INFLUXDB_READ_TOKEN: ${INFLUXDB_TOKEN:-change-this-influxdb-token}
+      MONITORING_DB_PATH: /var/lib/home-sensor/monitoring.sqlite3
+      EXPORT_OUTPUT_DIR: /var/lib/home-sensor/exports
+      EXPORT_RAW_CHUNK_SECONDS: ${EXPORT_RAW_CHUNK_SECONDS:-3600}
+      EXPORT_AGGREGATE_CHUNK_SECONDS: ${EXPORT_AGGREGATE_CHUNK_SECONDS:-86400}
+      EXPORT_WORKER_POLL_SECONDS: ${EXPORT_WORKER_POLL_SECONDS:-2}
+      EXPORT_WORKER_LEASE_SECONDS: ${EXPORT_WORKER_LEASE_SECONDS:-300}
+      EXPORT_WORKER_HEARTBEAT_SECONDS: ${EXPORT_WORKER_HEARTBEAT_SECONDS:-30}
+    volumes:
+      - monitoring-data:/var/lib/home-sensor
     restart: unless-stopped
 
   grafana:
@@ -139,3 +173,4 @@ volumes:
   mosquitto-config:
   mosquitto-data:
   mosquitto-log:
+  monitoring-data:

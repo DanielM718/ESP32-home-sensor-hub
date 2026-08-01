@@ -120,6 +120,24 @@ not read directly from MQTT.
 - `GET /api/readings`
 - `GET /api/nodes`
 
+The same dashboard also provides durable Active Monitoring sessions and
+historical CSV exports. Active Monitoring is interval bookkeeping over data
+already being stored; starting a session does not change sensor sampling or
+publishing. Both workflows enqueue the same SQLite-backed export-job type and
+are processed by `home-sensor-export-worker.service`, independently of browser
+connections and Gunicorn's two web workers.
+
+Persistent paths are outside the deployment tree:
+
+```text
+/var/lib/home-sensor/monitoring.sqlite3
+/var/lib/home-sensor/exports/<job-id>.csv
+```
+
+See [API](docs/API.md), [Dashboard](docs/DASHBOARD.md), and
+[Operations](docs/OPERATIONS.md) for lifecycle, CSV, recovery, backup, and
+cleanup details.
+
 The frontend is served at:
 
 ```text

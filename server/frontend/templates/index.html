@@ -36,6 +36,171 @@
 
       <section id="error-banner" class="error-banner" hidden></section>
 
+      <section id="active-monitoring" class="workflow-section" aria-labelledby="monitoring-heading">
+        <div class="section-heading workflow-heading">
+          <div>
+            <h2 id="monitoring-heading">Active Monitoring</h2>
+            <p class="subtle">Define a timed interval over readings already stored in InfluxDB.</p>
+          </div>
+          <span id="monitoring-poll-state" class="workflow-poll-state">Loading sessions</span>
+        </div>
+        <div class="workflow-layout">
+          <article class="workflow-panel">
+            <h3>Start a session</h3>
+            <form id="monitoring-form" class="workflow-form" novalidate>
+              <label class="form-control">
+                <span>Session name</span>
+                <input id="monitoring-name" name="name" type="text" maxlength="120" required autocomplete="off">
+              </label>
+              <label class="form-control">
+                <span>Notes <small>optional</small></span>
+                <textarea id="monitoring-notes" name="notes" maxlength="2000" rows="3"></textarea>
+              </label>
+              <fieldset>
+                <legend>Sensor sources</legend>
+                <div id="monitoring-sources" class="check-grid source-options" aria-live="polite">
+                  <span class="subtle">Waiting for known sources</span>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Measurements</legend>
+                <div id="monitoring-fields" class="field-groups"></div>
+              </fieldset>
+              <div class="form-row">
+                <label class="form-control">
+                  <span>Duration</span>
+                  <select id="monitoring-duration" name="duration">
+                    <option value="300">5 minutes</option>
+                    <option value="900">15 minutes</option>
+                    <option value="1800">30 minutes</option>
+                    <option value="3600" selected>1 hour</option>
+                    <option value="7200">2 hours</option>
+                    <option value="14400">4 hours</option>
+                    <option value="28800">8 hours</option>
+                    <option value="43200">12 hours</option>
+                    <option value="86400">24 hours</option>
+                    <option value="custom">Custom minutes</option>
+                  </select>
+                </label>
+                <label id="monitoring-custom-wrap" class="form-control" hidden>
+                  <span>Custom minutes</span>
+                  <input id="monitoring-custom-minutes" name="custom_minutes" type="number" min="1" max="4320" inputmode="numeric">
+                </label>
+              </div>
+              <div class="form-row">
+                <label class="form-control">
+                  <span>Resolution</span>
+                  <select id="monitoring-resolution" name="resolution">
+                    <option value="raw">Raw</option>
+                  </select>
+                </label>
+                <label class="form-control">
+                  <span>CSV format</span>
+                  <select id="monitoring-format" name="csv_format">
+                    <option value="long">Long (normalized)</option>
+                    <option value="wide">Wide</option>
+                  </select>
+                </label>
+              </div>
+              <p id="monitoring-validation" class="form-message" role="alert" hidden></p>
+              <button id="monitoring-start" class="primary-button" type="submit">Start monitoring</button>
+            </form>
+          </article>
+          <article class="workflow-panel workflow-status-panel">
+            <h3>Running sessions</h3>
+            <div id="monitoring-current" class="workflow-card-list" aria-live="polite">
+              <p class="empty-state">No running monitoring sessions.</p>
+            </div>
+          </article>
+        </div>
+        <div class="workflow-list-heading">
+          <h3>Recent sessions</h3>
+        </div>
+        <div class="table-wrap workflow-table-wrap">
+          <table class="workflow-table">
+            <thead>
+              <tr>
+                <th>Name</th>
+                <th>Status</th>
+                <th>Interval</th>
+                <th>Sources / fields</th>
+                <th>Export</th>
+                <th>Actions</th>
+              </tr>
+            </thead>
+            <tbody id="monitoring-sessions-table">
+              <tr><td colspan="6">Loading monitoring sessions.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="historical-exports" class="workflow-section" aria-labelledby="exports-heading">
+        <div class="section-heading workflow-heading">
+          <div>
+            <h2 id="exports-heading">Historical Data Export</h2>
+            <p class="subtle">Queue an arbitrary interval; the server continues after this page closes.</p>
+          </div>
+          <span id="export-poll-state" class="workflow-poll-state">Loading jobs</span>
+        </div>
+        <div class="workflow-layout">
+          <article class="workflow-panel">
+            <h3>Queue an export</h3>
+            <form id="export-form" class="workflow-form" novalidate>
+              <label class="form-control">
+                <span>Export name</span>
+                <input id="export-name" name="name" type="text" maxlength="120" required autocomplete="off">
+              </label>
+              <div class="form-row">
+                <label class="form-control">
+                  <span>Start date and time</span>
+                  <input id="export-start" name="start_time" type="datetime-local" required>
+                </label>
+                <label class="form-control">
+                  <span>End date and time</span>
+                  <input id="export-end" name="end_time" type="datetime-local" required>
+                </label>
+              </div>
+              <p class="form-help">Times are interpreted in this device's local timezone and sent with an explicit offset.</p>
+              <fieldset>
+                <legend>Sensor sources</legend>
+                <div id="export-sources" class="check-grid source-options" aria-live="polite">
+                  <span class="subtle">Waiting for known sources</span>
+                </div>
+              </fieldset>
+              <fieldset>
+                <legend>Measurements</legend>
+                <div id="export-fields" class="field-groups"></div>
+              </fieldset>
+              <div class="form-row">
+                <label class="form-control">
+                  <span>Resolution</span>
+                  <select id="export-resolution" name="resolution">
+                    <option value="raw">Raw</option>
+                    <option value="15m">Stored 15-minute means</option>
+                  </select>
+                </label>
+                <label class="form-control">
+                  <span>CSV format</span>
+                  <select id="export-format" name="csv_format">
+                    <option value="long">Long (normalized)</option>
+                    <option value="wide">Wide</option>
+                  </select>
+                </label>
+              </div>
+              <p id="export-validation" class="form-message" role="alert" hidden></p>
+              <button id="export-create" class="primary-button" type="submit">Queue export</button>
+            </form>
+          </article>
+          <article class="workflow-panel workflow-status-panel">
+            <h3>Export jobs</h3>
+            <div id="export-jobs" class="workflow-card-list" aria-live="polite">
+              <p class="empty-state">No export jobs.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
       <section>
         <div class="section-heading">
           <h2>Current Readings</h2>

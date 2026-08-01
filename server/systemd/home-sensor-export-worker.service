@@ -1,9 +1,8 @@
 [Unit]
-Description=Home Sensor Flask Dashboard
+Description=Home Sensor Persistent CSV Export Worker
 Documentation=file:/opt/home-sensor/server/docs/OPERATIONS.md
 Wants=network-online.target
 After=network-online.target influxdb.service
-Wants=home-sensor-export-worker.service
 
 [Service]
 Type=exec
@@ -13,10 +12,10 @@ WorkingDirectory=/opt/home-sensor/server/backend
 EnvironmentFile=/opt/home-sensor/server/backend/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
-ExecStart=/opt/home-sensor/server/backend/.venv/bin/gunicorn --workers ${GUNICORN_WORKERS} --bind ${FLASK_HOST}:${FLASK_PORT} app.web:create_app()
+ExecStart=/opt/home-sensor/server/backend/.venv/bin/python -m app.export_worker
 Restart=on-failure
 RestartSec=10s
-TimeoutStopSec=30s
+TimeoutStopSec=60s
 
 NoNewPrivileges=true
 PrivateTmp=true

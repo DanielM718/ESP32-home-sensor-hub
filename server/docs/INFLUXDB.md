@@ -27,7 +27,7 @@ Scoped application tokens are stored in `server/backend/.env` on the Raspberry
 Pi:
 
 - `INFLUXDB_WRITE_TOKEN`: write-only token for the MQTT bridge
-- `INFLUXDB_READ_TOKEN`: read-only token for Flask and Grafana
+- `INFLUXDB_READ_TOKEN`: read-only token for Flask, the export worker, and Grafana
 - `INFLUXDB_TOKEN`: compatibility alias for the write token
 
 The InfluxDB admin token is used only during setup and should be stored in a
@@ -115,6 +115,14 @@ points. The 24-hour, 7-day, and 30-day paths read only `air_quality_15m` after
 historical reconciliation. Creating the live bucket and running the backfill do
 not delete existing data. The bridge writes both aggregate/event data and the
 live tier; dashboard/Grafana credentials can read both buckets.
+
+The persistent CSV worker uses the same read token. Raw CSV mode reads
+environment nodes from `environment/environment_reading` and SEN66 stations
+from `environment_live/air_quality_reading`. Stored 15-minute CSV mode reads
+only `environment/air_quality_15m` and keeps aggregate field suffixes. Its
+queries use exact half-open UTC ranges and bounded chunks; they do not change
+retention, write points, or silently replace expired raw samples with
+aggregates.
 
 ## Historical Backfill and Verification
 

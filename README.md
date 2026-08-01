@@ -81,6 +81,7 @@ The backend lives in `server/` and includes:
 - Mosquitto MQTT configuration
 - Python MQTT-to-InfluxDB bridge
 - Flask REST API and dashboard
+- timed Active Monitoring and persistent multi-source CSV exports
 - InfluxDB OSS v2 setup
 - Grafana provisioning
 - Tailscale remote-access documentation

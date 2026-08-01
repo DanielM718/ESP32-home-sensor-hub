@@ -37,6 +37,7 @@ The installer performs base setup only:
 - installs the Chart.js browser bundle for the frontend
 - creates `server/backend/.env` from the example if missing
 - installs systemd unit files
+- creates and preserves `/var/lib/home-sensor` plus its `exports` directory
 
 It does not configure Mosquitto, InfluxDB, Grafana, or Tailscale yet. Later
 milestones add those files and instructions.
@@ -102,6 +103,18 @@ The secret environment file is:
 /opt/home-sensor/server/backend/.env
 ```
 
+Persistent application data is outside the deployment root:
+
+```text
+/var/lib/home-sensor/monitoring.sqlite3
+/var/lib/home-sensor/exports/
+```
+
+The installer creates/preserves these paths as `home-sensor:home-sensor` with
+restrictive permissions. `rsync` upgrades never target them. The monitored
+SQLite database, completed exports, `.env`, virtual environment, InfluxDB data,
+and Grafana data are not erased by a normal installer run.
+
 ## Installer Options
 
 ```bash
@@ -159,11 +172,12 @@ to Mosquitto, InfluxDB, Grafana, or Flask.
 The active native deployment is `/opt/home-sensor/server`. The repository's
 `install.sh` is the authoritative deployment method: it copies the `server/`
 tree into that path while preserving `backend/.env` and `backend/.venv`, updates
-the virtual environment from `requirements.txt`, and installs the two Python
+the virtual environment from `requirements.txt`, and installs the three Python
 systemd units. The unit files confirm these service names and runtime split:
 
 - `home-sensor-bridge.service`: MQTT subscriptions and InfluxDB writes
 - `home-sensor-dashboard.service`: Gunicorn, Flask API, and static dashboard
+- `home-sensor-export-worker.service`: persistent SQLite/InfluxDB CSV worker
 - `mosquitto.service`, `influxdb.service`, and `grafana-server.service`: separate
   platform services; the Grafana dashboard is reprovisioned after this update
 
@@ -215,16 +229,17 @@ Both application services must restart because the bridge now owns live writes,
 aggregation, event detection, and restart recovery:
 
 ```bash
-sudo systemctl restart home-sensor-bridge.service home-sensor-dashboard.service
-sudo systemctl status home-sensor-bridge.service home-sensor-dashboard.service --no-pager
+sudo systemctl restart home-sensor-bridge.service home-sensor-export-worker.service home-sensor-dashboard.service
+sudo systemctl status home-sensor-bridge.service home-sensor-export-worker.service home-sensor-dashboard.service --no-pager
 ```
 
-Do not restart Mosquitto or InfluxDB. Follow both application logs while running
+Do not restart Mosquitto or InfluxDB. Follow the affected application logs while running
 the MQTT test:
 
 ```bash
 sudo journalctl -u home-sensor-dashboard.service -f
 sudo journalctl -u home-sensor-bridge.service -f
+sudo journalctl -u home-sensor-export-worker.service -f
 ```
 
 In a separate terminal, watch the broker and run the full synthetic test:
@@ -270,11 +285,50 @@ Copy and install the reverted `server/` tree with the same commands above, then
 restart both application services:
 
 ```bash
-sudo systemctl restart home-sensor-bridge.service home-sensor-dashboard.service
-sudo systemctl status home-sensor-bridge.service home-sensor-dashboard.service --no-pager
-sudo journalctl -u home-sensor-bridge.service -u home-sensor-dashboard.service \
+sudo systemctl restart home-sensor-bridge.service home-sensor-export-worker.service home-sensor-dashboard.service
+sudo systemctl status home-sensor-bridge.service home-sensor-export-worker.service home-sensor-dashboard.service --no-pager
+sudo journalctl -u home-sensor-bridge.service -u home-sensor-export-worker.service -u home-sensor-dashboard.service \
   --since '10 minutes ago' --no-pager
 ```
 
 The complete compatibility, retention, verification, and firmware deployment
 checklist is in [`SEN66_AIR_QUALITY.md`](SEN66_AIR_QUALITY.md).
+
+## Upgrade For Active Monitoring And Exports
+
+Deploy with the established installer rather than copying individual Python
+files. From this source checkout on the Pi:
+
+```bash
+sudo server/install.sh \
+  --project-root /opt/home-sensor/server \
+  --no-frontend-assets
+```
+
+If `/opt/home-sensor/server/backend/.env` predates this feature, the defaults
+already point at `/var/lib/home-sensor`, but add the documented variables from
+`.env.example` so operations are explicit. Inspect before restart:
+
+```bash
+sudo systemd-analyze verify \
+  /etc/systemd/system/home-sensor-dashboard.service \
+  /etc/systemd/system/home-sensor-export-worker.service
+sudo ls -ld /var/lib/home-sensor /var/lib/home-sensor/exports
+```
+
+Only the new worker and dashboard need restart for this feature; the MQTT bridge,
+Mosquitto, InfluxDB, Grafana, sensor firmware, and publishing rates are
+unchanged:
+
+```bash
+sudo systemctl restart home-sensor-export-worker.service home-sensor-dashboard.service
+sudo systemctl status home-sensor-export-worker.service home-sensor-dashboard.service --no-pager
+sudo journalctl -u home-sensor-export-worker.service -u home-sensor-dashboard.service \
+  --since '10 minutes ago' --no-pager
+curl -fsS http://127.0.0.1:8080/api/health
+curl -fsS http://127.0.0.1:8080/api/monitoring/sessions | python3 -m json.tool
+curl -fsS http://127.0.0.1:8080/api/exports | python3 -m json.tool
+```
+
+On rollback, do not delete the SQLite database or export directory. Older code
+will ignore them, and redeploying this feature will reuse completed jobs/files.

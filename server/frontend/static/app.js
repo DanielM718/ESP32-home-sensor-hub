@@ -4,9 +4,14 @@ const API = {
   latest: "/api/latest",
   readings: "/api/readings",
   nodes: "/api/nodes",
+  workflowOptions: "/api/workflows/options",
+  monitoringSessions: "/api/monitoring/sessions",
+  exports: "/api/exports",
 };
 
 const POLL_INTERVAL_MS = 7000;
+const WORKFLOW_POLL_INTERVAL_MS = 5000;
+const PREVIEW_POLL_INTERVAL_MS = 15000;
 const FETCH_TIMEOUT_MS = 8000;
 const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
 
@@ -45,6 +50,13 @@ const ENVIRONMENT_STATUS_FLAGS = [
   { mask: 1 << 4, label: "Battery shutdown", className: "danger" },
 ];
 
+const EXPORT_FIELD_GROUPS = [
+  { label: "Climate", fields: ["temperature_c", "humidity"] },
+  { label: "Particulate", fields: ["pm1", "pm25", "pm4", "pm10"] },
+  { label: "Gas and indices", fields: ["co2", "voc_index", "nox_index"] },
+  { label: "Battery", fields: ["battery_mv"] },
+];
+
 const chartPalette = [
   "#0f766e",
   "#2563eb",
@@ -63,9 +75,22 @@ const state = {
   latestTimer: null,
   fullRefreshInFlight: false,
   latestRefreshInFlight: false,
+  knownSources: new Map(),
+  monitoringSessions: [],
+  exportJobs: [],
+  monitoringTimer: null,
+  exportTimer: null,
+  previewTimer: null,
+  clockTimer: null,
+  monitoringInFlight: false,
+  exportsInFlight: false,
+  previewInFlight: false,
+  serverOffsetMs: 0,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  setupWorkflowControllers();
+
   if (!window.Chart) {
     showError("Chart.js is not available. Run scripts/install_frontend_assets.sh on the Raspberry Pi.");
     setStatus("Chart.js missing", "error");
@@ -100,6 +125,7 @@ async function refreshAll() {
     ]);
     const nodes = await nodesForLatest(latest);
 
+    updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderNodes(nodes);
@@ -125,6 +151,7 @@ async function refreshLatestOnly() {
     const latest = await fetchJson(API.latest);
     const nodes = await nodesForLatest(latest);
 
+    updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderNodes(nodes);
@@ -180,13 +207,18 @@ function readingsQueryParams() {
   return params;
 }
 
-async function fetchJson(url) {
+async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
 
   try {
     const response = await fetch(url, {
-      headers: { "Accept": "application/json" },
+      ...options,
+      headers: {
+        "Accept": "application/json",
+        ...(options.body ? { "Content-Type": "application/json" } : {}),
+        ...(options.headers || {}),
+      },
       signal: controller.signal,
     });
 
@@ -203,6 +235,9 @@ async function fetchJson(url) {
       throw new Error(`${url}: ${message}`);
     }
 
+    if (response.status === 204) {
+      return null;
+    }
     return await response.json();
   } catch (error) {
     if (error.name === "AbortError") {
@@ -211,6 +246,655 @@ async function fetchJson(url) {
     throw error;
   } finally {
     window.clearTimeout(timeout);
+  }
+}
+
+function setupWorkflowControllers() {
+  renderWorkflowFieldSelectors();
+  setDefaultExportInterval();
+
+  const duration = document.getElementById("monitoring-duration");
+  duration.addEventListener("change", () => {
+    document.getElementById("monitoring-custom-wrap").hidden = duration.value !== "custom";
+  });
+  document.getElementById("monitoring-form").addEventListener("submit", submitMonitoringSession);
+  document.getElementById("export-form").addEventListener("submit", submitHistoricalExport);
+  document.getElementById("active-monitoring").addEventListener("click", handleMonitoringAction);
+  document.getElementById("historical-exports").addEventListener("click", handleExportAction);
+
+  void refreshWorkflowOptions();
+  void refreshMonitoringSessions(true);
+  void refreshExportJobs(true);
+  state.monitoringTimer = window.setInterval(refreshMonitoringSessions, WORKFLOW_POLL_INTERVAL_MS);
+  state.exportTimer = window.setInterval(refreshExportJobs, WORKFLOW_POLL_INTERVAL_MS);
+  state.previewTimer = window.setInterval(refreshMonitoringPreviews, PREVIEW_POLL_INTERVAL_MS);
+  state.clockTimer = window.setInterval(updateVisibleWorkflowClocks, 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      void refreshMonitoringSessions(true);
+      void refreshExportJobs(true);
+      void refreshMonitoringPreviews(true);
+    }
+  });
+}
+
+async function refreshWorkflowOptions() {
+  try {
+    const data = await fetchJson(API.workflowOptions);
+    updateServerOffset(data.server_time_utc);
+    const maximumMinutes = Math.floor(Number(data.raw_retention_seconds) / 60);
+    const custom = document.getElementById("monitoring-custom-minutes");
+    if (Number.isFinite(maximumMinutes) && maximumMinutes > 0) {
+      custom.max = String(maximumMinutes);
+    }
+  } catch (_error) {
+    // Forms retain safe built-in defaults; status pollers report API availability.
+  }
+}
+
+function renderWorkflowFieldSelectors() {
+  for (const prefix of ["monitoring", "export"]) {
+    const container = document.getElementById(`${prefix}-fields`);
+    container.replaceChildren(...EXPORT_FIELD_GROUPS.map((group) => {
+      const section = document.createElement("section");
+      section.className = "field-group";
+      const heading = document.createElement("h4");
+      heading.textContent = group.label;
+      const grid = document.createElement("div");
+      grid.className = "check-grid";
+      for (const field of group.fields) {
+        const label = document.createElement("label");
+        label.className = "check-option";
+        const input = document.createElement("input");
+        input.type = "checkbox";
+        input.name = `${prefix}_field`;
+        input.value = field;
+        input.checked = ["temperature_c", "humidity"].includes(field);
+        const text = document.createElement("span");
+        text.textContent = workflowFieldLabel(field);
+        label.append(input, text);
+        grid.append(label);
+      }
+      section.append(heading, grid);
+      return section;
+    }));
+  }
+}
+
+function updateWorkflowSources(nodes) {
+  let changed = false;
+  for (const node of nodes) {
+    let source = null;
+    if (node.sensor_type === "environment" && Number.isInteger(Number(node.node_id))) {
+      source = {
+        key: `environment:${Number(node.node_id)}`,
+        sensor_type: "environment",
+        node_id: Number(node.node_id),
+        label: `Environment · Node ${Number(node.node_id)}`,
+      };
+    } else if (node.sensor_type === "air_quality" && node.location) {
+      source = {
+        key: `air_quality:${node.location}`,
+        sensor_type: "air_quality",
+        location: String(node.location),
+        label: `Air quality · ${formatLabel(node.location)}`,
+      };
+    }
+    if (source && !state.knownSources.has(source.key)) {
+      state.knownSources.set(source.key, source);
+      changed = true;
+    }
+  }
+  if (changed || document.querySelectorAll(".source-options input").length === 0) {
+    renderSourceSelectors();
+  }
+}
+
+function renderSourceSelectors() {
+  const sources = Array.from(state.knownSources.values())
+    .sort((left, right) => left.key.localeCompare(right.key));
+  for (const prefix of ["monitoring", "export"]) {
+    const container = document.getElementById(`${prefix}-sources`);
+    const selected = new Set(
+      Array.from(container.querySelectorAll("input:checked"), (input) => input.value),
+    );
+    if (!sources.length) {
+      container.innerHTML = '<span class="subtle">No recently known sources.</span>';
+      continue;
+    }
+    container.replaceChildren(...sources.map((source) => {
+      const label = document.createElement("label");
+      label.className = "check-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = `${prefix}_source`;
+      input.value = source.key;
+      input.checked = selected.has(source.key);
+      const text = document.createElement("span");
+      text.textContent = source.label;
+      label.append(input, text);
+      return label;
+    }));
+  }
+}
+
+async function submitMonitoringSession(event) {
+  event.preventDefault();
+  const button = document.getElementById("monitoring-start");
+  setWorkflowMessage("monitoring-validation", "");
+  try {
+    const name = document.getElementById("monitoring-name").value.trim();
+    const sourceKeys = checkedValues("monitoring-sources");
+    const fields = checkedValues("monitoring-fields");
+    const durationSelect = document.getElementById("monitoring-duration").value;
+    const durationSeconds = durationSelect === "custom"
+      ? Math.round(Number(document.getElementById("monitoring-custom-minutes").value) * 60)
+      : Number(durationSelect);
+    if (!name) {
+      throw new Error("Enter a session name.");
+    }
+    if (!sourceKeys.length) {
+      throw new Error("Select at least one sensor source.");
+    }
+    if (!fields.length) {
+      throw new Error("Select at least one measurement.");
+    }
+    if (!Number.isInteger(durationSeconds) || durationSeconds < 60) {
+      throw new Error("Monitoring duration must be at least one minute.");
+    }
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    await fetchJson(API.monitoringSessions, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        notes: document.getElementById("monitoring-notes").value,
+        duration_seconds: durationSeconds,
+        sources: sourceKeys.map(sourceFromKey),
+        fields,
+        resolution: document.getElementById("monitoring-resolution").value,
+        csv_format: document.getElementById("monitoring-format").value,
+      }),
+    });
+    document.getElementById("monitoring-name").value = "";
+    document.getElementById("monitoring-notes").value = "";
+    setWorkflowMessage("monitoring-validation", "Monitoring session started.", true);
+    await refreshMonitoringSessions(true);
+  } catch (error) {
+    setWorkflowMessage("monitoring-validation", error.message || "Could not start monitoring.");
+  } finally {
+    button.disabled = false;
+    button.setAttribute("aria-busy", "false");
+  }
+}
+
+async function submitHistoricalExport(event) {
+  event.preventDefault();
+  const button = document.getElementById("export-create");
+  setWorkflowMessage("export-validation", "");
+  try {
+    const name = document.getElementById("export-name").value.trim();
+    const sourceKeys = checkedValues("export-sources");
+    const fields = checkedValues("export-fields");
+    const start = localInputToIso(document.getElementById("export-start").value);
+    const end = localInputToIso(document.getElementById("export-end").value);
+    if (!name) {
+      throw new Error("Enter an export name.");
+    }
+    if (!start || !end) {
+      throw new Error("Choose valid start and end date-times.");
+    }
+    if (Date.parse(end) <= Date.parse(start)) {
+      throw new Error("End time must be later than start time.");
+    }
+    if (!sourceKeys.length) {
+      throw new Error("Select at least one sensor source.");
+    }
+    if (!fields.length) {
+      throw new Error("Select at least one measurement.");
+    }
+    button.disabled = true;
+    button.setAttribute("aria-busy", "true");
+    await fetchJson(API.exports, {
+      method: "POST",
+      body: JSON.stringify({
+        name,
+        start_time: start,
+        end_time: end,
+        sources: sourceKeys.map(sourceFromKey),
+        fields,
+        resolution: document.getElementById("export-resolution").value,
+        csv_format: document.getElementById("export-format").value,
+      }),
+    });
+    document.getElementById("export-name").value = "";
+    setWorkflowMessage("export-validation", "Export queued. It will continue if this page closes.", true);
+    await refreshExportJobs(true);
+  } catch (error) {
+    setWorkflowMessage("export-validation", error.message || "Could not queue export.");
+  } finally {
+    button.disabled = false;
+    button.setAttribute("aria-busy", "false");
+  }
+}
+
+async function refreshMonitoringSessions(force = false) {
+  if (state.monitoringInFlight || (document.hidden && !force)) {
+    return;
+  }
+  state.monitoringInFlight = true;
+  const pollState = document.getElementById("monitoring-poll-state");
+  try {
+    const data = await fetchJson(API.monitoringSessions);
+    updateServerOffset(data.server_time_utc);
+    state.monitoringSessions = data.sessions || [];
+    renderMonitoringSessions();
+    pollState.textContent = "Session status current";
+  } catch (error) {
+    pollState.textContent = error.message || "Session status unavailable";
+  } finally {
+    state.monitoringInFlight = false;
+  }
+}
+
+async function refreshMonitoringPreviews(force = false) {
+  if (state.previewInFlight || (document.hidden && !force)) {
+    return;
+  }
+  const running = state.monitoringSessions.filter((session) => session.status === "running");
+  if (!running.length) {
+    return;
+  }
+  state.previewInFlight = true;
+  try {
+    for (const session of running) {
+      const updated = await fetchJson(`${API.monitoringSessions}/${session.id}/preview`);
+      updateServerOffset(updated.server_time_utc);
+      const index = state.monitoringSessions.findIndex((item) => item.id === updated.id);
+      if (index >= 0) {
+        state.monitoringSessions[index] = updated;
+      }
+    }
+    renderMonitoringSessions();
+  } catch (error) {
+    document.getElementById("monitoring-poll-state").textContent =
+      error.message || "Preview unavailable";
+  } finally {
+    state.previewInFlight = false;
+  }
+}
+
+async function refreshExportJobs(force = false) {
+  if (state.exportsInFlight || (document.hidden && !force)) {
+    return;
+  }
+  state.exportsInFlight = true;
+  const pollState = document.getElementById("export-poll-state");
+  try {
+    const data = await fetchJson(API.exports);
+    updateServerOffset(data.server_time_utc);
+    state.exportJobs = data.exports || [];
+    renderExportJobs();
+    pollState.textContent = "Export status current";
+  } catch (error) {
+    pollState.textContent = error.message || "Export status unavailable";
+  } finally {
+    state.exportsInFlight = false;
+  }
+}
+
+function renderMonitoringSessions() {
+  const running = state.monitoringSessions.filter((session) => session.status === "running");
+  const current = document.getElementById("monitoring-current");
+  current.innerHTML = running.length
+    ? running.map(monitoringCardHtml).join("")
+    : '<p class="empty-state">No running monitoring sessions.</p>';
+
+  const table = document.getElementById("monitoring-sessions-table");
+  table.innerHTML = state.monitoringSessions.length
+    ? state.monitoringSessions.map(monitoringTableRowHtml).join("")
+    : '<tr><td colspan="6">No monitoring sessions yet.</td></tr>';
+  updateVisibleWorkflowClocks();
+}
+
+function monitoringCardHtml(session) {
+  const preview = session.preview || {};
+  const exportJob = session.export;
+  const progress = session.duration_seconds
+    ? Math.min(100, session.elapsed_seconds / session.duration_seconds * 100)
+    : 0;
+  return `
+    <article class="workflow-card">
+      <div class="workflow-card-heading">
+        <h4>${escapeHtml(session.name)}</h4>
+        ${workflowStatusHtml(session.status)}
+      </div>
+      <dl class="workflow-facts">
+        <div><dt>Started</dt><dd>${escapeHtml(formatDateTime(session.start_time_utc))}</dd></div>
+        <div><dt>Scheduled end</dt><dd>${escapeHtml(formatDateTime(session.scheduled_end_time_utc))}</dd></div>
+        <div><dt>Elapsed</dt><dd id="monitor-elapsed-${session.id}">${escapeHtml(formatElapsedClock(session.elapsed_seconds))}</dd></div>
+        <div><dt>Remaining</dt><dd id="monitor-remaining-${session.id}">${escapeHtml(formatElapsedClock(session.remaining_seconds))}</dd></div>
+        <div><dt>Sources</dt><dd>${escapeHtml(sourceSummary(session.selected_sources))}</dd></div>
+        <div><dt>Fields</dt><dd>${escapeHtml(session.selected_fields.join(", "))}</dd></div>
+        <div><dt>Recent values</dt><dd>${escapeHtml(preview.row_count ?? "Collecting")}${preview.row_count_is_approximate ? " approx." : ""}</dd></div>
+        <div><dt>Latest sample</dt><dd>${escapeHtml(formatDateTime(preview.latest_sample_timestamp))}</dd></div>
+        <div><dt>CSV</dt><dd>${escapeHtml(exportJob ? `${formatLabel(exportJob.status)} · ${exportJob.rows_written} rows` : "Queued when session ends")}</dd></div>
+        <div><dt>CSV elapsed</dt><dd id="session-export-elapsed-${session.id}">${escapeHtml(formatElapsedClock(exportJob?.active_elapsed_seconds || 0))}</dd></div>
+      </dl>
+      <div class="workflow-progress" aria-label="Monitoring interval progress"><span style="--progress-width: ${progress.toFixed(2)}%"></span></div>
+      <div class="workflow-actions">
+        <button class="danger-button" type="button" data-action="stop-session" data-id="${session.id}">Stop early</button>
+        ${exportJob?.is_download_ready ? downloadLinkHtml(exportJob) : ""}
+      </div>
+    </article>
+  `;
+}
+
+function monitoringTableRowHtml(session) {
+  const exportJob = session.export;
+  const canDelete = session.status !== "running"
+    && !["running", "cancel_requested"].includes(exportJob?.status);
+  return `
+    <tr>
+      <td><strong>${escapeHtml(session.name)}</strong>${session.notes ? `<br><span class="subtle">${escapeHtml(session.notes)}</span>` : ""}</td>
+      <td>${workflowStatusHtml(session.status)}</td>
+      <td>${escapeHtml(formatDateTime(session.start_time_utc))}<br><span class="subtle">to ${escapeHtml(formatDateTime(session.effective_end_time_utc))}<br><span id="table-monitor-elapsed-${session.id}">${escapeHtml(formatElapsedClock(session.elapsed_seconds))}</span></span></td>
+      <td>${session.source_count} / ${session.field_count}<br><span class="subtle">${escapeHtml(session.selected_fields.join(", "))}</span></td>
+      <td>${exportJob ? `${workflowStatusHtml(exportJob.status)}<br><span class="subtle">${exportJob.rows_written} rows</span>` : "Not queued"}</td>
+      <td><div class="workflow-actions">
+        ${session.status === "running" ? `<button class="danger-button" type="button" data-action="stop-session" data-id="${session.id}">Stop</button>` : ""}
+        ${exportJob?.is_download_ready ? downloadLinkHtml(exportJob) : ""}
+        ${canDelete ? `<button class="danger-button" type="button" data-action="delete-session" data-id="${session.id}">Delete</button>` : ""}
+      </div></td>
+    </tr>
+  `;
+}
+
+function renderExportJobs() {
+  const container = document.getElementById("export-jobs");
+  container.innerHTML = state.exportJobs.length
+    ? state.exportJobs.map(exportCardHtml).join("")
+    : '<p class="empty-state">No export jobs.</p>';
+  updateVisibleWorkflowClocks();
+}
+
+function exportCardHtml(job) {
+  const hasUnits = job.work_units_total > 0;
+  const progress = hasUnits ? Math.min(100, job.work_units_completed / job.work_units_total * 100) : 0;
+  const active = ["running", "cancel_requested"].includes(job.status);
+  const zeroSources = (job.source_results || []).filter((source) => source.status === "zero_data");
+  const canDelete = ["completed", "failed", "cancelled"].includes(job.status)
+    && !job.monitoring_session_id;
+  return `
+    <article class="workflow-card">
+      <div class="workflow-card-heading">
+        <h4>${escapeHtml(job.name)}</h4>
+        ${workflowStatusHtml(job.status)}
+      </div>
+      <dl class="workflow-facts">
+        <div><dt>Interval</dt><dd>${escapeHtml(formatDateTime(job.start_time_utc))}<br>to ${escapeHtml(formatDateTime(job.end_time_utc))}</dd></div>
+        <div><dt>Origin</dt><dd>${job.monitoring_session_id ? "Active Monitoring" : "Historical export"}</dd></div>
+        <div><dt>Phase</dt><dd>${escapeHtml(formatLabel(job.current_phase))}</dd></div>
+        <div><dt>Work</dt><dd>${job.work_units_completed} of ${job.work_units_total || "?"} chunks/batches</dd></div>
+        <div><dt>Queued</dt><dd id="export-queued-${job.id}">${escapeHtml(formatElapsedClock(job.queued_elapsed_seconds))}</dd></div>
+        <div><dt>Active</dt><dd id="export-active-${job.id}">${escapeHtml(formatElapsedClock(job.active_elapsed_seconds))}</dd></div>
+        <div><dt>Total</dt><dd id="export-total-${job.id}">${escapeHtml(formatElapsedClock(job.total_elapsed_seconds))}</dd></div>
+        <div><dt>Output</dt><dd>${job.rows_written.toLocaleString()} rows · ${escapeHtml(formatBytes(job.output_size_bytes))}</dd></div>
+        <div><dt>Sources / fields</dt><dd>${job.source_count} / ${job.field_count}</dd></div>
+        <div><dt>Tier / format</dt><dd>${escapeHtml(job.resolution)} · ${escapeHtml(job.csv_format)}</dd></div>
+      </dl>
+      <div class="workflow-progress ${active && !hasUnits ? "is-indeterminate" : ""}" aria-label="Export work progress"><span style="--progress-width: ${progress.toFixed(2)}%"></span></div>
+      ${job.warnings?.length ? `<ul class="workflow-warnings">${job.warnings.map((warning) => `<li>${escapeHtml(warning)}</li>`).join("")}</ul>` : ""}
+      ${zeroSources.length ? `<ul class="source-results"><li>Zero data: ${escapeHtml(zeroSources.map((source) => source.source_id).join(", "))}</li></ul>` : ""}
+      ${job.error_message ? `<p class="form-message">${escapeHtml(job.error_message)}</p>` : ""}
+      <div class="workflow-actions">
+        ${["queued", "running"].includes(job.status) ? `<button class="danger-button" type="button" data-action="cancel-export" data-id="${job.id}">Cancel</button>` : ""}
+        ${job.is_download_ready ? downloadLinkHtml(job) : ""}
+        ${canDelete ? `<button class="danger-button" type="button" data-action="delete-export" data-id="${job.id}">Delete</button>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+async function handleMonitoringAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.disabled) {
+    return;
+  }
+  const id = button.dataset.id;
+  button.disabled = true;
+  try {
+    if (button.dataset.action === "stop-session") {
+      await fetchJson(`${API.monitoringSessions}/${id}/stop`, { method: "POST" });
+      setWorkflowMessage("monitoring-validation", "Monitoring session stopped; its CSV was queued.", true);
+    } else if (button.dataset.action === "delete-session") {
+      await fetchJson(`${API.monitoringSessions}/${id}`, { method: "DELETE" });
+      setWorkflowMessage("monitoring-validation", "Monitoring session and associated export were deleted.", true);
+    }
+    await Promise.all([refreshMonitoringSessions(true), refreshExportJobs(true)]);
+  } catch (error) {
+    setWorkflowMessage("monitoring-validation", error.message || "Monitoring action failed.");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+async function handleExportAction(event) {
+  const button = event.target.closest("button[data-action]");
+  if (!button || button.disabled) {
+    return;
+  }
+  const id = button.dataset.id;
+  button.disabled = true;
+  try {
+    if (button.dataset.action === "cancel-export") {
+      await fetchJson(`${API.exports}/${id}/cancel`, { method: "POST" });
+      setWorkflowMessage("export-validation", "Cancellation requested.", true);
+    } else if (button.dataset.action === "delete-export") {
+      await fetchJson(`${API.exports}/${id}`, { method: "DELETE" });
+      setWorkflowMessage("export-validation", "Export metadata and files were deleted.", true);
+    }
+    await Promise.all([refreshExportJobs(true), refreshMonitoringSessions(true)]);
+  } catch (error) {
+    setWorkflowMessage("export-validation", error.message || "Export action failed.");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+function updateVisibleWorkflowClocks() {
+  const now = Date.now() + state.serverOffsetMs;
+  for (const session of state.monitoringSessions) {
+    const start = Date.parse(session.start_time_utc);
+    const scheduled = Date.parse(session.scheduled_end_time_utc);
+    const running = session.status === "running";
+    const effective = running
+      ? Math.min(now, scheduled)
+      : Date.parse(session.effective_end_time_utc);
+    const elapsed = Number.isFinite(start) && Number.isFinite(effective)
+      ? Math.max(0, Math.floor((effective - start) / 1000))
+      : session.elapsed_seconds;
+    const remaining = running && Number.isFinite(scheduled)
+      ? Math.max(0, Math.floor((scheduled - now) / 1000))
+      : 0;
+    setTextIfPresent(`monitor-elapsed-${session.id}`, formatElapsedClock(elapsed));
+    setTextIfPresent(`table-monitor-elapsed-${session.id}`, formatElapsedClock(elapsed));
+    setTextIfPresent(`monitor-remaining-${session.id}`, formatElapsedClock(remaining));
+    if (session.export) {
+      setTextIfPresent(
+        `session-export-elapsed-${session.id}`,
+        formatElapsedClock(exportActiveSeconds(session.export, now)),
+      );
+    }
+  }
+  for (const job of state.exportJobs) {
+    setTextIfPresent(`export-queued-${job.id}`, formatElapsedClock(exportQueuedSeconds(job, now)));
+    setTextIfPresent(`export-active-${job.id}`, formatElapsedClock(exportActiveSeconds(job, now)));
+    setTextIfPresent(`export-total-${job.id}`, formatElapsedClock(exportTotalSeconds(job, now)));
+  }
+}
+
+function exportQueuedSeconds(job, now) {
+  const created = Date.parse(job.created_at_utc);
+  const end = job.started_at_utc
+    ? Date.parse(job.started_at_utc)
+    : (job.completed_at_utc ? Date.parse(job.completed_at_utc) : now);
+  return finiteSeconds(created, end, job.queued_elapsed_seconds);
+}
+
+function exportActiveSeconds(job, now) {
+  if (!job.started_at_utc) {
+    return 0;
+  }
+  const start = Date.parse(job.started_at_utc);
+  const end = job.completed_at_utc ? Date.parse(job.completed_at_utc) : now;
+  return finiteSeconds(start, end, job.active_elapsed_seconds);
+}
+
+function exportTotalSeconds(job, now) {
+  const start = Date.parse(job.created_at_utc);
+  const end = job.completed_at_utc ? Date.parse(job.completed_at_utc) : now;
+  return finiteSeconds(start, end, job.total_elapsed_seconds);
+}
+
+function finiteSeconds(start, end, fallback = 0) {
+  return Number.isFinite(start) && Number.isFinite(end)
+    ? Math.max(0, Math.floor((end - start) / 1000))
+    : Number(fallback || 0);
+}
+
+function updateServerOffset(serverTime) {
+  const parsed = Date.parse(serverTime);
+  if (Number.isFinite(parsed)) {
+    state.serverOffsetMs = parsed - Date.now();
+  }
+}
+
+function checkedValues(containerId) {
+  return Array.from(
+    document.querySelectorAll(`#${containerId} input[type="checkbox"]:checked`),
+    (input) => input.value,
+  );
+}
+
+function sourceFromKey(key) {
+  const source = state.knownSources.get(key);
+  if (!source) {
+    throw new Error(`Unknown source selection: ${key}`);
+  }
+  return source.sensor_type === "environment"
+    ? { sensor_type: "environment", node_id: source.node_id }
+    : { sensor_type: "air_quality", location: source.location };
+}
+
+function setWorkflowMessage(id, message, success = false) {
+  const element = document.getElementById(id);
+  element.textContent = message;
+  element.hidden = !message;
+  element.classList.toggle("is-success", Boolean(message && success));
+}
+
+function setDefaultExportInterval() {
+  const end = new Date();
+  end.setSeconds(0, 0);
+  const start = new Date(end.getTime() - 24 * 60 * 60 * 1000);
+  document.getElementById("export-start").value = localDateTimeValue(start);
+  document.getElementById("export-end").value = localDateTimeValue(end);
+}
+
+function localDateTimeValue(date) {
+  const parts = [
+    date.getFullYear(),
+    String(date.getMonth() + 1).padStart(2, "0"),
+    String(date.getDate()).padStart(2, "0"),
+    String(date.getHours()).padStart(2, "0"),
+    String(date.getMinutes()).padStart(2, "0"),
+  ];
+  return `${parts[0]}-${parts[1]}-${parts[2]}T${parts[3]}:${parts[4]}`;
+}
+
+function localInputToIso(value) {
+  if (!value) {
+    return null;
+  }
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? null : date.toISOString();
+}
+
+function workflowStatusHtml(status) {
+  return `<span class="workflow-status workflow-status-${escapeHtml(status)}">${escapeHtml(formatLabel(status))}</span>`;
+}
+
+function downloadLinkHtml(job) {
+  return `<a class="link-button" href="${escapeHtml(job.download_url)}" download>Download CSV</a>`;
+}
+
+function workflowFieldLabel(field) {
+  const labels = {
+    temperature_c: "Temperature",
+    humidity: "Humidity",
+    battery_mv: "Battery voltage",
+    co2: "CO₂",
+    pm1: "PM1.0",
+    pm25: "PM2.5",
+    pm4: "PM4.0",
+    pm10: "PM10",
+    voc_index: "VOC Index",
+    nox_index: "NOx Index",
+  };
+  return labels[field] || formatLabel(field);
+}
+
+function sourceSummary(sources) {
+  return (sources || []).map((source) => (
+    source.sensor_type === "environment"
+      ? `Node ${source.node_id}`
+      : formatLabel(source.location)
+  )).join(", ");
+}
+
+function formatDateTime(value) {
+  if (!value) {
+    return "-";
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    year: "numeric",
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+function formatElapsedClock(value) {
+  const total = Math.max(0, Math.floor(Number(value) || 0));
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor(total % 86400 / 3600);
+  const minutes = Math.floor(total % 3600 / 60);
+  const seconds = total % 60;
+  const clock = [hours, minutes, seconds].map((part) => String(part).padStart(2, "0")).join(":");
+  return days ? `${days}d ${clock}` : clock;
+}
+
+function formatBytes(value) {
+  const bytes = Number(value);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B";
+  }
+  const units = ["B", "KB", "MB", "GB"];
+  const index = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)));
+  return `${(bytes / 1024 ** index).toFixed(index ? 1 : 0)} ${units[index]}`;
+}
+
+function setTextIfPresent(id, value) {
+  const element = document.getElementById(id);
+  if (element) {
+    element.textContent = value;
   }
 }
 

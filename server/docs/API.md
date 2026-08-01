@@ -241,6 +241,153 @@ When the latest packet has no `status_flags`, all four status values are JSON
 or `no_recent_reading` otherwise. The primary `status` remains `stale` in both
 cases so stale-node detection is not suppressed.
 
+## Active Monitoring
+
+Active Monitoring defines a server-timed interval over the existing InfluxDB
+pipeline. It does not subscribe to MQTT, copy readings into SQLite, or change a
+sensor's publish rate.
+
+Routes:
+
+```text
+POST   /api/monitoring/sessions
+GET    /api/monitoring/sessions
+GET    /api/monitoring/sessions/<uuid>
+POST   /api/monitoring/sessions/<uuid>/stop
+DELETE /api/monitoring/sessions/<uuid>
+GET    /api/monitoring/sessions/<uuid>/preview
+```
+
+Creation accepts `name` (1–120 characters), optional `notes` (up to 2,000
+characters), `duration_seconds`, nonempty `sources`/`fields`, `resolution`, and
+`csv_format`. The API minimum is 10 seconds for deterministic integration
+testing; the dashboard minimum is one minute. The maximum is the configured raw
+retention horizon, currently 72 hours. Active Monitoring currently accepts
+`resolution=raw`; no aggregate substitution occurs.
+
+The server sets `start_time_utc`, `scheduled_end_time_utc`, status, and final
+end. Once the deadline passes, a read, preview, or the worker's reconciliation
+pass atomically changes `running` to `completed` and creates exactly one
+automatic export. Early stop is idempotent and uses the earlier of server-now
+or the deadline. A stopped/completed session returns its associated job:
+
+```json
+{
+  "id": "f44ad071-24cc-4fbb-8a0e-017083b88a8b",
+  "status": "completed",
+  "start_time_utc": "2026-08-01T20:00:00.000000Z",
+  "scheduled_end_time_utc": "2026-08-01T21:00:00.000000Z",
+  "actual_end_time_utc": "2026-08-01T21:00:00.000000Z",
+  "effective_end_time_utc": "2026-08-01T21:00:00.000000Z",
+  "duration_seconds": 3600,
+  "elapsed_seconds": 3600,
+  "remaining_seconds": 0,
+  "server_time_utc": "2026-08-01T21:00:03.000000Z",
+  "preview": null,
+  "export": {
+    "id": "44da1414-0486-409c-a27a-5598d9316d09",
+    "status": "running",
+    "rows_written": 42000,
+    "is_download_ready": false
+  },
+  "is_download_ready": false
+}
+```
+
+The preview endpoint uses bounded count/first/last/recent queries and returns at
+most 20 recent measurement values. `row_count_is_approximate=true` makes clear
+that the count is measurement values, not necessarily wide CSV rows. Listing
+and status endpoints never return CSV contents.
+
+A running session cannot be deleted. A finished session with an active export
+must first have that export cancelled and reach `cancelled`; deleting a session
+then removes its automatic job and files. Automatic jobs cannot be deleted
+directly through `/api/exports`; this preserves the session relationship.
+
+## Historical Exports
+
+Routes:
+
+```text
+POST   /api/exports
+GET    /api/exports
+GET    /api/exports/<uuid>
+POST   /api/exports/<uuid>/cancel
+DELETE /api/exports/<uuid>
+GET    /api/exports/<uuid>/download
+```
+
+Creation validates and persists a `queued` job, then returns HTTP 202. It never
+runs the InfluxDB export in the request. `start_time` and `end_time` must be ISO
+8601 values with `Z` or an explicit offset; they are normalized to UTC. Equal,
+reversed, timezone-free, and malformed intervals return HTTP 400 and are never
+silently swapped.
+
+Source identities are allowlisted objects:
+
+```json
+{"sensor_type":"environment","node_id":1}
+{"sensor_type":"air_quality","location":"printer_room"}
+```
+
+Supported environment fields are `temperature_c`, `humidity`, and
+`battery_mv`. Supported air-quality fields are `temperature_c`, `humidity`,
+`co2`, `pm1`, `pm25`, `pm4`, `pm10`, `voc_index`, and `nox_index`. A global
+field can be unsupported for some sources; only a request with no valid
+source/field combination is rejected.
+
+`raw` queries `environment_reading` in `environment` and
+`air_quality_reading` in `environment_live`. A raw air-quality interval older
+than the 72-hour retention boundary receives a warning; the worker does not
+silently read `air_quality_15m`. `15m` reads stored `*_mean` fields from
+`environment/air_quality_15m`. Automatic tier merging is omitted because a
+truthful overlap-free merge is not part of the current schema contract.
+
+Statuses are `queued`, `running`, `cancel_requested`, `completed`, `failed`,
+and `cancelled`. Progress includes `current_phase`, rows/bytes, completed/total
+work units, persisted warnings, per-source results, timestamps, attempt count,
+and server-derived queued/active/total elapsed seconds. The browser advances
+visible clocks locally from `server_time_utc`; it does not update SQLite each
+second.
+
+Cancellation is immediate for queued jobs. A running job changes to
+`cancel_requested`; the worker stops between bounded queries or while consuming
+a stream, removes the partial file, and marks it cancelled. Only completed,
+failed, or cancelled manual jobs can be deleted. Download is available only for
+a completed row whose final `.csv` exists; it streams the existing file and
+never regenerates it.
+
+Valid no-data intervals are successful. Missing fields, partial source
+coverage, expired raw data, and intervals predating deployment create no fake
+timestamps or zero measurements. A total no-data result is a completed,
+header-only CSV with zero rows and `zero_data` source results.
+
+### CSV Schemas
+
+Long is the default:
+
+```text
+timestamp_utc,sensor_type,source_id,node_id,location,field,value,unit,data_tier
+```
+
+Wide starts with `timestamp_utc,sensor_type,source_id,node_id,location`, then
+contains only selected measurement columns, followed by `data_tier`. It has one
+row per timestamp/source, leaves unavailable fields blank, and performs no
+resampling. Stored aggregate columns retain their honest `_mean` suffixes.
+
+Both formats use UTF-8, Python's CSV quoting, UTC timestamps, numeric text, and
+no `NaN`, `None`, dictionaries, or synthetic empty rows. Units are `degC`,
+`percent`, `mV`, `ppm`, `ug/m3`, or `index`. Spreadsheet-formula prefixes are
+escaped for text, and the attachment name is a sanitized name plus UTC start
+and short job ID. Internal filesystem paths are never returned.
+
+### Workflow Options
+
+`GET /api/workflows/options` returns the retention limit, allowed formats,
+resolutions, fields, units, and source-type applicability. Current source
+identities continue to come from `/api/nodes` (or the same node snapshot within
+`/api/latest`).
+
 ## Error Responses
 
 Invalid query parameters return HTTP 400:

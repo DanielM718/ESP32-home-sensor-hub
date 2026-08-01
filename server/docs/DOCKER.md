@@ -51,6 +51,12 @@ Start the stack:
 docker compose up --build
 ```
 
+The mirror runs one `export-worker` container and shares the named
+`monitoring-data` volume with the two-worker Gunicorn `dashboard`. The volume
+contains `monitoring.sqlite3` and completed CSVs, so browser/container restarts
+do not discard queued work or downloads. Remove that named volume only when an
+explicit local-lab data reset is intended.
+
 Local URLs:
 
 ```text

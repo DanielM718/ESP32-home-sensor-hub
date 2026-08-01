@@ -11,6 +11,12 @@ server/
 |   |   |-- influx.py
 |   |   |-- models.py
 |   |   |-- queries.py
+|   |   |-- workflows.py
+|   |   |-- persistence.py
+|   |   |-- export_queries.py
+|   |   |-- workflow_services.py
+|   |   |-- workflow_routes.py
+|   |   |-- export_worker.py
 |   |   |-- validation.py
 |   |   `-- web.py
 |   |-- bridge/
@@ -18,6 +24,7 @@ server/
 |   |   |-- mqtt_bridge.py
 |   |   `-- topic_router.py
 |   |-- tests/
+|   |   |-- test_monitoring_exports.py
 |   |   |-- test_queries.py
 |   |   `-- test_topic_router.py
 |   `-- .env.example
@@ -89,6 +96,7 @@ server/
 |   `-- verify_tailscale.sh
 |-- systemd/
 |   |-- home-sensor-bridge.service
+|   |-- home-sensor-export-worker.service
 |   `-- home-sensor-dashboard.service
 |-- .dockerignore
 |-- .env.example
@@ -98,3 +106,8 @@ server/
 |-- install.sh
 `-- requirements.txt
 ```
+
+Runtime SQLite and generated CSV files are intentionally absent from this tree.
+Production stores them under `/var/lib/home-sensor`; local tests use pytest
+temporary directories. They are never frontend static assets or deployment
+source.
