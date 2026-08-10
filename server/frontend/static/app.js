@@ -7,6 +7,7 @@ const API = {
   workflowOptions: "/api/workflows/options",
   monitoringSessions: "/api/monitoring/sessions",
   exports: "/api/exports",
+  status: "/api/status",
 };
 
 const POLL_INTERVAL_MS = 7000;
@@ -50,13 +51,6 @@ const ENVIRONMENT_STATUS_FLAGS = [
   { mask: 1 << 4, label: "Battery shutdown", className: "danger" },
 ];
 
-const EXPORT_FIELD_GROUPS = [
-  { label: "Climate", fields: ["temperature_c", "humidity"] },
-  { label: "Particulate", fields: ["pm1", "pm25", "pm4", "pm10"] },
-  { label: "Gas and indices", fields: ["co2", "voc_index", "nox_index"] },
-  { label: "Battery", fields: ["battery_mv"] },
-];
-
 const chartPalette = [
   "#0f766e",
   "#2563eb",
@@ -71,11 +65,21 @@ const chartPalette = [
 const state = {
   range: "24h",
   nodeFilter: "all",
+  activeTab: "monitoring",
   charts: {},
   latestTimer: null,
   fullRefreshInFlight: false,
   latestRefreshInFlight: false,
   knownSources: new Map(),
+  fieldDefinitions: new Map(),
+  latestData: null,
+  readingsData: null,
+  nodesData: null,
+  workflowOptions: null,
+  workflowSelectedFields: {
+    monitoring: new Set(["temperature_c", "humidity"]),
+    export: new Set(["temperature_c", "humidity"]),
+  },
   monitoringSessions: [],
   exportJobs: [],
   monitoringTimer: null,
@@ -85,28 +89,110 @@ const state = {
   monitoringInFlight: false,
   exportsInFlight: false,
   previewInFlight: false,
+  statusInFlight: false,
   serverOffsetMs: 0,
+  selectedChartFields: new Set(["temperature_c", "humidity"]),
+  ready: false,
 };
 
 document.addEventListener("DOMContentLoaded", () => {
+  setupTabs();
   setupWorkflowControllers();
-
-  if (!window.Chart) {
-    showError("Chart.js is not available. Run scripts/install_frontend_assets.sh on the Raspberry Pi.");
-    setStatus("Chart.js missing", "error");
-    return;
-  }
-
-  Chart.defaults.font.family = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
-  Chart.defaults.color = "#42534a";
-
   setupRangeButtons();
   setupNodeFilter();
-  document.getElementById("refresh-button").addEventListener("click", refreshAll);
-  initializeCharts();
-  refreshAll();
+  document.getElementById("refresh-button").addEventListener("click", () => refreshActiveTab(true));
+
+  if (window.Chart) {
+    Chart.defaults.font.family = 'system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif';
+    Chart.defaults.color = "#42534a";
+    initializeCharts();
+  } else {
+    showError("Chart.js is not available. Run scripts/install_frontend_assets.sh on the Raspberry Pi.");
+    setStatus("Chart.js missing", "error");
+  }
+
+  state.ready = true;
+  void refreshWorkflowOptions();
+  void refreshActiveTab(true);
   state.latestTimer = window.setInterval(refreshLatestOnly, POLL_INTERVAL_MS);
+  state.monitoringTimer = window.setInterval(refreshMonitoringSessions, WORKFLOW_POLL_INTERVAL_MS);
+  state.exportTimer = window.setInterval(refreshExportJobs, WORKFLOW_POLL_INTERVAL_MS);
+  state.previewTimer = window.setInterval(refreshMonitoringPreviews, PREVIEW_POLL_INTERVAL_MS);
+  state.clockTimer = window.setInterval(updateVisibleWorkflowClocks, 1000);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) {
+      void refreshActiveTab(true);
+    }
+  });
 });
+
+const TAB_IDS = ["monitoring", "active-monitoring", "status"];
+
+function setupTabs() {
+  const links = TAB_IDS.map((id) => document.getElementById(`tab-${id}`));
+  const activateHash = () => {
+    const requested = window.location.hash.replace(/^#/, "");
+    activateTab(TAB_IDS.includes(requested) ? requested : "monitoring");
+  };
+  for (const [index, link] of links.entries()) {
+    link.addEventListener("keydown", (event) => {
+      if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) {
+        return;
+      }
+      event.preventDefault();
+      const nextIndex = event.key === "Home"
+        ? 0
+        : event.key === "End"
+          ? links.length - 1
+          : (index + (event.key === "ArrowRight" ? 1 : -1) + links.length) % links.length;
+      links[nextIndex].focus();
+      links[nextIndex].click();
+    });
+  }
+  window.addEventListener("hashchange", activateHash);
+  activateHash();
+}
+
+function activateTab(tabId) {
+  state.activeTab = tabId;
+  for (const id of TAB_IDS) {
+    const active = id === tabId;
+    const link = document.getElementById(`tab-${id}`);
+    const panel = document.getElementById(`panel-${id}`);
+    link.classList.toggle("is-active", active);
+    link.setAttribute("aria-selected", String(active));
+    link.tabIndex = active ? 0 : -1;
+    panel.hidden = !active;
+  }
+  if (state.ready) {
+    void refreshActiveTab(true);
+  }
+}
+
+async function refreshActiveTab(force = false) {
+  if (document.hidden && !force) {
+    return;
+  }
+  if (state.activeTab === "monitoring") {
+    await refreshAll();
+  } else if (state.activeTab === "active-monitoring") {
+    try {
+      await Promise.all([
+        refreshKnownSources(force),
+        refreshMonitoringSessions(force),
+        refreshExportJobs(force),
+      ]);
+      await refreshMonitoringPreviews(force);
+      setStatus("Online", "ok");
+      clearError();
+    } catch (error) {
+      setStatus("API error", "error");
+      showError(error.message || "Active Monitoring refresh failed");
+    }
+  } else {
+    await refreshStatusTab(force);
+  }
+}
 
 async function refreshAll() {
   if (state.fullRefreshInFlight || state.latestRefreshInFlight) {
@@ -125,10 +211,13 @@ async function refreshAll() {
     ]);
     const nodes = await nodesForLatest(latest);
 
+    state.latestData = latest;
+    state.readingsData = readings;
+    state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
     renderLatest(latest);
-    renderNodes(nodes);
+    renderChartMetricSelector();
     renderCharts(readings);
     setLastUpdated(latest.generated_at || readings.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
@@ -142,7 +231,8 @@ async function refreshAll() {
 }
 
 async function refreshLatestOnly() {
-  if (state.fullRefreshInFlight || state.latestRefreshInFlight) {
+  if (state.activeTab !== "monitoring" || document.hidden
+      || state.fullRefreshInFlight || state.latestRefreshInFlight) {
     return;
   }
 
@@ -151,10 +241,12 @@ async function refreshLatestOnly() {
     const latest = await fetchJson(API.latest);
     const nodes = await nodesForLatest(latest);
 
+    state.latestData = latest;
+    state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
     renderLatest(latest);
-    renderNodes(nodes);
+    renderChartMetricSelector();
     setLastUpdated(latest.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
     clearError();
@@ -164,6 +256,17 @@ async function refreshLatestOnly() {
   } finally {
     state.latestRefreshInFlight = false;
   }
+}
+
+async function refreshKnownSources(force = false) {
+  if (document.hidden && !force) {
+    return;
+  }
+  const latest = await fetchJson(API.latest);
+  const nodes = await nodesForLatest(latest);
+  state.latestData = latest;
+  state.nodesData = nodes;
+  updateWorkflowSources(nodes.nodes || []);
 }
 
 async function nodesForLatest(latest) {
@@ -179,6 +282,7 @@ function setupNodeFilter() {
   const select = document.getElementById("node-filter");
   select.addEventListener("change", async () => {
     state.nodeFilter = select.value;
+    renderChartMetricSelector();
     await refreshAll();
   });
 }
@@ -250,75 +354,150 @@ async function fetchJson(url, options = {}) {
 }
 
 function setupWorkflowControllers() {
-  renderWorkflowFieldSelectors();
   setDefaultExportInterval();
 
   const duration = document.getElementById("monitoring-duration");
   duration.addEventListener("change", () => {
     document.getElementById("monitoring-custom-wrap").hidden = duration.value !== "custom";
   });
+  for (const prefix of ["monitoring", "export"]) {
+    document.getElementById(`${prefix}-sources`).addEventListener("change", () => {
+      renderWorkflowFieldSelector(prefix);
+      updateResolutionAvailability(prefix);
+    });
+    document.getElementById(`${prefix}-fields`).addEventListener("change", (event) => {
+      if (event.target.matches('input[type="checkbox"]')) {
+        const selected = state.workflowSelectedFields[prefix];
+        if (event.target.checked) {
+          selected.add(event.target.value);
+        } else {
+          selected.delete(event.target.value);
+        }
+      }
+    });
+    document.getElementById(`${prefix}-format`).addEventListener("change", () => {
+      updateCsvFormatHelp(prefix);
+    });
+    document.getElementById(`${prefix}-resolution`).addEventListener("change", () => {
+      updateResolutionHelp(prefix);
+      renderWorkflowFieldSelector(prefix);
+    });
+    updateCsvFormatHelp(prefix);
+  }
   document.getElementById("monitoring-form").addEventListener("submit", submitMonitoringSession);
   document.getElementById("export-form").addEventListener("submit", submitHistoricalExport);
   document.getElementById("active-monitoring").addEventListener("click", handleMonitoringAction);
   document.getElementById("historical-exports").addEventListener("click", handleExportAction);
-
-  void refreshWorkflowOptions();
-  void refreshMonitoringSessions(true);
-  void refreshExportJobs(true);
-  state.monitoringTimer = window.setInterval(refreshMonitoringSessions, WORKFLOW_POLL_INTERVAL_MS);
-  state.exportTimer = window.setInterval(refreshExportJobs, WORKFLOW_POLL_INTERVAL_MS);
-  state.previewTimer = window.setInterval(refreshMonitoringPreviews, PREVIEW_POLL_INTERVAL_MS);
-  state.clockTimer = window.setInterval(updateVisibleWorkflowClocks, 1000);
-  document.addEventListener("visibilitychange", () => {
-    if (!document.hidden) {
-      void refreshMonitoringSessions(true);
-      void refreshExportJobs(true);
-      void refreshMonitoringPreviews(true);
-    }
-  });
 }
 
 async function refreshWorkflowOptions() {
   try {
     const data = await fetchJson(API.workflowOptions);
+    state.workflowOptions = data;
     updateServerOffset(data.server_time_utc);
-    const maximumMinutes = Math.floor(Number(data.raw_retention_seconds) / 60);
-    const custom = document.getElementById("monitoring-custom-minutes");
-    if (Number.isFinite(maximumMinutes) && maximumMinutes > 0) {
-      custom.max = String(maximumMinutes);
+    state.fieldDefinitions = new Map((data.fields || []).map((field) => [field.name, field]));
+    populateResolutionOptions("monitoring", data.monitoring_resolutions || []);
+    populateResolutionOptions("export", data.export_resolutions || []);
+    const maximumSeconds = Number(data.raw_retention_seconds);
+    if (Number.isFinite(maximumSeconds) && maximumSeconds > 0) {
+      document.getElementById("monitoring-custom-hours").max = String(Math.floor(maximumSeconds / 3600));
+      document.getElementById("monitoring-duration-help").textContent =
+        `Maximum active-monitoring duration: ${formatDurationLong(maximumSeconds)} (raw retention).`;
     }
+    renderWorkflowFieldSelector("monitoring");
+    renderWorkflowFieldSelector("export");
+    renderChartMetricSelector();
+    updateResolutionAvailability("monitoring");
+    updateResolutionAvailability("export");
   } catch (_error) {
     // Forms retain safe built-in defaults; status pollers report API availability.
   }
 }
 
-function renderWorkflowFieldSelectors() {
-  for (const prefix of ["monitoring", "export"]) {
-    const container = document.getElementById(`${prefix}-fields`);
-    container.replaceChildren(...EXPORT_FIELD_GROUPS.map((group) => {
-      const section = document.createElement("section");
-      section.className = "field-group";
-      const heading = document.createElement("h4");
-      heading.textContent = group.label;
-      const grid = document.createElement("div");
-      grid.className = "check-grid";
-      for (const field of group.fields) {
-        const label = document.createElement("label");
-        label.className = "check-option";
-        const input = document.createElement("input");
-        input.type = "checkbox";
-        input.name = `${prefix}_field`;
-        input.value = field;
-        input.checked = ["temperature_c", "humidity"].includes(field);
-        const text = document.createElement("span");
-        text.textContent = workflowFieldLabel(field);
-        label.append(input, text);
-        grid.append(label);
-      }
-      section.append(heading, grid);
-      return section;
-    }));
+function populateResolutionOptions(prefix, options) {
+  if (!options.length) {
+    return;
   }
+  const select = document.getElementById(`${prefix}-resolution`);
+  const previous = select.value;
+  select.replaceChildren(...options.map((option) => {
+    const element = document.createElement("option");
+    element.value = option.value;
+    element.textContent = option.label;
+    element.dataset.source = option.data_source || "retained_raw";
+    return element;
+  }));
+  select.value = options.some((option) => option.value === previous) ? previous : "raw";
+  updateResolutionHelp(prefix);
+}
+
+function renderWorkflowFieldSelector(prefix) {
+  const container = document.getElementById(`${prefix}-fields`);
+  const selectedSources = checkedValues(`${prefix}-sources`)
+    .map((key) => state.knownSources.get(key))
+    .filter(Boolean);
+  const help = document.getElementById(`${prefix}-capability-help`);
+  if (!selectedSources.length) {
+    container.replaceChildren();
+    help.textContent = "Select one or more sources to see their measurements.";
+    return;
+  }
+
+  const providers = new Map();
+  const capabilitySources = prefix === "export"
+      && document.getElementById("export-resolution").value === "15m"
+    ? selectedSources.filter((source) => source.sensor_type === "air_quality")
+    : selectedSources;
+  for (const source of capabilitySources) {
+    for (const field of source.available_fields || []) {
+      const list = providers.get(field) || [];
+      list.push(source.label);
+      providers.set(field, list);
+    }
+  }
+  const selectedFields = state.workflowSelectedFields[prefix];
+  const definitions = Array.from(state.fieldDefinitions.values())
+    .filter((definition) => providers.has(definition.name));
+  if (!definitions.length) {
+    container.innerHTML = '<p class="empty-state">No measurements were discovered for these sources.</p>';
+    help.textContent = "Capabilities are derived from fields actually recorded for each source.";
+    return;
+  }
+  const groups = new Map();
+  for (const definition of definitions) {
+    const group = definition.group || "Measurements";
+    const list = groups.get(group) || [];
+    list.push(definition);
+    groups.set(group, list);
+  }
+  container.replaceChildren(...Array.from(groups, ([group, fields]) => {
+    const section = document.createElement("section");
+    section.className = "field-group";
+    const heading = document.createElement("h4");
+    heading.textContent = group;
+    const grid = document.createElement("div");
+    grid.className = "check-grid";
+    for (const definition of fields) {
+      const fieldProviders = providers.get(definition.name) || [];
+      const label = document.createElement("label");
+      label.className = "check-option capability-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.name = `${prefix}_field`;
+      input.value = definition.name;
+      input.checked = selectedFields.has(definition.name);
+      const text = document.createElement("span");
+      const availability = fieldProviders.length === selectedSources.length
+        ? "All selected sources"
+        : `${fieldProviders.length} of ${selectedSources.length}: ${fieldProviders.join(", ")}`;
+      text.innerHTML = `<strong>${escapeHtml(definition.label)}</strong><small>${escapeHtml(availability)}</small>`;
+      label.append(input, text);
+      grid.append(label);
+    }
+    section.append(heading, grid);
+    return section;
+  }));
+  help.textContent = "A measurement may be exported only for the selected sources that actually publish it.";
 }
 
 function updateWorkflowSources(nodes) {
@@ -340,13 +519,19 @@ function updateWorkflowSources(nodes) {
         label: `Air quality · ${formatLabel(node.location)}`,
       };
     }
-    if (source && !state.knownSources.has(source.key)) {
-      state.knownSources.set(source.key, source);
-      changed = true;
+    if (source) {
+      source.available_fields = Array.isArray(node.available_fields) ? node.available_fields : [];
+      const previous = state.knownSources.get(source.key);
+      if (!previous || JSON.stringify(previous) !== JSON.stringify(source)) {
+        state.knownSources.set(source.key, source);
+        changed = true;
+      }
     }
   }
   if (changed || document.querySelectorAll(".source-options input").length === 0) {
     renderSourceSelectors();
+    renderWorkflowFieldSelector("monitoring");
+    renderWorkflowFieldSelector("export");
   }
 }
 
@@ -378,6 +563,58 @@ function renderSourceSelectors() {
   }
 }
 
+function updateCsvFormatHelp(prefix) {
+  const format = document.getElementById(`${prefix}-format`).value;
+  document.getElementById(`${prefix}-format-help`).textContent = format === "wide"
+    ? "Best for Excel, plotting, and most analysis. One sample per row with each measurement in its own column."
+    : "Database-style format. Each measurement is a separate row with field/value columns.";
+}
+
+function updateResolutionAvailability(prefix) {
+  const select = document.getElementById(`${prefix}-resolution`);
+  if (prefix === "export") {
+    const sources = checkedValues("export-sources")
+      .map((key) => state.knownSources.get(key))
+      .filter(Boolean);
+    const stored = Array.from(select.options).find((option) => option.value === "15m");
+    if (stored) {
+      const hasAirQuality = sources.some((source) => source.sensor_type === "air_quality");
+      stored.disabled = sources.length > 0 && !hasAirQuality;
+      stored.title = stored.disabled
+        ? "Stored 15-minute data exists only for SEN66 air-quality sources."
+        : "Uses the permanent stored SEN66 15-minute mean tier.";
+      if (stored.disabled && select.value === "15m") {
+        select.value = "raw";
+      }
+    }
+  }
+  updateResolutionHelp(prefix);
+}
+
+function updateResolutionHelp(prefix) {
+  const select = document.getElementById(`${prefix}-resolution`);
+  const selected = select.selectedOptions[0];
+  const help = document.getElementById(`${prefix}-resolution-help`);
+  if (!help) {
+    return;
+  }
+  if (prefix === "export" && selected?.value === "15m") {
+    const sources = checkedValues("export-sources")
+      .map((key) => state.knownSources.get(key))
+      .filter(Boolean);
+    const hasEnvironment = sources.some((source) => source.sensor_type === "environment");
+    help.textContent = hasEnvironment
+      ? "Uses stored SEN66 15-minute means; selected environment nodes contribute no rows at this tier."
+      : "Uses the permanent stored SEN66 15-minute mean tier.";
+  } else if (selected?.value === "raw") {
+    help.textContent = "Exports retained individual samples without numeric aggregation.";
+  } else if (selected) {
+    help.textContent = "Calculates arithmetic means from retained raw samples. Status flags are not averaged.";
+  } else {
+    help.textContent = "Resolution options are provided by the backend.";
+  }
+}
+
 async function submitMonitoringSession(event) {
   event.preventDefault();
   const button = document.getElementById("monitoring-start");
@@ -387,9 +624,7 @@ async function submitMonitoringSession(event) {
     const sourceKeys = checkedValues("monitoring-sources");
     const fields = checkedValues("monitoring-fields");
     const durationSelect = document.getElementById("monitoring-duration").value;
-    const durationSeconds = durationSelect === "custom"
-      ? Math.round(Number(document.getElementById("monitoring-custom-minutes").value) * 60)
-      : Number(durationSelect);
+    const durationSeconds = monitoringDurationSeconds(durationSelect);
     if (!name) {
       throw new Error("Enter a session name.");
     }
@@ -399,8 +634,13 @@ async function submitMonitoringSession(event) {
     if (!fields.length) {
       throw new Error("Select at least one measurement.");
     }
-    if (!Number.isInteger(durationSeconds) || durationSeconds < 60) {
-      throw new Error("Monitoring duration must be at least one minute.");
+    const minimumSeconds = Number(state.workflowOptions?.minimum_monitoring_seconds || 10);
+    const maximumSeconds = Number(state.workflowOptions?.raw_retention_seconds || 72 * 3600);
+    if (!Number.isInteger(durationSeconds) || durationSeconds < minimumSeconds) {
+      throw new Error(`Monitoring duration must be at least ${formatDurationLong(minimumSeconds)}.`);
+    }
+    if (durationSeconds > maximumSeconds) {
+      throw new Error(`Monitoring duration may not exceed ${formatDurationLong(maximumSeconds)}.`);
     }
     button.disabled = true;
     button.setAttribute("aria-busy", "true");
@@ -426,6 +666,29 @@ async function submitMonitoringSession(event) {
     button.disabled = false;
     button.setAttribute("aria-busy", "false");
   }
+}
+
+function monitoringDurationSeconds(durationSelect) {
+  if (durationSelect !== "custom") {
+    return Number(durationSelect);
+  }
+  const hoursInput = document.getElementById("monitoring-custom-hours");
+  const minutesInput = document.getElementById("monitoring-custom-minutes");
+  if (hoursInput.value.trim() === "" || minutesInput.value.trim() === "") {
+    throw new Error("Enter both Hours and Minutes for Custom time.");
+  }
+  const hours = Number(hoursInput.value);
+  const minutes = Number(minutesInput.value);
+  if (!Number.isInteger(hours) || hours < 0) {
+    throw new Error("Custom Hours must be a whole number of 0 or more.");
+  }
+  if (!Number.isInteger(minutes) || minutes < 0 || minutes > 59) {
+    throw new Error("Custom Minutes must be a whole number from 0 to 59.");
+  }
+  if (hours === 0 && minutes === 0) {
+    throw new Error("Custom time must be greater than zero.");
+  }
+  return hours * 3600 + minutes * 60;
 }
 
 async function submitHistoricalExport(event) {
@@ -479,7 +742,8 @@ async function submitHistoricalExport(event) {
 }
 
 async function refreshMonitoringSessions(force = false) {
-  if (state.monitoringInFlight || (document.hidden && !force)) {
+  if (state.monitoringInFlight
+      || ((!force && state.activeTab !== "active-monitoring") || (document.hidden && !force))) {
     return;
   }
   state.monitoringInFlight = true;
@@ -498,7 +762,8 @@ async function refreshMonitoringSessions(force = false) {
 }
 
 async function refreshMonitoringPreviews(force = false) {
-  if (state.previewInFlight || (document.hidden && !force)) {
+  if (state.previewInFlight
+      || ((!force && state.activeTab !== "active-monitoring") || (document.hidden && !force))) {
     return;
   }
   const running = state.monitoringSessions.filter((session) => session.status === "running");
@@ -525,7 +790,8 @@ async function refreshMonitoringPreviews(force = false) {
 }
 
 async function refreshExportJobs(force = false) {
-  if (state.exportsInFlight || (document.hidden && !force)) {
+  if (state.exportsInFlight
+      || ((!force && state.activeTab !== "active-monitoring") || (document.hidden && !force))) {
     return;
   }
   state.exportsInFlight = true;
@@ -830,19 +1096,7 @@ function downloadLinkHtml(job) {
 }
 
 function workflowFieldLabel(field) {
-  const labels = {
-    temperature_c: "Temperature",
-    humidity: "Humidity",
-    battery_mv: "Battery voltage",
-    co2: "CO₂",
-    pm1: "PM1.0",
-    pm25: "PM2.5",
-    pm4: "PM4.0",
-    pm10: "PM10",
-    voc_index: "VOC Index",
-    nox_index: "NOx Index",
-  };
-  return labels[field] || formatLabel(field);
+  return state.fieldDefinitions.get(field)?.label || formatLabel(field);
 }
 
 function sourceSummary(sources) {
@@ -940,30 +1194,10 @@ function updateNodeFilterOptions(data) {
 }
 
 function initializeCharts() {
-  state.charts.temperature = createLineChart("temperature-chart", "Temperature °C");
-  state.charts.humidity = createLineChart("humidity-chart", "Humidity %");
-  state.charts.battery = createLineChart("battery-chart", "Battery mV");
-  state.charts.gas = createLineChart("gas-chart", "SEN66 gas and indices", {
-    y: {
-      beginAtZero: false,
-      position: "left",
-      title: { display: true, text: "CO₂ (ppm)" },
-      grid: { color: "#edf2ef" },
-    },
-    yIndex: {
-      beginAtZero: false,
-      position: "right",
-      title: { display: true, text: "VOC / NOx index" },
-      grid: { drawOnChartArea: false },
-    },
-  });
-  state.charts.particulate = createLineChart(
-    "particulate-chart",
-    "SEN66 particulate matter",
-  );
+  state.charts.history = createLineChart("history-chart");
 }
 
-function createLineChart(canvasId, title, yScales = null) {
+function createLineChart(canvasId) {
   const context = document.getElementById(canvasId).getContext("2d");
   return new Chart(context, {
     type: "line",
@@ -989,7 +1223,20 @@ function createLineChart(canvasId, title, yScales = null) {
         },
         title: {
           display: false,
-          text: title,
+          text: "Selected historical measurements",
+        },
+        tooltip: {
+          callbacks: {
+            title(items) {
+              const raw = items[0]?.dataset?.rawTimes?.[items[0].dataIndex];
+              return raw ? formatDateTime(raw) : "";
+            },
+            label(context) {
+              const dataset = context.dataset;
+              const value = context.parsed.y;
+              return `${dataset.sourceLabel} · ${dataset.measurementLabel}: ${value} ${dataset.displayUnit}`.trim();
+            },
+          },
         },
       },
       scales: {
@@ -1003,14 +1250,10 @@ function createLineChart(canvasId, title, yScales = null) {
             display: false,
           },
         },
-        ...(yScales || {
-          y: {
-            beginAtZero: false,
-            grid: {
-              color: "#edf2ef",
-            },
-          },
-        }),
+        y: {
+          beginAtZero: false,
+          grid: { color: "#edf2ef" },
+        },
       },
       elements: {
         line: {
@@ -1025,6 +1268,47 @@ function createLineChart(canvasId, title, yScales = null) {
       },
     },
   });
+}
+
+function renderChartMetricSelector() {
+  const container = document.getElementById("chart-metrics");
+  if (!container || !state.fieldDefinitions.size || !state.knownSources.size) {
+    return;
+  }
+  const applicableSources = state.nodeFilter === "all"
+    ? Array.from(state.knownSources.values())
+    : [state.knownSources.get(state.nodeFilter)].filter(Boolean);
+  const available = new Set(
+    applicableSources.flatMap((source) => source.available_fields || []),
+  );
+  const definitions = Array.from(state.fieldDefinitions.values())
+    .filter((definition) => available.has(definition.name));
+  if (!definitions.length) {
+    container.innerHTML = '<span class="subtle">No graphable measurements are available for this source.</span>';
+    return;
+  }
+  container.replaceChildren(...definitions.map((definition) => {
+    const label = document.createElement("label");
+    label.className = "check-option chart-metric-option";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.value = definition.name;
+    input.checked = state.selectedChartFields.has(definition.name);
+    input.addEventListener("change", () => {
+      if (input.checked) {
+        state.selectedChartFields.add(definition.name);
+      } else {
+        state.selectedChartFields.delete(definition.name);
+      }
+      if (state.readingsData) {
+        renderCharts(state.readingsData);
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = `${definition.label}${definition.display_unit ? ` (${definition.display_unit})` : ""}`;
+    label.append(input, text);
+    return label;
+  }));
 }
 
 function renderLatest(data) {
@@ -1236,12 +1520,101 @@ function metricHtml(label, value) {
   `;
 }
 
+async function refreshStatusTab(force = false) {
+  if (state.statusInFlight || (document.hidden && !force)) {
+    return;
+  }
+  state.statusInFlight = true;
+  setRefreshButtonBusy(true);
+  try {
+    const [status, nodes] = await Promise.all([
+      fetchJson(API.status),
+      fetchJson(API.nodes),
+    ]);
+    state.nodesData = nodes;
+    updateWorkflowSources(nodes.nodes || []);
+    renderServiceStatus(status);
+    renderNodes(nodes);
+    renderDebugInformation(status);
+    setLastUpdated(status.checked_at_utc || nodes.generated_at);
+    setStatus("Online", "ok");
+    clearError();
+  } catch (error) {
+    setStatus("Status error", "error");
+    showError(error.message || "Status refresh failed");
+  } finally {
+    state.statusInFlight = false;
+    setRefreshButtonBusy(false);
+  }
+}
+
+function renderServiceStatus(data) {
+  const services = data.services || [];
+  document.getElementById("status-checked").textContent =
+    `Checked ${relativeTime(data.checked_at_utc)}`;
+  const container = document.getElementById("services-grid");
+  container.innerHTML = services.length
+    ? services.map((service) => {
+      const stateName = !service.installed
+        ? "unavailable"
+        : service.active
+          ? "active"
+          : service.active_state === "failed"
+            ? "failed"
+            : "inactive";
+      const statusText = !service.installed
+        ? "Not installed"
+        : `${formatLabel(service.active_state)} · ${formatLabel(service.sub_state)}`;
+      return `
+        <article class="service-card service-${escapeHtml(stateName)}">
+          <div class="service-heading">
+            <h3>${escapeHtml(service.display_name)}</h3>
+            <span class="service-state">${escapeHtml(statusText)}</span>
+          </div>
+          <p class="subtle">${escapeHtml(service.unit)}</p>
+          ${service.description ? `<p>${escapeHtml(service.description)}</p>` : ""}
+          <dl class="service-facts">
+            <div><dt>Load state</dt><dd>${escapeHtml(service.load_state)}</dd></div>
+            <div><dt>State entered</dt><dd>${escapeHtml(service.state_entered_at || "Unavailable")}</dd></div>
+            <div><dt>Uptime</dt><dd>${service.uptime_seconds === null ? "Unavailable" : escapeHtml(formatDurationLong(service.uptime_seconds))}</dd></div>
+          </dl>
+        </article>`;
+    }).join("")
+    : '<p class="empty-state">No service status was returned.</p>';
+}
+
+function renderDebugInformation(data) {
+  const config = data.configuration || {};
+  const facts = [
+    ["Pi hostname", data.hostname || "Unavailable"],
+    ["Server UTC time", data.checked_at_utc || "Unavailable"],
+    ["Live dashboard refresh", `${POLL_INTERVAL_MS / 1000} seconds (Monitoring tab only)`],
+    ["Session / export polling", `${WORKFLOW_POLL_INTERVAL_MS / 1000} seconds (Active Monitoring tab only)`],
+    ["Session preview polling", `${PREVIEW_POLL_INTERVAL_MS / 1000} seconds (Active Monitoring tab only)`],
+    ["Frontend request timeout", `${FETCH_TIMEOUT_MS / 1000} seconds; server-side work continues`],
+    ["Environment stale threshold", formatDurationLong(config.node_stale_after_seconds)],
+    ["SEN66 stale threshold", formatDurationLong(config.air_quality_stale_after_seconds)],
+    ["SEN66 expected publish", formatDurationLong(config.sen66_expected_publish_seconds)],
+    ["Raw SEN66 retention / max session", formatDurationLong(config.raw_retention_seconds)],
+    ["Permanent SEN66 aggregate", formatDurationLong(config.stored_air_quality_resolution_seconds)],
+  ];
+  document.getElementById("debug-settings").innerHTML = facts.map(([label, value]) =>
+    `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`).join("");
+  const commands = (data.services || [])
+    .filter((service) => service.installed)
+    .flatMap((service) => [service.commands?.status, service.commands?.logs])
+    .filter(Boolean);
+  document.getElementById("debug-commands").innerHTML = commands.length
+    ? commands.map((command) => `<code>${escapeHtml(command)}</code>`).join("")
+    : "<code>No installed service commands are available.</code>";
+}
+
 function renderNodes(data) {
   const tbody = document.getElementById("nodes-table");
   const nodes = data.nodes || [];
 
   if (nodes.length === 0) {
-    tbody.innerHTML = '<tr><td colspan="6">No node status available.</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="7">No node status available.</td></tr>';
     return;
   }
 
@@ -1251,13 +1624,18 @@ function renderNodes(data) {
       ? `Node ${node.node_id}`
       : formatLabel(node.location || node.id);
     const statusClass = nodeStatusClass(node);
+    const availableFields = Array.isArray(node.available_fields) ? node.available_fields : [];
+    const hasBattery = availableFields.includes("battery_mv");
     row.innerHTML = `
       <td>${escapeHtml(label)}</td>
       <td>${escapeHtml(formatLabel(node.sensor_type))}</td>
       <td class="${escapeHtml(statusClass)}">${escapeHtml(nodeStatusLabel(node))}</td>
       <td>${escapeHtml(relativeTime(node.last_seen))}</td>
-      <td>${node.sensor_type === "environment" ? escapeHtml(batteryDisplay(node)) : "-"}</td>
+      <td>${hasBattery ? escapeHtml(batteryDisplay(node)) : "—"}</td>
       <td>${node.sensor_type === "environment" ? statusFlagsHtml(node) : "-"}</td>
+      <td><span class="capability-list">${availableFields.length
+        ? availableFields.map((field) => escapeHtml(workflowFieldLabel(field))).join(", ")
+        : "None discovered"}</span></td>
     `;
     return row;
   }));
@@ -1374,8 +1752,8 @@ function batteryAlertHtml(reading) {
 function nodeStatusLabel(node) {
   const status = node.status || "unknown";
   if (node.battery_shutdown === true) {
-    return status === "stale"
-      ? "stale - battery shutdown"
+    return ["stale", "offline"].includes(status)
+      ? `${status} - battery shutdown`
       : "battery shutdown";
   }
   if (node.battery_low === true) {
@@ -1395,137 +1773,71 @@ function nodeStatusClass(node) {
 }
 
 function renderCharts(data) {
+  if (!state.charts.history) {
+    return;
+  }
   const series = data.series || [];
-  const environmentSeries = series.filter((item) => item.sensor_type === "environment");
-  const airQualitySeries = series.filter((item) => item.sensor_type === "air_quality");
-  const climateSeries = [...environmentSeries, ...airQualitySeries];
   const tier = data.data_tier === "live_1m"
     ? "Short range: 1-minute means from bounded high-resolution live samples"
-    : "Long range: persistent 15-minute aggregates";
+    : "Long range: persistent 15-minute means (aggregate statistics hidden)";
   document.getElementById("history-tier").textContent = tier;
-
-  updateChart(state.charts.temperature, buildDatasets(climateSeries, "temperature_c", "Temp °C"));
-  updateChart(state.charts.humidity, buildDatasets(climateSeries, "humidity", "Humidity %"));
-  updateChart(state.charts.battery, buildDatasets(
-    environmentSeries,
-    "battery_mv",
-    "Battery mV",
-  ));
-
-  const gasDatasets = [
-    ...buildDatasets(airQualitySeries, "co2", "CO₂ mean (ppm)", { colorOffset: 0 }),
-    ...buildDatasets(airQualitySeries, "co2_max", "CO₂ maximum (ppm)", {
-      colorOffset: 0, hidden: true, borderDash: [5, 4],
-    }),
-    ...buildDatasets(airQualitySeries, "co2_p95", "CO₂ p95 (ppm)", {
-      colorOffset: 0, hidden: true, borderDash: [2, 3],
-    }),
-    ...buildDatasets(airQualitySeries, "voc_index", "VOC Index mean", {
-      colorOffset: 2,
-      yAxisID: "yIndex",
-    }),
-    ...buildDatasets(airQualitySeries, "voc_index_max", "VOC Index maximum", {
-      colorOffset: 2, yAxisID: "yIndex", hidden: true, borderDash: [5, 4],
-    }),
-    ...buildDatasets(airQualitySeries, "voc_index_p95", "VOC Index p95", {
-      colorOffset: 2, yAxisID: "yIndex", hidden: true, borderDash: [2, 3],
-    }),
-    ...buildDatasets(airQualitySeries, "nox_index", "NOx Index mean", {
-      colorOffset: 4,
-      yAxisID: "yIndex",
-    }),
-    ...buildDatasets(airQualitySeries, "nox_index_max", "NOx Index maximum", {
-      colorOffset: 4, yAxisID: "yIndex", hidden: true, borderDash: [5, 4],
-    }),
-    ...buildDatasets(airQualitySeries, "nox_index_p95", "NOx Index p95", {
-      colorOffset: 4, yAxisID: "yIndex", hidden: true, borderDash: [2, 3],
-    }),
-    ...eventDatasets(data.events || [], ["co2", "voc_index", "nox_index"]),
-  ];
-  const gasPanel = document.getElementById("gas-chart-panel");
-  gasPanel.hidden = gasDatasets.length === 0;
-  updateChart(state.charts.gas, gasDatasets);
-
-  const particulateDatasets = [
-    ...buildDatasets(airQualitySeries, "pm1", "PM1.0 mean", { colorOffset: 0 }),
-    ...buildDatasets(airQualitySeries, "pm25", "PM2.5 mean", { colorOffset: 2 }),
-    ...buildDatasets(airQualitySeries, "pm25_max", "PM2.5 maximum", {
-      colorOffset: 2, hidden: true, borderDash: [5, 4],
-    }),
-    ...buildDatasets(airQualitySeries, "pm25_p95", "PM2.5 p95", {
-      colorOffset: 2, hidden: true, borderDash: [2, 3],
-    }),
-    ...buildDatasets(airQualitySeries, "pm4", "PM4.0 mean", { colorOffset: 4 }),
-    ...buildDatasets(airQualitySeries, "pm10", "PM10 mean", { colorOffset: 6 }),
-    ...buildDatasets(airQualitySeries, "pm10_max", "PM10 maximum", {
-      colorOffset: 6, hidden: true, borderDash: [5, 4],
-    }),
-    ...buildDatasets(airQualitySeries, "pm10_p95", "PM10 p95", {
-      colorOffset: 6, hidden: true, borderDash: [2, 3],
-    }),
-    ...eventDatasets(data.events || [], ["pm25", "pm10"]),
-  ];
-  const particulatePanel = document.getElementById("particulate-chart-panel");
-  particulatePanel.hidden = particulateDatasets.length === 0;
-  updateChart(state.charts.particulate, particulateDatasets);
-}
-
-function buildDatasets(series, field, suffix, options = {}) {
-  const colorOffset = options.colorOffset || 0;
-  const yAxisID = options.yAxisID || "y";
-  return series
-    .map((item, index) => {
+  const selectedFields = Array.from(state.selectedChartFields);
+  const units = Array.from(new Set(selectedFields
+    .map((field) => state.fieldDefinitions.get(field)?.unit)
+    .filter(Boolean)));
+  const axisForUnit = new Map(units.map((unit, index) => [unit, `y${index}`]));
+  const datasets = [];
+  for (const item of series) {
+    const sourceLabel = item.sensor_type === "environment"
+      ? `Node ${item.node_id}`
+      : formatLabel(item.location || item.id);
+    for (const field of selectedFields) {
+      const definition = state.fieldDefinitions.get(field);
+      if (!definition) {
+        continue;
+      }
       const points = (item.points || [])
         .filter((point) => point[field] !== undefined && point[field] !== null)
-        .map((point) => ({
-          time: point.time,
-          value: point[field],
-        }));
-
-      if (points.length === 0) {
-        return null;
+        .map((point) => ({ time: point.time, value: point[field] }));
+      if (!points.length) {
+        continue;
       }
-
-      const labelBase = item.sensor_type === "environment"
-        ? `Node ${item.node_id}`
-        : formatLabel(item.location || item.id);
-      return {
-        label: `${labelBase} ${suffix}`,
+      const color = chartPalette[datasets.length % chartPalette.length];
+      datasets.push({
+        label: `${sourceLabel} · ${definition.label}`,
+        sourceLabel,
+        measurementLabel: definition.label,
+        displayUnit: definition.display_unit || "",
         data: points,
-        borderColor: chartPalette[(colorOffset + index) % chartPalette.length],
-        backgroundColor: chartPalette[(colorOffset + index) % chartPalette.length],
-        yAxisID,
-        hidden: Boolean(options.hidden),
-        borderDash: options.borderDash || [],
+        borderColor: color,
+        backgroundColor: color,
+        yAxisID: axisForUnit.get(definition.unit) || "y0",
         showLine: true,
         spanGaps: true,
-      };
-    })
-    .filter(Boolean);
-}
-
-function eventDatasets(events, metrics) {
-  const byMetric = new Map();
-  for (const event of events) {
-    if (!metrics.includes(event.metric) || event.trigger_value === undefined) {
-      continue;
+      });
     }
-    const list = byMetric.get(event.metric) || [];
-    list.push({ time: event.time, value: event.trigger_value });
-    byMetric.set(event.metric, list);
   }
-  return Array.from(byMetric.entries()).map(([metric, points], index) => ({
-    label: `${formatLabel(metric)} event`,
-    data: points,
-    borderColor: chartPalette[(index + 5) % chartPalette.length],
-    backgroundColor: chartPalette[(index + 5) % chartPalette.length],
-    yAxisID: ["voc_index", "nox_index"].includes(metric) ? "yIndex" : "y",
-    hidden: false,
-    borderDash: [],
-    showLine: false,
-    spanGaps: false,
-    pointRadius: 5,
-  }));
+  const chart = state.charts.history;
+  chart.options.scales = {
+    x: chart.options.scales.x,
+    ...Object.fromEntries(units.map((unit, index) => {
+      const definition = Array.from(state.fieldDefinitions.values())
+        .find((field) => field.unit === unit);
+      return [`y${index}`, {
+        type: "linear",
+        beginAtZero: false,
+        position: index === 0 ? "left" : "right",
+        offset: index > 1,
+        title: { display: true, text: definition?.display_unit || unit },
+        grid: index === 0 ? { color: "#edf2ef" } : { drawOnChartArea: false },
+      }];
+    })),
+  };
+  updateChart(chart, datasets);
+  document.getElementById("chart-series-count").textContent =
+    `${datasets.length} ${datasets.length === 1 ? "series" : "series"}`;
+  document.getElementById("chart-empty").hidden = datasets.length > 0;
+  document.querySelector(".chart-frame-large").hidden = datasets.length === 0;
 }
 
 function updateChart(chart, datasets) {
@@ -1543,7 +1855,11 @@ function updateChart(chart, datasets) {
       borderDash: dataset.borderDash,
       showLine: dataset.showLine,
       spanGaps: dataset.spanGaps,
-      pointRadius: dataset.pointRadius ?? 0,
+      pointRadius: 0,
+      rawTimes: labels,
+      sourceLabel: dataset.sourceLabel,
+      measurementLabel: dataset.measurementLabel,
+      displayUnit: dataset.displayUnit,
     };
   });
   chart.update();
@@ -1655,6 +1971,24 @@ function formatDuration(value) {
     return `${Math.round(seconds / 60)}m`;
   }
   return `${(seconds / 3600).toFixed(1)}h`;
+}
+
+function formatDurationLong(value) {
+  const total = Number(value);
+  if (!Number.isFinite(total) || total < 0) {
+    return "Unavailable";
+  }
+  const seconds = Math.round(total);
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  const parts = [];
+  if (days) parts.push(`${days}d`);
+  if (hours) parts.push(`${hours}h`);
+  if (minutes) parts.push(`${minutes}m`);
+  if (remainder || !parts.length) parts.push(`${remainder}s`);
+  return parts.join(" ");
 }
 
 function formatLabel(value) {

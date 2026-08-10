@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
-from datetime import datetime
+import fcntl
 import json
 import os
-from pathlib import Path
 import sqlite3
-from typing import Any, Iterator, Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import contextmanager
+from datetime import datetime
+from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 from app.workflows import (
@@ -35,9 +37,21 @@ class MonitoringExportStore:
             os.chmod(self.output_dir, 0o700)
         except OSError:
             pass
-        with self._connect() as connection:
-            connection.executescript(
-                """
+        lock_path = self.database_path.with_name(
+            self.database_path.name + ".schema.lock"
+        )
+        with lock_path.open("a+", encoding="utf-8") as lock_handle:
+            try:
+                os.chmod(lock_path, 0o600)
+            except OSError:
+                pass
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            with self._connect() as connection:
+                schema_version = int(
+                    connection.execute("PRAGMA user_version").fetchone()[0]
+                )
+                connection.executescript(
+                    """
                 CREATE TABLE IF NOT EXISTS monitoring_sessions (
                     id TEXT PRIMARY KEY,
                     name TEXT NOT NULL,
@@ -49,7 +63,7 @@ class MonitoringExportStore:
                     selected_sources_json TEXT NOT NULL,
                     selected_fields_json TEXT NOT NULL,
                     csv_format TEXT NOT NULL CHECK (csv_format IN ('long', 'wide')),
-                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '15m')),
+                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '1m', '5m', '15m', '1h')),
                     automatic_export_job_id TEXT UNIQUE,
                     created_at_utc TEXT NOT NULL,
                     updated_at_utc TEXT NOT NULL
@@ -67,7 +81,7 @@ class MonitoringExportStore:
                     end_time_utc TEXT NOT NULL,
                     selected_sources_json TEXT NOT NULL,
                     selected_fields_json TEXT NOT NULL,
-                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '15m')),
+                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '1m', '5m', '15m', '1h')),
                     csv_format TEXT NOT NULL CHECK (csv_format IN ('long', 'wide')),
                     output_path TEXT NOT NULL,
                     output_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (output_size_bytes >= 0),
@@ -97,13 +111,102 @@ class MonitoringExportStore:
                     ON export_jobs(status, created_at_utc);
                 CREATE INDEX IF NOT EXISTS idx_export_heartbeat
                     ON export_jobs(status, heartbeat_at_utc);
-                PRAGMA user_version = 1;
                 """
-            )
+                )
+                if schema_version == 1:
+                    self._migrate_resolution_constraints(connection)
+                connection.execute("PRAGMA user_version = 2")
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         try:
             os.chmod(self.database_path, 0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _migrate_resolution_constraints(connection: sqlite3.Connection) -> None:
+        """Expand v1 resolution checks without losing sessions or export jobs."""
+
+        connection.execute("PRAGMA foreign_keys = OFF")
+        try:
+            connection.executescript(
+                """
+                BEGIN IMMEDIATE;
+                ALTER TABLE monitoring_sessions RENAME TO monitoring_sessions_v1;
+                ALTER TABLE export_jobs RENAME TO export_jobs_v1;
+
+                CREATE TABLE monitoring_sessions (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    notes TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'stopped')),
+                    start_time_utc TEXT NOT NULL,
+                    scheduled_end_time_utc TEXT NOT NULL,
+                    actual_end_time_utc TEXT,
+                    selected_sources_json TEXT NOT NULL,
+                    selected_fields_json TEXT NOT NULL,
+                    csv_format TEXT NOT NULL CHECK (csv_format IN ('long', 'wide')),
+                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '1m', '5m', '15m', '1h')),
+                    automatic_export_job_id TEXT UNIQUE,
+                    created_at_utc TEXT NOT NULL,
+                    updated_at_utc TEXT NOT NULL
+                );
+
+                CREATE TABLE export_jobs (
+                    id TEXT PRIMARY KEY,
+                    monitoring_session_id TEXT UNIQUE,
+                    name TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (
+                        status IN ('queued', 'running', 'completed', 'failed',
+                                   'cancel_requested', 'cancelled')
+                    ),
+                    start_time_utc TEXT NOT NULL,
+                    end_time_utc TEXT NOT NULL,
+                    selected_sources_json TEXT NOT NULL,
+                    selected_fields_json TEXT NOT NULL,
+                    resolution TEXT NOT NULL CHECK (resolution IN ('raw', '1m', '5m', '15m', '1h')),
+                    csv_format TEXT NOT NULL CHECK (csv_format IN ('long', 'wide')),
+                    output_path TEXT NOT NULL,
+                    output_size_bytes INTEGER NOT NULL DEFAULT 0 CHECK (output_size_bytes >= 0),
+                    rows_written INTEGER NOT NULL DEFAULT 0 CHECK (rows_written >= 0),
+                    work_units_total INTEGER NOT NULL DEFAULT 0 CHECK (work_units_total >= 0),
+                    work_units_completed INTEGER NOT NULL DEFAULT 0 CHECK (work_units_completed >= 0),
+                    current_phase TEXT NOT NULL DEFAULT 'queued',
+                    warning_json TEXT NOT NULL DEFAULT '[]',
+                    source_results_json TEXT NOT NULL DEFAULT '[]',
+                    error_message TEXT,
+                    worker_id TEXT,
+                    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK (attempt_count >= 0),
+                    created_at_utc TEXT NOT NULL,
+                    started_at_utc TEXT,
+                    completed_at_utc TEXT,
+                    heartbeat_at_utc TEXT,
+                    updated_at_utc TEXT NOT NULL,
+                    FOREIGN KEY (monitoring_session_id)
+                        REFERENCES monitoring_sessions(id) ON DELETE RESTRICT
+                );
+
+                INSERT INTO monitoring_sessions SELECT * FROM monitoring_sessions_v1;
+                INSERT INTO export_jobs SELECT * FROM export_jobs_v1;
+                DROP TABLE export_jobs_v1;
+                DROP TABLE monitoring_sessions_v1;
+
+                CREATE INDEX idx_monitoring_status_end
+                    ON monitoring_sessions(status, scheduled_end_time_utc);
+                CREATE INDEX idx_monitoring_created
+                    ON monitoring_sessions(created_at_utc DESC);
+                CREATE INDEX idx_export_claim
+                    ON export_jobs(status, created_at_utc);
+                CREATE INDEX idx_export_heartbeat
+                    ON export_jobs(status, heartbeat_at_utc);
+                COMMIT;
+                """
+            )
+        except Exception:
+            if connection.in_transaction:
+                connection.rollback()
+            raise
+        finally:
+            connection.execute("PRAGMA foreign_keys = ON")
 
     def create_session(
         self,
@@ -308,7 +411,7 @@ class MonitoringExportStore:
                       SELECT 1 FROM export_jobs
                       WHERE status IN ('running', 'cancel_requested')
                   )
-                ORDER BY created_at_utc, id
+                ORDER BY created_at_utc, rowid
                 LIMIT 1
                 """
             ).fetchone()

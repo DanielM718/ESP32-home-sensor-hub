@@ -1,14 +1,97 @@
 # Frontend Dashboard
 
-The Flask app serves the overview dashboard at:
+The Flask dashboard is served at `http://sensor-pi.local:8080` (or the Pi's
+address on port 8080). It uses vanilla JavaScript and the locally installed
+Chart.js bundle; it reads only the Flask API, never MQTT directly.
+
+## Three sections
+
+The top-level navigation is hash-backed and does not reload the page:
+
+- `#monitoring` contains current readings, source/range filters, a reusable
+  measurement selector, and one historical chart.
+- `#active-monitoring` contains timed sessions, running/recent session state,
+  and persistent Historical Data Export jobs.
+- `#status` contains the fixed allow-list systemd status view, node status and
+  per-node capabilities, architecture/storage notes, and read-only
+  troubleshooting commands.
+
+Tab state is bookmarkable. Native links, tab semantics, arrow-key navigation,
+responsive forms, and horizontally scrollable tables keep the interface usable
+on desktop and narrow phones.
+
+## Monitoring and charts
+
+Current cards retain temperature, humidity, valid battery voltage and decoded
+flags, all nine SEN66 measurements, stale/invalid/warm-up handling, and the
+source-backed air-quality interpretations.
+
+The historical measurement checklist is derived from fields actually observed
+for the selected source(s). Any combination can share the chart, including
+Temperature + Humidity + CO2. Chart.js creates one Y axis per unit, reuses an
+axis for measurements with the same unit, and includes source, measurement,
+value, unit, and timestamp in tooltips.
+
+Only primary measurement fields are graphed. Long-range stored `*_mean` values
+are presented under the ordinary measurement label. Stored maxima, p95 values,
+and event records remain available to the backend and retention pipeline but
+are not normal chart datasets.
+
+## Source capabilities and workflow forms
+
+`/api/latest` and `/api/nodes` expose `available_fields` for each individual
+source. This comes from the fields actually returned by the latest InfluxDB
+query, not a sensor-type template. Selecting sources immediately rebuilds the
+Active Monitoring and Historical Export measurement checklists. With multiple
+sources, each choice says whether all or only some selected sources provide it.
+The API repeats this validation when a job is created.
+
+Duration presets run from five minutes through 24 hours. `Custom time` reveals
+separate whole-number Hours and Minutes controls; minutes are limited to 0–59,
+the pair may not both be zero, and the total may not exceed the raw-retention
+limit returned by the backend.
+
+Active Monitoring resolutions are provided by `/api/workflows/options`:
+
+- Raw samples
+- 1-minute mean
+- 5-minute mean
+- 15-minute mean
+- 1-hour mean
+
+Active session means are calculated from retained raw readings. Numeric sensor
+fields use arithmetic mean; battery voltage averages only battery-valid
+samples, and status flags are never averaged. A session shorter than its mean
+window produces one partial-window mean when it has data.
+
+## CSV formats
+
+Wide is the default. It writes one logical timestamp/source sample per row:
 
 ```text
-http://sensor-pi.local:8080
-http://<raspberry-pi-ip>:8080
+timestamp_utc,sensor_type,source_id,node_id,location,<selected fields>,data_tier
 ```
 
-The frontend uses Chart.js for historical graphs and calls only the Flask REST
-API. It never reads from MQTT directly.
+Selected fields such as `temperature_c` and `humidity` are separate columns;
+missing source fields stay blank. Long / normalized remains available with one
+measurement per row:
+
+```text
+timestamp_utc,sensor_type,source_id,node_id,location,field,value,unit,data_tier
+```
+
+Both selectors show a short explanation in the UI. Sessions and jobs live in
+SQLite and are processed by `home-sensor-export-worker.service`, so navigation,
+refresh, browser closure, and frontend request timeouts do not cancel them.
+
+## Polling
+
+The Monitoring tab refreshes live values every seven seconds. The Active
+Monitoring tab polls session/export metadata every five seconds and bounded
+previews every 15 seconds. Hidden tabs do not perform their normal periodic
+fetches; activating a tab refreshes it immediately. In-flight guards prevent
+overlap, page visibility pauses optional work, and Chart.js is instantiated
+once and updated in place.
 
 ## Files
 
@@ -19,126 +102,5 @@ server/frontend/static/app.js
 server/frontend/static/vendor/chart.umd.min.js
 ```
 
-`chart.umd.min.js` is installed on the Raspberry Pi by:
-
-```bash
-sudo /opt/home-sensor/server/scripts/install_frontend_assets.sh
-```
-
-The main `install.sh` runs this script by default. For offline installation, use:
-
-```bash
-sudo ./install.sh --no-frontend-assets
-```
-
-Then copy or download the Chart.js browser bundle before using the dashboard.
-
-## Behavior
-
-- `/` renders the dashboard.
-- `/api/latest` is polled every 7 seconds for current readings and node status.
-- `/api/nodes` remains available to API clients, but the dashboard uses the node
-  snapshot included with `/api/latest` to avoid repeating the same InfluxDB
-  latest-value query.
-- `/api/readings` is refreshed when the selected range changes.
-- Supported ranges are `1h`, `24h`, `7d`, and `30d`.
-- Refreshes do not overlap: the periodic poll waits while a full refresh is in
-  progress, and the refresh button is disabled until its query completes.
-- Monitoring metadata and export-job metadata use separate five-second pollers;
-  monitoring previews use a separate 15-second bounded poller. Each controller
-  skips an interval while its own request is active.
-- A one-second display timer derives clocks from server timestamps without
-  writing to the backend. Optional workflow polls pause while the page is
-  hidden and resume on visibility; server work never pauses.
-
-## Displayed Data
-
-- current temperature and humidity by node/station
-- calibrated battery voltage for battery nodes when `STATUS_BATTERY_OK` is set
-- raw status flags plus decoded battery measurement, low, and shutdown states
-- all nine current SEN66 values, grouped as climate, gas/indices, and
-  particulate matter, with plain-language status and source authority
-- station summary driven transparently by the worst available current pollutant
-- stale/invalid/warm-up visibility, last-update age, 15-minute mean/max/trend,
-  rolling 24-hour PM context, and active-event state
-- historical temperature and humidity for both SHT41 nodes and SEN66 stations
-- a SEN66 gas/index chart for CO2, VOC Index, and NOx Index
-- a SEN66 particulate chart for PM1.0, PM2.5, PM4.0, and PM10
-- historical battery voltage for SHT41 battery nodes
-- node online/stale status
-
-Dashboard units are degrees Celsius (`°C`), relative humidity percent (`%`),
-CO2 parts per million (`ppm`), particulate mass concentration (`µg/m³`), and
-unitless VOC/NOx `index` values. The gas chart gives CO2 and the two indices
-separate axes so the lower index values remain readable. Particulate sizes
-share one chart because they use the same unit.
-
-The current dashboard does not label every threshold as a regulatory limit.
-EPA PM breakpoints, WHO PM guidelines, Sensirion index guidance, a CO2
-ventilation heuristic, a separate occupational CO2 comparison, and
-temperature/RH context each name their framework and limitations. Source links
-are expandable per metric. PM cards distinguish instantaneous provisional
-context from coverage-qualified rolling 24-hour context. Historical charts
-show average and maximum series separately, keep sparse event markers
-unconnected, and label whether the response came from one-minute live data or
-verified persistent 15-minute aggregate tier.
-Stored p95 series for CO2, PM2.5, PM10, VOC Index, and NOx Index are available as
-hidden legend toggles on long-range charts, alongside hidden maxima; primary
-means remain visible by default to keep the graphs readable.
-
-Old air-quality records that contain only a subset of these fields remain
-supported. Current cards show `-` for a missing value, chart datasets are
-created only when a field has at least one numeric point, and absent fields do
-not hide the station or affect the SHT41 display.
-
-The current-reading card and node table show battery measurement unavailable
-when `BIT2` is clear or `status_flags` is missing. `BIT3` produces a visible
-low-battery warning, while `BIT4` produces a critical shutdown state. If the
-final shutdown packet later becomes stale, the row remains stale but is labeled
-`stale - battery shutdown`; a node that disappears without `BIT4` remains a
-normal unexplained stale node. The historical battery chart includes only
-points paired with a same-timestamp `STATUS_BATTERY_OK` bit, so legacy records
-without status are not presented as measurements. No battery percentage is
-estimated.
-
-## Active Monitoring And Historical Export
-
-The Active Monitoring panel accepts a name, notes, known source checkboxes,
-grouped fields, a duration preset or custom minutes, raw resolution, and long
-or wide CSV. A running card shows authoritative start/deadline, elapsed and
-remaining clocks, sources/fields, bounded recent activity, interval progress,
-automatic-export state, CSV rows, and CSV elapsed time. Stopped/completed
-sessions remain in the recent table across reloads and become downloadable only
-after their export is completed and its final file exists.
-
-The Historical Data Export panel accepts local `datetime-local` values, then
-JavaScript converts each to an ISO 8601 UTC timestamp before sending it. New York
-wall time is therefore not mislabeled as UTC. Jobs show interval, origin,
-phase, truthful work-unit counts, queued/active/total clocks, rows, bytes,
-warnings, zero-data sources, cancellation, download, and deletion actions.
-
-Both forms use the same in-page source inventory derived from the node snapshot
-and the same grouped user-facing fields. When discovery adds a source, only the
-checkbox containers are updated and existing checks are preserved. Ordinary
-seven-second current-reading refreshes never rerender either form, reset
-partially typed names/dates/notes, call a creation route, complete a session,
-or interact with the worker. Workflow errors remain inside their own panel and
-do not stop charts/current readings; ordinary dashboard errors likewise do not
-stop export progress.
-
-The mobile layout collapses forms/status panels and form rows to one column.
-Labels, fieldsets, live regions, normal buttons/links, native date-time inputs,
-and keyboard-operable checkboxes are used without inline JavaScript or blocking
-validation alerts.
-
-The status display always retains the raw unsigned integer in decimal and
-hexadecimal, then labels every known SHT41 bit: `BIT0` SHT41 read OK, `BIT1`
-ESP-NOW send attempted, `BIT2` battery measurement OK, `BIT3` low battery, and
-`BIT4` confirmed battery shutdown. Any additional bits are shown as an unknown
-hexadecimal mask rather than discarded.
-
-## Official References
-
-- Chart.js installation: <https://www.chartjs.org/docs/latest/getting-started/installation.html>
-- Chart.js line charts: <https://www.chartjs.org/docs/latest/charts/line.html>
-- Chart.js responsive charts: <https://www.chartjs.org/docs/latest/configuration/responsive.html>
+The Pi installer supplies `chart.umd.min.js`; use
+`scripts/install_frontend_assets.sh` if that local asset is missing.

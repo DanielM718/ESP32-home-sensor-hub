@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone
 import math
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from typing import Any
 from uuid import UUID
-
 
 SENSOR_TYPE_ENVIRONMENT = "environment"
 SENSOR_TYPE_AIR_QUALITY = "air_quality"
@@ -40,8 +40,79 @@ FIELD_UNITS = {
     "voc_index": "index",
     "nox_index": "index",
 }
+FIELD_LABELS = {
+    "temperature_c": "Temperature",
+    "humidity": "Humidity",
+    "battery_mv": "Battery voltage",
+    "co2": "CO₂",
+    "pm1": "PM1.0",
+    "pm25": "PM2.5",
+    "pm4": "PM4.0",
+    "pm10": "PM10",
+    "voc_index": "VOC Index",
+    "nox_index": "NOx Index",
+}
+FIELD_DISPLAY_UNITS = {
+    "temperature_c": "°C",
+    "humidity": "%",
+    "battery_mv": "mV",
+    "co2": "ppm",
+    "pm1": "µg/m³",
+    "pm25": "µg/m³",
+    "pm4": "µg/m³",
+    "pm10": "µg/m³",
+    "voc_index": "index",
+    "nox_index": "index",
+}
+FIELD_GROUPS = {
+    "temperature_c": "Climate",
+    "humidity": "Climate",
+    "battery_mv": "Battery",
+    "co2": "Gas and indices",
+    "pm1": "Particulate matter",
+    "pm25": "Particulate matter",
+    "pm4": "Particulate matter",
+    "pm10": "Particulate matter",
+    "voc_index": "Gas and indices",
+    "nox_index": "Gas and indices",
+}
 
-RESOLUTIONS = ("raw", "15m")
+RESOLUTION_OPTIONS = (
+    {
+        "value": "raw",
+        "label": "Raw samples",
+        "window_seconds": None,
+        "aggregation": "none",
+    },
+    {
+        "value": "1m",
+        "label": "1-minute mean",
+        "window_seconds": 60,
+        "aggregation": "mean",
+    },
+    {
+        "value": "5m",
+        "label": "5-minute mean",
+        "window_seconds": 5 * 60,
+        "aggregation": "mean",
+    },
+    {
+        "value": "15m",
+        "label": "15-minute mean",
+        "window_seconds": 15 * 60,
+        "aggregation": "mean",
+    },
+    {
+        "value": "1h",
+        "label": "1-hour mean",
+        "window_seconds": 60 * 60,
+        "aggregation": "mean",
+    },
+)
+RESOLUTIONS = tuple(option["value"] for option in RESOLUTION_OPTIONS)
+RESOLUTION_WINDOWS = {
+    str(option["value"]): option["window_seconds"] for option in RESOLUTION_OPTIONS
+}
 CSV_FORMATS = ("long", "wide")
 SESSION_STATUSES = ("running", "completed", "stopped")
 EXPORT_STATUSES = (
@@ -144,11 +215,7 @@ def validate_monitoring_request(
     sources = validate_sources(data.get("sources"))
     fields = validate_fields(data.get("fields"))
     resolution = _choice(data.get("resolution", "raw"), "resolution", RESOLUTIONS)
-    if resolution != "raw":
-        raise WorkflowValidationError(
-            "active monitoring currently supports raw resolution only"
-        )
-    csv_format = _choice(data.get("csv_format", "long"), "csv_format", CSV_FORMATS)
+    csv_format = _choice(data.get("csv_format", "wide"), "csv_format", CSV_FORMATS)
     _validate_supported_selection(sources, fields, resolution)
     return MonitoringRequest(
         name=name,
@@ -178,8 +245,13 @@ def validate_export_request(
     sources = validate_sources(data.get("sources"))
     fields = validate_fields(data.get("fields"))
     resolution = _choice(data.get("resolution", "raw"), "resolution", RESOLUTIONS)
-    csv_format = _choice(data.get("csv_format", "long"), "csv_format", CSV_FORMATS)
-    _validate_supported_selection(sources, fields, resolution)
+    csv_format = _choice(data.get("csv_format", "wide"), "csv_format", CSV_FORMATS)
+    _validate_supported_selection(
+        sources,
+        fields,
+        resolution,
+        stored_aggregate=resolution == "15m",
+    )
 
     warnings: list[str] = []
     if resolution == "15m":
@@ -193,7 +265,7 @@ def validate_export_request(
                 "Environment nodes do not have a stored 15-minute aggregate tier and "
                 "will report zero rows: " + ", ".join(unsupported)
             )
-    if resolution == "raw" and any(
+    if resolution in {"raw", "1m", "5m", "1h"} and any(
         source.sensor_type == SENSOR_TYPE_AIR_QUALITY for source in sources
     ):
         reference = _aware_utc(now or datetime.now(timezone.utc))
@@ -201,7 +273,7 @@ def validate_export_request(
         if start.timestamp() < retained_after:
             boundary = datetime.fromtimestamp(retained_after, tz=timezone.utc)
             warnings.append(
-                "Raw air-quality data is retained for approximately "
+                "Raw air-quality data used for this resolution is retained for approximately "
                 f"{raw_retention_seconds // 3600} hours; data before {iso_utc(boundary)} "
                 "may have expired. Aggregates are not substituted."
             )
@@ -312,9 +384,13 @@ def validate_fields(value: Any) -> tuple[str, ...]:
 
 
 def fields_for_source(
-    source: Source, fields: Sequence[str], resolution: str
+    source: Source,
+    fields: Sequence[str],
+    resolution: str,
+    *,
+    stored_aggregate: bool = False,
 ) -> tuple[str, ...]:
-    if resolution == "15m" and source.sensor_type != SENSOR_TYPE_AIR_QUALITY:
+    if stored_aggregate and source.sensor_type != SENSOR_TYPE_AIR_QUALITY:
         return ()
     supported = (
         ENVIRONMENT_FIELDS
@@ -331,8 +407,17 @@ def aggregate_field(field: str) -> str:
 
 
 def unit_for_field(field: str) -> str:
-    base = field[:-5] if field.endswith("_mean") else field
+    base = field.removesuffix("_mean")
     return FIELD_UNITS.get(base, "")
+
+
+def resolution_window_seconds(resolution: str) -> int | None:
+    """Return the mean window for a supported resolution, or ``None`` for raw."""
+
+    if resolution not in RESOLUTION_WINDOWS:
+        raise WorkflowValidationError(f"unsupported resolution: {resolution}")
+    value = RESOLUTION_WINDOWS[resolution]
+    return int(value) if value is not None else None
 
 
 def parse_client_time(value: Any, name: str) -> datetime:
@@ -395,9 +480,21 @@ def finite_csv_number(value: Any) -> int | float | None:
 
 
 def _validate_supported_selection(
-    sources: Sequence[Source], fields: Sequence[str], resolution: str
+    sources: Sequence[Source],
+    fields: Sequence[str],
+    resolution: str,
+    *,
+    stored_aggregate: bool = False,
 ) -> None:
-    if not any(fields_for_source(source, fields, resolution) for source in sources):
+    if not any(
+        fields_for_source(
+            source,
+            fields,
+            resolution,
+            stored_aggregate=stored_aggregate,
+        )
+        for source in sources
+    ):
         raise WorkflowValidationError(
             "no selected source supports any requested field at the selected resolution"
         )

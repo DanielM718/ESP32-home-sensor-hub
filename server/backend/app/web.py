@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +20,7 @@ from app.queries import (
     latest_with_node_status,
     readings_query_from_params,
 )
+from app.service_status import SystemStatusProvider
 from app.workflow_routes import register_workflow_routes
 from app.workflow_services import ExportService, MonitoringService, utc_now
 from app.workflows import (
@@ -27,7 +28,6 @@ from app.workflows import (
     WorkflowNotFoundError,
     WorkflowValidationError,
 )
-
 
 LOGGER = logging.getLogger("home_sensor.web")
 SERVER_ROOT = Path(__file__).resolve().parents[2]
@@ -40,6 +40,7 @@ def create_app(
     monitoring_store: MonitoringExportStore | None = None,
     export_query_repository: Any | None = None,
     clock: Any | None = None,
+    status_provider: Any | None = None,
 ) -> Flask:
     """Create the Flask WSGI application."""
 
@@ -63,9 +64,15 @@ def create_app(
     )
     app.config["REPOSITORY"] = read_repository
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
-    app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = settings.air_quality.stale_after_seconds
+    app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = (
+        settings.air_quality.stale_after_seconds
+    )
     app.config["MONITORING_MAX_DURATION_SECONDS"] = (
         settings.monitoring_exports.raw_retention_seconds
+    )
+    app.config["STATUS_PROVIDER"] = status_provider or SystemStatusProvider()
+    app.config["SEN66_EXPECTED_PUBLISH_SECONDS"] = (
+        settings.air_quality.expected_publish_seconds
     )
 
     store = monitoring_store or MonitoringExportStore(
@@ -81,6 +88,7 @@ def create_app(
         store,
         clock=current_clock,
         raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
+        capability_resolver=read_repository.latest,
     )
     app.config["EXPORT_SERVICE"] = export_service
     app.config["MONITORING_SERVICE"] = MonitoringService(
@@ -89,6 +97,7 @@ def create_app(
         export_queries,
         clock=current_clock,
         max_duration_seconds=settings.monitoring_exports.raw_retention_seconds,
+        capability_resolver=read_repository.latest,
     )
 
     register_routes(app)
@@ -122,7 +131,9 @@ def register_routes(app: Flask) -> None:
         latest_payload = latest_with_air_quality_context(
             latest_payload,
             context,
-            stale_after_seconds=int(current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]),
+            stale_after_seconds=int(
+                current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]
+            ),
         )
         stale_after_seconds = int(current_app.config["NODE_STALE_AFTER_SECONDS"])
         return jsonify(
@@ -152,6 +163,26 @@ def register_routes(app: Flask) -> None:
             )
         )
 
+    @app.get("/api/status")
+    def status() -> Any:
+        payload = dict(current_app.config["STATUS_PROVIDER"].snapshot())
+        payload["configuration"] = {
+            "node_stale_after_seconds": int(
+                current_app.config["NODE_STALE_AFTER_SECONDS"]
+            ),
+            "air_quality_stale_after_seconds": int(
+                current_app.config["AIR_QUALITY_STALE_AFTER_SECONDS"]
+            ),
+            "sen66_expected_publish_seconds": int(
+                current_app.config["SEN66_EXPECTED_PUBLISH_SECONDS"]
+            ),
+            "raw_retention_seconds": int(
+                current_app.config["MONITORING_MAX_DURATION_SECONDS"]
+            ),
+            "stored_air_quality_resolution_seconds": 15 * 60,
+        }
+        return jsonify(payload)
+
 
 def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(WorkflowValidationError)
@@ -177,7 +208,9 @@ def register_error_handlers(app: Flask) -> None:
     @app.errorhandler(Exception)
     def unhandled_error(exc: Exception) -> Any:
         LOGGER.exception("API request failed: %s", exc)
-        return jsonify({"error": "service_unavailable", "message": "backend query failed"}), 503
+        return jsonify(
+            {"error": "service_unavailable", "message": "backend query failed"}
+        ), 503
 
 
 def _repository() -> Any:

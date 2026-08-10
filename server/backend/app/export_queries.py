@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime
 import json
-from typing import TYPE_CHECKING, Any, Iterable, Iterator, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING, Any
 
 from app.workflows import (
     AIR_QUALITY_FIELDS,
@@ -17,6 +18,7 @@ from app.workflows import (
     fields_for_source,
     finite_csv_number,
     iso_utc,
+    resolution_window_seconds,
     unit_for_field,
 )
 
@@ -54,7 +56,7 @@ class InfluxExportQueryRepository:
     """Query raw or stored aggregate data one bounded source/time chunk at a time."""
 
     def __init__(
-        self, settings: "InfluxSettings", *, query_api: Any | None = None
+        self, settings: InfluxSettings, *, query_api: Any | None = None
     ) -> None:
         self._settings = settings
         self._client: Any | None = None
@@ -78,23 +80,34 @@ class InfluxExportQueryRepository:
         sources: Sequence[Source],
         fields: Sequence[str],
         resolution: str,
+        use_stored_aggregate: bool = False,
     ) -> Iterable[ExportPoint]:
         matching = [source for source in sources if source.sensor_type == sensor_type]
         if not matching:
             return ()
         if sensor_type == SENSOR_TYPE_ENVIRONMENT:
-            if resolution != "raw":
+            if use_stored_aggregate:
                 return ()
             flux = environment_export_flux(
                 self._settings.bucket, start, stop, matching, fields
             )
-            return self._environment_points(self._records(flux), matching, fields)
+            points = self._environment_points(self._records(flux), matching, fields)
+            return (
+                points
+                if resolution == "raw"
+                else _downsample_points(points, start=start, resolution=resolution)
+            )
         if sensor_type == SENSOR_TYPE_AIR_QUALITY:
-            if resolution == "raw":
+            if not use_stored_aggregate:
                 flux = air_quality_raw_export_flux(
                     self._settings.live_bucket, start, stop, matching, fields
                 )
-                return self._air_raw_points(self._records(flux), matching, fields)
+                points = self._air_raw_points(self._records(flux), matching, fields)
+                return (
+                    points
+                    if resolution == "raw"
+                    else _downsample_points(points, start=start, resolution=resolution)
+                )
             flux = air_quality_aggregate_export_flux(
                 self._settings.bucket, start, stop, matching, fields
             )
@@ -306,8 +319,7 @@ class InfluxExportQueryRepository:
             timestamp = _record_time(record)
             node_id = _optional_int(values.get("node_id"))
             for field in selected:
-                stored_field = aggregate_field(field)
-                number = finite_csv_number(values.get(stored_field))
+                number = finite_csv_number(values.get(aggregate_field(field)))
                 if number is None:
                     continue
                 yield ExportPoint(
@@ -316,10 +328,10 @@ class InfluxExportQueryRepository:
                     location,
                     node_id,
                     location,
-                    stored_field,
+                    field,
                     number,
-                    unit_for_field(stored_field),
-                    "15m",
+                    unit_for_field(field),
+                    "stored_15m",
                 )
 
     def _long_records_to_points(
@@ -537,6 +549,55 @@ def point_to_dict(point: ExportPoint) -> dict[str, Any]:
         "unit": point.unit,
         "data_tier": point.data_tier,
     }
+
+
+def _downsample_points(
+    points: Iterable[ExportPoint],
+    *,
+    start: datetime,
+    resolution: str,
+) -> Iterator[ExportPoint]:
+    """Mean numeric raw values into source/field buckets anchored at chunk start."""
+
+    window_seconds = resolution_window_seconds(resolution)
+    if window_seconds is None:
+        yield from points
+        return
+
+    buckets: dict[
+        tuple[datetime, str, str, int | None, str | None, str],
+        list[float],
+    ] = {}
+    for point in points:
+        parsed = datetime.fromisoformat(point.timestamp_utc.replace("Z", "+00:00"))
+        offset_seconds = max(0, (parsed - start).total_seconds())
+        bucket_time = start + timedelta(
+            seconds=int(offset_seconds // window_seconds) * window_seconds
+        )
+        key = (
+            bucket_time,
+            point.sensor_type,
+            point.source_id,
+            point.node_id,
+            point.location,
+            point.field,
+        )
+        buckets.setdefault(key, []).append(float(point.value))
+
+    for key in sorted(buckets):
+        bucket_time, sensor_type, source_id, node_id, location, field = key
+        values = buckets[key]
+        yield ExportPoint(
+            timestamp_utc=iso_utc(bucket_time),
+            sensor_type=sensor_type,
+            source_id=source_id,
+            node_id=node_id,
+            location=location,
+            field=field,
+            value=sum(values) / len(values),
+            unit=unit_for_field(field),
+            data_tier=f"{resolution}_mean",
+        )
 
 
 def _values(record: Any) -> Mapping[str, Any]:

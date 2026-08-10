@@ -11,7 +11,12 @@ from app.workflows import (
     AIR_QUALITY_FIELDS,
     CSV_FORMATS,
     ENVIRONMENT_FIELDS,
+    FIELD_DISPLAY_UNITS,
+    FIELD_GROUPS,
+    FIELD_LABELS,
     FIELD_UNITS,
+    MIN_MONITORING_SECONDS,
+    RESOLUTION_OPTIONS,
     RESOLUTIONS,
     SUPPORTED_FIELDS,
 )
@@ -26,12 +31,30 @@ def register_workflow_routes(app: Flask) -> None:
                 "raw_retention_seconds": current_app.config[
                     "MONITORING_MAX_DURATION_SECONDS"
                 ],
+                "minimum_monitoring_seconds": MIN_MONITORING_SECONDS,
                 "resolutions": list(RESOLUTIONS),
+                "monitoring_resolutions": list(RESOLUTION_OPTIONS),
+                "export_resolutions": [
+                    {
+                        **option,
+                        "data_source": (
+                            "stored_air_quality_aggregate"
+                            if option["value"] == "15m"
+                            else "retained_raw"
+                            if option["value"] != "raw"
+                            else "raw"
+                        ),
+                    }
+                    for option in RESOLUTION_OPTIONS
+                ],
                 "csv_formats": list(CSV_FORMATS),
                 "fields": [
                     {
                         "name": field,
+                        "label": FIELD_LABELS[field],
                         "unit": FIELD_UNITS[field],
+                        "display_unit": FIELD_DISPLAY_UNITS[field],
+                        "group": FIELD_GROUPS[field],
                         "sensor_types": [
                             sensor_type
                             for sensor_type, allowed in (

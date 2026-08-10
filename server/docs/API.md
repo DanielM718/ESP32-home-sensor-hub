@@ -53,6 +53,7 @@ Response shape:
       "battery_measurement_ok": true,
       "battery_low": false,
       "battery_shutdown": false,
+      "available_fields": ["temperature_c", "humidity", "battery_mv"],
       "sequence": 1523
     }
   ],
@@ -71,7 +72,8 @@ Response shape:
       "pm4": 3.5,
       "pm10": 5.2,
       "voc_index": 88,
-      "nox_index": 12
+      "nox_index": 12,
+      "available_fields": ["temperature_c", "humidity", "co2", "pm1", "pm25", "pm4", "pm10", "voc_index", "nox_index"]
     }
   ],
   "stale_after_seconds": 1800,
@@ -84,7 +86,8 @@ Response shape:
       "status_flags": 4,
       "battery_measurement_ok": true,
       "battery_low": false,
-      "battery_shutdown": false
+      "battery_shutdown": false,
+      "available_fields": ["temperature_c", "humidity", "battery_mv"]
     }
   ]
 }
@@ -221,6 +224,7 @@ tier per poll.
       "battery_measurement_ok": true,
       "battery_low": false,
       "battery_shutdown": false,
+      "available_fields": ["temperature_c", "humidity", "battery_mv"],
       "stale_reason": null,
       "sequence": 1523
     }
@@ -238,8 +242,37 @@ When the latest packet has no `status_flags`, all four status values are JSON
 `null`. When `battery_measurement_ok` is not `true`, `battery_mv` is also
 `null`, including a raw placeholder zero with `BIT2` clear. A stale node has
 `stale_reason` set to `battery_shutdown` when its final packet carried `BIT4`,
-or `no_recent_reading` otherwise. The primary `status` remains `stale` in both
-cases so stale-node detection is not suppressed.
+or `no_recent_reading` otherwise. Status is `online` through the configured
+stale threshold, `stale` for the next three threshold windows, and `offline`
+after four thresholds; shutdown context remains visible in either late state.
+
+`available_fields` is source-specific. It contains only supported measurement
+fields actually observed for that node/station by the bounded latest query. A
+node that never published `battery_mv` therefore does not advertise battery,
+even though another environment node may advertise it.
+
+### `GET /api/status`
+
+Returns a credential-free, read-only Pi status snapshot. The route accepts no
+unit name or command parameter. It checks only the backend allow-list:
+
+```text
+home-sensor-dashboard.service
+home-sensor-bridge.service
+home-sensor-export-worker.service
+mosquitto.service
+influxdb.service
+grafana-server.service
+```
+
+Each service reports its display/unit names, installed flag, load/active/sub
+states, description, state-entered time, approximate uptime, check timestamp,
+and fixed read-only `systemctl status` / `journalctl` examples. A missing unit
+is returned as `installed=false` and does not fail the response. The payload
+also includes hostname, backend health, configured stale thresholds, expected
+SEN66 publish interval, raw-retention/max-session duration, and the permanent
+15-minute aggregate resolution. It never returns environment files, tokens,
+passwords, or arbitrary journal output.
 
 ## Active Monitoring
 
@@ -261,9 +294,16 @@ GET    /api/monitoring/sessions/<uuid>/preview
 Creation accepts `name` (1–120 characters), optional `notes` (up to 2,000
 characters), `duration_seconds`, nonempty `sources`/`fields`, `resolution`, and
 `csv_format`. The API minimum is 10 seconds for deterministic integration
-testing; the dashboard minimum is one minute. The maximum is the configured raw
-retention horizon, currently 72 hours. Active Monitoring currently accepts
-`resolution=raw`; no aggregate substitution occurs.
+testing; the dashboard's whole-minute custom control has a practical minimum of
+one minute. The maximum is the configured raw-retention horizon, normally 72
+hours. Supported resolutions are `raw`, `1m`, `5m`, `15m`, and `1h`; the
+options endpoint supplies their human-readable labels.
+
+For active sessions, every non-raw resolution is calculated from retained raw
+session readings. Temperature, humidity, gas/index, particulate, CO2, and valid
+battery voltage use arithmetic mean. Status flags are not selectable numeric
+measurements and are never averaged. A session shorter than its requested
+window yields one partial-window mean when samples exist.
 
 The server sets `start_time_utc`, `scheduled_end_time_utc`, status, and final
 end. Once the deadline passes, a read, preview, or the worker's reconciliation
@@ -330,18 +370,23 @@ Source identities are allowlisted objects:
 {"sensor_type":"air_quality","location":"printer_room"}
 ```
 
-Supported environment fields are `temperature_c`, `humidity`, and
+Supported environment field names are `temperature_c`, `humidity`, and
 `battery_mv`. Supported air-quality fields are `temperature_c`, `humidity`,
 `co2`, `pm1`, `pm25`, `pm4`, `pm10`, `voc_index`, and `nox_index`. A global
-field can be unsupported for some sources; only a request with no valid
-source/field combination is rejected.
+field can be unsupported for some sources. Creation also resolves the current
+source capability snapshot: every requested field must have been actually
+observed on at least one selected source, and every source identity must be
+currently discoverable. This prevents a battery-less node from accepting a
+battery-only job while still allowing a mixed selection where only some
+sources provide a requested field.
 
 `raw` queries `environment_reading` in `environment` and
-`air_quality_reading` in `environment_live`. A raw air-quality interval older
-than the 72-hour retention boundary receives a warning; the worker does not
-silently read `air_quality_15m`. `15m` reads stored `*_mean` fields from
-`environment/air_quality_15m`. Automatic tier merging is omitted because a
-truthful overlap-free merge is not part of the current schema contract.
+`air_quality_reading` in `environment_live`. Historical `1m`, `5m`, and `1h`
+exports calculate means from those raw readings. An air-quality interval older
+than the raw-retention boundary receives a warning; the worker does not silently
+substitute aggregates. Historical `15m` retains the existing behavior: it reads
+stored `*_mean` fields from `environment/air_quality_15m`, exposes them under
+the ordinary selected field name, and produces no environment-node rows.
 
 Statuses are `queued`, `running`, `cancel_requested`, `completed`, `failed`,
 and `cancelled`. Progress includes `current_phase`, rows/bytes, completed/total
@@ -364,16 +409,22 @@ header-only CSV with zero rows and `zero_data` source results.
 
 ### CSV Schemas
 
-Long is the default:
+Wide is the default:
+
+```text
+timestamp_utc,sensor_type,source_id,node_id,location,<selected fields>,data_tier
+```
+
+It has one row per timestamp/source, places measurements such as
+`temperature_c` and `humidity` in separate columns on that same row, and leaves
+unavailable values blank. Source identity columns distinguish multiple nodes.
+Aggregate storage suffixes are not leaked into selected column names.
+
+Long / normalized remains available:
 
 ```text
 timestamp_utc,sensor_type,source_id,node_id,location,field,value,unit,data_tier
 ```
-
-Wide starts with `timestamp_utc,sensor_type,source_id,node_id,location`, then
-contains only selected measurement columns, followed by `data_tier`. It has one
-row per timestamp/source, leaves unavailable fields blank, and performs no
-resampling. Stored aggregate columns retain their honest `_mean` suffixes.
 
 Both formats use UTF-8, Python's CSV quoting, UTC timestamps, numeric text, and
 no `NaN`, `None`, dictionaries, or synthetic empty rows. Units are `degC`,
@@ -383,8 +434,9 @@ and short job ID. Internal filesystem paths are never returned.
 
 ### Workflow Options
 
-`GET /api/workflows/options` returns the retention limit, allowed formats,
-resolutions, fields, units, and source-type applicability. Current source
+`GET /api/workflows/options` returns minimum/maximum monitoring duration,
+machine and display units, field labels/groups, allowed formats, and separate
+backend-authoritative monitoring/export resolution metadata. Current source
 identities continue to come from `/api/nodes` (or the same node snapshot within
 `/api/latest`).
 

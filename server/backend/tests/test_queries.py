@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timezone, timedelta
 import unittest
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 
 from app.battery_status import (
     STATUS_BATTERY_LOW,
@@ -16,8 +16,8 @@ from app.queries import (
     air_quality_context_response,
     events_flux,
     latest_flux,
-    latest_with_node_status,
     latest_response,
+    latest_with_node_status,
     nodes_response,
     readings_flux,
     readings_query_from_params,
@@ -61,9 +61,7 @@ class QueryHelpersTest(unittest.TestCase):
 
     def test_incompatible_filter_is_rejected(self) -> None:
         with self.assertRaises(QueryValidationError):
-            readings_query_from_params(
-                {"sensor_type": "air_quality", "node_id": "1"}
-            )
+            readings_query_from_params({"sensor_type": "air_quality", "node_id": "1"})
 
     def test_readings_flux_escapes_location_filter(self) -> None:
         query = readings_query_from_params(
@@ -114,7 +112,7 @@ class QueryHelpersTest(unittest.TestCase):
 
     def test_latest_live_lookback_is_bounded_and_shorter_than_retention(self) -> None:
         flux = latest_flux("environment", "environment_live")
-        air_section = flux[flux.index("airQualityLatest ="):]
+        air_section = flux[flux.index("airQualityLatest =") :]
 
         self.assertIn("|> range(start: -30m)", air_section)
         self.assertNotIn("-3d", air_section)
@@ -133,9 +131,9 @@ class QueryHelpersTest(unittest.TestCase):
     def test_context_uses_aligned_live_window_and_permanent_aggregates(self) -> None:
         flux = air_quality_context_flux("environment", "environment_live")
 
-        live_section = flux[flux.index("live ="):flux.index("aggregates =")]
+        live_section = flux[flux.index("live =") : flux.index("aggregates =")]
         aggregate_section = flux[
-            flux.index("aggregates ="):flux.index("activeEventStates =")
+            flux.index("aggregates =") : flux.index("activeEventStates =")
         ]
         self.assertIn("date.truncate(t: now(), unit: 15m)", live_section)
         self.assertIn('from(bucket: "environment_live")', live_section)
@@ -176,7 +174,7 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertNotIn("r.status_flags == 4", flux)
 
         battery_value_map = (
-            '|> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))'
+            "|> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))"
         )
         battery_field_map = '|> map(fn: (r) => ({r with _field: "battery_mv"}))'
         value_map_index = flux.index(battery_value_map)
@@ -204,9 +202,7 @@ class QueryHelpersTest(unittest.TestCase):
             {"range": "1h", "sensor_type": "air_quality", "location": "office"}
         )
 
-        flux = readings_flux(
-            "environment", query, live_bucket="environment_live"
-        )
+        flux = readings_flux("environment", query, live_bucket="environment_live")
 
         self.assertIn('from(bucket: "environment_live")', flux)
         self.assertNotIn('from(bucket: "environment")', flux)
@@ -266,6 +262,7 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(node["node_id"], 1)
         self.assertEqual(node["temperature_c"], 24.8)
         self.assertEqual(node["humidity"], 41.6)
+        self.assertEqual(node["available_fields"], ["temperature_c", "humidity"])
         self.assertEqual(node["last_seen"], "2026-01-01T12:00:01Z")
         self.assertIsNone(node["status_flags"])
         self.assertIsNone(node["battery_measurement_ok"])
@@ -294,6 +291,7 @@ class QueryHelpersTest(unittest.TestCase):
                 "humidity": 42.3,
             },
         )
+        self.assertEqual(set(station["available_fields"]), set(AIR_QUALITY_FIELDS))
 
     def test_latest_response_does_not_reuse_older_raw_diagnostic_ticks(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -436,6 +434,7 @@ class QueryHelpersTest(unittest.TestCase):
                 self.assertIs(node["battery_low"], low)
                 self.assertIs(node["battery_shutdown"], shutdown)
                 self.assertEqual(node["battery_mv"], battery_mv)
+                self.assertIn("battery_mv", node["available_fields"])
 
     def test_latest_response_treats_missing_status_as_unavailable(self) -> None:
         node = _latest_environment_node(status_flags=None, battery_mv=4058)
@@ -519,6 +518,26 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(response["nodes"][0]["status"], "stale")
         self.assertEqual(response["air_quality_stale_after_seconds"], 20)
 
+    def test_node_becomes_offline_after_four_stale_windows(self) -> None:
+        latest = {
+            "generated_at": "2026-01-01T13:00:01Z",
+            "environment": [
+                {
+                    "id": "1",
+                    "sensor_type": "environment",
+                    "node_id": 1,
+                    "last_seen": "2026-01-01T12:00:00Z",
+                    "available_fields": ["temperature_c", "humidity"],
+                }
+            ],
+            "air_quality": [],
+        }
+
+        node = nodes_response(latest, stale_after_seconds=600)["nodes"][0]
+
+        self.assertEqual(node["status"], "offline")
+        self.assertEqual(node["stale_reason"], "no_recent_reading")
+
     def test_nodes_response_preserves_confirmed_shutdown_while_stale(self) -> None:
         latest = {
             "generated_at": "2026-01-01T12:30:00Z",
@@ -531,9 +550,7 @@ class QueryHelpersTest(unittest.TestCase):
                     "last_seen": "2026-01-01T12:00:00Z",
                     "battery_mv": 3190,
                     "status_flags": (
-                        STATUS_BATTERY_OK
-                        | STATUS_BATTERY_LOW
-                        | STATUS_BATTERY_SHUTDOWN
+                        STATUS_BATTERY_OK | STATUS_BATTERY_LOW | STATUS_BATTERY_SHUTDOWN
                     ),
                     "battery_measurement_ok": True,
                     "battery_low": True,
@@ -716,7 +733,9 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(summary["voc_index_mean"], 100)
         self.assertEqual(summary["voc_duration_above_150_seconds"], 0)
 
-    def test_overall_status_includes_direct_co2_exposure_warning_only_when_relevant(self) -> None:
+    def test_overall_status_includes_direct_co2_exposure_warning_only_when_relevant(
+        self,
+    ) -> None:
         from app.queries import _overall_air_quality_status
 
         normal = _overall_air_quality_status(

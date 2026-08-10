@@ -119,6 +119,7 @@ not read directly from MQTT.
 - `GET /api/latest`
 - `GET /api/readings`
 - `GET /api/nodes`
+- `GET /api/status` (fixed allow-list, read-only system/service state)
 
 The same dashboard also provides durable Active Monitoring sessions and
 historical CSV exports. Active Monitoring is interval bookkeeping over data
@@ -137,6 +138,12 @@ Persistent paths are outside the deployment tree:
 See [API](docs/API.md), [Dashboard](docs/DASHBOARD.md), and
 [Operations](docs/OPERATIONS.md) for lifecycle, CSV, recovery, backup, and
 cleanup details.
+
+The dashboard has three hash-backed sections: Monitoring, Active Monitoring,
+and Status & Debug. Active Monitoring supports raw, 1-minute, 5-minute,
+15-minute, and 1-hour output; Wide CSV (one source/sample per row with selected
+measurements as columns) is the default, with Long / normalized still
+available.
 
 The frontend is served at:
 

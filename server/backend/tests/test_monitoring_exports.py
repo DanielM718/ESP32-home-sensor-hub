@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import csv
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from app.config import (
     AirQualitySettings,
     AppSettings,
@@ -16,11 +17,13 @@ from app.config import (
 )
 from app.export_queries import (
     ExportPoint,
+    InfluxExportQueryRepository,
+    _downsample_points,
     air_quality_aggregate_export_flux,
     air_quality_raw_export_flux,
     environment_export_flux,
 )
-from app.export_worker import ExportWorker, LONG_HEADER, _bounded_chunk_seconds
+from app.export_worker import LONG_HEADER, ExportWorker, _bounded_chunk_seconds
 from app.persistence import MonitoringExportStore
 from app.web import create_app
 from app.workflow_services import ExportService, csv_safe_text, download_filename
@@ -31,7 +34,6 @@ from app.workflows import (
     iso_utc,
     parse_stored_time,
 )
-
 
 BASE = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
 
@@ -49,7 +51,41 @@ class FakeClock:
 
 class DashboardRepository:
     def latest(self) -> dict[str, Any]:
-        return {"generated_at": iso_utc(BASE), "environment": [], "air_quality": []}
+        return {
+            "generated_at": iso_utc(BASE),
+            "environment": [
+                {
+                    "id": "1",
+                    "sensor_type": "environment",
+                    "node_id": 1,
+                    "available_fields": ["temperature_c", "humidity", "battery_mv"],
+                },
+                {
+                    "id": "2",
+                    "sensor_type": "environment",
+                    "node_id": 2,
+                    "available_fields": ["temperature_c", "humidity"],
+                },
+            ],
+            "air_quality": [
+                {
+                    "id": "printer_room",
+                    "sensor_type": "air_quality",
+                    "location": "printer_room",
+                    "available_fields": [
+                        "temperature_c",
+                        "humidity",
+                        "co2",
+                        "pm1",
+                        "pm25",
+                        "pm4",
+                        "pm10",
+                        "voc_index",
+                        "nox_index",
+                    ],
+                }
+            ],
+        }
 
     def air_quality_context(self) -> dict[str, Any]:
         return {"locations": {}}
@@ -88,7 +124,14 @@ class FakeExportQuery:
                 and point.source_key in selected
                 and point_time is not None
                 and start <= point_time < stop
-                and point.data_tier == resolution
+                and (
+                    point.data_tier == resolution
+                    or (
+                        kwargs.get("use_stored_aggregate")
+                        and resolution == "15m"
+                        and point.data_tier == "stored_15m"
+                    )
+                )
             ):
                 yield point
                 if self.cancel_callback is not None:
@@ -109,6 +152,15 @@ class FakeExportQuery:
             "recent_sample_limit": kwargs["limit"],
             "warnings": [],
         }
+
+
+class PivotRecord:
+    def __init__(self, timestamp: datetime, values: dict[str, Any]) -> None:
+        self.timestamp = timestamp
+        self.values = values
+
+    def get_time(self) -> datetime:
+        return self.timestamp
 
 
 def settings(tmp_path: Path) -> AppSettings:
@@ -238,6 +290,14 @@ class TestMonitoringApi:
         assert (
             client.get("/api/workflows/options").json["raw_retention_seconds"] == 259200
         )
+        options = client.get("/api/workflows/options").json
+        assert [item["value"] for item in options["monitoring_resolutions"]] == [
+            "raw",
+            "1m",
+            "5m",
+            "15m",
+            "1h",
+        ]
         assert query.calls == []
 
     def test_valid_session_creation_uses_server_timestamps(self, system: Any) -> None:
@@ -276,7 +336,7 @@ class TestMonitoringApi:
             {"sources": [{"sensor_type": "air_quality", "location": "bad room"}]},
             {"sources": [{"sensor_type": "unknown", "node_id": 1}]},
             {"fields": ["status_flags"]},
-            {"resolution": "15m"},
+            {"resolution": "2m"},
         ],
     )
     def test_invalid_sources_fields_and_resolution(
@@ -301,6 +361,75 @@ class TestMonitoringApi:
         assert (
             client.get(f"/api/monitoring/sessions/{first['id']}").json["name"] == "one"
         )
+
+    @pytest.mark.parametrize("resolution", ["raw", "1m", "5m", "15m", "1h"])
+    def test_every_advertised_monitoring_resolution_is_accepted(
+        self, system: Any, resolution: str
+    ) -> None:
+        response = system[0].post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(resolution=resolution),
+        )
+        assert response.status_code == 201
+        assert response.json["resolution"] == resolution
+
+    def test_wide_is_the_api_default(self, system: Any) -> None:
+        payload = monitoring_payload()
+        payload.pop("csv_format")
+        response = system[0].post("/api/monitoring/sessions", json=payload)
+        assert response.status_code == 201
+        assert response.json["csv_format"] == "wide"
+
+    def test_custom_eight_hours_twenty_five_minutes_is_exact(self, system: Any) -> None:
+        response = system[0].post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(duration_seconds=8 * 3600 + 25 * 60),
+        )
+        assert response.status_code == 201
+        assert response.json["duration_seconds"] == 30_300
+        assert response.json["scheduled_end_time_utc"] == iso_utc(
+            BASE + timedelta(seconds=30_300)
+        )
+
+    def test_schema_v1_migration_preserves_sessions_and_accepts_new_resolutions(
+        self, system: Any
+    ) -> None:
+        client, store, _query, _clock, _settings = system
+        original = client.post(
+            "/api/monitoring/sessions", json=monitoring_payload(resolution="raw")
+        ).json
+        with sqlite3.connect(store.database_path) as connection:
+            connection.execute("PRAGMA user_version = 1")
+
+        store.initialize()
+
+        assert store.get_session(original["id"])["name"] == original["name"]
+        created = client.post(
+            "/api/monitoring/sessions", json=monitoring_payload(resolution="5m")
+        )
+        assert created.status_code == 201
+
+    def test_capability_validation_distinguishes_battery_per_node(
+        self, system: Any
+    ) -> None:
+        client = system[0]
+        without_battery = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[{"sensor_type": "environment", "node_id": 2}],
+                fields=["battery_mv"],
+            ),
+        )
+        with_battery = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[{"sensor_type": "environment", "node_id": 1}],
+                fields=["battery_mv"],
+            ),
+        )
+        assert without_battery.status_code == 400
+        assert "not available" in without_battery.json["message"]
+        assert with_battery.status_code == 201
 
     def test_automatic_completion_and_exactly_one_export(self, system: Any) -> None:
         client, store, _query, clock, _settings = system
@@ -437,6 +566,13 @@ class TestExportApi:
         body = system[0].post("/api/exports", json=export_payload()).json
         assert body["start_time_utc"] == "2026-07-31T12:00:00.000000Z"
         assert body["end_time_utc"] == "2026-07-31T14:00:00.000000Z"
+
+    def test_wide_is_the_historical_export_api_default(self, system: Any) -> None:
+        payload = export_payload()
+        payload.pop("csv_format")
+        response = system[0].post("/api/exports", json=payload)
+        assert response.status_code == 202
+        assert response.json["csv_format"] == "wide"
 
     def test_raw_retention_warning_without_aggregate_substitution(
         self, system: Any
@@ -791,7 +927,55 @@ class TestExportWorkerAndCsv:
         assert rows[0]["humidity"] == ""
         assert rows[0]["data_tier"] == "raw"
 
-    def test_aggregate_csv_preserves_stored_mean_name_and_tier(
+    def test_wide_csv_puts_fields_on_same_row_and_keeps_sources_distinct(
+        self, system: Any
+    ) -> None:
+        client, store, query, clock, _settings = system
+        query.points = [
+            point(-3600, source_id="1", field="temperature_c", value=22.0),
+            point(-3600, source_id="1", field="humidity", value=41.5),
+            point(-3600, source_id="2", field="temperature_c", value=24.0),
+        ]
+        job = client.post(
+            "/api/exports",
+            json=export_payload(
+                start_time=iso_utc(BASE - timedelta(hours=2)),
+                end_time=iso_utc(BASE),
+                sources=[
+                    {"sensor_type": "environment", "node_id": 1},
+                    {"sensor_type": "environment", "node_id": 2},
+                ],
+                fields=["temperature_c", "humidity"],
+                csv_format="wide",
+            ),
+        ).json
+        worker = ExportWorker(
+            store, query, clock=clock, worker_id="worker", start_heartbeat_thread=False
+        )
+        assert worker.run_once()
+        with (store.output_dir / f"{job['id']}.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+            assert reader.fieldnames == [
+                "timestamp_utc",
+                "sensor_type",
+                "source_id",
+                "node_id",
+                "location",
+                "temperature_c",
+                "humidity",
+                "data_tier",
+            ]
+        assert len(rows) == 2
+        by_source = {row["source_id"]: row for row in rows}
+        assert by_source["1"]["temperature_c"] == "22.0"
+        assert by_source["1"]["humidity"] == "41.5"
+        assert by_source["2"]["temperature_c"] == "24.0"
+        assert by_source["2"]["humidity"] == ""
+
+    def test_aggregate_csv_uses_normal_measurement_name_and_tier(
         self, system: Any
     ) -> None:
         client, store, query, clock, _settings = system
@@ -800,9 +984,9 @@ class TestExportWorkerAndCsv:
                 -86400,
                 sensor_type="air_quality",
                 source_id="printer_room",
-                field="temperature_c_mean",
+                field="temperature_c",
                 value=22.25,
-                data_tier="15m",
+                data_tier="stored_15m",
             )
         ]
         job = client.post(
@@ -823,8 +1007,8 @@ class TestExportWorkerAndCsv:
             newline="", encoding="utf-8"
         ) as handle:
             rows = list(csv.DictReader(handle))
-        assert rows[0]["field"] == "temperature_c_mean"
-        assert rows[0]["data_tier"] == "15m"
+        assert rows[0]["field"] == "temperature_c"
+        assert rows[0]["data_tier"] == "stored_15m"
 
     def test_worker_graceful_stop_requeues_without_final_file(
         self, system: Any
@@ -864,6 +1048,80 @@ class TestExportWorkerAndCsv:
 
 
 class TestExportFlux:
+    @pytest.mark.parametrize(
+        ("resolution", "second_offset"),
+        [("1m", 30), ("5m", 240), ("15m", 840), ("1h", 3500)],
+    )
+    def test_downsampled_resolutions_calculate_means(
+        self, resolution: str, second_offset: int
+    ) -> None:
+        points = [
+            point(0, field="temperature_c", value=20.0),
+            point(second_offset, field="temperature_c", value=24.0),
+            point(0, field="humidity", value=40.0),
+            point(second_offset, field="humidity", value=44.0),
+        ]
+        result = list(_downsample_points(points, start=BASE, resolution=resolution))
+        assert [(item.field, item.value) for item in result] == [
+            ("humidity", 42.0),
+            ("temperature_c", 22.0),
+        ]
+        assert {item.timestamp_utc for item in result} == {iso_utc(BASE)}
+        assert {item.data_tier for item in result} == {f"{resolution}_mean"}
+
+    def test_query_repository_downsamples_raw_and_averages_only_valid_battery(
+        self,
+    ) -> None:
+        records = [
+            PivotRecord(
+                BASE,
+                {
+                    "node_id": "1",
+                    "temperature_c": 20.0,
+                    "battery_mv": 4000,
+                    "status_flags": 4,
+                },
+            ),
+            PivotRecord(
+                BASE + timedelta(seconds=30),
+                {
+                    "node_id": "1",
+                    "temperature_c": 24.0,
+                    "battery_mv": 1000,
+                    "status_flags": 0,
+                },
+            ),
+        ]
+
+        class QueryApi:
+            def query_stream(self, **_kwargs: Any):
+                return iter(records)
+
+        repository = InfluxExportQueryRepository(
+            SimpleNamespace(
+                bucket="environment",
+                live_bucket="environment_live",
+                org="home",
+            ),
+            query_api=QueryApi(),
+        )
+        result = list(
+            repository.query_source_type(
+                sensor_type="environment",
+                start=BASE,
+                stop=BASE + timedelta(minutes=1),
+                sources=[Source("environment", node_id=1)],
+                fields=["temperature_c", "battery_mv"],
+                resolution="1m",
+            )
+        )
+
+        assert {item.field: item.value for item in result} == {
+            "battery_mv": 4000.0,
+            "temperature_c": 22.0,
+        }
+        assert {item.data_tier for item in result} == {"1m_mean"}
+
     def test_exact_start_stop_environment_bucket_and_allowlisted_fields(self) -> None:
         start = BASE
         stop = BASE + timedelta(hours=1)

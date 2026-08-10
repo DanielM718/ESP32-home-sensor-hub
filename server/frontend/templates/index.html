@@ -14,272 +14,259 @@
       </div>
       <div class="header-actions">
         <span id="connection-state" class="status-pill status-loading">Loading</span>
-        <button id="refresh-button" class="icon-button" type="button" title="Refresh now" aria-label="Refresh now">R</button>
+        <button id="refresh-button" class="icon-button" type="button" title="Refresh current tab" aria-label="Refresh current tab">↻</button>
       </div>
     </header>
 
+    <nav class="app-tabs" aria-label="Dashboard sections" role="tablist">
+      <a id="tab-monitoring" class="tab-link" href="#monitoring" role="tab" aria-controls="panel-monitoring">Monitoring</a>
+      <a id="tab-active-monitoring" class="tab-link" href="#active-monitoring" role="tab" aria-controls="panel-active-monitoring">Active Monitoring</a>
+      <a id="tab-status" class="tab-link" href="#status" role="tab" aria-controls="panel-status">Status &amp; Debug</a>
+    </nav>
+
     <main class="dashboard-shell">
-      <section class="toolbar" aria-label="Dashboard filters">
-        <label class="filter-control">
-          <span>Charts</span>
-          <select id="node-filter">
-            <option value="all">All sensors</option>
-          </select>
-        </label>
-        <div class="segmented-control" role="group" aria-label="History range">
-          <button class="range-button" type="button" data-range="1h">1h</button>
-          <button class="range-button is-active" type="button" data-range="24h">24h</button>
-          <button class="range-button" type="button" data-range="7d">7d</button>
-          <button class="range-button" type="button" data-range="30d">30d</button>
-        </div>
-      </section>
+      <section id="error-banner" class="error-banner" role="alert" hidden></section>
 
-      <section id="error-banner" class="error-banner" hidden></section>
-
-      <section id="active-monitoring" class="workflow-section" aria-labelledby="monitoring-heading">
-        <div class="section-heading workflow-heading">
-          <div>
-            <h2 id="monitoring-heading">Active Monitoring</h2>
-            <p class="subtle">Define a timed interval over readings already stored in InfluxDB.</p>
+      <section id="panel-monitoring" class="tab-panel" role="tabpanel" aria-labelledby="tab-monitoring">
+        <section class="toolbar" aria-label="Monitoring filters">
+          <label class="filter-control">
+            <span>Source</span>
+            <select id="node-filter">
+              <option value="all">All sensors</option>
+            </select>
+          </label>
+          <div class="segmented-control" role="group" aria-label="History range">
+            <button class="range-button" type="button" data-range="1h">1h</button>
+            <button class="range-button is-active" type="button" data-range="24h">24h</button>
+            <button class="range-button" type="button" data-range="7d">7d</button>
+            <button class="range-button" type="button" data-range="30d">30d</button>
           </div>
-          <span id="monitoring-poll-state" class="workflow-poll-state">Loading sessions</span>
-        </div>
-        <div class="workflow-layout">
-          <article class="workflow-panel">
-            <h3>Start a session</h3>
-            <form id="monitoring-form" class="workflow-form" novalidate>
-              <label class="form-control">
-                <span>Session name</span>
-                <input id="monitoring-name" name="name" type="text" maxlength="120" required autocomplete="off">
-              </label>
-              <label class="form-control">
-                <span>Notes <small>optional</small></span>
-                <textarea id="monitoring-notes" name="notes" maxlength="2000" rows="3"></textarea>
-              </label>
-              <fieldset>
-                <legend>Sensor sources</legend>
-                <div id="monitoring-sources" class="check-grid source-options" aria-live="polite">
-                  <span class="subtle">Waiting for known sources</span>
-                </div>
-              </fieldset>
-              <fieldset>
-                <legend>Measurements</legend>
-                <div id="monitoring-fields" class="field-groups"></div>
-              </fieldset>
-              <div class="form-row">
-                <label class="form-control">
-                  <span>Duration</span>
-                  <select id="monitoring-duration" name="duration">
-                    <option value="300">5 minutes</option>
-                    <option value="900">15 minutes</option>
-                    <option value="1800">30 minutes</option>
-                    <option value="3600" selected>1 hour</option>
-                    <option value="7200">2 hours</option>
-                    <option value="14400">4 hours</option>
-                    <option value="28800">8 hours</option>
-                    <option value="43200">12 hours</option>
-                    <option value="86400">24 hours</option>
-                    <option value="custom">Custom minutes</option>
-                  </select>
-                </label>
-                <label id="monitoring-custom-wrap" class="form-control" hidden>
-                  <span>Custom minutes</span>
-                  <input id="monitoring-custom-minutes" name="custom_minutes" type="number" min="1" max="4320" inputmode="numeric">
-                </label>
+        </section>
+
+        <section>
+          <div class="section-heading">
+            <div>
+              <h2>Current Readings</h2>
+              <p class="subtle">Latest values and sensor-backed air-quality interpretation.</p>
+            </div>
+          </div>
+          <div id="current-grid" class="current-grid" aria-live="polite"></div>
+        </section>
+
+        <section aria-labelledby="history-heading">
+          <article class="chart-panel configurable-chart">
+            <div class="section-heading chart-heading">
+              <div>
+                <h2 id="history-heading">Historical Measurements</h2>
+                <p id="history-tier" class="subtle">Historical tier loading</p>
               </div>
-              <div class="form-row">
-                <label class="form-control">
-                  <span>Resolution</span>
-                  <select id="monitoring-resolution" name="resolution">
-                    <option value="raw">Raw</option>
-                  </select>
-                </label>
-                <label class="form-control">
-                  <span>CSV format</span>
-                  <select id="monitoring-format" name="csv_format">
-                    <option value="long">Long (normalized)</option>
-                    <option value="wide">Wide</option>
-                  </select>
-                </label>
+              <span id="chart-series-count" class="unit">No series</span>
+            </div>
+            <fieldset class="metric-selector">
+              <legend>Measurements shown together</legend>
+              <div id="chart-metrics" class="check-grid" aria-live="polite">
+                <span class="subtle">Waiting for available measurements</span>
               </div>
-              <p id="monitoring-validation" class="form-message" role="alert" hidden></p>
-              <button id="monitoring-start" class="primary-button" type="submit">Start monitoring</button>
-            </form>
-          </article>
-          <article class="workflow-panel workflow-status-panel">
-            <h3>Running sessions</h3>
-            <div id="monitoring-current" class="workflow-card-list" aria-live="polite">
-              <p class="empty-state">No running monitoring sessions.</p>
+            </fieldset>
+            <div id="chart-empty" class="empty-state" hidden>Select at least one available measurement.</div>
+            <div class="chart-frame chart-frame-large">
+              <canvas id="history-chart" aria-label="Selected historical sensor measurements"></canvas>
             </div>
           </article>
-        </div>
-        <div class="workflow-list-heading">
-          <h3>Recent sessions</h3>
-        </div>
-        <div class="table-wrap workflow-table-wrap">
-          <table class="workflow-table">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Status</th>
-                <th>Interval</th>
-                <th>Sources / fields</th>
-                <th>Export</th>
-                <th>Actions</th>
-              </tr>
-            </thead>
-            <tbody id="monitoring-sessions-table">
-              <tr><td colspan="6">Loading monitoring sessions.</td></tr>
-            </tbody>
-          </table>
-        </div>
+        </section>
       </section>
 
-      <section id="historical-exports" class="workflow-section" aria-labelledby="exports-heading">
-        <div class="section-heading workflow-heading">
-          <div>
-            <h2 id="exports-heading">Historical Data Export</h2>
-            <p class="subtle">Queue an arbitrary interval; the server continues after this page closes.</p>
-          </div>
-          <span id="export-poll-state" class="workflow-poll-state">Loading jobs</span>
-        </div>
-        <div class="workflow-layout">
-          <article class="workflow-panel">
-            <h3>Queue an export</h3>
-            <form id="export-form" class="workflow-form" novalidate>
-              <label class="form-control">
-                <span>Export name</span>
-                <input id="export-name" name="name" type="text" maxlength="120" required autocomplete="off">
-              </label>
-              <div class="form-row">
-                <label class="form-control">
-                  <span>Start date and time</span>
-                  <input id="export-start" name="start_time" type="datetime-local" required>
-                </label>
-                <label class="form-control">
-                  <span>End date and time</span>
-                  <input id="export-end" name="end_time" type="datetime-local" required>
-                </label>
-              </div>
-              <p class="form-help">Times are interpreted in this device's local timezone and sent with an explicit offset.</p>
-              <fieldset>
-                <legend>Sensor sources</legend>
-                <div id="export-sources" class="check-grid source-options" aria-live="polite">
-                  <span class="subtle">Waiting for known sources</span>
-                </div>
-              </fieldset>
-              <fieldset>
-                <legend>Measurements</legend>
-                <div id="export-fields" class="field-groups"></div>
-              </fieldset>
-              <div class="form-row">
-                <label class="form-control">
-                  <span>Resolution</span>
-                  <select id="export-resolution" name="resolution">
-                    <option value="raw">Raw</option>
-                    <option value="15m">Stored 15-minute means</option>
-                  </select>
-                </label>
-                <label class="form-control">
-                  <span>CSV format</span>
-                  <select id="export-format" name="csv_format">
-                    <option value="long">Long (normalized)</option>
-                    <option value="wide">Wide</option>
-                  </select>
-                </label>
-              </div>
-              <p id="export-validation" class="form-message" role="alert" hidden></p>
-              <button id="export-create" class="primary-button" type="submit">Queue export</button>
-            </form>
-          </article>
-          <article class="workflow-panel workflow-status-panel">
-            <h3>Export jobs</h3>
-            <div id="export-jobs" class="workflow-card-list" aria-live="polite">
-              <p class="empty-state">No export jobs.</p>
+      <section id="panel-active-monitoring" class="tab-panel" role="tabpanel" aria-labelledby="tab-active-monitoring" hidden>
+        <section id="active-monitoring" class="workflow-section" aria-labelledby="monitoring-heading">
+          <div class="section-heading workflow-heading">
+            <div>
+              <h2 id="monitoring-heading">Active Monitoring</h2>
+              <p class="subtle">Define a timed interval over readings already stored in InfluxDB. Sessions continue on the Pi if this page closes.</p>
             </div>
-          </article>
-        </div>
+            <span id="monitoring-poll-state" class="workflow-poll-state">Loading sessions</span>
+          </div>
+          <div class="workflow-layout">
+            <article class="workflow-panel">
+              <h3>Start a session</h3>
+              <form id="monitoring-form" class="workflow-form" novalidate>
+                <label class="form-control">
+                  <span>Session name</span>
+                  <input id="monitoring-name" name="name" type="text" maxlength="120" required autocomplete="off">
+                </label>
+                <label class="form-control">
+                  <span>Notes <small>optional</small></span>
+                  <textarea id="monitoring-notes" name="notes" maxlength="2000" rows="3"></textarea>
+                </label>
+                <fieldset>
+                  <legend>Sensor sources</legend>
+                  <div id="monitoring-sources" class="check-grid source-options" aria-live="polite">
+                    <span class="subtle">Waiting for known sources</span>
+                  </div>
+                </fieldset>
+                <fieldset>
+                  <legend>Measurements available from selected sources</legend>
+                  <div id="monitoring-fields" class="field-groups" aria-live="polite"></div>
+                  <p id="monitoring-capability-help" class="form-help">Select one or more sources to see their measurements.</p>
+                </fieldset>
+                <div class="form-row">
+                  <label class="form-control">
+                    <span>Duration</span>
+                    <select id="monitoring-duration" name="duration">
+                      <option value="300">5 minutes</option>
+                      <option value="900">15 minutes</option>
+                      <option value="1800">30 minutes</option>
+                      <option value="3600" selected>1 hour</option>
+                      <option value="7200">2 hours</option>
+                      <option value="14400">4 hours</option>
+                      <option value="28800">8 hours</option>
+                      <option value="43200">12 hours</option>
+                      <option value="86400">24 hours</option>
+                      <option value="custom">Custom time</option>
+                    </select>
+                  </label>
+                  <div id="monitoring-custom-wrap" class="custom-time" hidden>
+                    <label class="form-control">
+                      <span>Hours</span>
+                      <input id="monitoring-custom-hours" name="custom_hours" type="number" min="0" step="1" inputmode="numeric">
+                    </label>
+                    <label class="form-control">
+                      <span>Minutes</span>
+                      <input id="monitoring-custom-minutes" name="custom_minutes" type="number" min="0" max="59" step="1" inputmode="numeric">
+                    </label>
+                  </div>
+                </div>
+                <p id="monitoring-duration-help" class="form-help"></p>
+                <div class="form-row">
+                  <label class="form-control">
+                    <span>Resolution</span>
+                    <select id="monitoring-resolution" name="resolution">
+                      <option value="raw">Raw samples</option>
+                    </select>
+                  </label>
+                  <label class="form-control">
+                    <span>CSV format</span>
+                    <select id="monitoring-format" name="csv_format">
+                      <option value="wide" selected>Wide</option>
+                      <option value="long">Long / normalized</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="monitoring-format-help" class="form-help"></p>
+                <p id="monitoring-validation" class="form-message" role="alert" hidden></p>
+                <button id="monitoring-start" class="primary-button" type="submit">Start monitoring</button>
+              </form>
+            </article>
+            <article class="workflow-panel workflow-status-panel">
+              <h3>Running sessions</h3>
+              <div id="monitoring-current" class="workflow-card-list" aria-live="polite">
+                <p class="empty-state">No running monitoring sessions.</p>
+              </div>
+            </article>
+          </div>
+          <div class="workflow-list-heading"><h3>Recent sessions</h3></div>
+          <div class="table-wrap workflow-table-wrap">
+            <table class="workflow-table">
+              <thead><tr><th>Name</th><th>Status</th><th>Interval</th><th>Sources / fields</th><th>Export</th><th>Actions</th></tr></thead>
+              <tbody id="monitoring-sessions-table"><tr><td colspan="6">Loading monitoring sessions.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="historical-exports" class="workflow-section" aria-labelledby="exports-heading">
+          <div class="section-heading workflow-heading">
+            <div>
+              <h2 id="exports-heading">Historical Data Export</h2>
+              <p class="subtle">Queue an arbitrary interval; the server continues after this page closes.</p>
+            </div>
+            <span id="export-poll-state" class="workflow-poll-state">Loading jobs</span>
+          </div>
+          <div class="workflow-layout">
+            <article class="workflow-panel">
+              <h3>Queue an export</h3>
+              <form id="export-form" class="workflow-form" novalidate>
+                <label class="form-control"><span>Export name</span><input id="export-name" name="name" type="text" maxlength="120" required autocomplete="off"></label>
+                <div class="form-row">
+                  <label class="form-control"><span>Start date and time</span><input id="export-start" name="start_time" type="datetime-local" required></label>
+                  <label class="form-control"><span>End date and time</span><input id="export-end" name="end_time" type="datetime-local" required></label>
+                </div>
+                <p class="form-help">Times use this device’s local timezone and are sent with an explicit offset.</p>
+                <fieldset>
+                  <legend>Sensor sources</legend>
+                  <div id="export-sources" class="check-grid source-options" aria-live="polite"><span class="subtle">Waiting for known sources</span></div>
+                </fieldset>
+                <fieldset>
+                  <legend>Measurements available from selected sources</legend>
+                  <div id="export-fields" class="field-groups" aria-live="polite"></div>
+                  <p id="export-capability-help" class="form-help">Select one or more sources to see their measurements.</p>
+                </fieldset>
+                <div class="form-row">
+                  <label class="form-control"><span>Resolution</span><select id="export-resolution" name="resolution"><option value="raw">Raw samples</option></select></label>
+                  <label class="form-control">
+                    <span>CSV format</span>
+                    <select id="export-format" name="csv_format">
+                      <option value="wide" selected>Wide</option>
+                      <option value="long">Long / normalized</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="export-resolution-help" class="form-help"></p>
+                <p id="export-format-help" class="form-help"></p>
+                <p id="export-validation" class="form-message" role="alert" hidden></p>
+                <button id="export-create" class="primary-button" type="submit">Queue export</button>
+              </form>
+            </article>
+            <article class="workflow-panel workflow-status-panel">
+              <h3>Export jobs</h3>
+              <div id="export-jobs" class="workflow-card-list" aria-live="polite"><p class="empty-state">No export jobs.</p></div>
+            </article>
+          </div>
+        </section>
       </section>
 
-      <section>
-        <div class="section-heading">
-          <h2>Current Readings</h2>
-        </div>
-        <div id="current-grid" class="current-grid" aria-live="polite"></div>
-      </section>
+      <section id="panel-status" class="tab-panel" role="tabpanel" aria-labelledby="tab-status" hidden>
+        <section class="status-section" aria-labelledby="services-heading">
+          <div class="section-heading workflow-heading">
+            <div><h2 id="services-heading">System / Service Status</h2><p class="subtle">Read-only state from the Pi’s fixed project service list.</p></div>
+            <span id="status-checked" class="workflow-poll-state">Not checked</span>
+          </div>
+          <div id="services-grid" class="services-grid" aria-live="polite"><p class="empty-state">Loading services.</p></div>
+        </section>
 
-      <section class="chart-grid" aria-label="Historical readings">
-        <p id="history-tier" class="history-tier">Historical tier loading</p>
-        <article class="chart-panel">
-          <div class="section-heading">
-            <h2>Temperature</h2>
-            <span class="unit">&deg;C</span>
+        <section class="status-section" aria-labelledby="nodes-heading">
+          <div class="section-heading"><div><h2 id="nodes-heading">Sensor Node Status</h2><p class="subtle">Staleness, battery state, flags, and measurements actually observed per source.</p></div></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Node / location</th><th>Type</th><th>Status</th><th>Last seen</th><th>Battery</th><th>Flags</th><th>Available measurements</th></tr></thead>
+              <tbody id="nodes-table"><tr><td colspan="7">Loading node status.</td></tr></tbody>
+            </table>
           </div>
-          <div class="chart-frame">
-            <canvas id="temperature-chart"></canvas>
-          </div>
-        </article>
+        </section>
 
-        <article class="chart-panel">
-          <div class="section-heading">
-            <h2>Humidity</h2>
-            <span class="unit">%</span>
+        <section class="status-section" aria-labelledby="debug-heading">
+          <div class="section-heading"><div><h2 id="debug-heading">Debug Information</h2><p class="subtle">A concise, credential-free operational overview.</p></div></div>
+          <div class="debug-grid">
+            <article class="debug-panel">
+              <h3>Architecture / data flow</h3>
+              <ol class="data-flow">
+                <li>Battery SHT41 node</li><li>ESP-NOW</li><li>ESP32 gateway</li><li>MQTT</li><li>Raspberry Pi / bridge</li><li>InfluxDB</li><li>Flask API / dashboard</li>
+              </ol>
+              <p class="subtle">The Wi-Fi SEN66 station publishes directly to MQTT. Grafana reads InfluxDB alongside this dashboard.</p>
+            </article>
+            <article class="debug-panel">
+              <h3>Polling and storage</h3>
+              <dl id="debug-settings" class="debug-facts"><div><dt>Loading</dt><dd>Configuration</dd></div></dl>
+            </article>
+            <article class="debug-panel debug-panel-wide">
+              <h3>Resolution and retention</h3>
+              <p>Raw readings preserve individual samples while retained. Active Monitoring can export raw samples or calculate 1-minute, 5-minute, 15-minute, and 1-hour arithmetic means from that bounded raw interval. Battery voltage uses only battery-valid samples; status flags are never averaged.</p>
+              <p>The permanent SEN66 tier stores UTC-aligned 15-minute summaries for long-range charts and historical 15-minute exports. Normal charts label stored means as the ordinary measurement and omit max, p95, and event datasets.</p>
+            </article>
+            <article class="debug-panel debug-panel-wide">
+              <h3>Useful read-only commands</h3>
+              <div id="debug-commands" class="command-grid"><code>Loading service commands…</code></div>
+            </article>
           </div>
-          <div class="chart-frame">
-            <canvas id="humidity-chart"></canvas>
-          </div>
-        </article>
-
-        <article class="chart-panel">
-          <div class="section-heading">
-            <h2>Battery</h2>
-            <span class="unit">mV</span>
-          </div>
-          <div class="chart-frame">
-            <canvas id="battery-chart"></canvas>
-          </div>
-        </article>
-
-        <article id="gas-chart-panel" class="chart-panel">
-          <div class="section-heading">
-            <h2>SEN66 Gas and Indices</h2>
-            <span class="unit">Mean; select legend for maxima/p95/events</span>
-          </div>
-          <div class="chart-frame">
-            <canvas id="gas-chart"></canvas>
-          </div>
-        </article>
-
-        <article id="particulate-chart-panel" class="chart-panel">
-          <div class="section-heading">
-            <h2>SEN66 Particulate Matter</h2>
-            <span class="unit">Mean; select legend for maxima/p95/events</span>
-          </div>
-          <div class="chart-frame">
-            <canvas id="particulate-chart"></canvas>
-          </div>
-        </article>
-      </section>
-
-      <section>
-        <div class="section-heading">
-          <h2>Node Status</h2>
-        </div>
-        <div class="table-wrap">
-          <table>
-            <thead>
-              <tr>
-                <th>Node</th>
-                <th>Type</th>
-                <th>Status</th>
-                <th>Last Seen</th>
-                <th>Battery</th>
-                <th>Flags</th>
-              </tr>
-            </thead>
-            <tbody id="nodes-table"></tbody>
-          </table>
-        </div>
+        </section>
       </section>
     </main>
 

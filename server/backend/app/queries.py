@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
 import json
 import math
 import re
-from typing import TYPE_CHECKING, Any, Iterable, Mapping, Protocol, Sequence
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, Any, Protocol
 
-from app.air_quality_policy import rolling_24h_status
-from app.air_quality_policy import interpret_station
+from app.air_quality_policy import interpret_station, rolling_24h_status
 from app.battery_status import decode_battery_status
 
 if TYPE_CHECKING:
@@ -75,7 +75,9 @@ AIR_QUALITY_METADATA_FIELDS = (
     "reset_reason",
     "firmware_version",
 )
-AIR_QUALITY_LATEST_FIELDS = AIR_QUALITY_FIELDS + AIR_QUALITY_RAW_FIELDS + AIR_QUALITY_METADATA_FIELDS
+AIR_QUALITY_LATEST_FIELDS = (
+    AIR_QUALITY_FIELDS + AIR_QUALITY_RAW_FIELDS + AIR_QUALITY_METADATA_FIELDS
+)
 AIR_QUALITY_MAX_FIELDS = ("co2", "pm1", "pm25", "pm4", "pm10", "voc_index", "nox_index")
 AIR_QUALITY_P95_FIELDS = ("co2", "pm25", "pm10", "voc_index", "nox_index")
 
@@ -99,17 +101,13 @@ class ReadingsQuery:
 class RecordLike(Protocol):
     values: Mapping[str, Any]
 
-    def get_field(self) -> str:
-        ...
+    def get_field(self) -> str: ...
 
-    def get_measurement(self) -> str:
-        ...
+    def get_measurement(self) -> str: ...
 
-    def get_time(self) -> datetime:
-        ...
+    def get_time(self) -> datetime: ...
 
-    def get_value(self) -> Any:
-        ...
+    def get_value(self) -> Any: ...
 
 
 class InfluxReadRepository:
@@ -117,7 +115,7 @@ class InfluxReadRepository:
 
     def __init__(
         self,
-        settings: "InfluxSettings",
+        settings: InfluxSettings,
         *,
         expected_publish_seconds: int = 5,
         minimum_coverage_percent: int = 75,
@@ -289,7 +287,9 @@ def _environment_history_flux(bucket: str, query: ReadingsQuery) -> list[str]:
         f"  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_HISTORY_FIELDS)}))",
     ]
     if query.node_id is not None:
-        lines.append(f"  |> filter(fn: (r) => r.node_id == {_flux_string(str(query.node_id))})")
+        lines.append(
+            f"  |> filter(fn: (r) => r.node_id == {_flux_string(str(query.node_id))})"
+        )
 
     lines.extend(
         [
@@ -306,7 +306,7 @@ def _environment_history_flux(bucket: str, query: ReadingsQuery) -> list[str]:
             "    exists r.status_flags and",
             "    bitwise.sand(a: r.status_flags, b: 4) > 0",
             "  )",
-            '  |> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))',
+            "  |> map(fn: (r) => ({r with _value: float(v: r.battery_mv)}))",
             f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
             # aggregateWindow drops non-group-key columns added after pivot, so
             # restore _field after aggregation for the Python record parser.
@@ -398,13 +398,11 @@ def _raw_air_streams(
 
 
 def _aggregate_field_map(remove_suffix: str, add_suffix: str) -> str:
-    expression = 'r._field'
+    expression = "r._field"
     for field in reversed(AIR_QUALITY_FIELDS + AIR_QUALITY_RAW_FIELDS):
         source = f"{field}{remove_suffix}"
         destination = f"{field}{add_suffix}"
-        expression = (
-            f'if r._field == "{source}" then "{destination}" else {expression}'
-        )
+        expression = f'if r._field == "{source}" then "{destination}" else {expression}'
     return expression
 
 
@@ -415,7 +413,9 @@ def events_flux(bucket: str, query: ReadingsQuery) -> str:
         f"  |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_EVENT_MEASUREMENT)})",
     ]
     if query.location is not None:
-        lines.append(f"  |> filter(fn: (r) => r.location == {_flux_string(query.location)})")
+        lines.append(
+            f"  |> filter(fn: (r) => r.location == {_flux_string(query.location)})"
+        )
     lines.extend(
         [
             # Event fields intentionally mix strings (for example, state) and
@@ -515,14 +515,18 @@ def air_quality_context_response(
     locations = sorted(set(live) | set(aggregates) | set(events))
     result: dict[str, Any] = {}
     for location in locations:
-        live_points = sorted(live.get(location, {}).values(), key=lambda row: row["time"])
+        live_points = sorted(
+            live.get(location, {}).values(), key=lambda row: row["time"]
+        )
         aggregate_points = sorted(
             aggregates.get(location, {}).values(), key=lambda row: row["time"]
         )
         current_summary = _current_15m_summary(
             live_points, expected_publish_seconds=expected_publish_seconds
         )
-        completed = [point for point in aggregate_points if point.get("is_partial") is False]
+        completed = [
+            point for point in aggregate_points if point.get("is_partial") is False
+        ]
         previous = completed[-1] if completed else None
         previous_previous = completed[-2] if len(completed) >= 2 else None
         if current_summary and previous:
@@ -538,7 +542,9 @@ def air_quality_context_response(
                 new = _number_or_none(previous.get(f"{metric}_mean"))
                 old = _number_or_none(previous_previous.get(f"{metric}_mean"))
                 if new is not None and old is not None:
-                    previous[f"{metric}_change_from_previous_window"] = round(new - old, 3)
+                    previous[f"{metric}_change_from_previous_window"] = round(
+                        new - old, 3
+                    )
 
         rolling = rolling_24h_status(
             completed,
@@ -584,7 +590,10 @@ def _current_15m_summary(
     current = [
         point
         for point in points
-        if (_parse_iso_time(str(point.get("time", ""))) or datetime.min.replace(tzinfo=timezone.utc))
+        if (
+            _parse_iso_time(str(point.get("time", "")))
+            or datetime.min.replace(tzinfo=timezone.utc)
+        )
         >= start
     ]
     expected = max(
@@ -617,9 +626,7 @@ def _current_15m_summary(
     for metric in AIR_QUALITY_FIELDS + AIR_QUALITY_RAW_FIELDS:
         values = [
             value
-            for value in (
-                _number_or_none(point.get(metric)) for point in valid_points
-            )
+            for value in (_number_or_none(point.get(metric)) for point in valid_points)
             if value is not None
         ]
         if not values:
@@ -700,11 +707,13 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
     return {
         "generated_at": _now_iso(),
         "environment": _sorted_entities(
-            item for (sensor_type, _), item in entities.items()
+            item
+            for (sensor_type, _), item in entities.items()
             if sensor_type == SENSOR_TYPE_ENVIRONMENT
         ),
         "air_quality": _sorted_entities(
-            item for (sensor_type, _), item in entities.items()
+            item
+            for (sensor_type, _), item in entities.items()
             if sensor_type == SENSOR_TYPE_AIR_QUALITY
         ),
     }
@@ -738,7 +747,9 @@ def readings_response(
     response_series = []
     for key, item in series.items():
         item = dict(item)
-        item["points"] = sorted(points.get(key, {}).values(), key=lambda row: row["time"])
+        item["points"] = sorted(
+            points.get(key, {}).values(), key=lambda row: row["time"]
+        )
         response_series.append(item)
 
     return {
@@ -870,7 +881,9 @@ def latest_with_air_quality_context(
             rolling_24h=rolling_24h if isinstance(rolling_24h, Mapping) else None,
             stale_after_seconds=stale_after_seconds,
         )
-        station["overall_status"] = _overall_air_quality_status(station["interpretations"])
+        station["overall_status"] = _overall_air_quality_status(
+            station["interpretations"]
+        )
         stations.append(station)
     response["air_quality"] = stations
     response["air_quality_stale_after_seconds"] = stale_after_seconds
@@ -905,7 +918,9 @@ def _overall_air_quality_status(
             continue
         if severity not in severity_rank or item.get("is_stale"):
             continue
-        candidates.append((severity_rank[severity], key, severity, item.get("category")))
+        candidates.append(
+            (severity_rank[severity], key, severity, item.get("category"))
+        )
     if not candidates:
         return {
             "severity": "unavailable",
@@ -935,7 +950,12 @@ def _node_status(
         age_seconds = None
     else:
         age_seconds = max(0, int((now - last_seen).total_seconds()))
-        status = "online" if age_seconds <= stale_after_seconds else "stale"
+        if age_seconds <= stale_after_seconds:
+            status = "online"
+        elif age_seconds <= stale_after_seconds * 4:
+            status = "stale"
+        else:
+            status = "offline"
 
     result = {
         "id": item.get("id"),
@@ -955,11 +975,12 @@ def _node_status(
         "battery_low",
         "battery_shutdown",
         "sequence",
+        "available_fields",
     ):
         if key in item:
             result[key] = item[key]
 
-    if status == "stale":
+    if status in {"stale", "offline"}:
         result["stale_reason"] = (
             "battery_shutdown"
             if item.get("battery_shutdown") is True
@@ -975,6 +996,16 @@ def _finalize_latest_item(item: dict[str, Any]) -> None:
     """Add battery semantics without attaching an older flag to a newer packet."""
 
     field_times = item.pop("_field_times", {})
+    supported_fields = (
+        ENVIRONMENT_HISTORY_FIELDS
+        if item.get("sensor_type") == SENSOR_TYPE_ENVIRONMENT
+        else AIR_QUALITY_FIELDS
+        if item.get("sensor_type") == SENSOR_TYPE_AIR_QUALITY
+        else ()
+    )
+    item["available_fields"] = [
+        field for field in supported_fields if field in field_times
+    ]
     if item.get("sensor_type") == SENSOR_TYPE_AIR_QUALITY:
         sample_valid = (
             item.get("sample_valid")
@@ -1133,7 +1164,9 @@ def _now_iso() -> str:
 
 
 def _sorted_entities(items: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
-    return sorted(items, key=lambda item: (str(item.get("sensor_type")), str(item.get("id"))))
+    return sorted(
+        items, key=lambda item: (str(item.get("sensor_type")), str(item.get("id")))
+    )
 
 
 def _optional_node_id(value: str) -> int | None:

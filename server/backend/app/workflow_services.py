@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import re
+import unicodedata
+from collections.abc import Callable, Mapping
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-import re
-from typing import Any, Callable, Mapping
-import unicodedata
+from typing import Any
 
+from app.capabilities import validate_source_capabilities
 from app.persistence import MonitoringExportStore
 from app.workflows import (
     DEFAULT_RAW_RETENTION_SECONDS,
@@ -19,8 +21,8 @@ from app.workflows import (
     validate_monitoring_request,
 )
 
-
 Clock = Callable[[], datetime]
+CapabilityResolver = Callable[[], Mapping[str, Any]]
 
 
 def utc_now() -> datetime:
@@ -34,10 +36,12 @@ class ExportService:
         *,
         clock: Clock = utc_now,
         raw_retention_seconds: int = DEFAULT_RAW_RETENTION_SECONDS,
+        capability_resolver: CapabilityResolver | None = None,
     ) -> None:
         self.store = store
         self.clock = clock
         self.raw_retention_seconds = raw_retention_seconds
+        self.capability_resolver = capability_resolver
 
     def serialize_time(self) -> str:
         return iso_utc(self.clock())
@@ -49,6 +53,12 @@ class ExportService:
             now=now,
             raw_retention_seconds=self.raw_retention_seconds,
         )
+        if self.capability_resolver is not None:
+            validate_source_capabilities(
+                request.sources,
+                request.fields,
+                self.capability_resolver(),
+            )
         return self.serialize(self.store.create_export(request, now=now), now=now)
 
     def list(self) -> list[dict[str, Any]]:
@@ -165,12 +175,14 @@ class MonitoringService:
         *,
         clock: Clock = utc_now,
         max_duration_seconds: int = DEFAULT_RAW_RETENTION_SECONDS,
+        capability_resolver: CapabilityResolver | None = None,
     ) -> None:
         self.store = store
         self.export_service = export_service
         self.query_repository = query_repository
         self.clock = clock
         self.max_duration_seconds = max_duration_seconds
+        self.capability_resolver = capability_resolver
 
     def server_time(self) -> str:
         return iso_utc(self.clock())
@@ -179,6 +191,12 @@ class MonitoringService:
         request = validate_monitoring_request(
             payload, max_duration_seconds=self.max_duration_seconds
         )
+        if self.capability_resolver is not None:
+            validate_source_capabilities(
+                request.sources,
+                request.fields,
+                self.capability_resolver(),
+            )
         now = self.clock()
         session = self.store.create_session(
             request,

@@ -131,7 +131,7 @@ still responsive enough to return an HTTP 503; this message alone does not mean
 the server is hung. Identify the failing endpoint and its duration with:
 
 ```bash
-for path in api/health api/latest 'api/readings?range=24h' api/nodes; do
+for path in api/health api/latest 'api/readings?range=24h' api/nodes api/workflows/options api/status; do
   curl --silent --show-error --output /dev/null \
     --write-out "${path} HTTP %{http_code} in %{time_total}s\n" \
     "http://127.0.0.1:8080/${path}"
@@ -180,7 +180,10 @@ busy timeout, parameterized statements, and a fresh connection per Flask/worker
 operation. The two Gunicorn processes can safely read/write metadata while the
 separate worker transactionally claims one heavy job at a time.
 
-Schema version 1 contains:
+Schema version 2 expands the resolution constraints to `raw`, `1m`, `5m`,
+`15m`, and `1h`. Initialization migrates version 1 transactionally while a
+small schema lock serializes dashboard/worker startup; existing sessions,
+jobs, and CSVs are preserved. The tables contain:
 
 - `monitoring_sessions`: UUID, name/notes/status, start/scheduled/actual UTC
   times, selected-source/field JSON, resolution/format, unique automatic job

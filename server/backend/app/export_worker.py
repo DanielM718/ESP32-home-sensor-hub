@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import csv
-from datetime import datetime, timedelta
-from itertools import groupby
 import logging
 import math
 import os
-from pathlib import Path
 import re
 import signal
 import socket
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from datetime import datetime, timedelta
+from itertools import groupby
+from pathlib import Path
 from threading import Event, Thread
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any, Self
 from uuid import uuid4
 
 from app.config import AppSettings, configure_logging, load_settings
@@ -24,12 +25,11 @@ from app.workflows import (
     SENSOR_TYPE_AIR_QUALITY,
     SENSOR_TYPE_ENVIRONMENT,
     Source,
-    aggregate_field,
     fields_for_source,
     parse_stored_time,
+    resolution_window_seconds,
     sources_from_json,
 )
-
 
 LOGGER = logging.getLogger("home_sensor.export_worker")
 
@@ -135,6 +135,9 @@ class ExportWorker:
         fields = tuple(str(field) for field in job["selected_fields"])
         resolution = str(job["resolution"])
         csv_format = str(job["csv_format"])
+        use_stored_aggregate = (
+            resolution == "15m" and job.get("monitoring_session_id") is None
+        )
         start = parse_stored_time(job["start_time_utc"])
         end = parse_stored_time(job["end_time_utc"])
         if start is None or end is None or end < start:
@@ -147,20 +150,34 @@ class ExportWorker:
             return
 
         warnings = list(job.get("warnings") or [])
-        source_state = _initial_source_state(sources, fields, resolution)
+        source_state = _initial_source_state(
+            sources,
+            fields,
+            resolution,
+            use_stored_aggregate=use_stored_aggregate,
+        )
         configured_chunk_seconds = (
-            self.raw_chunk_seconds
-            if resolution == "raw"
-            else self.aggregate_chunk_seconds
+            self.aggregate_chunk_seconds
+            if use_stored_aggregate
+            else self.raw_chunk_seconds
         )
         chunk_seconds = _bounded_chunk_seconds(
             resolution,
             configured_chunk_seconds,
             sources,
             fields,
+            use_stored_aggregate=use_stored_aggregate,
         )
+        window_seconds = resolution_window_seconds(resolution)
+        if window_seconds is not None and not use_stored_aggregate:
+            # Query chunks and mean windows share boundaries, preventing a
+            # partially repeated window at the edge of adjacent chunks.
+            chunk_seconds = max(
+                window_seconds,
+                (chunk_seconds // window_seconds) * window_seconds,
+            )
         chunk_count = (
-            int(math.ceil((end - start).total_seconds() / chunk_seconds))
+            math.ceil((end - start).total_seconds() / chunk_seconds)
             if end > start
             else 0
         )
@@ -206,7 +223,7 @@ class ExportWorker:
                     for sensor_type in sensor_types:
                         phase = (
                             "querying_aggregate"
-                            if resolution == "15m"
+                            if use_stored_aggregate
                             else (
                                 "querying_environment"
                                 if sensor_type == SENSOR_TYPE_ENVIRONMENT
@@ -231,6 +248,7 @@ class ExportWorker:
                             sources=sources,
                             fields=fields,
                             resolution=resolution,
+                            use_stored_aggregate=use_stored_aggregate,
                         )
                         for point_index, point in enumerate(stream, start=1):
                             if point_index % 500 == 0:
@@ -377,7 +395,7 @@ class _LeaseHeartbeat:
         self.event = Event()
         self.thread: Thread | None = None
 
-    def __enter__(self) -> "_LeaseHeartbeat":
+    def __enter__(self) -> Self:
         if self.enabled:
             self.thread = Thread(
                 target=self._run,
@@ -424,10 +442,11 @@ def _bounded_chunk_seconds(
     fields: Sequence[str],
     *,
     target_points: int = 50_000,
+    use_stored_aggregate: bool = False,
 ) -> int:
     """Shrink chunks as source cardinality grows so one sort remains Pi-sized."""
 
-    if resolution == "raw":
+    if not use_stored_aggregate:
         sample_seconds = 5
         relevant = [
             source
@@ -448,7 +467,15 @@ def _bounded_chunk_seconds(
         # raw chunk is already bounded even at the source limit.
         return configured_seconds
     selected_cells = sum(
-        len(fields_for_source(source, fields, resolution)) for source in relevant
+        len(
+            fields_for_source(
+                source,
+                fields,
+                resolution,
+                stored_aggregate=use_stored_aggregate,
+            )
+        )
+        for source in relevant
     )
     if selected_cells <= 0:
         return configured_seconds
@@ -457,11 +484,20 @@ def _bounded_chunk_seconds(
 
 
 def _initial_source_state(
-    sources: Sequence[Source], fields: Sequence[str], resolution: str
+    sources: Sequence[Source],
+    fields: Sequence[str],
+    resolution: str,
+    *,
+    use_stored_aggregate: bool = False,
 ) -> dict[tuple[str, str], dict[str, Any]]:
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for source in sources:
-        supported = fields_for_source(source, fields, resolution)
+        supported = fields_for_source(
+            source,
+            fields,
+            resolution,
+            stored_aggregate=use_stored_aggregate,
+        )
         result[source.key] = {
             **source.as_dict(),
             "source_id": source.source_id,
@@ -547,9 +583,8 @@ def _write_wide(
 
 
 def _wide_fields(fields: Sequence[str], resolution: str) -> tuple[str, ...]:
-    if resolution == "raw":
-        return tuple(fields)
-    return tuple(aggregate_field(field) for field in fields if field != "battery_mv")
+    del resolution
+    return tuple(fields)
 
 
 def _safe_error(exc: Exception) -> str:
