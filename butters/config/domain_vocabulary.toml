@@ -1,0 +1,32 @@
+# Terms are available to a future hotword/context-biasing adapter. The selected
+# small model does not bundle the BPE vocabulary artifact required to enable
+# sherpa-onnx hotwords safely, so Milestone 2 uses only the aliases below.
+[domain]
+terms = [
+  "Butters",
+  "SEN66",
+  "SHT41",
+  "MQTT",
+  "InfluxDB",
+  "Grafana",
+  "Home Assistant",
+  "Bambu",
+  "AMS",
+  "KR260",
+  "Kria",
+  "Tailscale",
+  "filament",
+  "CO2",
+  "PM2.5",
+]
+
+# Keep these deliberately narrow. Matching is case-insensitive and applies to
+# whole phrases only; all unconfigured transcript text is preserved verbatim.
+[aliases]
+"co two" = "CO2"
+"c o two" = "CO2"
+"m q t t" = "MQTT"
+"in flux d b" = "InfluxDB"
+"p m two point five" = "PM2.5"
+"pm two point five" = "PM2.5"
+"home assistant" = "Home Assistant"

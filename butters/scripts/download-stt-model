@@ -1,0 +1,44 @@
+#!/bin/sh
+set -eu
+
+model="sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+url="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$model.tar.bz2"
+sha256="9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+destination="${1:-$butters_dir/models/$model}"
+
+complete=true
+for filename in tokens.txt encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg-1.int8.onnx joiner-epoch-99-avg-1.int8.onnx; do
+    if [ ! -f "$destination/$filename" ]; then
+        complete=false
+    fi
+done
+if [ "$complete" = true ]; then
+    echo "model already installed: $destination"
+    exit 0
+fi
+if [ -e "$destination" ]; then
+    echo "error: incomplete destination already exists: $destination" >&2
+    exit 2
+fi
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/butters-stt-model.XXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+archive="$temporary/$model.tar.bz2"
+
+echo "downloading $url"
+curl --fail --location --output "$archive" "$url"
+printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status -
+
+mkdir -p "$temporary/extracted"
+tar -xjf "$archive" -C "$temporary/extracted" \
+    "$model/tokens.txt" \
+    "$model/encoder-epoch-99-avg-1.int8.onnx" \
+    "$model/decoder-epoch-99-avg-1.int8.onnx" \
+    "$model/joiner-epoch-99-avg-1.int8.onnx" \
+    "$model/test_wavs"
+mkdir -p "$(dirname -- "$destination")"
+mv "$temporary/extracted/$model" "$destination"
+echo "installed INT8 streaming model and test WAVs: $destination"

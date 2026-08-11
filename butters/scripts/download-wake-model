@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+model="sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+url="https://github.com/k2-fsa/sherpa-onnx/releases/download/kws-models/$model.tar.bz2"
+sha256="68447f4fbc67e70eee3a93961f36e81e98f47aef73ce7e7ca00885c6cd3616a6"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+destination="${1:-$butters_dir/models/$model}"
+
+complete=true
+for filename in \
+    tokens.txt en.phone \
+    encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx \
+    decoder-epoch-13-avg-2-chunk-8-left-64.onnx \
+    joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx; do
+    if [ ! -f "$destination/$filename" ]; then
+        complete=false
+    fi
+done
+if [ "$complete" = true ]; then
+    echo "model already installed: $destination"
+    exit 0
+fi
+if [ -e "$destination" ]; then
+    echo "error: incomplete destination already exists: $destination" >&2
+    exit 2
+fi
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/butters-wake-model.XXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+archive="$temporary/$model.tar.bz2"
+
+echo "downloading $url"
+curl --fail --location --output "$archive" "$url"
+printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status -
+
+mkdir -p "$temporary/extracted"
+tar -xjf "$archive" -C "$temporary/extracted" \
+    "$model/tokens.txt" \
+    "$model/en.phone" \
+    "$model/encoder-epoch-13-avg-2-chunk-8-left-64.int8.onnx" \
+    "$model/decoder-epoch-13-avg-2-chunk-8-left-64.onnx" \
+    "$model/joiner-epoch-13-avg-2-chunk-8-left-64.int8.onnx" \
+    "$model/encoder-epoch-13-avg-2-chunk-16-left-64.int8.onnx" \
+    "$model/decoder-epoch-13-avg-2-chunk-16-left-64.onnx" \
+    "$model/joiner-epoch-13-avg-2-chunk-16-left-64.int8.onnx" \
+    "$model/test_wavs"
+mkdir -p "$(dirname -- "$destination")"
+mv "$temporary/extracted/$model" "$destination"
+echo "installed INT8 streaming keyword model and test WAVs: $destination"

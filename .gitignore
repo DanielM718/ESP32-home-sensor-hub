@@ -29,6 +29,8 @@ logs/
 .env.*
 !.env.example
 !**/.env.example
+butters/config/audio.local.toml
+butters/models/
 **/configuration/secrets.yaml
 **/.storage/
 **/home-assistant_v2.db*

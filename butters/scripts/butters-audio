@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$butters_dir/src:$PYTHONPATH"
+else
+    export PYTHONPATH="$butters_dir/src"
+fi
+
+exec python3 -m butters "$@"

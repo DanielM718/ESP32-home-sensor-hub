@@ -1,0 +1,59 @@
+# Copy this file to audio.local.toml and select a device reported by:
+#   ./butters/scripts/butters-audio discover --probe
+
+[audio]
+source = "alsa"
+frame_ms = 20
+preroll_ms = 800
+
+[alsa]
+# Prefer a stable CARD name over a numeric card index. "plughw" lets ALSA
+# efficiently convert a device's native format to Butters' internal format.
+device = "plughw:CARD=CHANGE_ME,DEV=0"
+# Leave empty for normal USB microphones. Some combined webcam firmware needs
+# one low-bandwidth UVC frame before its audio endpoint starts after reconnect.
+video_warmup_device = ""
+
+[wave]
+path = ""
+realtime = false
+loop = false
+
+[vad]
+enabled = true
+threshold_dbfs = -42.0
+attack_ms = 40
+release_ms = 300
+clip_threshold = 0.98
+
+[stt]
+# Paths are relative to this configuration file unless absolute.
+model_dir = "../models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+num_threads = 1
+decoding_method = "greedy_search"
+endpoint_silence_ms = 600
+max_utterance_seconds = 20.0
+vocabulary_path = "domain_vocabulary.toml"
+
+[wakeword]
+# The open-vocabulary KWS model can be swapped without changing live routing.
+model_dir = "../models/sherpa-onnx-kws-zipformer-zh-en-3M-2025-12-20"
+keywords_path = "wakewords.txt"
+phrase = "Hey Butters"
+num_threads = 1
+chunk_size = 8
+score = 1.5
+threshold = 0.25
+
+[live]
+no_speech_timeout_seconds = 4.0
+max_command_seconds = 20.0
+command_preroll_ms = 300
+audio_retry_seconds = 1.0
+max_audio_retries = 3
+
+[playback]
+acknowledge = true
+device = "plughw:CARD=Headphones,DEV=0"
+chime_volume = 0.18
+acknowledgement_guard_ms = 120

@@ -1,0 +1,24 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+repository_dir=$(dirname -- "$butters_dir")
+butters_python="$butters_dir/.venv/bin/python"
+pytest_python="$repository_dir/server/backend/.venv/bin/python"
+
+if [ ! -x "$butters_python" ] || [ ! -x "$pytest_python" ]; then
+    echo "error: expected both Butters and backend Python environments" >&2
+    exit 2
+fi
+
+stt_site=$(
+    "$butters_python" -c 'import site; print(site.getsitepackages()[0])'
+)
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$butters_dir/src:$stt_site:$PYTHONPATH"
+else
+    export PYTHONPATH="$butters_dir/src:$stt_site"
+fi
+
+exec "$pytest_python" -m pytest "$butters_dir/tests" "$@"

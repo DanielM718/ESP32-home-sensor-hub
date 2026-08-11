@@ -1,0 +1,2 @@
+# Installed only in butters/.venv; never install this globally on the Pi.
+sherpa-onnx==1.13.4
