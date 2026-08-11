@@ -14,6 +14,7 @@ class RoutedIntent:
     arguments: dict[str, object] = field(default_factory=dict)
     confidence: float = 0.0
     message: str | None = None
+    allow_fallback: bool = False
 
     @property
     def matched(self) -> bool:

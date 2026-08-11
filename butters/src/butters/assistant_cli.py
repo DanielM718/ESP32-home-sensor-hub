@@ -53,6 +53,26 @@ def build_parser() -> argparse.ArgumentParser:
     query.add_argument("--model-dir", type=Path, help="override STT model directory")
     query.add_argument("--threads", type=int, help="override STT threads")
     query.add_argument("--json", action="store_true", help="print structured result")
+    query.add_argument(
+        "--show-route",
+        action="store_true",
+        help="show model proposal and policy outcome without exposing secrets",
+    )
+    query.add_argument(
+        "--llm",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="enable or explicitly disable the configured localhost LLM fallback",
+    )
+    query.add_argument("--llm-server", help="override the loopback llama.cpp URL")
+    query.add_argument("--llm-model", help="override the llama.cpp model alias")
+    query.add_argument(
+        "--llm-profile", choices=("generic", "lfm2", "qwen3")
+    )
+    query.add_argument(
+        "--llm-output-mode", choices=("native_tools", "json_schema")
+    )
+    query.add_argument("--llm-timeout", type=float)
     query.add_argument("--tts-output", type=Path, help="synthesize response to WAV")
     query.add_argument("--overwrite", action="store_true")
 
@@ -75,7 +95,23 @@ def command_query(args: argparse.Namespace) -> int:
         num_threads=args.threads,
     )
     vocabulary = load_domain_vocabulary(stt_settings.vocabulary_path)
-    assistant = create_assistant(settings, vocabulary)
+    language_model = None
+    llm_requested = settings.llm.enabled if args.llm is None else args.llm
+    if llm_requested:
+        from butters.llm.llama_server import LlamaCppServerLanguageModel
+
+        language_model = LlamaCppServerLanguageModel(
+            args.llm_server or settings.llm.server_url,
+            args.llm_model or settings.llm.model,
+            profile=args.llm_profile or settings.llm.profile,
+            output_mode=args.llm_output_mode or settings.llm.output_mode,
+            timeout_seconds=args.llm_timeout or settings.llm.timeout_seconds,
+        )
+    elif settings.llm.enabled:
+        settings = replace(settings, llm=replace(settings.llm, enabled=False))
+    assistant = create_assistant(
+        settings, vocabulary, language_model=language_model
+    )
     utterances: list[UtteranceResult] = []
     pipeline_started = time.perf_counter()
     if args.wav is not None:
@@ -95,7 +131,9 @@ def command_query(args: argparse.Namespace) -> int:
 
     responses = [assistant.handle_text(request) for request in requests]
     for response in responses:
-        _print_response(response, structured=args.json)
+        _print_response(
+            response, structured=args.json, show_route=args.show_route
+        )
     elapsed = time.perf_counter() - pipeline_started
     print(f"PIPELINE LATENCY: {elapsed * 1000:.1f} ms", flush=True)
 
@@ -192,16 +230,31 @@ def _transcribe_wav(
         engine.close()
 
 
-def _print_response(response: AssistantResponse, *, structured: bool) -> None:
+def _print_response(
+    response: AssistantResponse, *, structured: bool, show_route: bool
+) -> None:
     print(f"REQUEST: {response.raw_text}")
     print(f"NORMALIZED: {response.normalized_text}")
+    print(f"ROUTE: {response.routing_path}")
     if response.route.matched:
         print(
-            f"ROUTE: {response.route.skill} confidence={response.route.confidence:.2f} "
+            f"SKILL: {response.route.skill} confidence={response.route.confidence:.2f} "
             f"arguments={response.route.arguments}"
         )
     else:
-        print(f"ROUTE: {response.route.status}")
+        print(f"OUTCOME: {response.route.status}")
+    if show_route and response.llm_result is not None:
+        llm = response.llm_result
+        print(f"MODEL: {llm.model}")
+        print(
+            f"PROPOSAL: kind={llm.proposal.kind.value} "
+            f"skill={llm.proposal.skill} arguments={llm.proposal.arguments}"
+        )
+        print(f"POLICY: {response.policy_status or 'not_applicable'}")
+        print(
+            f"MODEL LATENCY: {llm.elapsed_seconds * 1000:.1f} ms "
+            f"prompt_tokens={llm.prompt_tokens} generated_tokens={llm.generated_tokens}"
+        )
     print(f"RESPONSE: {response.response_text}")
     print(f"QUERY LATENCY: {response.elapsed_seconds * 1000:.1f} ms")
     if structured:

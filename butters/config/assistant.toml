@@ -13,6 +13,16 @@ num_threads = 2
 speed = 1.0
 max_text_chars = 500
 
+# Optional semantic fallback. This connects only to a manually started local
+# llama.cpp worker. Deterministic routing remains the default fast path.
+[llm]
+enabled = false
+server_url = "http://127.0.0.1:18080"
+model = "butters-router"
+profile = "lfm2"
+output_mode = "native_tools"
+timeout_seconds = 12.0
+
 [[entities]]
 id = "printer_room"
 display_name = "Printer room"

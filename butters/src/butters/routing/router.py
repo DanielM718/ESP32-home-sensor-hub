@@ -100,6 +100,7 @@ class IntentRouter:
             return self._unsupported(
                 normalized,
                 "That request is not supported by the read-only deterministic router.",
+                allow_fallback=True,
             )
         metric = self._choose_metric(matched_metrics)
         if metric is None:
@@ -235,5 +236,9 @@ class IntentRouter:
         return RoutedIntent("clarification", text, message=message)
 
     @staticmethod
-    def _unsupported(text: str, message: str) -> RoutedIntent:
-        return RoutedIntent("unsupported", text, message=message)
+    def _unsupported(
+        text: str, message: str, *, allow_fallback: bool = False
+    ) -> RoutedIntent:
+        return RoutedIntent(
+            "unsupported", text, message=message, allow_fallback=allow_fallback
+        )

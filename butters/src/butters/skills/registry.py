@@ -103,6 +103,27 @@ class SkillRegistry:
                 arguments=dict(arguments),
             )
 
+    def validate_proposal(
+        self, skill_name: str, arguments: Mapping[str, object]
+    ) -> SkillFailure | None:
+        """Apply typed parsing and policy without calling an integration adapter."""
+        spec = self._skills.get(skill_name)
+        if spec is None:
+            return SkillFailure("unknown_skill", "skill is not registered")
+        try:
+            parsed = spec.parse_arguments(arguments)
+            self._policy.authorize(
+                skill_name=spec.name,
+                action_class=spec.action_class,
+                arguments=parsed,
+                authorizer=spec.authorize,
+            )
+        except SkillError as exc:
+            return SkillFailure(exc.code, str(exc))
+        except Exception:  # noqa: BLE001
+            return SkillFailure("policy_denied", "proposal validation failed")
+        return None
+
 
 def strict_arguments(
     values: Mapping[str, object],

@@ -202,3 +202,27 @@ def test_every_registered_skill_is_read_only() -> None:
 
     assert registry.skills
     assert {spec.action_class for spec in registry.skills} == {ActionClass.READ_ONLY}
+
+
+def test_proposal_validation_applies_policy_without_querying_adapter() -> None:
+    provider = SnapshotProvider((_record("environment", "1", humidity=18.0),))
+    settings = load_assistant_settings()
+    registry = build_read_only_registry(
+        provider,
+        HealthProvider(),
+        EntityRegistry(settings.entities),
+        MetricRegistry(),
+    )
+
+    valid = registry.validate_proposal(
+        "get_sensor_value", {"entity": "filament_box_1", "metric": "humidity"}
+    )
+    denied = registry.validate_proposal(
+        "get_sensor_value", {"entity": "secret", "metric": "humidity"}
+    )
+    unknown = registry.validate_proposal("run_shell", {"command": "id"})
+
+    assert valid is None
+    assert provider.calls == 0
+    assert denied is not None and denied.code == "policy_denied"
+    assert unknown is not None and unknown.code == "unknown_skill"

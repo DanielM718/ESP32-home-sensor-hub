@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+
+version="b10360"
+archive_name="llama-b10360-bin-ubuntu-arm64.tar.gz"
+url="https://github.com/ggml-org/llama.cpp/releases/download/$version/$archive_name"
+sha256="f71958f004a5d6fe04d8b2367660265d2268bf9ae71c3590df4b8d6961e78a89"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+destination="${1:-$butters_dir/runtime/llama-b10360}"
+
+if [ -x "$destination/llama-server" ] && [ -x "$destination/llama-bench" ]; then
+    echo "llama.cpp already installed: $destination"
+    exit 0
+fi
+if [ -e "$destination" ]; then
+    echo "error: incomplete destination already exists: $destination" >&2
+    exit 2
+fi
+
+temporary=$(mktemp -d "${TMPDIR:-/tmp}/butters-llama.XXXXXX")
+trap 'rm -rf -- "$temporary"' EXIT HUP INT TERM
+archive="$temporary/$archive_name"
+curl --fail --location --output "$archive" "$url"
+printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status -
+tar -xzf "$archive" -C "$temporary"
+mkdir -p "$(dirname -- "$destination")"
+mv "$temporary/llama-b10360" "$destination"
+echo "installed llama.cpp $version: $destination"

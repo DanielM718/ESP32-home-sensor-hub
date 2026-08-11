@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import tomllib
 
@@ -52,6 +53,34 @@ class TTSSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class LLMSettings:
+    enabled: bool = False
+    server_url: str = "http://127.0.0.1:18080"
+    model: str = "butters-router"
+    profile: str = "lfm2"
+    output_mode: str = "native_tools"
+    timeout_seconds: float = 12.0
+
+    def validated(self) -> LLMSettings:
+        parsed = urlparse(self.server_url)
+        if parsed.scheme != "http" or parsed.hostname not in {
+            "127.0.0.1",
+            "localhost",
+            "::1",
+        }:
+            raise ConfigError("llm.server_url must be an HTTP loopback URL")
+        if self.profile not in {"generic", "lfm2", "qwen3"}:
+            raise ConfigError("llm.profile must be generic, lfm2, or qwen3")
+        if self.output_mode not in {"native_tools", "json_schema"}:
+            raise ConfigError("llm.output_mode must be native_tools or json_schema")
+        if not 0.1 <= self.timeout_seconds <= 120:
+            raise ConfigError("llm.timeout_seconds must be between 0.1 and 120")
+        if not self.model.strip():
+            raise ConfigError("llm.model cannot be empty")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class EntitySettings:
     entity_id: str
     display_name: str
@@ -65,6 +94,7 @@ class EntitySettings:
 class AssistantSettings:
     integration: IntegrationSettings
     tts: TTSSettings
+    llm: LLMSettings
     entities: tuple[EntitySettings, ...]
 
 
@@ -104,6 +134,18 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_text_chars=int(tts_table.get("max_text_chars", 500)),
     ).validated()
 
+    llm_table = _table(data, "llm")
+    llm = LLMSettings(
+        enabled=bool(llm_table.get("enabled", False)),
+        server_url=str(
+            llm_table.get("server_url", "http://127.0.0.1:18080")
+        ).rstrip("/"),
+        model=str(llm_table.get("model", "butters-router")),
+        profile=str(llm_table.get("profile", "lfm2")),
+        output_mode=str(llm_table.get("output_mode", "native_tools")),
+        timeout_seconds=float(llm_table.get("timeout_seconds", 12.0)),
+    ).validated()
+
     raw_entities = data.get("entities", [])
     if not isinstance(raw_entities, list) or not raw_entities:
         raise ConfigError("assistant configuration requires at least one [[entities]]")
@@ -114,7 +156,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
     source_keys = [(entity.sensor_type, entity.source_id) for entity in entities]
     if len(source_keys) != len(set(source_keys)):
         raise ConfigError("assistant entity source mappings must be unique")
-    return AssistantSettings(integration=integration, tts=tts, entities=entities)
+    return AssistantSettings(
+        integration=integration, tts=tts, llm=llm, entities=entities
+    )
 
 
 def _table(data: dict[str, Any], name: str) -> dict[str, Any]:

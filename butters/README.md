@@ -5,7 +5,7 @@ inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
 Wake-on-LAN. It is not part of the critical monitoring data path.
 
-## Current status: Milestone 4, deterministic read-only assistant
+## Current status: Milestone 5, deterministic first; no resident LLM selected
 
 The implementation now provides:
 
@@ -28,6 +28,12 @@ The implementation now provides:
 - a fixed-command, fixed-service server-health adapter with no shell skill;
 - structured skill results and separate concise response formatting;
 - direct text, streaming-WAV, and asynchronous live-transcript entry paths;
+- an engine-neutral, optional local-LLM proposal interface behind unresolved
+  deterministic routes only;
+- strict JSON and official LFM2 tool-call parsing with no `eval`/`exec`;
+- non-executable clarification/unsupported outcomes and unchanged default-deny
+  skill-policy validation for every proposed call;
+- a fixed 120-case tool-routing/safety corpus and repeatable scorer;
 - local Piper-compatible TTS through the existing sherpa-onnx runtime;
 - a separate `TextToSpeechEngine`/`AudioOutput` boundary and explicit WAV output;
 - explicit diagnostics, finite recordings, tests, and actual Pi benchmarks.
@@ -37,19 +43,24 @@ the same standardized stream and never race to reopen the webcam. Normal
 operation does not save audio or publish it to MQTT.
 
 The deterministic assistant answers real sensor questions without a generative
-model. The webcam endpoint remains in the persistent `EIO` state discovered in
-Milestone 3 and the user is away, so Milestone 4 deliberately used direct text,
+model. Milestone 5 tested three local GGUF candidates, but none met this shared
+Pi's latency, RAM/swap, thermal, and first-proposal quality gates. LLM fallback
+therefore remains disabled by default; ordinary requests are unchanged and no
+model service is installed. The webcam endpoint remains in the persistent
+`EIO` state discovered in Milestone 3 and the user is away, so this milestone deliberately used direct text,
 streaming WAVs, and simulated session handoff. It did not probe, reset, or
 reopen the wedged device. See **Hardware and human-validation status** and
 **Known limitations** below.
 
-Not implemented: LLM inference, write/control skills, MQTT publication, Home
-Assistant actions, arbitrary database queries, conversational memory, physical
-speaker validation, or a permanent service. See [ARCHITECTURE.md](ARCHITECTURE.md),
+Not implemented/enabled: a production LLM worker or accepted model,
+write/control skills, MQTT publication, Home Assistant actions, arbitrary
+database queries, conversational memory, physical speaker validation, or a
+permanent service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/baseline.md](benchmarks/baseline.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
 [benchmarks/live-voice.md](benchmarks/live-voice.md), and
-[benchmarks/skills-tts.md](benchmarks/skills-tts.md).
+[benchmarks/skills-tts.md](benchmarks/skills-tts.md), and
+[benchmarks/llm.md](benchmarks/llm.md).
 
 ## Layout
 
@@ -57,14 +68,16 @@ speaker validation, or a permanent service. See [ARCHITECTURE.md](ARCHITECTURE.m
 butters/
   README.md
   ARCHITECTURE.md
-  benchmarks/{baseline,stt,live-voice,skills-tts}.md
+  benchmarks/{baseline,stt,live-voice,skills-tts,llm}.md
+  benchmarks/llm-corpus.json
   config/{audio.example,assistant,domain_vocabulary}.toml
   config/wakewords.txt
   requirements-stt.txt
   scripts/
     butters-audio, butters-stt, butters-wake, butters-live
     butters-query, butters-speak
-    download-{stt,wake,tts}-model, benchmark-{stt,skills,tts}, test-butters
+    download-{stt,wake,tts}-model, download-{llama-runtime,llm-models}
+    benchmark-{stt,skills,tts,llm}, test-butters
   src/butters/
     audio/                 capture, conversion, VAD, pre-roll, chime
     stt/                   neutral engine, sherpa adapter, normalization
@@ -74,13 +87,14 @@ butters/
     skills/                typed registry, policy, structured results
     integrations/          bounded dashboard and local-health adapters
     responses/             result-to-text templates
+    llm/                   neutral proposal API, strict parsers, scorer/client
     tts/                   engine-neutral synthesis and output adapters
     assistant.py           common orchestration and bounded live handoff
     assistant_cli.py       text/WAV/TTS commands
   tests/
 ```
 
-The local `butters/.venv`, `butters/models`, and machine-specific
+The local `butters/.venv`, `butters/models`, `butters/runtime`, and machine-specific
 `config/audio.local.toml` are ignored by Git.
 
 ## Dependencies and model installation
@@ -113,6 +127,20 @@ archive is 67,118,360 bytes and its pinned SHA-256 is
 `3dd0adaf077e19de32876608c3ac3d4a0a46a6f06310cc7a5633b3b47d762cde`.
 The ONNX weights are 63,052,430 bytes; the complete local voice directory is
 81,049,294 bytes including eSpeak data. Model binaries remain Git-ignored.
+
+Milestone 5 added no Python or global dependency. Reproduce the isolated
+official ARM64 llama.cpp b10360 runtime and the three pinned GGUF candidates
+with:
+
+```bash
+./butters/scripts/download-llama-runtime
+./butters/scripts/download-llm-models
+```
+
+The runtime reports build 10360 / commit `48d22e295`. Model files are
+468,624,320 bytes (LFM2-700M Q4_K_M), 428,970,080 bytes (Qwen3-0.6B Q4_0),
+and 730,894,048 bytes (LFM2-1.2B-Tool Q4_K_M). Both installers verify pinned
+SHA-256 values. Runtime/build artifacts and GGUFs stay ignored.
 
 ## Connected microphone
 
@@ -274,6 +302,58 @@ from Filament box three.
 These are point-in-time examples, not fixtures or promised current readings.
 The cold first query took 1.354 seconds; cached queries in the same process took
 approximately 0.5-4 ms. See `benchmarks/skills-tts.md` for the full corpus.
+
+## Optional constrained LLM fallback
+
+The deterministic router remains first. A matched sensor query never calls a
+model; explicit ambiguous questions such as “what is the humidity” still ask
+for clarification without allowing a model to guess; deterministic control
+denials also bypass it. Only a route explicitly marked as unresolved/fallback
+eligible may call `LanguageModel.propose_tools()`.
+
+The model receives a compact non-secret tool/alias catalog and can return one
+of: a typed read-only skill proposal, `clarify_request`, or
+`unsupported_request`. The latter two are local sentinel outcomes, not skills.
+JSON and LFM2's official `[function(keyword=value)]` representation are parsed
+without evaluation. A real proposal then passes the same known-skill, strict
+argument, entity/metric compatibility, action-class, and skill-policy checks
+as a deterministic proposal. The model process receives no credentials,
+adapters, shell, filesystem, Python, MQTT, database, Home Assistant, or network
+tool.
+
+`assistant.toml` intentionally has `llm.enabled = false`. The actual Pi tests
+selected **none acceptable**:
+
+| Candidate | Cold load | RSS | Proposal result |
+| --- | ---: | ---: | --- |
+| LFM2-700M Q4_K_M | 13.86 s | 509.7 MiB | malformed native output; constrained output chose a wrong policy-denied call; 8.6 s even warmed |
+| Qwen3-0.6B Q4_0 | 12.74 s | 697.7 MiB | no native proposal before 120 s |
+| LFM2-1.2B-Tool Q4_K_M | 20.34 s | 822.7 MiB | no native proposal before the bounded timeout |
+
+Candidate loading pushed zram from the prior 86.5 MiB baseline to about
+1.04 GiB, and the benchmark recorded a past soft-temperature-limit flag. A
+full 120-case model sweep was stopped rather than displacing the critical home
+stack. The fixed corpus and scorer remain available for suitable future
+hardware:
+
+```bash
+# Against an explicitly, manually started loopback llama.cpp worker:
+./butters/scripts/benchmark-llm \
+  --server http://127.0.0.1:18080 \
+  --model butters-router --profile lfm2
+
+# Inspect routing; deterministic commands still work if the worker is absent.
+./butters/scripts/butters-query --show-route "what is the CO2 level"
+./butters/scripts/butters-query --llm --show-route \
+  "how damp is the third filament container"
+```
+
+The CLI prints `ROUTE: deterministic`, `llm_fallback`, `clarification`, or
+`unsupported`, plus the model proposal and policy outcome when requested. An
+LLM timeout/crash/malformed proposal safely returns unsupported; it cannot take
+down deterministic routing. See `benchmarks/llm.md` for exact hashes, prompt
+and generation speeds, thread matrices, resource observations, and the honest
+N/A corpus metrics after the resource-gate abort.
 
 ## WAV-to-assistant mode
 
@@ -463,13 +543,29 @@ available, 86.5 MiB zram used, load 0.40/0.43/0.45, 66.7 C, and
 dashboard probes returned HTTP 200. Exact TTS peaks and caveats are in
 `benchmarks/skills-tts.md`.
 
+Milestone 5 began near 1.8 GiB available and 86.5 MiB zram used. It loaded one
+LLM candidate at a time under `nice +10`; RSS ranged from 509.7 to 822.7 MiB.
+After the bounded probes and thread microbenchmarks, model processes were gone
+and 2.17 GiB was available, but compressed zram remained at 1.04 GiB. Peak
+temperature was 74.0 C and `get_throttled=0x80000` recorded a past soft thermal
+limit, so no further model/corpus load was attempted. All checked dashboard
+routes remained HTTP 200. This result supersedes the earlier preliminary idea
+that a 700M model might be comfortably resident.
+
+At the later final audit, 2.03 GiB remained available and zram had recovered
+partly to 858.8 MiB as pages were touched back in. All nine protected services
+were active; dashboard, InfluxDB, Grafana, and Home Assistant health checks
+returned HTTP 200. The high cumulative swap-in/out deltas confirm that model
+loading displaced real server pages, rather than merely increasing an unused
+counter.
+
 ## Tests
 
 ```bash
 ./butters/scripts/test-butters -q
 ```
 
-The 79-test Butters suite covers conversion/WAV metadata, standardized chunks,
+The 103-test Butters suite covers conversion/WAV metadata, standardized chunks,
 VAD/clipping, bounded buffers, repeated ALSA cleanup, optional UVC warm-up,
 normalization, STT partial/final/reset, every live state recovery path, chime
 invocation, single capture ownership, repeated interactions, and real local
@@ -479,6 +575,11 @@ argument parsing, policy denial, structured results, timeouts, stale/missing
 data, comparisons, fixed health commands, response templates, TTS abstraction
 and WAV metadata, text-mode orchestration, and bounded asynchronous live
 handoff.
+Milestone 5 adds deterministic bypass, fallback invocation, model
+timeout/process-failure recovery, native/JSON normalization, rejection of
+prose/code/multiple calls, unknown skill/entity/metric and control denial,
+clarification safety, policy-only validation without adapter access, and all
+120 fixed-corpus invariants.
 
 ## Known limitations
 
@@ -507,8 +608,14 @@ handoff.
 - Only four user-facing entities are mapped. Adding a sensor requires an
   explicit reviewed `assistant.toml` entry; unknown deployed sources are not
   silently exposed.
-- No write/control skill, LLM fallback, permanent service, or production audit
-  log exists yet.
+- No candidate local LLM passed the resource/latency/quality gates, so the
+  implemented optional fallback is disabled and has no production worker.
+- Full per-model 120-case accuracy is deliberately unavailable: the run was
+  aborted after zram reached about 1 GiB and a soft-temperature-limit event was
+  recorded. `benchmarks/llm.md` reports probe-level outcomes without inflating
+  them into percentages.
+- No write/control skill, permanent service, or production audit log exists
+  yet.
 - `arecord` can count xrun events but not exact lost samples, so the drop count
   is an event estimate.
 - WAV input supports uncompressed integer PCM, not compressed/float WAV.

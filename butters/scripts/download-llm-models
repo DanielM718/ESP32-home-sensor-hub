@@ -1,0 +1,42 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+destination="${1:-$butters_dir/models/llm}"
+mkdir -p "$destination"
+
+download() {
+    filename=$1
+    url=$2
+    sha256=$3
+    target="$destination/$filename"
+    if [ -f "$target" ]; then
+        if printf '%s  %s\n' "$sha256" "$target" | sha256sum --check --status -; then
+            echo "verified existing model: $target"
+            return
+        fi
+        echo "error: existing model has the wrong SHA-256: $target" >&2
+        exit 2
+    fi
+    temporary=$(mktemp "${TMPDIR:-/tmp}/butters-model.XXXXXX")
+    trap 'rm -f -- "$temporary"' EXIT HUP INT TERM
+    curl --fail --location --output "$temporary" "$url"
+    printf '%s  %s\n' "$sha256" "$temporary" | sha256sum --check --status -
+    mv "$temporary" "$target"
+    trap - EXIT HUP INT TERM
+    echo "installed model: $target"
+}
+
+download \
+    LFM2-700M-Q4_K_M.gguf \
+    'https://huggingface.co/LiquidAI/LFM2-700M-GGUF/resolve/main/LFM2-700M-Q4_K_M.gguf?download=true' \
+    684e8406dc13321452b3f6aeca432776e2a6a7e1ad6c23f7887b8fe3efbe2efa
+download \
+    Qwen3-0.6B-Q4_0.gguf \
+    'https://huggingface.co/ggml-org/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_0.gguf?download=true' \
+    da2572f16c06133561ce56accaa822216f2391ef4d37fba427801cd6736417d4
+download \
+    LFM2-1.2B-Tool-Q4_K_M.gguf \
+    'https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF/resolve/main/LFM2-1.2B-Tool-Q4_K_M.gguf?download=true' \
+    3a942f51f9f3088c0b502b61ee49480a3d8c54de369f9c53ee5668419caf67a7

@@ -36,7 +36,7 @@ printer-room fan" should match a deterministic intent and typed arguments. They
 must not pay LLM latency. An LLM is a constrained fallback for phrasing and
 selection, not an authority and not the execution environment.
 
-## Current implementation through Milestone 4
+## Current implementation through Milestone 5
 
 Both sources implement the same pull-based `AudioSource` contract and emit
 16 kHz, mono, signed 16-bit little-endian PCM. Milestone 3 adds replaceable
@@ -195,6 +195,47 @@ near 182 MiB, idle CPU was effectively zero, and RTF was 0.45-0.49. Cold load
 was 3.7-4.0 seconds, so on-demand versus low-priority residency remains a
 deployment choice rather than an assumption.
 
+Milestone 5 adds an optional engine-neutral semantic fallback without changing
+the deterministic or policy boundaries:
+
+```text
+normalized request
+  -> IntentRouter
+       matched --------------------------> typed proposal
+       explicit clarification/control ---> local fixed response (no model)
+       unresolved and fallback-eligible
+         -> LanguageModel (untrusted, no adapters/credentials)
+              -> tool proposal | clarify sentinel | unsupported sentinel
+         -> strict syntax/model-format normalization
+         -> existing SkillRegistry.validate/execute
+              -> strict argument parser
+              -> existing default-deny PolicyValidator
+              -> read-only implementation only when allowed
+```
+
+`LanguageModel.propose_tools()` receives only compact public tool schemas,
+canonical entity/metric aliases, and the current request. The concrete client
+can talk only to a configured unauthenticated HTTP loopback URL. It supports
+llama.cpp's native OpenAI-compatible tool calls, strict standalone JSON, and
+the official LFM2 Python-like list representation. The latter is parsed with a
+restricted AST/literal parser: only a one-element list containing one simple
+named call with keyword primitive literals is admitted. `eval`, `exec`, Python
+code, surrounding prose, attributes, positional arguments, multiple calls,
+and non-literals are rejected.
+
+`clarify_request` and `unsupported_request` are non-executable catalog entries;
+their output is mapped to fixed local text. A syntactically valid real call is
+still untrusted. Unknown skill names, missing/unexpected arguments, invalid or
+incompatible entities/metrics, comparison values, and action classes fail at
+the existing policy/registry boundary. Model timeout, process failure,
+malformed output, and policy denial produce a safe unsupported response while
+the deterministic path remains available.
+
+No candidate passed the Pi resource/latency/quality gates, so configuration
+leaves this fallback disabled and no model worker is selected or installed as
+a service. The fixed 120-case ground-truth corpus and model-independent scorer
+remain for future hardware. See [benchmarks/llm.md](benchmarks/llm.md).
+
 ## Future process layout
 
 Keep responsibilities separable even if the first deployment combines a few
@@ -266,9 +307,10 @@ timeouts. Policy defaults to deny.
 
 ## Candidate plan and measured selection
 
-Only the streaming STT candidate below was installed in Milestone 2. Other
-candidates remain research targets. Project claims and model file sizes are
-useful filters, not substitutes for testing on this Pi.
+Streaming STT, wake word, and TTS have selected implementations. Milestone 5
+installed isolated candidate GGUFs/runtime for benchmarking only; it selected
+no production LLM. Project claims and model file sizes are useful filters, not
+substitutes for testing on this Pi.
 
 ### Wake word
 
@@ -323,27 +365,35 @@ remain the important accuracy tests before deployment.
 
 ### Local LLM
 
-Use `llama.cpp` directly on ARM64 with a short context and a Q4 GGUF. Its grammar
-and JSON-schema constraints are valuable defense-in-depth for typed tool
-proposals. The router should still handle common commands without it. See
-[llama.cpp](https://github.com/ggml-org/llama.cpp) and its
-[grammar/JSON-schema guide](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md).
+Milestone 5 tested current official/practical candidates through the official
+ARM64 llama.cpp b10360 build (`48d22e295`) and 2K context, one model at a time:
 
-Candidates by tier:
+| Candidate | Quantization | File | Loaded RSS | Decision |
+| --- | --- | ---: | ---: | --- |
+| LiquidAI LFM2-700M | Q4_K_M | 468,624,320 B | 509.7 MiB | Rejected: malformed native output; wrong policy-denied constrained proposal; 8.6 s warmed |
+| Qwen3-0.6B | Q4_0 | 428,970,080 B | 697.7 MiB | Rejected: native proposal exceeded 120 s and residency displaced too much memory |
+| LiquidAI LFM2-1.2B-Tool | Q4_K_M | 730,894,048 B | 822.7 MiB | Rejected: official native format exceeded bounded timeout and caused heavy zram displacement |
 
-| Tier | Initial candidate | Reason and caution |
-| --- | --- | --- |
-| ~350M | SmolLM2-360M-Instruct Q4 | Very small, Apache-2.0, English/on-device oriented. Its official model card only calls out function-calling support for the 1.7B member, so assume weak tool selection until proven. |
-| ~700M | Qwen3-0.6B GGUF Q4 | Official GGUF exists under Apache-2.0 and is close to the target tier. Benchmark non-thinking/short constrained output; do not infer reliability from general benchmarks. |
-| ~1.2B | Llama 3.2 1B Instruct (1.23B) Q4 | Better capacity candidate with a custom Meta license, but less comfortable for residency. Validate the exact GGUF source and tool schema behavior. |
+LFM2-1.2B-Tool used its official tool-call chat convention and greedy
+generation. Qwen used non-thinking mode. For the generic 700M model,
+llama.cpp JSON-schema generation was also tested as defense-in-depth; the
+grammar made syntax valid but could not make the semantic choice correct, and
+the downstream policy denied it. This is exactly why constrained generation is
+not authorization.
 
-Relevant primary model cards are
-[SmolLM2-360M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-360M-Instruct),
-[Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF), and
-[Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct).
-Test each against the same allow-listed home-intent corpus, including refusal
-and ambiguity cases. A smaller deterministic classifier may outperform all
-three for routine routing.
+Candidate loads moved host zram from the previous 86.5 MiB baseline to about
+1.04 GiB and the thermal flags recorded a past soft-temperature-limit event.
+Cold load alone took 12.7-20.3 seconds. Therefore neither resident nor
+per-request cold inference is acceptable on the current shared Pi. No winner
+is forced; `llm.enabled` remains false. A future separate edge host or much
+smaller deterministic semantic classifier should rerun the same 120 fixed
+cases before integration.
+
+Primary references are [llama.cpp b10360](https://github.com/ggml-org/llama.cpp/releases/tag/b10360),
+the [grammar/JSON-schema guide](https://github.com/ggml-org/llama.cpp/blob/master/grammars/README.md),
+[LFM2-700M-GGUF](https://huggingface.co/LiquidAI/LFM2-700M-GGUF),
+[LFM2-1.2B-Tool-GGUF](https://huggingface.co/LiquidAI/LFM2-1.2B-Tool-GGUF),
+and [Qwen3-0.6B-GGUF](https://huggingface.co/Qwen/Qwen3-0.6B-GGUF).
 
 ### TTS
 
