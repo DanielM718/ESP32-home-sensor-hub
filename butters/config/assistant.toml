@@ -1,0 +1,46 @@
+# Non-secret deterministic assistant configuration. Source IDs mirror the
+# deployed dashboard API; friendly names are explicit rather than inferred.
+
+[integration]
+dashboard_url = "http://127.0.0.1:8080"
+timeout_seconds = 4.0
+cache_seconds = 5.0
+max_response_bytes = 2097152
+
+[tts]
+model_dir = "../models/vits-piper-en_US-kathleen-low"
+num_threads = 2
+speed = 1.0
+max_text_chars = 500
+
+[[entities]]
+id = "printer_room"
+display_name = "Printer room"
+sensor_type = "air_quality"
+source_id = "office"
+aliases = ["printer room", "printer area", "office", "sen66"]
+groups = ["rooms", "air_quality_stations"]
+
+[[entities]]
+id = "filament_box_1"
+display_name = "Filament box one"
+sensor_type = "environment"
+source_id = "1"
+aliases = ["filament box one", "filament box 1", "box one", "box 1", "container one", "container 1"]
+groups = ["filament_boxes"]
+
+[[entities]]
+id = "filament_box_2"
+display_name = "Filament box two"
+sensor_type = "environment"
+source_id = "2"
+aliases = ["filament box two", "filament box 2", "box two", "box 2", "container two", "container 2"]
+groups = ["filament_boxes"]
+
+[[entities]]
+id = "filament_box_3"
+display_name = "Filament box three"
+sensor_type = "environment"
+source_id = "3"
+aliases = ["filament box three", "filament box 3", "box three", "box 3", "container three", "container 3"]
+groups = ["filament_boxes"]

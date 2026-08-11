@@ -166,6 +166,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     live.add_argument("--playback-device", help="override ALSA playback PCM")
     live.add_argument("--no-speech-timeout", type=float)
+    live.add_argument(
+        "--assistant",
+        action="store_true",
+        help="route final transcripts through asynchronous read-only skills",
+    )
+    live.add_argument("--assistant-config", type=Path)
     return parser
 
 
@@ -653,6 +659,32 @@ def command_live(args: argparse.Namespace) -> int:
         ),
         clip_threshold=settings.clip_threshold,
     )
+    responder = None
+    if args.assistant:
+        from butters.assistant import (
+            AssistantResponse,
+            AsyncAssistantResponder,
+            create_assistant,
+        )
+        from butters.assistant_config import load_assistant_settings
+
+        assistant = create_assistant(
+            load_assistant_settings(args.assistant_config), vocabulary
+        )
+
+        def report_assistant(response: AssistantResponse) -> None:
+            route = response.route
+            if route.matched:
+                print(
+                    f"[ROUTE] skill={route.skill} confidence={route.confidence:.2f} "
+                    f"arguments={route.arguments}",
+                    flush=True,
+                )
+            else:
+                print(f"[ROUTE] {route.status}", flush=True)
+            print(f"[RESPONSE] {response.response_text}", flush=True)
+
+        responder = AsyncAssistantResponder(assistant, report_assistant)
     input_name = settings.alsa_device if settings.source == "alsa" else settings.wave_path
     print(
         f"live source={settings.source} input={input_name} "
@@ -712,6 +744,16 @@ def command_live(args: argparse.Namespace) -> int:
                 f"endpoint={result.endpoint_reason}",
                 flush=True,
             )
+            if (
+                responder is not None
+                and result.normalized
+                and not responder.submit(result.normalized)
+            ):
+                print(
+                    "[ERROR] read-only response queue is full; transcript dropped",
+                    file=sys.stderr,
+                    flush=True,
+                )
         elif event.kind == "timeout":
             print("[TIMEOUT] No speech; returning to wake listening", flush=True)
         elif event.kind == "error":
@@ -731,6 +773,8 @@ def command_live(args: argparse.Namespace) -> int:
         )
     finally:
         controller.close()
+        if responder is not None:
+            responder.close()
     live_wall = time.perf_counter() - live_started
     live_cpu = time.process_time() - live_cpu_started
     print(

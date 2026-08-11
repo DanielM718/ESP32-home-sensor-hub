@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+python="$butters_dir/.venv/bin/python"
+
+if [ ! -x "$python" ]; then
+    echo "error: missing isolated Butters Python environment: $python" >&2
+    exit 2
+fi
+
+if [ -n "${PYTHONPATH:-}" ]; then
+    export PYTHONPATH="$butters_dir/src:$PYTHONPATH"
+else
+    export PYTHONPATH="$butters_dir/src"
+fi
+
+exec "$python" -m butters.benchmark_assistant "$@"

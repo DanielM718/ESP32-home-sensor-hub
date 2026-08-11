@@ -5,7 +5,7 @@ inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
 Wake-on-LAN. It is not part of the critical monitoring data path.
 
-## Current status: Milestone 3, live voice frontend
+## Current status: Milestone 4, deterministic read-only assistant
 
 The implementation now provides:
 
@@ -21,25 +21,35 @@ The implementation now provides:
 - a replaceable `StreamingSTTEngine` and resident 20M INT8 English Zipformer;
 - partial/final transcripts, 600 ms endpointing, and conservative aliases;
 - no-speech, empty-result, STT-error, audio-error, and timeout recovery;
+- concept-based intent routing with explicit clarification/unsupported paths;
+- a typed, default-deny registry containing six read-only skills;
+- explicit entity/metric allow-lists and strict argument validation;
+- bounded read-only current-data access through the deployed dashboard API;
+- a fixed-command, fixed-service server-health adapter with no shell skill;
+- structured skill results and separate concise response formatting;
+- direct text, streaming-WAV, and asynchronous live-transcript entry paths;
+- local Piper-compatible TTS through the existing sherpa-onnx runtime;
+- a separate `TextToSpeechEngine`/`AudioOutput` boundary and explicit WAV output;
 - explicit diagnostics, finite recordings, tests, and actual Pi benchmarks.
 
 One persistent source owns ALSA across every normal state. KWS and STT consume
 the same standardized stream and never race to reopen the webcam. Normal
 operation does not save audio or publish it to MQTT.
 
-The software path and earlier real captures are validated, but this milestone
-is not yet a positive human-voice acceptance result. No deliberate speech
-reached the requested capture windows, and late in the extended test session
-the webcam audio endpoint entered a persistent `EIO` state that now requires a
-physical USB replug. See **Hardware and human-validation status** and **Known
-limitations** below.
+The deterministic assistant answers real sensor questions without a generative
+model. The webcam endpoint remains in the persistent `EIO` state discovered in
+Milestone 3 and the user is away, so Milestone 4 deliberately used direct text,
+streaming WAVs, and simulated session handoff. It did not probe, reset, or
+reopen the wedged device. See **Hardware and human-validation status** and
+**Known limitations** below.
 
-Not implemented: LLM inference, intent/tool calling, skills, MQTT/Home
-Assistant actions, InfluxDB queries, TTS, conversational memory, or a permanent
-service. See [ARCHITECTURE.md](ARCHITECTURE.md),
+Not implemented: LLM inference, write/control skills, MQTT publication, Home
+Assistant actions, arbitrary database queries, conversational memory, physical
+speaker validation, or a permanent service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/baseline.md](benchmarks/baseline.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
-[benchmarks/live-voice.md](benchmarks/live-voice.md).
+[benchmarks/live-voice.md](benchmarks/live-voice.md), and
+[benchmarks/skills-tts.md](benchmarks/skills-tts.md).
 
 ## Layout
 
@@ -47,19 +57,26 @@ service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 butters/
   README.md
   ARCHITECTURE.md
-  benchmarks/{baseline,stt,live-voice}.md
-  config/{audio.example,domain_vocabulary}.toml
+  benchmarks/{baseline,stt,live-voice,skills-tts}.md
+  config/{audio.example,assistant,domain_vocabulary}.toml
   config/wakewords.txt
   requirements-stt.txt
   scripts/
     butters-audio, butters-stt, butters-wake, butters-live
-    download-stt-model, download-wake-model, benchmark-stt, test-butters
+    butters-query, butters-speak
+    download-{stt,wake,tts}-model, benchmark-{stt,skills,tts}, test-butters
   src/butters/
     audio/                 capture, conversion, VAD, pre-roll, chime
     stt/                   neutral engine, sherpa adapter, normalization
     wakeword/              neutral detector and sherpa KWS adapter
     live/                  session state machine and single-owner routing
-    cli.py, config.py
+    routing/               concept, entity, and metric resolution
+    skills/                typed registry, policy, structured results
+    integrations/          bounded dashboard and local-health adapters
+    responses/             result-to-text templates
+    tts/                   engine-neutral synthesis and output adapters
+    assistant.py           common orchestration and bounded live handoff
+    assistant_cli.py       text/WAV/TTS commands
   tests/
 ```
 
@@ -82,6 +99,7 @@ butters/.venv/bin/python -m pip install \
   --only-binary=:all: -r butters/requirements-stt.txt
 ./butters/scripts/download-stt-model
 ./butters/scripts/download-wake-model
+./butters/scripts/download-tts-model
 ```
 
 Both downloaders verify pinned SHA-256 values. The STT archive is 127,887,156
@@ -89,6 +107,12 @@ bytes and selected inference files are 43,649,301 bytes. The wake archive is
 32,885,699 bytes; active chunk-8 files are 5,449,043 bytes, while its clean
 installed directory is about 15.4 MiB because both latency variants, the
 English lexicon, and small natural fixtures are retained.
+
+The TTS downloader installs only `vits-piper-en_US-kathleen-low`. Its official
+archive is 67,118,360 bytes and its pinned SHA-256 is
+`3dd0adaf077e19de32876608c3ac3d4a0a46a6f06310cc7a5633b3b47d762cde`.
+The ONNX weights are 63,052,430 bytes; the complete local voice directory is
+81,049,294 bytes including eSpeak data. Model binaries remain Git-ignored.
 
 ## Connected microphone
 
@@ -167,6 +191,143 @@ The WAV is still streamed in approximately 20 ms chunks. Output includes VAD
 start, changed partials, final raw/normalized text, endpoint reason, RTF, CPU,
 finalization/speech-end latency, RSS, and source counters.
 
+## Deterministic read-only assistant
+
+Text mode is the preferred Milestone 4 development path while the webcam is
+wedged:
+
+```bash
+./butters/scripts/butters-query "what is the CO2 level"
+./butters/scripts/butters-query --json "which filament box has the highest humidity"
+./butters/scripts/butters-query "what is the server status"
+```
+
+Every request follows the same boundary:
+
+```text
+normalize -> deterministic router -> typed skill registry -> default-deny policy
+          -> narrow integration adapter -> structured result -> response template
+```
+
+The router varies words and aliases rather than matching whole sentences. For
+example, “what's box 3 humidity,” “how humid is filament box three,” and
+“humidity for container 3” all select `filament_box_3`/`humidity`. “What's the
+co two level” is conservatively normalized to `CO2`. An unqualified humidity
+question asks which sensor; multiple boxes ask for clarification; controls and
+unknown complex requests are explicitly unsupported.
+
+Six skills are registered, and every one is classified `READ_ONLY`:
+
+| Skill | Allow-listed operation |
+| --- | --- |
+| `get_sensor_value` | One compatible current metric for one configured entity |
+| `get_sensor_status` | Reporting status for one entity or all configured entities |
+| `get_sensor_last_seen` | Timestamp/age for one entity |
+| `compare_sensor_metric` | Maximum current humidity across `filament_boxes` only |
+| `get_room_air_quality` | Structured SEN66/dashboard summary for one air station |
+| `get_server_health` | Fixed local metrics and fixed service-unit status list |
+
+Unknown skills, unexpected/missing arguments, unknown entities, incompatible
+metrics, non-allow-listed comparisons, and every action class other than
+`READ_ONLY` are denied. The router never receives a URL, credential, database
+client, MQTT client, subprocess API, or filesystem API. The health adapter may
+only invoke fixed `systemctl is-active` arguments and `vcgencmd get_throttled`;
+there is no caller-controlled command string and no `run_shell` skill.
+
+### Entities and real data source
+
+`config/assistant.toml` is non-secret and maps the deployed dashboard source
+IDs to reviewed user-facing entities:
+
+| Entity | Deployed source | Aliases |
+| --- | --- | --- |
+| `printer_room` | air-quality location `office` / SEN66 node 100 | printer room, printer area, office, SEN66 |
+| `filament_box_1` | environment node `1` | box/filament box/container one or 1 |
+| `filament_box_2` | environment node `2` | box/filament box/container two or 2 |
+| `filament_box_3` | environment node `3` | box/filament box/container three or 3 |
+
+Metrics are temperature, humidity, battery voltage, CO2, PM2.5, PM10, VOC
+index, and NOx index. The integration uses the existing local
+`http://127.0.0.1:8080/api/latest` representation because it already applies
+the deployed node identity, freshness, battery validity, field availability,
+and air-quality policy. The service credentials required for direct InfluxDB,
+MQTT, or Home Assistant access are intentionally not copied into Butters.
+
+The adapter imposes a four-second HTTP deadline, a 2 MiB response bound, typed
+parsing, and a five-second in-process cache. A persistent assistant normally
+pays one latest-query cost per cache interval; separate one-shot CLI processes
+start cold. Sensor/database errors are converted to concise unavailable
+results. Missing and stale readings never become zero, and comparison excludes
+them explicitly.
+
+During the 2026-08-11 real corpus run, representative answers were:
+
+```text
+Printer room CO2 is 684 ppm.
+Printer room PM2.5 is 11.4 micrograms per cubic meter.
+Filament box one battery voltage is 3.442 volts.
+Filament box two is the most humid at 31 percent. Excluded unavailable data
+from Filament box three.
+3 of 4 configured sensors are reporting. Filament box three is stale.
+```
+
+These are point-in-time examples, not fixtures or promised current readings.
+The cold first query took 1.354 seconds; cached queries in the same process took
+approximately 0.5-4 ms. See `benchmarks/skills-tts.md` for the full corpus.
+
+## WAV-to-assistant mode
+
+Stream a file through the existing source/VAD/STT path and then through the
+same assistant used by text and live modes:
+
+```bash
+./butters/scripts/butters-query --wav /path/to/request.wav
+./butters/scripts/butters-query \
+  --wav /path/to/request.wav --no-realtime --json
+./butters/scripts/butters-query \
+  --wav /path/to/request.wav --no-realtime \
+  --tts-output /tmp/butters-response.wav --overwrite
+```
+
+The file is never handed to an offline whole-file recognizer. It remains
+20 ms streaming input with VAD, partial hypotheses, endpointing, and raw versus
+normalized final text. A low-quality Kathleen TTS query used for integration
+testing was recognized as `ON DIOXID` rather than “what is the carbon dioxide
+level.” The router correctly refused to infer a sensor query and TTS generated
+the unsupported response. This proves the wiring and safe failure path, not
+domain-command STT accuracy; a successful speech-to-real-sensor acceptance run
+still needs a suitable human recording after webcam recovery.
+
+## Local TTS
+
+Butters uses the existing `sherpa-onnx==1.13.4` ARM64 runtime with the
+Piper-compatible VITS voice `vits-piper-en_US-kathleen-low`. This avoids a
+second runtime and preserves separate `TextToSpeechEngine` and `AudioOutput`
+interfaces. Only an explicit command writes synthesized audio:
+
+```bash
+./butters/scripts/butters-speak \
+  "Printer room CO2 is 742 parts per million." \
+  --output /tmp/butters-response.wav
+```
+
+Output is 16 kHz, mono, 16-bit PCM WAV. No speaker was confirmed remotely, so
+physical playback was not attempted. The current sherpa adapter returns a
+complete utterance rather than streaming its first audio chunk. Two threads
+are the measured default: roughly 1.8-2.0 seconds to synthesize about four
+seconds of speech (RTF 0.45-0.49), about 182 MiB warmed RSS, and about 191%
+process CPU while active. Cold load takes 3.7-4.0 seconds and loaded idle CPU
+was effectively zero. Because load latency is noticeable while the warmed
+footprint is modest but not free, deployment should benchmark on-demand versus
+a low-priority resident worker alongside the eventual LLM before deciding.
+
+Run the repeatable resource test with:
+
+```bash
+./butters/scripts/benchmark-tts --threads 2 --repeats 5
+./butters/scripts/benchmark-skills
+```
+
 ## Wake-word diagnostic
 
 ```bash
@@ -185,6 +346,7 @@ confidence, so diagnostics print `confidence=n/a` rather than fabricate one.
 
 ```bash
 ./butters/scripts/butters-live
+./butters/scripts/butters-live --assistant
 ```
 
 Expected output:
@@ -196,8 +358,16 @@ Expected output:
 [PARTIAL] ...
 [FINAL RAW] ...
 [FINAL NORMALIZED] ...
+[ROUTE] skill=get_sensor_value confidence=...
+[RESPONSE] ...
 [READY] Waiting for wake word
 ```
+
+`--assistant` sends each non-empty final transcript to a bounded two-item
+worker queue. Dashboard latency therefore never blocks the sole audio-capture
+loop; a full queue drops only the semantic request with a visible error. The
+webcam is currently wedged, so this handoff is automated-test/file prepared but
+was not invoked against ALSA in Milestone 4.
 
 Useful bounded variants:
 
@@ -284,17 +454,31 @@ bridge, dashboard, export worker, Docker/containerd, and Tailscale remained
 healthy; all checked local routes returned HTTP 200. See the live benchmark
 for exact phase definitions and caveats.
 
+Milestone 4 began its TTS measurements with about 1.79 GiB available RAM,
+81.5 MiB zram used, and 67.2 C. The first one-thread repeated TTS run increased
+zram occupancy by about 5 MiB; the subsequent two-thread five-run test did not
+increase it further. After all query/STT/TTS work, the host had 1.78 GiB
+available, 86.5 MiB zram used, load 0.40/0.43/0.45, 66.7 C, and
+`throttled=0x0`. All nine fixed service units were active and all seven
+dashboard probes returned HTTP 200. Exact TTS peaks and caveats are in
+`benchmarks/skills-tts.md`.
+
 ## Tests
 
 ```bash
 ./butters/scripts/test-butters -q
 ```
 
-The 33-test Butters suite covers conversion/WAV metadata, standardized chunks,
+The 79-test Butters suite covers conversion/WAV metadata, standardized chunks,
 VAD/clipping, bounded buffers, repeated ALSA cleanup, optional UVC warm-up,
 normalization, STT partial/final/reset, every live state recovery path, chime
 invocation, single capture ownership, repeated interactions, and real local
-sherpa STT/KWS model resets when the ignored models are installed.
+sherpa STT/KWS model resets when the ignored models are installed. Milestone 4
+adds phrase variants, aliases, ambiguity, invalid entities/metrics, strict
+argument parsing, policy denial, structured results, timeouts, stale/missing
+data, comparisons, fixed health commands, response templates, TTS abstraction
+and WAV metadata, text-mode orchestration, and bounded asynchronous live
+handoff.
 
 ## Known limitations
 
@@ -311,6 +495,20 @@ sherpa STT/KWS model resets when the ignored models are installed.
   remain separate; aliases only cover unambiguous whole phrases.
 - SEN66, SHT41, Bambu, KR260, Kria, Grafana, and Home Assistant are expected to
   be difficult until actual user speech is measured.
+- The small STT model performed poorly on the low-quality Kathleen synthetic
+  voice, so no successful synthetic domain-query transcript is claimed.
+- `api/latest` is deliberately reused for correctness, but a cold query takes
+  about 1.35 seconds on this deployment. Persistent caching limits load; a
+  future narrowly scoped latest-state IPC/API can improve latency if the
+  dashboard endpoint becomes a bottleneck.
+- The current TTS adapter returns full-utterance PCM, and physical speaker
+  output is unvalidated. The Kathleen voice is compact and usable for pipeline
+  work but was selected for resource fit, not a voice-quality acceptance test.
+- Only four user-facing entities are mapped. Adding a sensor requires an
+  explicit reviewed `assistant.toml` entry; unknown deployed sources are not
+  silently exposed.
+- No write/control skill, LLM fallback, permanent service, or production audit
+  log exists yet.
 - `arecord` can count xrun events but not exact lost samples, so the drop count
   is an event estimate.
 - WAV input supports uncompressed integer PCM, not compressed/float WAV.

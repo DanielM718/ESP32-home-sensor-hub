@@ -37,6 +37,8 @@ butters/models/
 **/home-assistant.log*
 **/home-assistant.log.fault
 **/tts/
+!butters/src/butters/tts/
+!butters/src/butters/tts/**
 home-assistant/discovery-data/
 **/main/wifi_cred.h
 **/main/app_config.h

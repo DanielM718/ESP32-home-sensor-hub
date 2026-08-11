@@ -20,12 +20,13 @@ USB microphone
   -> streaming speech recognition and endpointing
   -> transcript normalization
   -> deterministic intent matching
+       -> typed proposal for normal commands
+       -> small local LLM only for unresolved language/tool selection
+  -> policy validation of every proposed tool call (default deny)
   -> restricted skill/tool registry
-       -> read-only MQTT / InfluxDB / Home Assistant queries
-       -> safe Home Assistant / MQTT / WOL controls
-       -> confirmation-gated disruptive actions
-  -> small local LLM only for unresolved language/tool selection
-  -> policy validation of every proposed tool call
+       -> read-only integration adapters
+       -> future safe Home Assistant / MQTT / WOL controls
+       -> future confirmation-gated disruptive actions
   -> response generation
   -> local TTS
 ```
@@ -35,7 +36,7 @@ printer-room fan" should match a deterministic intent and typed arguments. They
 must not pay LLM latency. An LLM is a constrained fallback for phrasing and
 selection, not an authority and not the execution environment.
 
-## Current implementation through Milestone 3
+## Current implementation through Milestone 4
 
 Both sources implement the same pull-based `AudioSource` contract and emit
 16 kHz, mono, signed 16-bit little-endian PCM. Milestone 3 adds replaceable
@@ -123,6 +124,77 @@ The current energy VAD remains deterministic RMS hysteresis, not a trained
 speech/noise classifier. Actual room noise calibrated this host's local gate to
 -34 dBFS; another room or microphone must be measured independently.
 
+Milestone 4 adds one common post-transcript execution path for direct text,
+streaming WAV/STT results, and optional live final transcripts:
+
+```text
+raw text / final STT transcript
+  -> conservative transcript and request normalization
+  -> concept-based IntentRouter
+       -> entity and metric alias registries
+       -> matched typed intent, clarification, or unsupported result
+  -> explicit SkillRegistry
+       -> strict typed argument parser
+       -> default-deny PolicyValidator
+       -> READ_ONLY implementation
+  -> narrow integration adapter
+       -> typed structured result
+  -> independent ResponseFormatter
+       -> concise response text
+  -> optional TextToSpeechEngine
+       -> separate explicit AudioOutput
+```
+
+The six current skills cover one sensor metric, sensor reporting status,
+last-seen time, maximum filament-box humidity, printer-room air quality, and
+server health. All are `READ_ONLY`. Every skill declares its stable name,
+description, argument parser, action class, policy authorizer, implementation,
+and deadline. The registry rejects unknown names, missing/unexpected fields,
+unknown entities/metrics, incompatible entity/metric pairs, non-allow-listed
+comparisons, and any action class not admitted by policy. Integration failures
+are sanitized at this boundary. The current deadlines are defense-in-depth;
+the dashboard HTTP request itself has the enforceable four-second I/O timeout.
+
+`config/assistant.toml` is the reviewed entity exposure list. It maps dashboard
+air-quality source `office` to `printer_room` and environment source IDs 1-3 to
+the three filament boxes, with unambiguous aliases. This explicit mapping is
+intentional: deployed-but-unreviewed sources do not become voice entities by
+accident. Metrics form a separate compatibility allow-list. Ambiguous
+questions request clarification rather than selecting the first candidate.
+
+Current sensor data comes from the established local dashboard `/api/latest`
+representation through `DashboardSensorAdapter`. That interface was selected
+after inspection because it already applies the deployed node IDs, freshness,
+battery validity, field availability, and project air-quality policy. The
+service-owned InfluxDB/MQTT credentials remain outside Butters, and neither the
+router nor skill registry receives the dashboard URL/client. The adapter has a
+hard response-size bound, typed parsing, a four-second network timeout, and a
+five-second in-process cache to avoid repeated expensive latest queries.
+Direct InfluxDB access may be appropriate for a later historical skill, but it
+would be a separate least-privilege adapter rather than leaked query authority.
+
+`LocalServerHealthAdapter` reads fixed local kernel/sysfs metrics and runs only
+two fixed command shapes: `systemctl is-active` over a compiled allow-list and
+`vcgencmd get_throttled`. Callers cannot supply a unit name, command, path, or
+argument. There is no general shell, filesystem, database, MQTT, or Home
+Assistant skill.
+
+The live CLI's optional assistant handoff uses a bounded two-item worker queue.
+Sensor-query latency cannot block the single audio-capture owner; saturation
+drops the semantic request visibly rather than allowing unbounded memory or
+audio backlog. This path is unit-tested but was not run against the known-wedged
+webcam in Milestone 4.
+
+Local TTS uses `SherpaOnnxPiperTTS`, a replaceable adapter around the existing
+sherpa-onnx ARM64 runtime and the Piper-compatible
+`vits-piper-en_US-kathleen-low` voice. Synthesis returns 16 kHz mono PCM in a
+typed `SynthesizedSpeech`; `WaveFileOutput` is a separate explicit sink. No
+normal query writes audio. The current adapter returns a complete utterance,
+not first-chunk streaming. Its measured two-thread warm footprint stabilized
+near 182 MiB, idle CPU was effectively zero, and RTF was 0.45-0.49. Cold load
+was 3.7-4.0 seconds, so on-demand versus low-priority residency remains a
+deployment choice rather than an assumption.
+
 ## Future process layout
 
 Keep responsibilities separable even if the first deployment combines a few
@@ -159,7 +231,7 @@ can only propose a tool name and schema-validated arguments from a registry the
 router supplies. The policy layer independently checks the proposal and invokes
 the integration adapter.
 
-Use at least three action classes:
+The policy enum defines three action classes for future compatibility:
 
 1. **Read-only:** current sensor values, trends, service health, device state.
 2. **Safe/reversible control:** allow-listed lights or fans with value bounds,
@@ -167,6 +239,11 @@ Use at least three action classes:
 3. **Disruptive/sensitive:** shutdown, broad power changes, door/security
    actions, destructive data changes, or ambiguous targets. These require an
    explicit confirmation or are excluded from voice control entirely.
+
+Only the first class is registered today. Merely adding an enum value or skill
+implementation does not authorize it: policy continues to deny anything other
+than `READ_ONLY` until a later reviewed milestone changes both the registry and
+validator deliberately.
 
 An output grammar/JSON schema can make syntax valid; it does not make a tiny
 model's choice correct. Tests must cover wrong-device names, prompt injection in
@@ -270,12 +347,29 @@ three for routine routing.
 
 ### TTS
 
-Benchmark **Piper** first. The maintained Open Home Foundation project provides
-a local C/C++ core, Python API, streaming/raw output, and ARM64 Raspberry Pi 4
-binaries. Voice model size and quality vary. A persistent worker avoids model
-reload latency, but on-demand loading protects RAM; measure both. See
-[OHF-Voice Piper](https://github.com/OHF-Voice/piper1-gpl) and note its GPL-3.0
-license before integration.
+Milestone 4 selected the Piper-compatible VITS voice
+`vits-piper-en_US-kathleen-low`, executed through the already installed
+**sherpa-onnx 1.13.4** offline TTS API. It is a single-speaker U.S. English
+16 kHz low-quality voice. The ONNX file is 63,052,430 bytes and the complete
+directory is 81,049,294 bytes with eSpeak data. The model card identifies its
+dataset as CC0. See the
+[official sherpa model page](https://k2-fsa.github.io/sherpa/onnx/tts/all/English/vits-piper-en_US-kathleen-low.html)
+and [Piper voice inventory](https://huggingface.co/rhasspy/piper-voices/tree/main/en/en_US/kathleen/low).
+
+The maintained Piper codebase has moved to
+[OHF-Voice Piper](https://github.com/OHF-Voice/piper1-gpl) under GPL-3.0. It was
+not installed because sherpa already provides the necessary ARM64 VITS runtime;
+this avoids another package without claiming that the archived original Piper
+runtime remains current. A future streaming-output comparison may still test
+the maintained runtime if first-audio latency becomes important.
+
+One thread synthesized at RTF about 0.72-0.75 and used about 98% process CPU.
+Two threads synthesized at RTF 0.45-0.49 and about 191% process CPU while
+leaving two cores available for the server, so two is the current development
+default. Loaded idle CPU was approximately 0.002%. The warmed two-thread RSS
+stabilized near 191,082,496 bytes; engine close returned the process to about
+139 MiB RSS, subject to allocator retention. See
+[benchmarks/skills-tts.md](benchmarks/skills-tts.md).
 
 ## Resource protection and systemd plan
 
