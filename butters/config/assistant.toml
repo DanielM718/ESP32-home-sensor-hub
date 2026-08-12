@@ -75,6 +75,14 @@ aliases = ["printer room", "printer area", "office", "sen66"]
 groups = ["rooms", "air_quality_stations"]
 
 [[entities]]
+id = "x2d"
+display_name = "Bambu Lab X2D"
+sensor_type = "printer"
+source_id = "x2d"
+aliases = ["printer", "3d printer", "X2D", "Bambu", "Bambu printer"]
+groups = ["printers"]
+
+[[entities]]
 id = "filament_box_1"
 display_name = "Filament box one"
 sensor_type = "environment"

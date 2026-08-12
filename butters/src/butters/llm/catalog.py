@@ -9,12 +9,21 @@ from butters.routing.entities import EntityRegistry, MetricRegistry
 def build_tool_catalog(
     entities: EntityRegistry, metrics: MetricRegistry
 ) -> tuple[ToolDefinition, ...]:
-    entity_ids = [entity.entity_id for entity in entities.entities]
+    entity_ids = [
+        entity.entity_id
+        for entity in entities.entities
+        if entity.sensor_type != "printer"
+    ]
     metric_ids = [metric.metric_id for metric in metrics.metrics]
     air_entities = [
         entity.entity_id
         for entity in entities.entities
         if entity.sensor_type == "air_quality"
+    ]
+    printer_entities = [
+        entity.entity_id
+        for entity in entities.entities
+        if entity.sensor_type == "printer"
     ]
     return (
         ToolDefinition(
@@ -73,6 +82,31 @@ def build_tool_catalog(
             "Read Raspberry Pi resources and fixed allow-listed service status.",
             _object_schema({}),
         ),
+        *(
+            ToolDefinition(
+                name,
+                description,
+                _object_schema(
+                    {"entity": _enum_string(printer_entities)},
+                    ("entity",),
+                ),
+            )
+            for name, description in (
+                ("get_printer_status", "Read state for one configured printer."),
+                (
+                    "get_current_print",
+                    "Read the active print job, progress, layer, remaining time, and material.",
+                ),
+                (
+                    "get_printer_temperatures",
+                    "Read observed nozzle, bed, and chamber temperatures.",
+                ),
+                (
+                    "get_print_environment_summary",
+                    "Read an observational SEN66 summary for the latest print session.",
+                ),
+            )
+        ),
         ToolDefinition(
             "clarify_request",
             "Use when a sensor, filament box, metric, or request is ambiguous.",
@@ -80,7 +114,13 @@ def build_tool_catalog(
                 {
                     "topic": {
                         "type": "string",
-                        "enum": ["sensor", "filament_box", "metric", "request"],
+                        "enum": [
+                            "sensor",
+                            "filament_box",
+                            "printer",
+                            "metric",
+                            "request",
+                        ],
                     }
                 },
                 ("topic",),
@@ -106,8 +146,7 @@ def entity_alias_summary(entities: EntityRegistry) -> tuple[str, ...]:
 
 def metric_alias_summary(metrics: MetricRegistry) -> tuple[str, ...]:
     return tuple(
-        f"{metric.metric_id}: {', '.join(metric.aliases)}"
-        for metric in metrics.metrics
+        f"{metric.metric_id}: {', '.join(metric.aliases)}" for metric in metrics.metrics
     )
 
 

@@ -15,6 +15,8 @@ from butters.diagnostics.model import DiagnosticAnswer
 from butters.diagnostics.planner import DiagnosticPlanner
 from butters.diagnostics.tools import build_diagnostic_registry
 from butters.integrations.dashboard import DashboardSensorAdapter
+from butters.integrations.model import PrinterSnapshotProvider
+from butters.integrations.printer import DashboardPrinterAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
 from butters.llm.catalog import (
     build_tool_catalog,
@@ -330,14 +332,16 @@ def create_assistant(
     *,
     sensor_adapter: DashboardSensorAdapter | None = None,
     server_adapter: LocalServerHealthAdapter | None = None,
+    printer_adapter: PrinterSnapshotProvider | None = None,
     language_model: LanguageModel | None = None,
 ) -> DeterministicAssistant:
     entities = EntityRegistry(settings.entities)
     metrics = MetricRegistry()
     sensor_provider = sensor_adapter or DashboardSensorAdapter(settings.integration)
     server_provider = server_adapter or LocalServerHealthAdapter()
+    printer_provider = printer_adapter or DashboardPrinterAdapter(settings.integration)
     skills = build_read_only_registry(
-        sensor_provider, server_provider, entities, metrics
+        sensor_provider, server_provider, entities, metrics, printer_provider
     )
     diagnostic_planner = DiagnosticPlanner(entities)
     diagnostic_engine = None

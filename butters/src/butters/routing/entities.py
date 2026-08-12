@@ -69,11 +69,19 @@ class EntityRegistry:
         return tuple(entity for entity in self._entities if group in entity.groups)
 
     def resolve(self, normalized_text: str) -> EntityResolution:
-        matched: dict[str, Entity] = {}
+        matched: dict[str, tuple[Entity, int]] = {}
         for entity in self._entities:
-            if any(contains_phrase(normalized_text, alias) for alias in entity.aliases):
-                matched[entity.entity_id] = entity
-        candidates = tuple(matched.values())
+            scores = [
+                len(normalize_request(alias).split())
+                for alias in entity.aliases
+                if contains_phrase(normalized_text, alias)
+            ]
+            if scores:
+                matched[entity.entity_id] = (entity, max(scores))
+        best = max((score for _, score in matched.values()), default=0)
+        candidates = tuple(
+            entity for entity, score in matched.values() if score == best
+        )
         return EntityResolution(
             entity=candidates[0] if len(candidates) == 1 else None,
             candidates=candidates,

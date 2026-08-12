@@ -5,6 +5,10 @@ from __future__ import annotations
 from butters.skills.model import (
     AirQualityResult,
     ComparisonResult,
+    CurrentPrintResult,
+    PrintEnvironmentResult,
+    PrinterStatusResult,
+    PrinterTemperaturesResult,
     SensorLastSeenResult,
     SensorStatusResult,
     SensorValueResult,
@@ -30,6 +34,14 @@ class ResponseFormatter:
             return self._air_quality(result)
         if isinstance(result, ServerHealthResult):
             return self._server_health(result)
+        if isinstance(result, PrinterStatusResult):
+            return self._printer_status(result)
+        if isinstance(result, CurrentPrintResult):
+            return self._current_print(result)
+        if isinstance(result, PrinterTemperaturesResult):
+            return self._printer_temperatures(result)
+        if isinstance(result, PrintEnvironmentResult):
+            return self._print_environment(result)
         return "The read-only skill returned no usable result."
 
     @staticmethod
@@ -145,6 +157,122 @@ class ResponseFormatter:
         return text
 
     @staticmethod
+    def _printer_status(result: PrinterStatusResult) -> str:
+        printer = result.printer
+        name = printer.printer_model
+        if not printer.online:
+            return f"{name} is offline."
+        state = printer.normalized_state.replace("_", " ")
+        text = f"{name} is {state}."
+        progress = _number(printer.values.get("progress_percent"))
+        if (
+            state in {"preparing", "printing", "paused", "finishing"}
+            and progress is not None
+        ):
+            text += f" Progress is {_format_decimal(progress, 1)} percent."
+        return text
+
+    @staticmethod
+    def _current_print(result: CurrentPrintResult) -> str:
+        printer = result.printer
+        if not printer.online:
+            return f"{printer.printer_model} is offline, so the current print is unavailable."
+        if printer.normalized_state not in {
+            "preparing",
+            "printing",
+            "paused",
+            "finishing",
+        }:
+            return f"{printer.printer_model} has no active print."
+        values = printer.values
+        job = _text(values.get("job_name")) or "an unnamed job"
+        parts = [
+            f"{printer.printer_model} is {printer.normalized_state}, working on {job}"
+        ]
+        progress = _number(values.get("progress_percent"))
+        if progress is not None:
+            parts.append(f"{_format_decimal(progress, 1)} percent complete")
+        remaining = _integer(values.get("remaining_seconds"))
+        if remaining is not None:
+            parts.append(f"about {_duration(remaining)} remaining")
+        current_layer = _integer(values.get("current_layer"))
+        total_layers = _integer(values.get("total_layers"))
+        if current_layer is not None and total_layers is not None:
+            parts.append(f"layer {current_layer} of {total_layers}")
+        elif current_layer is not None:
+            parts.append(f"layer {current_layer}")
+        material = _text(values.get("active_material"))
+        if material is not None:
+            provenance = printer.provenance.get("active_material", "unknown")
+            label = {
+                "observed": "observed material",
+                "inferred_active_ams_tray": "material inferred from the active AMS tray",
+            }.get(provenance, "material with unknown provenance")
+            parts.append(f"{label} {material}")
+        return "; ".join(parts) + "."
+
+    @staticmethod
+    def _printer_temperatures(result: PrinterTemperaturesResult) -> str:
+        printer = result.printer
+        if not printer.online:
+            return (
+                f"{printer.printer_model} is offline, so temperatures are unavailable."
+            )
+        values = printer.values
+        labels = (
+            ("nozzle one", "nozzle_1_temperature", "nozzle_1_target"),
+            ("nozzle two", "nozzle_2_temperature", "nozzle_2_target"),
+            ("bed", "bed_temperature", "bed_target"),
+            ("chamber", "chamber_temperature", None),
+        )
+        parts = []
+        for label, current_key, target_key in labels:
+            current = _number(values.get(current_key))
+            if current is None:
+                continue
+            text = f"{label} {_format_decimal(current, 1)} degrees Celsius"
+            target = _number(values.get(target_key)) if target_key is not None else None
+            if target is not None:
+                text += f", target {_format_decimal(target, 1)}"
+            parts.append(text)
+        if not parts:
+            return f"{printer.printer_model} has no observed temperature values."
+        return f"{printer.printer_model}: " + "; ".join(parts) + "."
+
+    @staticmethod
+    def _print_environment(result: PrintEnvironmentResult) -> str:
+        summary = result.summary
+        if not summary.available:
+            reason = (summary.reason or "summary unavailable").replace("_", " ")
+            return f"The last-print environmental summary is unavailable: {reason}."
+        job = _text(summary.session.get("job_name")) or "the last print"
+        parts = []
+        pm25 = summary.metrics.get("pm25", {})
+        peak = _number(pm25.get("print_peak"))
+        if peak is not None:
+            parts.append(
+                f"peak PM2.5 was {_format_decimal(peak, 1)} micrograms per cubic meter"
+            )
+        voc = summary.metrics.get("voc_index", {})
+        voc_change = _number(voc.get("change_from_baseline"))
+        if voc_change is not None:
+            direction = "increased" if voc_change >= 0 else "decreased"
+            parts.append(
+                f"VOC index {direction} by {_format_decimal(abs(voc_change), 1)} from baseline during the print"
+            )
+        if summary.voc_recovery_seconds is not None:
+            parts.append(
+                f"VOC returned to the configured baseline range after about {_duration(summary.voc_recovery_seconds)}"
+            )
+        if not parts:
+            return f"Environmental samples exist for {job}, but the requested summary values are unavailable."
+        return (
+            f"For {job}, "
+            + "; ".join(parts)
+            + ". This is an observational association, not proof of causation."
+        )
+
+    @staticmethod
     def _failure(code: str, message: str) -> str:
         if code in {"timeout", "unavailable", "upstream_status"}:
             return "Current home-sensor data is temporarily unavailable."
@@ -200,3 +328,30 @@ def _age_phrase(age_seconds: int | None) -> str:
         return f"{hours} hour{'s' if hours != 1 else ''} ago"
     days = round(age_seconds / 86400)
     return f"{days} day{'s' if days != 1 else ''} ago"
+
+
+def _text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _number(value: object) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return float(value)
+    return None
+
+
+def _integer(value: object) -> int | None:
+    number = _number(value)
+    return None if number is None else round(number)
+
+
+def _duration(seconds: int) -> str:
+    if seconds < 60:
+        return f"{seconds} seconds"
+    minutes = round(seconds / 60)
+    if minutes < 60:
+        return f"{minutes} minute{'s' if minutes != 1 else ''}"
+    hours, remainder = divmod(minutes, 60)
+    if remainder:
+        return f"{hours} hour{'s' if hours != 1 else ''} {remainder} minutes"
+    return f"{hours} hour{'s' if hours != 1 else ''}"

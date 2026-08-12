@@ -1,0 +1,43 @@
+[Unit]
+Description=Home Sensor Read-Only Printer Observer
+Documentation=file:/opt/home-sensor/server/docs/BAMBU_X2D.md
+Wants=network-online.target
+After=network-online.target influxdb.service docker.service
+ConditionPathExists=/etc/home-sensor/printer.toml
+ConditionPathExists=/etc/home-sensor/printer.env
+
+[Service]
+Type=exec
+User=home-sensor
+Group=home-sensor
+WorkingDirectory=/opt/home-sensor/server/backend
+EnvironmentFile=/opt/home-sensor/server/backend/.env
+EnvironmentFile=/etc/home-sensor/printer.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PRINTER_CONFIG_PATH=/etc/home-sensor/printer.toml
+ExecStart=/opt/home-sensor/server/backend/.venv/bin/python -m app.printer_worker
+Restart=on-failure
+RestartSec=15s
+TimeoutStopSec=15s
+MemoryMax=192M
+CPUQuota=25%
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/home-sensor
+
+[Install]
+WantedBy=multi-user.target

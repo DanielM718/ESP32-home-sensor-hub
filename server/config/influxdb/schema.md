@@ -97,12 +97,29 @@ One sparse point per threshold or rapid-rise episode. Tags include `location`,
 point with peak, end, duration, sample count, state, threshold provenance, and
 baseline context. Hysteresis and cooldown prevent per-sample event spam.
 
+### Printer observations and sessions
+
+The optional read-only X2D observer adds:
+
+- `printer_state` in `environment_live`: one normalized observation per poll.
+- `printer_state_5m` in `environment`: state changes plus a bounded five-minute
+  permanent sample.
+- `print_session` in `environment`: idempotent logical session records.
+
+State tags are only `printer_id`, `printer_model`, and `source`. Session tags
+are only `printer_id` and `source`. Session UUID, job ID/name, material,
+provenance, stage, state text, timestamps, layers, progress, and temperatures
+are fields. See [`BAMBU_X2D.md`](../../docs/BAMBU_X2D.md) for the exact lifecycle
+and field set.
+
 ## Cardinality Rules
 
 Keep tags low-cardinality:
 
 - good tags: node IDs, room/location slugs, stable topic names, sensor type
 - bad tags: sequence numbers, timestamps, raw status text, battery voltage
+- printer filenames, job IDs, session UUIDs, and material labels are fields,
+  never tags
 
 Additional sensor types should add new measurements or fields without changing
 the existing MQTT payload contract. Sequence numbers, boot IDs, timestamps,

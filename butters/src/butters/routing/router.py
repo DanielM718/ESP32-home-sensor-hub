@@ -9,8 +9,9 @@ from butters.routing.model import RoutedIntent
 from butters.routing.normalization import contains_phrase, normalize_request
 
 CONTROL_START = re.compile(
-    r"^(?:please )?(?:turn|switch|set|start|stop|restart|reboot|shutdown|"
-    r"shut down|wake|enable|disable|open|close)\b"
+    r"^(?:please )?(?:turn|switch|set|start|stop|pause|resume|cancel|restart|"
+    r"reboot|shutdown|shut down|wake|enable|disable|open|close|move|home|heat|"
+    r"cool|load|unload|upload|delete|print|extrude)\b"
 )
 
 
@@ -63,6 +64,55 @@ class IntentRouter:
                 missing_arguments=("entity",),
             )
         entity = resolution.entity
+
+        if self._print_environment_request(normalized):
+            printer_or_result = self._require_printer(normalized, entity)
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_print_environment_summary",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
+        if entity is not None and entity.sensor_type == "printer":
+            if self._printer_temperature_request(normalized):
+                skill = "get_printer_temperatures"
+            elif self._current_print_request(normalized):
+                skill = "get_current_print"
+            elif self._printer_status_request(normalized):
+                skill = "get_printer_status"
+            else:
+                return self._unsupported(
+                    normalized,
+                    "That printer question is not supported by the read-only router.",
+                    allow_fallback=True,
+                )
+            return self._matched(
+                normalized,
+                skill,
+                {"entity": entity.entity_id},
+                0.98,
+            )
+
+        if self._current_print_request(normalized) or self._printer_temperature_request(
+            normalized
+        ):
+            printer_or_result = self._require_printer(normalized, entity)
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            skill = (
+                "get_printer_temperatures"
+                if self._printer_temperature_request(normalized)
+                else "get_current_print"
+            )
+            return self._matched(
+                normalized,
+                skill,
+                {"entity": printer_or_result.entity_id},
+                0.95,
+            )
 
         if self._last_seen_request(normalized):
             entity_or_result = self._require_entity(
@@ -125,9 +175,7 @@ class IntentRouter:
                 normalized,
                 f"Which measurement did you mean: {names}?",
                 skill="get_sensor_value",
-                arguments=(
-                    {"entity": entity.entity_id} if entity is not None else {}
-                ),
+                arguments=({"entity": entity.entity_id} if entity is not None else {}),
                 missing_arguments=("metric",),
             )
 
@@ -217,6 +265,92 @@ class IntentRouter:
         return contains_phrase(text, "air quality")
 
     @staticmethod
+    def _print_environment_request(text: str) -> bool:
+        print_context = any(
+            contains_phrase(text, phrase)
+            for phrase in (
+                "last print",
+                "during the print",
+                "after the print",
+                "print emissions",
+            )
+        )
+        environment = any(
+            phrase in text
+            for phrase in (
+                "pm1",
+                "pm2.5",
+                "pm 2.5",
+                "pm4",
+                "pm10",
+                "voc",
+                "nox",
+                "co2",
+                "air quality",
+                "emission",
+                "environment",
+                "baseline",
+                "recover",
+                "temperature",
+                "humidity",
+            )
+        )
+        return print_context and environment
+
+    @staticmethod
+    def _printer_temperature_request(text: str) -> bool:
+        component = any(
+            word in text.split()
+            for word in ("nozzle", "nozzles", "bed", "chamber", "toolhead")
+        )
+        return component and any(
+            word in text.split()
+            for word in ("temperature", "temperatures", "temp", "hot")
+        )
+
+    @staticmethod
+    def _current_print_request(text: str) -> bool:
+        return any(
+            contains_phrase(text, phrase)
+            for phrase in (
+                "current print",
+                "printing now",
+                "what is the printer printing",
+                "what is x2d printing",
+                "what is the x2d printing",
+                "how much longer",
+                "remaining time",
+                "time remaining",
+                "what layer",
+                "which layer",
+                "print progress",
+                "current material",
+                "what material",
+                "which material",
+                "current filament",
+                "print job",
+            )
+        )
+
+    @staticmethod
+    def _printer_status_request(text: str) -> bool:
+        words = set(text.split())
+        return bool(
+            words
+            & {
+                "running",
+                "doing",
+                "state",
+                "status",
+                "online",
+                "offline",
+                "printing",
+                "idle",
+                "paused",
+            }
+        )
+
+    @staticmethod
     def _mentions_unnumbered_box(text: str) -> bool:
         words = set(text.split())
         return bool(words & {"box", "container"}) and not bool(
@@ -248,6 +382,26 @@ class IntentRouter:
             normalized,
             "Which sensor did you mean?",
             skill=skill,
+            missing_arguments=("entity",),
+        )
+
+    def _require_printer(
+        self, normalized: str, entity: Entity | None
+    ) -> Entity | RoutedIntent:
+        if entity is not None:
+            if entity.sensor_type == "printer":
+                return entity
+            return self._unsupported(
+                normalized, f"{entity.display_name} is not a printer."
+            )
+        printers = tuple(
+            item for item in self.entities.entities if item.sensor_type == "printer"
+        )
+        if len(printers) == 1:
+            return printers[0]
+        return self._clarification(
+            normalized,
+            "Which printer did you mean?",
             missing_arguments=("entity",),
         )
 

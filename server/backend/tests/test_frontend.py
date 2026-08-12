@@ -130,6 +130,19 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn(".reset(", export_refresh)
         self.assertNotIn('method: "POST"', export_refresh)
 
+    def test_printer_card_is_read_only_and_refreshes_independently(self) -> None:
+        self.assertIn('id="printer-status"', self.template)
+        self.assertIn("Read-only state observed through Home Assistant", self.template)
+        printer_refresh = self.javascript[
+            self.javascript.index("async function refreshPrinter") : self.javascript.index(
+                "async function refreshKnownSources"
+            )
+        ]
+        self.assertIn("fetchJson(API.printer)", printer_refresh)
+        self.assertIn("Printer state is temporarily unavailable", printer_refresh)
+        self.assertNotIn('method: "POST"', printer_refresh)
+        self.assertIn("inferred from active AMS tray", printer_refresh)
+
     def test_clocks_use_server_timestamp_and_download_requires_ready_state(
         self,
     ) -> None:

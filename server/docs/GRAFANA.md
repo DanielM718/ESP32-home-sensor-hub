@@ -73,6 +73,7 @@ Dashboard JSON:
 
 ```text
 /var/lib/grafana/dashboards/home-sensor/home-sensor-environment.json
+/var/lib/grafana/dashboards/home-sensor/home-sensor-printer.json
 ```
 
 ## Dashboard
@@ -85,6 +86,12 @@ The generated dashboard is titled `Home Sensor Environment` and includes:
 - air-quality overview for direct-MQTT stations
 - latest battery voltage stat panel
 - latest node status table
+
+The optional `Home Sensor X2D` dashboard is prepared in the repository. Once
+the observer has real data and provisioning is manually approved, it provides a
+normalized state timeline, print start/end annotations, progress, dual-nozzle /
+bed / chamber temperatures, printer-room PM2.5/VOC/NOx overlay, and session
+table. The environmental overlay is observational and does not claim causation.
 
 The environmental panels query long-term `environment_reading`. The air-quality
 overview unions long-term `air_quality_15m` mean/max series with recent

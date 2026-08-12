@@ -6,6 +6,9 @@ from collections.abc import Mapping
 from typing import cast
 
 from butters.integrations.model import (
+    IntegrationError,
+    PrintEnvironmentSnapshot,
+    PrinterSnapshotProvider,
     SensorRecord,
     SensorSnapshot,
     SensorSnapshotProvider,
@@ -19,7 +22,12 @@ from butters.skills.model import (
     ComparisonArgs,
     ComparisonMissing,
     ComparisonResult,
+    CurrentPrintResult,
     EntityStatusResult,
+    PrintEnvironmentResult,
+    PrinterArgs,
+    PrinterStatusResult,
+    PrinterTemperaturesResult,
     SensorLastSeenArgs,
     SensorLastSeenResult,
     SensorStatusArgs,
@@ -49,11 +57,13 @@ class ReadOnlySkillImplementations:
         server_provider: ServerHealthProvider,
         entities: EntityRegistry,
         metrics: MetricRegistry,
+        printer_provider: PrinterSnapshotProvider,
     ) -> None:
         self.sensor_provider = sensor_provider
         self.server_provider = server_provider
         self.entities = entities
         self.metrics = metrics
+        self.printer_provider = printer_provider
 
     def authorize_value(self, arguments: SkillArguments) -> None:
         args = cast(SensorValueArgs, arguments)
@@ -68,11 +78,19 @@ class ReadOnlySkillImplementations:
     def authorize_status(self, arguments: SkillArguments) -> None:
         args = cast(SensorStatusArgs, arguments)
         if args.entity is not None:
-            self._allowed_entity(args.entity)
+            entity = self._allowed_entity(args.entity)
+            if entity.sensor_type == "printer":
+                raise SkillError(
+                    "policy_denied", "printer status requires a printer skill"
+                )
 
     def authorize_last_seen(self, arguments: SkillArguments) -> None:
         args = cast(SensorLastSeenArgs, arguments)
-        self._allowed_entity(args.entity)
+        entity = self._allowed_entity(args.entity)
+        if entity.sensor_type == "printer":
+            raise SkillError(
+                "policy_denied", "printer history requires a printer skill"
+            )
 
     def authorize_comparison(self, arguments: SkillArguments) -> None:
         args = cast(ComparisonArgs, arguments)
@@ -86,6 +104,12 @@ class ReadOnlySkillImplementations:
         entity = self._allowed_entity(args.entity)
         if entity.sensor_type != "air_quality":
             raise SkillError("policy_denied", "entity is not an air-quality station")
+
+    def authorize_printer(self, arguments: SkillArguments) -> None:
+        args = cast(PrinterArgs, arguments)
+        entity = self._allowed_entity(args.entity)
+        if entity.sensor_type != "printer":
+            raise SkillError("policy_denied", "entity is not a configured printer")
 
     def get_sensor_value(self, arguments: SkillArguments) -> SkillResult:
         args = cast(SensorValueArgs, arguments)
@@ -136,7 +160,11 @@ class ReadOnlySkillImplementations:
         selected = (
             (self.entities.require(args.entity),)
             if args.entity is not None
-            else self.entities.entities
+            else tuple(
+                entity
+                for entity in self.entities.entities
+                if entity.sensor_type != "printer"
+            )
         )
         statuses = tuple(
             self._entity_status(entity, self._record_or_missing(snapshot, entity))
@@ -255,6 +283,32 @@ class ReadOnlySkillImplementations:
     def get_server_health(self, _arguments: SkillArguments) -> SkillResult:
         return ServerHealthResult(self.server_provider.snapshot())
 
+    def get_printer_status(self, arguments: SkillArguments) -> SkillResult:
+        return PrinterStatusResult(self._printer(arguments))
+
+    def get_current_print(self, arguments: SkillArguments) -> SkillResult:
+        return CurrentPrintResult(self._printer(arguments))
+
+    def get_printer_temperatures(self, arguments: SkillArguments) -> SkillResult:
+        return PrinterTemperaturesResult(self._printer(arguments))
+
+    def get_print_environment_summary(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        return PrintEnvironmentResult(self.printer_provider.environment_summary())
+
+    def _printer(self, arguments: SkillArguments):
+        entity = self._printer_entity(arguments)
+        snapshot = self.printer_provider.current()
+        if snapshot.printer_id != entity.source_id:
+            raise IntegrationError(
+                "unavailable", "configured printer state is unavailable"
+            )
+        return snapshot
+
+    def _printer_entity(self, arguments: SkillArguments) -> Entity:
+        args = cast(PrinterArgs, arguments)
+        return self.entities.require(args.entity)
+
     def _allowed_entity(self, entity_id: str) -> Entity:
         entity = self.entities.get(entity_id)
         if entity is None:
@@ -295,9 +349,11 @@ def build_read_only_registry(
     server_provider: ServerHealthProvider,
     entities: EntityRegistry,
     metrics: MetricRegistry,
+    printer_provider: PrinterSnapshotProvider | None = None,
 ) -> SkillRegistry:
+    printer_provider = printer_provider or _UnavailablePrinterProvider()
     implementation = ReadOnlySkillImplementations(
-        sensor_provider, server_provider, entities, metrics
+        sensor_provider, server_provider, entities, metrics, printer_provider
     )
     registry = SkillRegistry()
     registry.register(
@@ -366,6 +422,39 @@ def build_read_only_registry(
             5.0,
         )
     )
+    for name, description, method in (
+        (
+            "get_printer_status",
+            "Return read-only state for one configured printer.",
+            implementation.get_printer_status,
+        ),
+        (
+            "get_current_print",
+            "Return current print job, progress, remaining time, layer, and material.",
+            implementation.get_current_print,
+        ),
+        (
+            "get_printer_temperatures",
+            "Return observed nozzle, bed, and chamber temperatures.",
+            implementation.get_printer_temperatures,
+        ),
+        (
+            "get_print_environment_summary",
+            "Return an observational SEN66 summary for the latest print session.",
+            implementation.get_print_environment_summary,
+        ),
+    ):
+        registry.register(
+            SkillSpec(
+                name,
+                description,
+                ActionClass.READ_ONLY,
+                _parse_printer,
+                implementation.authorize_printer,
+                method,
+                5.0,
+            )
+        )
     return registry
 
 
@@ -403,6 +492,19 @@ def _parse_air_quality(values: Mapping[str, object]) -> SkillArguments:
 def _parse_server_health(values: Mapping[str, object]) -> SkillArguments:
     strict_arguments(values)
     return ServerHealthArgs()
+
+
+def _parse_printer(values: Mapping[str, object]) -> SkillArguments:
+    strict_arguments(values, required=frozenset({"entity"}))
+    return PrinterArgs(required_string(values, "entity"))
+
+
+class _UnavailablePrinterProvider:
+    def current(self):
+        raise IntegrationError("unavailable", "printer observer is unavailable")
+
+    def environment_summary(self) -> PrintEnvironmentSnapshot:
+        raise IntegrationError("unavailable", "printer observer is unavailable")
 
 
 def _optional_string(value: object) -> str | None:

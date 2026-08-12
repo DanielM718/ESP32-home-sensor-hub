@@ -1,7 +1,9 @@
 # Flask REST API
 
-The Flask app is a lightweight overview API and dashboard host. It reads from
-InfluxDB only and never reads directly from MQTT.
+The Flask app is a lightweight overview API and dashboard host. Environmental
+data comes from InfluxDB; optional current printer state comes from the
+observer's local SQLite checkpoint. Flask never reads directly from MQTT, Home
+Assistant, or the printer.
 
 The root route `/` serves the Chart.js frontend dashboard. API endpoints live
 under `/api/`.
@@ -193,6 +195,21 @@ fallback. Mean and maximum fields remain distinct, while sparse event episodes
 are returned separately in `events`. A historical point contains only fields
 present in that window, so legacy and partially populated data remain valid JSON
 and render as gaps rather than invented zeroes.
+
+### Printer endpoints
+
+Printer endpoints are absent from the critical sensor data path and expose no
+credentials or raw Home Assistant attributes:
+
+- `GET /api/printer`: normalized current state, or explicit `not_configured` /
+  unavailable state.
+- `GET /api/printer/sessions?limit=20`: newest sessions; `limit` is restricted
+  to `1..100`.
+- `GET /api/printer/environment-summary`: observational baseline/print/recovery
+  summary over the latest session and high-resolution SEN66 data.
+
+There is no write/control printer endpoint. Details and response fields are in
+[`BAMBU_X2D.md`](BAMBU_X2D.md).
 
 ### `GET /api/nodes`
 

@@ -347,7 +347,7 @@ def _entity(value: Any, index: int) -> EntitySettings:
     if missing:
         raise ConfigError(f"entities[{index}] missing: {', '.join(missing)}")
     sensor_type = str(value["sensor_type"])
-    if sensor_type not in {"environment", "air_quality"}:
+    if sensor_type not in {"environment", "air_quality", "printer"}:
         raise ConfigError(f"entities[{index}].sensor_type is unsupported")
     aliases = _string_tuple(value.get("aliases", []), f"entities[{index}].aliases")
     groups = _string_tuple(value.get("groups", []), f"entities[{index}].groups")

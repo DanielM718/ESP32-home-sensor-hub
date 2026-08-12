@@ -30,6 +30,19 @@ Grafana analytics       Flask REST API          Future services
                          Chart.js dashboard
 ```
 
+The optional X2D observer is a separate non-critical branch:
+
+```text
+X2D -> existing HA Bambu integration -> GET-only allow-listed observer
+                                           |
+                                           +-> printer.sqlite3 current/session state
+                                           +-> InfluxDB printer history
+                                           +-> Flask/Grafana/Butters read paths
+```
+
+It is never part of environmental MQTT ingestion. See
+[`BAMBU_X2D.md`](BAMBU_X2D.md).
+
 ## Runtime Processes
 
 - `mosquitto.service`: MQTT broker, authenticated, no anonymous clients.
@@ -39,6 +52,8 @@ Grafana analytics       Flask REST API          Future services
 - `home-sensor-dashboard.service`: Flask API and dashboard via Gunicorn.
 - `home-sensor-export-worker.service`: single-heavy-job CSV worker with
   transactional SQLite claiming and restart recovery.
+- `home-sensor-printer-observer.service`: optional, separately configured
+  read-only Home Assistant observer; not enabled until real entity discovery.
 - `tailscaled.service`: Tailnet access for remote administration.
 
 ## Ports
@@ -67,6 +82,7 @@ Measurements:
 - `air_quality_reading` (live bucket; legacy copies may remain long-term)
 - `air_quality_15m` (long-term)
 - `air_quality_event` (long-term)
+- `printer_state` (live), `printer_state_5m` and `print_session` (long-term)
 
 The MQTT bridge validates incoming messages, writes live data, and derives
 aggregates/events before long-term writes. The Flask API and Grafana read only

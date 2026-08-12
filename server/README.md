@@ -19,6 +19,7 @@ This repository directory owns only the Raspberry Pi backend:
 - systemd services
 - Tailscale access documentation
 - native Raspberry Pi deployment scripts
+- optional read-only Bambu Lab X2D observation through existing Home Assistant
 
 The ESP32 sensor-node and master-gateway firmware are external to this backend.
 This backend subscribes to MQTT messages published by the gateway and by direct
@@ -120,6 +121,8 @@ not read directly from MQTT.
 - `GET /api/readings`
 - `GET /api/nodes`
 - `GET /api/status` (fixed allow-list, read-only system/service state)
+- `GET /api/printer` and bounded printer session/environment endpoints when the
+  optional observer is configured
 
 The same dashboard also provides durable Active Monitoring sessions and
 historical CSV exports. Active Monitoring is interval bookkeeping over data
@@ -138,6 +141,10 @@ Persistent paths are outside the deployment tree:
 See [API](docs/API.md), [Dashboard](docs/DASHBOARD.md), and
 [Operations](docs/OPERATIONS.md) for lifecycle, CSV, recovery, backup, and
 cleanup details.
+
+The X2D architecture, current upstream compatibility evidence, discovery
+boundary, provenance rules, session lifecycle, and undeployed manual steps are
+documented in [Bambu Lab X2D read-only integration](docs/BAMBU_X2D.md).
 
 The dashboard has three hash-backed sections: Monitoring, Active Monitoring,
 and Status & Debug. Active Monitoring supports raw, 1-minute, 5-minute,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from werkzeug.exceptions import HTTPException
 from app.config import AppSettings, ConfigError, configure_logging, load_settings
 from app.export_queries import InfluxExportQueryRepository
 from app.persistence import MonitoringExportStore
+from app.printer_queries import PrinterReadRepository
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
@@ -41,6 +43,7 @@ def create_app(
     export_query_repository: Any | None = None,
     clock: Any | None = None,
     status_provider: Any | None = None,
+    printer_repository: Any | None = None,
 ) -> Flask:
     """Create the Flask WSGI application."""
 
@@ -63,6 +66,17 @@ def create_app(
         minimum_coverage_percent=settings.air_quality.rolling_minimum_coverage_percent,
     )
     app.config["REPOSITORY"] = read_repository
+    app.config["PRINTER_REPOSITORY"] = printer_repository or PrinterReadRepository(
+        settings.influx,
+        database_path=Path(
+            os.environ.get("PRINTER_DB_PATH", "/var/lib/home-sensor/printer.sqlite3")
+        ),
+        environment_location=os.environ.get(
+            "PRINTER_ENVIRONMENT_LOCATION", "printer_room"
+        ),
+        baseline_minutes=int(os.environ.get("PRINTER_BASELINE_MINUTES", "30")),
+        recovery_minutes=int(os.environ.get("PRINTER_RECOVERY_MINUTES", "120")),
+    )
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
     app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = (
         settings.air_quality.stale_after_seconds
@@ -182,6 +196,25 @@ def register_routes(app: Flask) -> None:
             "stored_air_quality_resolution_seconds": 15 * 60,
         }
         return jsonify(payload)
+
+    @app.get("/api/printer")
+    def printer() -> Any:
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].current())
+
+    @app.get("/api/printer/sessions")
+    def printer_sessions() -> Any:
+        raw_limit = request.args.get("limit", "20")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise QueryValidationError("limit must be an integer") from exc
+        if not 1 <= limit <= 100:
+            raise QueryValidationError("limit must be between 1 and 100")
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].sessions(limit=limit))
+
+    @app.get("/api/printer/environment-summary")
+    def printer_environment_summary() -> Any:
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].environment_summary())
 
 
 def register_error_handlers(app: Flask) -> None:

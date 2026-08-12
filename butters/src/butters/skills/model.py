@@ -6,7 +6,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TypeAlias
 
-from butters.integrations.model import ServerHealthSnapshot
+from butters.integrations.model import (
+    PrintEnvironmentSnapshot,
+    PrinterSnapshot,
+    ServerHealthSnapshot,
+)
 
 
 class ActionClass(str, Enum):
@@ -54,6 +58,11 @@ class ServerHealthArgs:
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class PrinterArgs:
+    entity: str
+
+
 SkillArguments: TypeAlias = (
     SensorValueArgs
     | SensorStatusArgs
@@ -61,6 +70,7 @@ SkillArguments: TypeAlias = (
     | ComparisonArgs
     | AirQualityArgs
     | ServerHealthArgs
+    | PrinterArgs
 )
 
 
@@ -146,6 +156,26 @@ class ServerHealthResult:
     health: ServerHealthSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class PrinterStatusResult:
+    printer: PrinterSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class CurrentPrintResult:
+    printer: PrinterSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PrinterTemperaturesResult:
+    printer: PrinterSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PrintEnvironmentResult:
+    summary: PrintEnvironmentSnapshot
+
+
 SkillResult: TypeAlias = (
     SensorValueResult
     | SensorStatusResult
@@ -153,6 +183,10 @@ SkillResult: TypeAlias = (
     | ComparisonResult
     | AirQualityResult
     | ServerHealthResult
+    | PrinterStatusResult
+    | CurrentPrintResult
+    | PrinterTemperaturesResult
+    | PrintEnvironmentResult
 )
 
 

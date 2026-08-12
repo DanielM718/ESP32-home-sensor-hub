@@ -1,0 +1,52 @@
+# Non-secret allow-list for the read-only X2D observer. Do not guess these IDs.
+# Populate them only after running the documented Home Assistant discovery step.
+
+[printer]
+id = "x2d"
+model = "X2D"
+
+[home_assistant]
+url = "http://127.0.0.1:8123"
+poll_seconds = 15
+timeout_seconds = 3
+max_response_bytes = 4194304
+stale_after_seconds = 90
+
+[storage]
+database_path = "/var/lib/home-sensor/printer.sqlite3"
+permanent_sample_seconds = 300
+terminal_confirmations = 2
+
+[analysis]
+environment_location = "printer_room"
+baseline_minutes = 30
+recovery_minutes = 120
+
+# Required mappings. The remaining mappings are optional and omitted when HA
+# does not expose them. These syntactically valid IDs are deliberately non-real.
+[entities]
+online = "binary_sensor.replace_online_after_discovery"
+print_status = "sensor.replace_print_status_after_discovery"
+# current_stage = "sensor.actual_entity_id"
+# job_id = "sensor.actual_entity_id"
+# job_name = "sensor.actual_entity_id"
+# progress_percent = "sensor.actual_entity_id"
+# remaining_time = "sensor.actual_entity_id"
+# current_layer = "sensor.actual_entity_id"
+# total_layers = "sensor.actual_entity_id"
+# print_started_at = "sensor.actual_entity_id"
+# print_finished_at = "sensor.actual_entity_id"
+# nozzle_1_temperature = "sensor.actual_entity_id"
+# nozzle_1_target = "sensor.actual_entity_id"
+# nozzle_2_temperature = "sensor.actual_entity_id"
+# nozzle_2_target = "sensor.actual_entity_id"
+# bed_temperature = "sensor.actual_entity_id"
+# bed_target = "sensor.actual_entity_id"
+# chamber_temperature = "sensor.actual_entity_id"
+# active_tool = "sensor.actual_entity_id"
+# active_material = "sensor.actual_entity_id"
+# active_filament = "sensor.actual_entity_id"
+# ams_state = "sensor.actual_entity_id"
+# ams_slot = "sensor.actual_entity_id"
+# print_source = "sensor.actual_entity_id"
+# firmware_version = "sensor.actual_entity_id"

@@ -44,6 +44,33 @@ class SensorSnapshotProvider(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class PrinterSnapshot:
+    printer_id: str
+    printer_model: str
+    online: bool
+    normalized_state: str
+    observed_at: str | None
+    values: dict[str, object]
+    provenance: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class PrintEnvironmentSnapshot:
+    available: bool
+    reason: str | None
+    observational: bool
+    session: dict[str, object]
+    metrics: dict[str, dict[str, float | int | None]]
+    voc_recovery_seconds: int | None
+
+
+class PrinterSnapshotProvider(Protocol):
+    def current(self) -> PrinterSnapshot: ...
+
+    def environment_summary(self) -> PrintEnvironmentSnapshot: ...
+
+
+@dataclass(frozen=True, slots=True)
 class ServiceHealth:
     name: str
     unit: str

@@ -8,6 +8,7 @@ const API = {
   monitoringSessions: "/api/monitoring/sessions",
   exports: "/api/exports",
   status: "/api/status",
+  printer: "/api/printer",
 };
 
 const POLL_INTERVAL_MS = 7000;
@@ -90,6 +91,7 @@ const state = {
   exportsInFlight: false,
   previewInFlight: false,
   statusInFlight: false,
+  printerInFlight: false,
   serverOffsetMs: 0,
   selectedChartFields: new Set(["temperature_c", "humidity"]),
   ready: false,
@@ -219,6 +221,7 @@ async function refreshAll() {
     renderLatest(latest);
     renderChartMetricSelector();
     renderCharts(readings);
+    void refreshPrinter();
     setLastUpdated(latest.generated_at || readings.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
   } catch (error) {
@@ -247,6 +250,7 @@ async function refreshLatestOnly() {
     updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderChartMetricSelector();
+    void refreshPrinter();
     setLastUpdated(latest.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
     clearError();
@@ -256,6 +260,64 @@ async function refreshLatestOnly() {
   } finally {
     state.latestRefreshInFlight = false;
   }
+}
+
+async function refreshPrinter() {
+  if (state.printerInFlight) {
+    return;
+  }
+  state.printerInFlight = true;
+  try {
+    renderPrinter(await fetchJson(API.printer));
+  } catch (_error) {
+    renderPrinter({ available: false, status: "unavailable", reason: "Printer state is temporarily unavailable" });
+  } finally {
+    state.printerInFlight = false;
+  }
+}
+
+function renderPrinter(printer) {
+  const container = document.getElementById("printer-status");
+  if (!container) {
+    return;
+  }
+  if (printer.status === "not_configured") {
+    container.innerHTML = '<p class="empty-state">Printer observer is not configured.</p>';
+    return;
+  }
+  const progress = Number.isFinite(printer.progress_percent)
+    ? `${Math.round(printer.progress_percent)}%`
+    : "Unknown";
+  const remaining = Number.isFinite(printer.remaining_seconds)
+    ? formatDuration(printer.remaining_seconds)
+    : "Unknown";
+  const layer = Number.isInteger(printer.current_layer)
+    ? `${printer.current_layer}${Number.isInteger(printer.total_layers) ? ` / ${printer.total_layers}` : ""}`
+    : "Unknown";
+  const materialProvenance = (printer.provenance || {}).active_material;
+  const materialQualifier = materialProvenance === "observed"
+    ? ""
+    : materialProvenance === "inferred_active_ams_tray"
+      ? " (inferred from active AMS tray)"
+      : " (provenance unknown)";
+  const material = printer.active_material
+    ? `${printer.active_material}${materialQualifier}`
+    : "Unknown";
+  container.innerHTML = `
+    <article class="reading-card printer-card">
+      <div class="air-station-heading">
+        <div><h3>${escapeHtml(printer.printer_model || "Printer")}</h3><span class="authority-label">Read only · ${escapeHtml(printer.source || "unavailable")}</span></div>
+        <span class="status-pill ${printer.available ? "status-ok" : "status-error"}">${escapeHtml(formatLabel(printer.status || "unknown"))}</span>
+      </div>
+      <dl class="printer-facts">
+        <div><dt>Job</dt><dd>${escapeHtml(printer.job_name || "Unknown")}</dd></div>
+        <div><dt>Progress</dt><dd>${escapeHtml(progress)}</dd></div>
+        <div><dt>Remaining</dt><dd>${escapeHtml(remaining)}</dd></div>
+        <div><dt>Layer</dt><dd>${escapeHtml(layer)}</dd></div>
+        <div><dt>Material</dt><dd>${escapeHtml(material)}</dd></div>
+        <div><dt>Observed</dt><dd>${escapeHtml(relativeTime(printer.observed_at))}</dd></div>
+      </dl>
+    </article>`;
 }
 
 async function refreshKnownSources(force = false) {

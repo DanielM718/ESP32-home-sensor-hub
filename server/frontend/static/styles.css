@@ -1239,6 +1239,36 @@ tbody tr:last-child td {
   gap: 7px;
 }
 
+.printer-status {
+  margin-bottom: 22px;
+}
+
+.printer-card {
+  max-width: none;
+}
+
+.printer-facts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 12px;
+  margin: 14px 0 0;
+}
+
+.printer-facts div {
+  min-width: 0;
+}
+
+.printer-facts dt {
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+}
+
+.printer-facts dd {
+  margin: 4px 0 0;
+  overflow-wrap: anywhere;
+}
+
 .command-grid code {
   display: block;
   padding: 8px 10px;
