@@ -24,10 +24,13 @@ from butters.skills.model import (
     ComparisonResult,
     CurrentPrintResult,
     EntityStatusResult,
+    LastPrintResult,
     PrintEnvironmentResult,
     PrinterArgs,
+    PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
+    PrinterUsageResult,
     SensorLastSeenArgs,
     SensorLastSeenResult,
     SensorStatusArgs,
@@ -296,6 +299,18 @@ class ReadOnlySkillImplementations:
         self._printer_entity(arguments)
         return PrintEnvironmentResult(self.printer_provider.environment_summary())
 
+    def get_printer_usage(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        return PrinterUsageResult(self.printer_provider.intelligence())
+
+    def get_printer_maintenance(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        return PrinterMaintenanceResult(self.printer_provider.intelligence())
+
+    def get_last_print(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        return LastPrintResult(self.printer_provider.intelligence())
+
     def _printer(self, arguments: SkillArguments):
         entity = self._printer_entity(arguments)
         snapshot = self.printer_provider.current()
@@ -443,6 +458,21 @@ def build_read_only_registry(
             "Return an observational SEN66 summary for the latest print session.",
             implementation.get_print_environment_summary,
         ),
+        (
+            "get_printer_usage",
+            "Return read-only local and upstream printer usage provenance and print counts.",
+            implementation.get_printer_usage,
+        ),
+        (
+            "get_printer_maintenance",
+            "Return read-only local printer maintenance due state and completion history.",
+            implementation.get_printer_maintenance,
+        ),
+        (
+            "get_last_print",
+            "Return read-only metadata for the latest local or cloud-history print.",
+            implementation.get_last_print,
+        ),
     ):
         registry.register(
             SkillSpec(
@@ -504,6 +534,9 @@ class _UnavailablePrinterProvider:
         raise IntegrationError("unavailable", "printer observer is unavailable")
 
     def environment_summary(self) -> PrintEnvironmentSnapshot:
+        raise IntegrationError("unavailable", "printer observer is unavailable")
+
+    def intelligence(self):
         raise IntegrationError("unavailable", "printer observer is unavailable")
 
 

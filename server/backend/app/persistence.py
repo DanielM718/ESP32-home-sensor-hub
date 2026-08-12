@@ -113,9 +113,21 @@ class MonitoringExportStore:
                     ON export_jobs(status, heartbeat_at_utc);
                 """
                 )
-                if schema_version == 1:
+                monitoring_columns = {
+                    str(row[1])
+                    for row in connection.execute(
+                        "PRAGMA table_info(monitoring_sessions)"
+                    ).fetchall()
+                }
+                if schema_version == 1 and "trigger_source" not in monitoring_columns:
                     self._migrate_resolution_constraints(connection)
-                connection.execute("PRAGMA user_version = 2")
+                self._ensure_monitoring_metadata_columns(connection)
+                connection.execute(
+                    """CREATE UNIQUE INDEX IF NOT EXISTS idx_monitoring_printer_session
+                       ON monitoring_sessions(printer_session_id)
+                       WHERE printer_session_id IS NOT NULL"""
+                )
+                connection.execute("PRAGMA user_version = 3")
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         try:
             os.chmod(self.database_path, 0o600)
@@ -208,6 +220,27 @@ class MonitoringExportStore:
         finally:
             connection.execute("PRAGMA foreign_keys = ON")
 
+    @staticmethod
+    def _ensure_monitoring_metadata_columns(connection: sqlite3.Connection) -> None:
+        columns = {
+            str(row[1])
+            for row in connection.execute(
+                "PRAGMA table_info(monitoring_sessions)"
+            ).fetchall()
+        }
+        additions = {
+            "trigger_source": "TEXT NOT NULL DEFAULT 'manual'",
+            "printer_session_id": "TEXT",
+            "printer_ended_at_utc": "TEXT",
+            "recovery_end_time_utc": "TEXT",
+            "auto_close_on_schedule": "INTEGER NOT NULL DEFAULT 1",
+        }
+        for name, declaration in additions.items():
+            if name not in columns:
+                connection.execute(
+                    f"ALTER TABLE monitoring_sessions ADD COLUMN {name} {declaration}"
+                )
+
     def create_session(
         self,
         request: MonitoringRequest,
@@ -256,6 +289,94 @@ class MonitoringExportStore:
             ).fetchall()
         return [_session_dict(row) for row in rows]
 
+    def ensure_printer_session(
+        self,
+        *,
+        printer_session_id: str,
+        name: str,
+        start_time: datetime,
+        provisional_end_time: datetime,
+        sources: Sequence[Mapping[str, Any]],
+        fields: Sequence[str],
+    ) -> dict[str, Any]:
+        """Idempotently associate one monitoring interval with one print."""
+
+        now_text = iso_utc(start_time)
+        with self._transaction() as connection:
+            existing = connection.execute(
+                "SELECT id FROM monitoring_sessions WHERE printer_session_id=?",
+                (printer_session_id,),
+            ).fetchone()
+            if existing is None:
+                session_id = str(uuid4())
+                connection.execute(
+                    """
+                    INSERT INTO monitoring_sessions (
+                        id, name, notes, status, start_time_utc,
+                        scheduled_end_time_utc, actual_end_time_utc,
+                        selected_sources_json, selected_fields_json,
+                        csv_format, resolution, automatic_export_job_id,
+                        created_at_utc, updated_at_utc, trigger_source,
+                        printer_session_id, printer_ended_at_utc,
+                        recovery_end_time_utc, auto_close_on_schedule
+                    ) VALUES (?, ?, ?, 'running', ?, ?, NULL, ?, ?, 'wide',
+                              'raw', NULL, ?, ?, 'printer', ?, NULL, NULL, 0)
+                    """,
+                    (
+                        session_id,
+                        name[:120],
+                        "Automatically associated with read-only printer observation.",
+                        now_text,
+                        iso_utc(provisional_end_time),
+                        _json(list(sources)),
+                        _json(list(fields)),
+                        now_text,
+                        now_text,
+                        printer_session_id,
+                    ),
+                )
+            else:
+                session_id = str(existing["id"])
+        return self.get_session(session_id)
+
+    def finish_printer_session(
+        self,
+        printer_session_id: str,
+        *,
+        print_ended_at: datetime,
+        recovery_end_time: datetime,
+    ) -> dict[str, Any] | None:
+        """Schedule post-print recovery; this never communicates with a printer."""
+
+        with self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM monitoring_sessions WHERE printer_session_id=?",
+                (printer_session_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            if row["status"] == "running":
+                connection.execute(
+                    """
+                    UPDATE monitoring_sessions
+                    SET printer_ended_at_utc=?, recovery_end_time_utc=?,
+                        scheduled_end_time_utc=?, auto_close_on_schedule=1,
+                        updated_at_utc=?
+                    WHERE id=? AND status='running'
+                    """,
+                    (
+                        iso_utc(print_ended_at),
+                        iso_utc(recovery_end_time),
+                        iso_utc(recovery_end_time),
+                        iso_utc(print_ended_at),
+                        row["id"],
+                    ),
+                )
+                session_id = str(row["id"])
+            else:
+                session_id = str(row["id"])
+        return self.get_session(session_id)
+
     def get_session(self, session_id: str) -> dict[str, Any]:
         with self._connect() as connection:
             row = connection.execute(
@@ -272,7 +393,8 @@ class MonitoringExportStore:
             rows = connection.execute(
                 """
                 SELECT * FROM monitoring_sessions
-                WHERE status = 'running' AND scheduled_end_time_utc <= ?
+                WHERE status = 'running' AND auto_close_on_schedule = 1
+                  AND scheduled_end_time_utc <= ?
                 ORDER BY scheduled_end_time_utc, id
                 """,
                 (now_text,),
@@ -303,6 +425,10 @@ class MonitoringExportStore:
             ).fetchone()
             if row is None:
                 raise WorkflowNotFoundError("unknown monitoring session")
+            if row["trigger_source"] == "printer" and row["status"] == "running":
+                raise WorkflowConflictError(
+                    "automatic printer monitoring closes after its recovery interval"
+                )
             if row["status"] == "running":
                 if row["scheduled_end_time_utc"] <= now_text:
                     status = "completed"

@@ -174,10 +174,12 @@ class LocalDiagnosticRules:
             throttle_flags = int(throttled, 16) if isinstance(throttled, str) else 0
         except ValueError:
             throttle_flags = 0
-        if throttle_flags & 0xF:
-            findings.append(_finding("thermal_throttling", FindingSeverity.ERROR, "Firmware reports a current power or thermal throttle condition", health))
-        elif throttle_flags & 0xF0000:
-            findings.append(_finding("historical_throttling", FindingSeverity.WARNING, "Firmware records a past power or thermal throttle condition", health))
+        current_conditions = _throttle_conditions(throttle_flags, historical=False)
+        historical_conditions = _throttle_conditions(throttle_flags, historical=True)
+        if current_conditions:
+            findings.append(_finding("thermal_throttling", FindingSeverity.ERROR, "Firmware reports current condition(s): " + ", ".join(current_conditions), health))
+        elif historical_conditions:
+            findings.append(_finding("historical_throttling", FindingSeverity.WARNING, "Firmware records historical condition(s), with no current condition bits set: " + ", ".join(historical_conditions), health))
         services = values.get("services")
         inactive = [item.get("unit") for item in services if isinstance(item, dict) and item.get("active") is False] if isinstance(services, list) else []
         if inactive:
@@ -257,6 +259,13 @@ class LocalDiagnosticRules:
             escalation_reason=reason,
             observation_complexity=ObservationComplexity(False, missing_or_stale_evidence=True, systems_implicated=tuple(plan.complexity.systems_referenced)),
         )
+
+
+def _throttle_conditions(flags: int, *, historical: bool) -> tuple[str, ...]:
+    """Decode firmware flags without conflating thermal and power bits."""
+    offset = 16 if historical else 0
+    labels = ("undervoltage", "ARM frequency capped", "CPU throttling", "soft-temperature limit")
+    return tuple(label for bit, label in enumerate(labels) if flags & (1 << (bit + offset)))
 
 
 def _id(bundle: EvidenceBundle, evidence_id: str) -> EvidenceItem | None:

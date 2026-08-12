@@ -64,10 +64,20 @@ class PrintEnvironmentSnapshot:
     voc_recovery_seconds: int | None
 
 
+@dataclass(frozen=True, slots=True)
+class PrinterIntelligenceSnapshot:
+    usage: dict[str, object]
+    maintenance_tasks: tuple[dict[str, object], ...]
+    completion_history: tuple[dict[str, object], ...]
+    print_history: tuple[dict[str, object], ...]
+
+
 class PrinterSnapshotProvider(Protocol):
     def current(self) -> PrinterSnapshot: ...
 
     def environment_summary(self) -> PrintEnvironmentSnapshot: ...
+
+    def intelligence(self) -> PrinterIntelligenceSnapshot: ...
 
 
 @dataclass(frozen=True, slots=True)

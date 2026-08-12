@@ -339,6 +339,39 @@ If MagicDNS is not enabled, use the Pi's Tailscale IP instead of `sensor-pi`.
 
 ## systemd Services
 
+### X2D observer recovery (deployment pending)
+
+The X2D observer is not part of MQTT ingestion. Its non-secret configuration is
+`/etc/home-sensor/printer.toml`; HA/Bambu credentials are restricted to
+`/etc/home-sensor/printer.env`. Never print either environment value. Safe
+read-only checks after an approved deployment are:
+
+```bash
+systemctl is-active home-sensor-printer-observer
+curl --fail --silent http://127.0.0.1:8080/api/printer
+curl --fail --silent http://127.0.0.1:8080/api/printer/history?limit=5
+curl --fail --silent http://127.0.0.1:8080/api/printer/maintenance
+```
+
+If HA or local MQTT disappears, leave the active local print session open and
+restore connectivity; do not close it manually or change printer mode. Cloud
+history failures preserve prior imports and retry hourly. If the observer is
+restarted, the SQLite unique keys resume the active session and Active
+Monitoring association. A maintenance completion is recoverable from the
+append-only `maintenance_completion_events` table.
+
+Back up these files together while services are stopped under a separately
+approved maintenance window:
+
+```text
+/var/lib/home-sensor/printer.sqlite3
+/var/lib/home-sensor/monitoring.sqlite3
+```
+
+Do not delete HA recorder data, Bambu caches, or Influx history as part of
+printer recovery. See `BAMBU_X2D.md` for actual entities, cloud-history
+semantics, retention, and the deployment boundary.
+
 Milestone 2 adds:
 
 - `home-sensor-bridge.service`

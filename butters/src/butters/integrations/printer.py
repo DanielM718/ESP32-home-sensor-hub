@@ -12,6 +12,7 @@ from butters.assistant_config import IntegrationSettings
 from butters.integrations.model import (
     IntegrationError,
     PrintEnvironmentSnapshot,
+    PrinterIntelligenceSnapshot,
     PrinterSnapshot,
 )
 
@@ -84,6 +85,32 @@ class DashboardPrinterAdapter:
                 recovery
                 if isinstance(recovery, int) and not isinstance(recovery, bool)
                 else None
+            ),
+        )
+
+    def intelligence(self) -> PrinterIntelligenceSnapshot:
+        maintenance = self._fetch("/api/printer/maintenance")
+        history = self._fetch("/api/printer/history?limit=100")
+        usage = maintenance.get("usage", {})
+        tasks = maintenance.get("tasks", [])
+        completions = maintenance.get("completion_history", [])
+        prints = history.get("history", [])
+        if not isinstance(usage, Mapping) or not all(
+            isinstance(value, list) for value in (tasks, completions, prints)
+        ):
+            raise IntegrationError(
+                "invalid_response", "printer intelligence has an invalid shape"
+            )
+        return PrinterIntelligenceSnapshot(
+            usage={str(key): value for key, value in usage.items()},
+            maintenance_tasks=tuple(
+                dict(item) for item in tasks if isinstance(item, Mapping)
+            ),
+            completion_history=tuple(
+                dict(item) for item in completions if isinstance(item, Mapping)
+            ),
+            print_history=tuple(
+                dict(item) for item in prints if isinstance(item, Mapping)
             ),
         )
 

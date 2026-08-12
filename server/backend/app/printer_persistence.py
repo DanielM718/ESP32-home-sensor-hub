@@ -308,7 +308,7 @@ class PrinterStore:
                 material_provenance.value,
                 state.active_tool,
                 state.ams_slot,
-                state.source,
+                "locally_observed",
                 _iso(state.observed_at),
             ),
         )

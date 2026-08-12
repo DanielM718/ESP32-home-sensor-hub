@@ -33,10 +33,14 @@ Grafana analytics       Flask REST API          Future services
 The optional X2D observer is a separate non-critical branch:
 
 ```text
-X2D -> existing HA Bambu integration -> GET-only allow-listed observer
+X2D -> encrypted local MQTT + Bambu Cloud -> existing HA Bambu integration
+                                           -> GET-only allow-listed observer
                                            |
-                                           +-> printer.sqlite3 current/session state
+                                           +-> printer.sqlite3 current/session,
+                                               cloud history, usage, maintenance
                                            +-> InfluxDB printer history
+                                           +-> existing monitoring.sqlite3
+                                               printer-triggered interval
                                            +-> Flask/Grafana/Butters read paths
 ```
 
@@ -52,8 +56,9 @@ It is never part of environmental MQTT ingestion. See
 - `home-sensor-dashboard.service`: Flask API and dashboard via Gunicorn.
 - `home-sensor-export-worker.service`: single-heavy-job CSV worker with
   transactional SQLite claiming and restart recovery.
-- `home-sensor-printer-observer.service`: optional, separately configured
-  read-only Home Assistant observer; not enabled until real entity discovery.
+- `home-sensor-printer-observer.service`: separately configured read-only Home
+  Assistant/cloud observer; entity discovery is complete but the unit remains
+  pending deployment approval.
 - `tailscaled.service`: Tailnet access for remote administration.
 
 ## Ports
@@ -111,6 +116,12 @@ reconciled by the export worker, so the browser is never responsible for
 completion or automatic-job creation. A unique `monitoring_session_id` on the
 job table and one transaction for session completion/job insertion guarantee
 one automatic export per session.
+
+Printer-triggered sessions use the same table with `trigger_source=printer` and
+a unique `printer_session_id`. They describe a time window over sensor samples
+already written by the bridge; a simultaneous manual session does not duplicate
+collection. Confirmed print end schedules the configured recovery deadline,
+after which the existing export worker performs normal reconciliation/export.
 
 InfluxDB remains the reading source of truth. SQLite stores no sensor samples;
 it contains workflow metadata only. CSV files and the SQLite database live

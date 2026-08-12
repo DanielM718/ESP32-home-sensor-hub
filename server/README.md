@@ -121,8 +121,8 @@ not read directly from MQTT.
 - `GET /api/readings`
 - `GET /api/nodes`
 - `GET /api/status` (fixed allow-list, read-only system/service state)
-- `GET /api/printer` and bounded printer session/environment endpoints when the
-  optional observer is configured
+- `GET /api/printer` plus bounded history, maintenance, session, and
+  environmental-association endpoints when the optional observer is configured
 
 The same dashboard also provides durable Active Monitoring sessions and
 historical CSV exports. Active Monitoring is interval bookkeeping over data
@@ -135,6 +135,7 @@ Persistent paths are outside the deployment tree:
 
 ```text
 /var/lib/home-sensor/monitoring.sqlite3
+/var/lib/home-sensor/printer.sqlite3
 /var/lib/home-sensor/exports/<job-id>.csv
 ```
 
@@ -146,11 +147,11 @@ The X2D architecture, current upstream compatibility evidence, discovery
 boundary, provenance rules, session lifecycle, and undeployed manual steps are
 documented in [Bambu Lab X2D read-only integration](docs/BAMBU_X2D.md).
 
-The dashboard has three hash-backed sections: Monitoring, Active Monitoring,
-and Status & Debug. Active Monitoring supports raw, 1-minute, 5-minute,
-15-minute, and 1-hour output; Wide CSV (one source/sample per row with selected
-measurements as columns) is the default, with Long / normalized still
-available.
+The dashboard has four hash-backed sections: Monitoring, Bambu / Printer,
+Active Monitoring, and Status & Debug. Active Monitoring supports raw,
+1-minute, 5-minute, 15-minute, and 1-hour output; Wide CSV (one source/sample
+per row with selected measurements as columns) is the default, with Long /
+normalized still available.
 
 The frontend is served at:
 

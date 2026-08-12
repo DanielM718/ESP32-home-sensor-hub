@@ -23,7 +23,7 @@ The implementation now provides:
 - bounded targeted clarification/continuation state with no blind concatenation;
 - no-speech, empty-result, STT-error, audio-error, and timeout recovery;
 - concept-based intent routing with explicit clarification/unsupported paths;
-- a typed, default-deny registry containing six read-only skills;
+- a typed, default-deny registry containing thirteen read-only skills;
 - explicit entity/metric allow-lists and strict argument validation;
 - bounded read-only current-data access through the deployed dashboard API;
 - a fixed-command, fixed-service server-health adapter with no shell skill;
@@ -262,7 +262,7 @@ co two level” is conservatively normalized to `CO2`. An unqualified humidity
 question asks which sensor; multiple boxes ask for clarification; controls and
 unknown complex requests are explicitly unsupported.
 
-Six skills are registered, and every one is classified `READ_ONLY`:
+Thirteen skills are registered, and every one is classified `READ_ONLY`:
 
 | Skill | Allow-listed operation |
 | --- | --- |
@@ -272,6 +272,13 @@ Six skills are registered, and every one is classified `READ_ONLY`:
 | `compare_sensor_metric` | Maximum current humidity across `filament_boxes` only |
 | `get_room_air_quality` | Structured SEN66/dashboard summary for one air station |
 | `get_server_health` | Fixed local metrics and fixed service-unit status list |
+| `get_printer_status` | Current normalized read-only state for the configured printer |
+| `get_current_print` | Current job, progress, timing, layer, and active material metadata |
+| `get_printer_temperatures` | Observed dual-nozzle, bed, and chamber temperatures |
+| `get_print_environment_summary` | Observational SEN66 summary for the latest print session |
+| `get_printer_usage` | Local/upstream usage provenance and local print counts |
+| `get_printer_maintenance` | Local maintenance due state and completion audit history |
+| `get_last_print` | Latest canonical local/cloud print duration and result |
 
 Unknown skills, unexpected/missing arguments, unknown entities, incompatible
 metrics, non-allow-listed comparisons, and every action class other than
@@ -335,7 +342,7 @@ Use direct text while the webcam remains unavailable:
 ./butters/scripts/benchmark-diagnostics
 ```
 
-The diagnostic pipeline is independent of the six ordinary query skills:
+The diagnostic pipeline is independent of the thirteen ordinary query skills:
 
 ```text
 DiagnosticRequest -> planner -> typed READ_ONLY tools -> EvidenceBundle

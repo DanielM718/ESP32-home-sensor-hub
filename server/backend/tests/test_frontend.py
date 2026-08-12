@@ -49,11 +49,11 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("eventDatasets", self.javascript)
         self.assertNotIn('buildDatasets(airQualitySeries, "pm25_max"', self.javascript)
 
-    def test_exactly_three_hash_backed_tabs_exist(self) -> None:
-        for tab_id in ("monitoring", "active-monitoring", "status"):
+    def test_exactly_four_hash_backed_tabs_exist(self) -> None:
+        for tab_id in ("monitoring", "bambu-printer", "active-monitoring", "status"):
             self.assertIn(f'href="#{tab_id}"', self.template)
             self.assertIn(f'id="panel-{tab_id}"', self.template)
-        self.assertEqual(self.template.count('role="tab"'), 3)
+        self.assertEqual(self.template.count('role="tab"'), 4)
         self.assertIn("hashchange", self.javascript)
         self.assertIn("ArrowRight", self.javascript)
 
@@ -130,18 +130,46 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn(".reset(", export_refresh)
         self.assertNotIn('method: "POST"', export_refresh)
 
-    def test_printer_card_is_read_only_and_refreshes_independently(self) -> None:
+    def test_dedicated_printer_tab_is_read_only_and_failure_isolated(self) -> None:
+        self.assertIn('id="tab-bambu-printer"', self.template)
+        self.assertIn('id="panel-bambu-printer"', self.template)
         self.assertIn('id="printer-status"', self.template)
-        self.assertIn("Read-only state observed through Home Assistant", self.template)
-        printer_refresh = self.javascript[
-            self.javascript.index("async function refreshPrinter") : self.javascript.index(
-                "async function refreshKnownSources"
+        self.assertIn("No printer controls are exposed", self.template)
+        self.assertIn("records an audit event only", self.template)
+        monitoring_panel = self.template[
+            self.template.index('id="panel-monitoring"') : self.template.index(
+                'id="panel-bambu-printer"'
             )
         ]
+        self.assertNotIn('id="printer-status"', monitoring_panel)
+        printer_refresh = self.javascript[
+            self.javascript.index(
+                "async function refreshPrinter"
+            ) : self.javascript.index("async function refreshKnownSources")
+        ]
         self.assertIn("fetchJson(API.printer)", printer_refresh)
+        self.assertIn("Promise.allSettled", printer_refresh)
         self.assertIn("Printer state is temporarily unavailable", printer_refresh)
-        self.assertNotIn('method: "POST"', printer_refresh)
         self.assertIn("inferred from active AMS tray", printer_refresh)
+        self.assertIn("raw_samples_expired", printer_refresh)
+        self.assertNotIn("start_print", self.javascript)
+        self.assertNotIn("pause_print", self.javascript)
+        self.assertIn('method: "POST"', printer_refresh)
+        self.assertIn("confirm: true", printer_refresh)
+        self.assertIn("does not send any command to the printer", printer_refresh)
+
+    def test_printer_tab_has_mobile_structure_and_history_detail(self) -> None:
+        for element_id in (
+            "printer-details",
+            "printer-ams",
+            "printer-maintenance",
+            "printer-history",
+            "printer-environment",
+        ):
+            self.assertIn(f'id="{element_id}"', self.template)
+        self.assertIn("printer-dashboard-grid", self.styles)
+        self.assertIn("@media (max-width: 640px)", self.styles)
+        self.assertIn("session_id=", self.javascript)
 
     def test_clocks_use_server_timestamp_and_download_requires_ready_state(
         self,

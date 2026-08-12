@@ -4,12 +4,16 @@ The Flask dashboard is served at `http://sensor-pi.local:8080` (or the Pi's
 address on port 8080). It uses vanilla JavaScript and the locally installed
 Chart.js bundle; it reads only the Flask API, never MQTT directly.
 
-## Three sections
+## Four sections
 
 The top-level navigation is hash-backed and does not reload the page:
 
 - `#monitoring` contains current readings, source/range filters, a reusable
   measurement selector, and one historical chart.
+- `#bambu-printer` is a failure-isolated, read-only X2D view with current print,
+  dual toolheads, connectivity/usage provenance, AMS inventory, local
+  maintenance records, canonical print history, and selected-session SEN66
+  association.
 - `#active-monitoring` contains timed sessions, running/recent session state,
   and persistent Historical Data Export jobs.
 - `#status` contains the fixed allow-list systemd status view, node status and
@@ -86,7 +90,10 @@ refresh, browser closure, and frontend request timeouts do not cancel them.
 
 ## Polling
 
-The Monitoring tab refreshes live values every seven seconds. The Active
+The Monitoring tab refreshes live values every seven seconds. The Bambu /
+Printer tab refreshes its current snapshot every seven seconds and loads
+history/maintenance independently with `Promise.allSettled`, so one printer
+section cannot reject the others or the sensor dashboard. The Active
 Monitoring tab polls session/export metadata every five seconds and bounded
 previews every 15 seconds. Hidden tabs do not perform their normal periodic
 fetches; activating a tab refreshes it immediately. In-flight guards prevent

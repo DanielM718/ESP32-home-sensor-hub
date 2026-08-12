@@ -76,6 +76,39 @@ class IntentRouter:
                 0.98,
             )
 
+        if self._printer_maintenance_request(normalized):
+            printer_or_result = self._require_printer(normalized, entity)
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_printer_maintenance",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
+        if self._last_print_request(normalized):
+            printer_or_result = self._require_printer(normalized, entity)
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_last_print",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
+        if self._printer_usage_request(normalized):
+            printer_or_result = self._require_printer(normalized, entity)
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_printer_usage",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
         if entity is not None and entity.sensor_type == "printer":
             if self._printer_temperature_request(normalized):
                 skill = "get_printer_temperatures"
@@ -306,6 +339,44 @@ class IntentRouter:
         return component and any(
             word in text.split()
             for word in ("temperature", "temperatures", "temp", "hot")
+        )
+
+    @staticmethod
+    def _printer_usage_request(text: str) -> bool:
+        printer_context = any(
+            word in text.split() for word in ("printer", "x2d", "bambu")
+        )
+        usage = any(
+            contains_phrase(text, phrase)
+            for phrase in (
+                "how many hours",
+                "usage hours",
+                "printer run",
+                "how many prints",
+                "print count",
+            )
+        )
+        return printer_context and usage
+
+    @staticmethod
+    def _printer_maintenance_request(text: str) -> bool:
+        return any(
+            word in text.split()
+            for word in ("maintenance", "overdue", "service", "serviced", "lubricate")
+        ) and any(
+            word in text.split() for word in ("printer", "x2d", "bambu", "maintenance")
+        )
+
+    @staticmethod
+    def _last_print_request(text: str) -> bool:
+        return any(
+            contains_phrase(text, phrase)
+            for phrase in (
+                "last print",
+                "previous print",
+                "most recent print",
+                "how long was the print",
+            )
         )
 
     @staticmethod

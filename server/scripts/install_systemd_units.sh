@@ -13,6 +13,7 @@ UNITS=(
   home-sensor-bridge.service
   home-sensor-export-worker.service
   home-sensor-dashboard.service
+  home-sensor-printer-observer.service
 )
 
 usage() {

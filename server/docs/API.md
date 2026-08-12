@@ -205,10 +205,20 @@ credentials or raw Home Assistant attributes:
   unavailable state.
 - `GET /api/printer/sessions?limit=20`: newest sessions; `limit` is restricted
   to `1..100`.
-- `GET /api/printer/environment-summary`: observational baseline/print/recovery
-  summary over the latest session and high-resolution SEN66 data.
+- `GET /api/printer/sessions/<id>`: one canonical local/cloud history item.
+- `GET /api/printer/history?limit=100`: reconciled local and Bambu Cloud
+  history; `limit` is restricted to `1..500`.
+- `GET /api/printer/maintenance`: usage provenance, configured reminder state,
+  and append-only completion history.
+- `GET /api/printer/environment-summary?session_id=<id>`: observational
+  baseline/print/recovery summary over retained raw SEN66 data. Missing or
+  expired raw data is explicit and is never replaced by 15-minute aggregates.
+- `POST /api/printer/maintenance/<task>/complete` with
+  `{"confirm":true,"notes":"..."}`: append a local maintenance audit record.
+  The response includes `local_record_only=true` and `printer_control=false`.
 
-There is no write/control printer endpoint. Details and response fields are in
+The sole POST changes only the home-sensor SQLite database. There is no
+printer-control endpoint or HA service invocation. Details and response fields are in
 [`BAMBU_X2D.md`](BAMBU_X2D.md).
 
 ### `GET /api/nodes`

@@ -105,6 +105,18 @@ def build_tool_catalog(
                     "get_print_environment_summary",
                     "Read an observational SEN66 summary for the latest print session.",
                 ),
+                (
+                    "get_printer_usage",
+                    "Read local print hours/counts and clearly separated upstream usage provenance.",
+                ),
+                (
+                    "get_printer_maintenance",
+                    "Read local maintenance reminders and completion history.",
+                ),
+                (
+                    "get_last_print",
+                    "Read metadata and duration for the latest print-history item.",
+                ),
             )
         ),
         ToolDefinition(

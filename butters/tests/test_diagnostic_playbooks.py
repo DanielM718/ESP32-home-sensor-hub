@@ -163,6 +163,33 @@ def test_server_health_rules_cover_resource_and_service_thresholds() -> None:
     assert assessment.confidence is Confidence.HIGH
 
 
+def test_server_health_decodes_historical_soft_temperature_flag_exactly() -> None:
+    assessment = LocalDiagnosticRules().assess(
+        _plan("server_health", DiagnosticDomain.SERVER, "butters"),
+        _bundle(
+            _item(
+                "server.health",
+                EvidenceStatus.DEGRADED,
+                values={
+                    "load": [0.5, 0.5, 0.5],
+                    "available_memory_bytes": 1_000_000_000,
+                    "swap_used_bytes": 0,
+                    "disk_free_bytes": 90,
+                    "disk_total_bytes": 100,
+                    "temperature_c": 69.0,
+                    "throttled": "0x80000",
+                    "services": [],
+                },
+            )
+        ),
+    )
+
+    finding = next(item for item in assessment.findings if item.code == "historical_throttling")
+    assert "soft-temperature limit" in finding.summary
+    assert "no current condition bits set" in finding.summary
+    assert "undervoltage" not in finding.summary
+
+
 def test_network_rules_separate_dns_routing_and_host_failures() -> None:
     rules = LocalDiagnosticRules()
     dns = rules.assess(

@@ -6,9 +6,12 @@ from butters.skills.model import (
     AirQualityResult,
     ComparisonResult,
     CurrentPrintResult,
+    LastPrintResult,
     PrintEnvironmentResult,
+    PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
+    PrinterUsageResult,
     SensorLastSeenResult,
     SensorStatusResult,
     SensorValueResult,
@@ -42,6 +45,12 @@ class ResponseFormatter:
             return self._printer_temperatures(result)
         if isinstance(result, PrintEnvironmentResult):
             return self._print_environment(result)
+        if isinstance(result, PrinterUsageResult):
+            return self._printer_usage(result)
+        if isinstance(result, PrinterMaintenanceResult):
+            return self._printer_maintenance(result)
+        if isinstance(result, LastPrintResult):
+            return self._last_print(result)
         return "The read-only skill returned no usable result."
 
     @staticmethod
@@ -271,6 +280,74 @@ class ResponseFormatter:
             + "; ".join(parts)
             + ". This is an observational association, not proof of causation."
         )
+
+    @staticmethod
+    def _printer_usage(result: PrinterUsageResult) -> str:
+        usage = result.intelligence.usage
+        local_hours = _number(usage.get("locally_observed_print_hours")) or 0.0
+        completed = _integer(usage.get("locally_observed_completed_print_count")) or 0
+        effective = _number(usage.get("maintenance_effective_lifetime_hours"))
+        text = (
+            f"The printer has {local_hours:.1f} locally observed print hours and "
+            f"{completed} locally observed completed prints."
+        )
+        reported = _number(usage.get("printer_reported_lifetime_hours"))
+        if reported is None:
+            text += " The X2D integration does not expose a printer-reported lifetime counter."
+        else:
+            text += f" The printer-reported lifetime value is {reported:.1f} hours."
+        if effective is not None:
+            text += f" The local maintenance position is {effective:.1f} hours."
+        return text
+
+    @staticmethod
+    def _printer_maintenance(result: PrinterMaintenanceResult) -> str:
+        enabled = [
+            task
+            for task in result.intelligence.maintenance_tasks
+            if task.get("enabled") is True
+        ]
+        overdue = [
+            str(task.get("name")) for task in enabled if task.get("overdue") is True
+        ]
+        warning = [
+            str(task.get("name")) for task in enabled if task.get("warning") is True
+        ]
+        if overdue:
+            text = f"Overdue printer maintenance: {', '.join(overdue)}."
+        elif warning:
+            text = (
+                f"Printer maintenance approaching its reminder: {', '.join(warning)}."
+            )
+        elif enabled:
+            text = f"All {len(enabled)} configured printer maintenance tasks are currently within their local intervals."
+        else:
+            text = "No printer maintenance tasks are configured."
+        completions = result.intelligence.completion_history
+        if completions:
+            latest = completions[0]
+            text += f" The last recorded service was {latest.get('completed_at', 'at an unknown time')}."
+        return text
+
+    @staticmethod
+    def _last_print(result: LastPrintResult) -> str:
+        if not result.intelligence.print_history:
+            return "No local or imported printer history is available."
+        item = result.intelligence.print_history[0]
+        job = _text(item.get("job_name")) or "an unnamed job"
+        outcome = _text(item.get("result")) or "unknown"
+        duration = _integer(item.get("duration_seconds"))
+        duration_text = (
+            f" It lasted {_duration(duration)}."
+            if duration is not None
+            else " Its duration is unknown."
+        )
+        source = (
+            "Bambu Cloud history"
+            if item.get("source") == "bambu_cloud_history"
+            else "local observation"
+        )
+        return f"The latest print was {job}; result {outcome}, from {source}.{duration_text}"
 
     @staticmethod
     def _failure(code: str, message: str) -> str:

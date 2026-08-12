@@ -8,6 +8,7 @@ from butters.assistant import create_assistant
 from butters.assistant_config import IntegrationSettings, load_assistant_settings
 from butters.integrations.model import (
     PrintEnvironmentSnapshot,
+    PrinterIntelligenceSnapshot,
     PrinterSnapshot,
     SensorSnapshot,
     ServerHealthSnapshot,
@@ -20,9 +21,12 @@ from butters.skills.implementations import build_read_only_registry
 from butters.skills.model import (
     ActionClass,
     CurrentPrintResult,
+    LastPrintResult,
     PrintEnvironmentResult,
+    PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
+    PrinterUsageResult,
     SkillExecution,
 )
 from butters.stt.normalization import load_domain_vocabulary
@@ -80,6 +84,28 @@ class Printers:
             voc_recovery_seconds=600,
         )
 
+    def intelligence(self) -> PrinterIntelligenceSnapshot:
+        return PrinterIntelligenceSnapshot(
+            usage={
+                "locally_observed_print_hours": 12.5,
+                "locally_observed_completed_print_count": 8,
+                "printer_reported_lifetime_hours": None,
+                "maintenance_effective_lifetime_hours": 12.5,
+            },
+            maintenance_tasks=(
+                {"name": "User inspection", "enabled": True, "overdue": True},
+            ),
+            completion_history=({"completed_at": "2026-08-01T12:00:00Z"},),
+            print_history=(
+                {
+                    "job_name": "dragon.3mf",
+                    "result": "completed",
+                    "duration_seconds": 5400,
+                    "source": "locally_observed",
+                },
+            ),
+        )
+
 
 class Sensors:
     def snapshot(self) -> SensorSnapshot:
@@ -123,6 +149,11 @@ def _registry(printer: Printers | None = None):
             "how long did air quality take to recover after the print",
             "get_print_environment_summary",
         ),
+        ("how many hours has the printer run", "get_printer_usage"),
+        ("how many prints has the X2D done", "get_printer_usage"),
+        ("what printer maintenance is overdue", "get_printer_maintenance"),
+        ("when was the printer last serviced", "get_printer_maintenance"),
+        ("how long was the last print", "get_last_print"),
     ),
 )
 def test_printer_questions_route_to_typed_read_only_skills(
@@ -169,6 +200,9 @@ def test_printer_skills_return_typed_results() -> None:
         "get_current_print": CurrentPrintResult,
         "get_printer_temperatures": PrinterTemperaturesResult,
         "get_print_environment_summary": PrintEnvironmentResult,
+        "get_printer_usage": PrinterUsageResult,
+        "get_printer_maintenance": PrinterMaintenanceResult,
+        "get_last_print": LastPrintResult,
     }
     for name, result_type in expected.items():
         execution = registry.execute(name, {"entity": "x2d"})
@@ -192,6 +226,9 @@ def test_no_printer_control_skill_is_registered() -> None:
         "get_current_print",
         "get_printer_temperatures",
         "get_print_environment_summary",
+        "get_printer_usage",
+        "get_printer_maintenance",
+        "get_last_print",
     }
     assert names.isdisjoint(
         {"start_print", "stop_print", "pause_print", "resume_print", "cancel_print"}
@@ -257,6 +294,14 @@ def test_dashboard_printer_adapter_parses_current_and_environment_payloads() -> 
             "metrics": {"pm25": {"print_peak": 4.2}},
             "voc_recovery_seconds": 300,
         },
+        "/api/printer/maintenance": {
+            "usage": {"locally_observed_print_hours": 12.5},
+            "tasks": [],
+            "completion_history": [],
+        },
+        "/api/printer/history?limit=100": {
+            "history": [{"job_name": "cube", "duration_seconds": 60}],
+        },
     }
 
     def opener(request, **_kwargs):
@@ -266,3 +311,37 @@ def test_dashboard_printer_adapter_parses_current_and_environment_payloads() -> 
     adapter = DashboardPrinterAdapter(IntegrationSettings(), opener=opener)
     assert adapter.current().normalized_state == "idle"
     assert adapter.environment_summary().metrics["pm25"]["print_peak"] == 4.2
+    assert adapter.intelligence().usage["locally_observed_print_hours"] == 12.5
+
+
+def test_printer_intelligence_responses_remain_read_only_and_provenance_clear() -> None:
+    formatter = ResponseFormatter()
+    intelligence = Printers().intelligence()
+    usage = formatter.format_execution(
+        SkillExecution(
+            "get_printer_usage",
+            ActionClass.READ_ONLY,
+            0.01,
+            PrinterUsageResult(intelligence),
+        )
+    )
+    maintenance = formatter.format_execution(
+        SkillExecution(
+            "get_printer_maintenance",
+            ActionClass.READ_ONLY,
+            0.01,
+            PrinterMaintenanceResult(intelligence),
+        )
+    )
+    last = formatter.format_execution(
+        SkillExecution(
+            "get_last_print",
+            ActionClass.READ_ONLY,
+            0.01,
+            LastPrintResult(intelligence),
+        )
+    )
+    assert "12.5 locally observed print hours" in usage
+    assert "does not expose a printer-reported lifetime counter" in usage
+    assert "Overdue printer maintenance" in maintenance
+    assert "dragon.3mf" in last and "1 hour 30 minutes" in last

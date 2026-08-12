@@ -12,9 +12,15 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from app.printer_config import PrinterObserverSettings
-from app.printer_model import NormalizedPrinterState, PrinterState, ValueProvenance
+from app.printer_model import (
+    AmsTrayState,
+    AmsUnitState,
+    NormalizedPrinterState,
+    PrinterState,
+    ValueProvenance,
+)
 
-UNAVAILABLE_STATES = frozenset({"", "unknown", "unavailable", "none", "null"})
+UNAVAILABLE_STATES = frozenset({"", "unknown", "unavailable", "none", "null", "empty"})
 SAFE_DISCOVERY_ATTRIBUTES = frozenset(
     {
         "friendly_name",
@@ -137,6 +143,9 @@ class HomeAssistantPrinterAdapter:
                 "Home Assistant state response has an invalid shape"
             )
         wanted = set(self.settings.entities.values())
+        for unit in self.settings.ams_units:
+            wanted.update(unit.entities.values())
+            wanted.update(unit.tray_entities)
         states = {
             str(item.get("entity_id")): item
             for item in decoded
@@ -207,10 +216,16 @@ def printer_state_from_home_assistant(
 
     started_at = _datetime_entity(mapped.get("print_started_at"))
     finished_at = _datetime_entity(mapped.get("print_finished_at"))
+    expected_finished_at = _datetime_entity(mapped.get("expected_finished_at"))
     if started_at is not None:
         provenance["print_started_at"] = ValueProvenance.OBSERVED
     if finished_at is not None:
         provenance["print_finished_at"] = ValueProvenance.OBSERVED
+
+    ams_units = _ams_units(states, settings)
+    ams_slot, ams_slot_provenance = _active_ams_slot(active_tray, ams_units)
+    if ams_slot is not None:
+        provenance["ams_slot"] = ams_slot_provenance
 
     return PrinterState(
         printer_id=settings.printer_id,
@@ -236,6 +251,7 @@ def printer_state_from_home_assistant(
         total_layers=_integer_entity(mapped.get("total_layers"), 0),
         print_started_at=started_at,
         print_finished_at=finished_at,
+        expected_finished_at=expected_finished_at,
         nozzle_1_temperature=_temperature(mapped.get("nozzle_1_temperature")),
         nozzle_1_target=_temperature(mapped.get("nozzle_1_target")),
         nozzle_2_temperature=_temperature(mapped.get("nozzle_2_temperature")),
@@ -243,13 +259,51 @@ def printer_state_from_home_assistant(
         bed_temperature=_temperature(mapped.get("bed_temperature")),
         bed_target=_temperature(mapped.get("bed_target")),
         chamber_temperature=_temperature(mapped.get("chamber_temperature")),
+        chamber_target=_temperature(mapped.get("chamber_target")),
         active_tool=_text_entity(mapped.get("active_tool")),
         active_material=material,
         active_filament=filament,
         ams_state=_text_entity(mapped.get("ams_state")),
-        ams_slot=_text_entity(active_tray),
+        ams_slot=ams_slot,
         print_source=_text_entity(mapped.get("print_source")),
-        firmware_version=_text_entity(mapped.get("firmware_version")),
+        firmware_version=(
+            _text_entity(mapped.get("firmware_version")) or settings.firmware_version
+        ),
+        gcode_filename=_text_entity(mapped.get("gcode_filename")),
+        print_bed_type=_text_entity(mapped.get("print_bed_type")),
+        print_weight_grams=_number_entity(
+            mapped.get("print_weight_grams"), 0, 1_000_000
+        ),
+        print_length_meters=_number_entity(
+            mapped.get("print_length_meters"), 0, 1_000_000
+        ),
+        nozzle_1_type=_text_entity(mapped.get("nozzle_1_type")),
+        nozzle_1_size_mm=_number_entity(mapped.get("nozzle_1_size_mm"), 0, 10),
+        nozzle_2_type=_text_entity(mapped.get("nozzle_2_type")),
+        nozzle_2_size_mm=_number_entity(mapped.get("nozzle_2_size_mm"), 0, 10),
+        cooling_fan_percent=_number_entity(mapped.get("cooling_fan_percent"), 0, 100),
+        auxiliary_fan_percent=_number_entity(
+            mapped.get("auxiliary_fan_percent"), 0, 100
+        ),
+        chamber_fan_percent=_number_entity(mapped.get("chamber_fan_percent"), 0, 100),
+        heatbreak_fan_percent=_number_entity(
+            mapped.get("heatbreak_fan_percent"), 0, 100
+        ),
+        wifi_signal_dbm=_number_entity(mapped.get("wifi_signal_dbm"), -200, 0),
+        mqtt_connection_mode=_text_entity(mapped.get("mqtt_connection_mode")),
+        mqtt_encryption=_boolean_entity(mapped.get("mqtt_encryption")),
+        hybrid_mqtt_control_blocked=_boolean_entity(
+            mapped.get("hybrid_mqtt_control_blocked")
+        ),
+        developer_lan_mode=_boolean_entity(mapped.get("developer_lan_mode")),
+        ha_bambulab_estimated_usage_hours=_number_entity(
+            mapped.get("ha_bambulab_estimated_usage_hours"), 0, 10_000_000
+        ),
+        printer_reported_lifetime_hours=_number_entity(
+            mapped.get("printer_reported_lifetime_hours"), 0, 10_000_000
+        ),
+        cover_available=_available_entity(mapped.get("cover_image")),
+        ams_units=ams_units,
         provenance=provenance,
     )
 
@@ -336,6 +390,90 @@ def _attributes(entity: Mapping[str, Any] | None) -> Mapping[str, Any]:
 def _online(entity: Mapping[str, Any] | None) -> bool:
     state = str(_state(entity) or "").strip().lower()
     return state in {"on", "true", "1", "online", "connected", "available"}
+
+
+def _boolean_entity(entity: Mapping[str, Any] | None) -> bool | None:
+    if entity is None:
+        return None
+    state = str(_state(entity) or "").strip().lower()
+    if state in {"on", "true", "1", "yes", "enabled"}:
+        return True
+    if state in {"off", "false", "0", "no", "disabled"}:
+        return False
+    return None
+
+
+def _available_entity(entity: Mapping[str, Any] | None) -> bool | None:
+    if entity is None:
+        return None
+    return str(_state(entity) or "").strip().lower() not in UNAVAILABLE_STATES
+
+
+def _ams_units(
+    states: Mapping[str, Mapping[str, Any]], settings: PrinterObserverSettings
+) -> tuple[AmsUnitState, ...]:
+    units = []
+    for configured in settings.ams_units:
+        mapped = {
+            key: states.get(entity_id) for key, entity_id in configured.entities.items()
+        }
+        trays = []
+        for index, entity_id in enumerate(configured.tray_entities, start=1):
+            entity = states.get(entity_id)
+            attributes = _attributes(entity)
+            remain = attributes.get("remain")
+            trays.append(
+                AmsTrayState(
+                    slot=str(attributes.get("slot") or index),
+                    name=_attribute_text(attributes, "name") or _text_entity(entity),
+                    material=_attribute_text(attributes, "type", "material"),
+                    color=_attribute_text(attributes, "color"),
+                    remaining_percent=(
+                        int(remain)
+                        if isinstance(remain, (int, float))
+                        and not isinstance(remain, bool)
+                        and 0 <= remain <= 100
+                        else None
+                    ),
+                    active=_attribute_bool(attributes, "active"),
+                    empty=_attribute_bool(attributes, "empty"),
+                )
+            )
+        units.append(
+            AmsUnitState(
+                ams_id=configured.ams_id,
+                model=configured.model,
+                active=_boolean_entity(mapped.get("active")),
+                humidity_percent=_number_entity(mapped.get("humidity_percent"), 0, 100),
+                humidity_index=_integer_entity(mapped.get("humidity_index"), 0),
+                temperature=_temperature(mapped.get("temperature")),
+                drying=_boolean_entity(mapped.get("drying")),
+                remaining_drying_seconds=_duration_seconds(
+                    mapped.get("remaining_drying_time")
+                ),
+                trays=tuple(trays),
+            )
+        )
+    return tuple(units)
+
+
+def _active_ams_slot(
+    active_tray: Mapping[str, Any] | None,
+    units: tuple[AmsUnitState, ...],
+) -> tuple[str | None, ValueProvenance]:
+    attributes = _attributes(active_tray)
+    direct_slot = attributes.get("slot")
+    if isinstance(direct_slot, (str, int)) and str(direct_slot).strip():
+        return str(direct_slot).strip()[:64], ValueProvenance.OBSERVED
+    for unit in units:
+        for tray in unit.trays:
+            if tray.active is True:
+                return (
+                    f"{unit.ams_id} / slot {tray.slot}",
+                    ValueProvenance.INFERRED_ACTIVE_AMS_TRAY,
+                )
+    label = _text_entity(active_tray)
+    return label, ValueProvenance.OBSERVED if label else ValueProvenance.UNKNOWN
 
 
 def _offline_reason(entity: Mapping[str, Any] | None) -> str:
@@ -428,6 +566,11 @@ def _attribute_text(attributes: Mapping[str, Any], *names: str) -> str | None:
         if isinstance(value, str) and value.strip().lower() not in UNAVAILABLE_STATES:
             return value.strip()[:512]
     return None
+
+
+def _attribute_bool(attributes: Mapping[str, Any], name: str) -> bool | None:
+    value = {str(key).lower(): item for key, item in attributes.items()}.get(name)
+    return value if isinstance(value, bool) else None
 
 
 def _safe_scalar(value: object) -> str | int | float | bool | None:

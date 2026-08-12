@@ -1269,6 +1269,148 @@ tbody tr:last-child td {
   overflow-wrap: anywhere;
 }
 
+.printer-hero,
+.printer-panel {
+  margin-bottom: 20px;
+}
+
+.printer-panel {
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+}
+
+.printer-dashboard-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(320px, 1fr);
+  gap: 16px;
+}
+
+.printer-current-card {
+  border-left: 4px solid var(--accent);
+}
+
+.printer-progress {
+  height: 8px;
+  margin-top: 14px;
+  overflow: hidden;
+  background: #e7eeea;
+  border-radius: 999px;
+}
+
+.printer-progress span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+  transition: width 180ms ease;
+}
+
+.printer-detail-facts {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.ams-grid,
+.maintenance-grid {
+  display: grid;
+  gap: 12px;
+}
+
+.maintenance-grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.ams-card,
+.maintenance-card {
+  padding: 14px;
+  background: #fbfcfb;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.maintenance-overdue {
+  border-left: 4px solid var(--danger);
+}
+
+.maintenance-due {
+  border-left: 4px solid var(--danger);
+}
+
+.maintenance-warning {
+  border-left: 4px solid var(--warning);
+}
+
+.maintenance-card ul {
+  margin: 10px 0;
+  padding-left: 20px;
+}
+
+.tray-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(125px, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.tray-card {
+  display: grid;
+  grid-template-columns: 14px 1fr;
+  column-gap: 7px;
+  padding: 9px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+}
+
+.tray-card.is-active {
+  outline: 2px solid var(--accent);
+}
+
+.tray-card span:not(.tray-color),
+.tray-card small {
+  grid-column: 2;
+  overflow-wrap: anywhere;
+}
+
+.tray-color {
+  width: 12px;
+  height: 12px;
+  margin-top: 4px;
+  background: var(--tray-color);
+  border: 1px solid #8b9891;
+  border-radius: 50%;
+}
+
+.printer-history-wrap {
+  max-height: 560px;
+}
+
+.printer-history-table tr.is-selected {
+  background: #ecfdf3;
+}
+
+.interval-markers {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.interval-markers div {
+  display: grid;
+  gap: 4px;
+  padding: 10px;
+  background: #f3f7f5;
+  border-radius: 7px;
+}
+
+.interval-markers span {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
 .command-grid code {
   display: block;
   padding: 8px 10px;
@@ -1299,6 +1441,10 @@ tbody tr:last-child td {
 
   .debug-panel-wide {
     grid-column: auto;
+  }
+
+  .printer-dashboard-grid {
+    grid-template-columns: 1fr;
   }
 }
 
@@ -1374,5 +1520,18 @@ tbody tr:last-child td {
 
   .workflow-panel {
     padding: 13px;
+  }
+
+  .printer-panel {
+    padding: 13px;
+  }
+
+  .printer-detail-facts,
+  .interval-markers {
+    grid-template-columns: 1fr;
+  }
+
+  .printer-history-wrap {
+    margin-inline: -13px;
   }
 }

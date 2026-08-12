@@ -87,6 +87,12 @@ Measurements:
 - `environment/air_quality_event`: long-term sparse event episodes
 - `environment/air_quality_reading`: legacy raw SEN66 history, retained only
   until aggregate backfill is verified and a separately approved cleanup occurs
+- `environment_live/printer_state`: optional high-resolution read-only printer
+  observations, retained for 72 hours
+- `environment/printer_state_5m`: optional permanent printer observations on
+  state changes and at most one point per five minutes
+- `environment/print_session`: optional permanent locally observed print-session
+  transitions
 
 Tags are used for low-cardinality dimensions:
 
@@ -123,6 +129,13 @@ only `environment/air_quality_15m` and keeps aggregate field suffixes. Its
 queries use exact half-open UTC ranges and bounded chunks; they do not change
 retention, write points, or silently replace expired raw samples with
 aggregates.
+
+Printer session UUIDs, cloud task IDs, job names, filenames, materials, and AMS
+inventory are not Influx tags. Session/history/maintenance identity and audit
+records live in the printer SQLite database. Historical environmental
+correlation uses raw `environment_live` samples only; once the full interval is
+outside raw retention it reports `raw_samples_expired` and does not silently
+substitute the permanent 15-minute aggregate methodology.
 
 ## Historical Backfill and Verification
 

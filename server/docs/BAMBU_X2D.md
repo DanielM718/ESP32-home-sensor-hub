@@ -1,178 +1,119 @@
 # Bambu Lab X2D read-only integration
 
-Research and implementation date: **2026-08-11**. This document deliberately
-separates upstream capability, unit-tested behavior, local inspection, and live
-printer verification. No printer command path exists in this design.
+Verified and implemented: **2026-08-12**. The checked-out repository and the
+running Raspberry Pi were inspected without restarting or changing any service.
+The printer was idle and no test print was started.
 
-## Status at this revision
-
-| Item | Status | Evidence |
-|---|---|---|
-| Home Assistant runtime | Locally inspected | Running; version `2026.7.3` returned by its WebSocket handshake. |
-| HA container/config | Partially inspected | The `python3 -m homeassistant --config /config` process is running. Docker socket and `/opt/home-assistant/config` require privileges unavailable in this session, so container name and config entries were not read. |
-| HACS installed | Awaiting authenticated discovery | Not inferable from an unauthenticated endpoint. |
-| HA Bambu integration installed/configured | Awaiting authenticated discovery | No HA token was already available. |
-| Actual X2D entities/attributes/update rate | Awaiting authenticated discovery | Entity IDs have not been guessed or hard-coded. |
-| Actual X2D firmware | Not observed | The official download page lists current available X2D firmware, but that is not evidence of the printer's installed version. |
-| Normalization, session tracking, API, dashboard, Influx schema, Butters | Implemented and unit-tested | See the test and design sections below. |
-| Grafana dashboard | Prepared, not provisioned | Provisioning/restart was intentionally not performed. |
-| Live X2D validation | Awaiting authenticated discovery | No print was started and no printer setting was changed. |
-
-## Integration research
-
-The following sources were checked on 2026-08-11.
-
-### Option A: `greghesp/ha-bambulab`
-
-- Current stable release reviewed: [`v2.2.22`](https://github.com/greghesp/ha-bambulab/releases/tag/v2.2.22), published 2026-05-12. Its release notes explicitly add X2D support.
-- The tagged [manifest](https://raw.githubusercontent.com/greghesp/ha-bambulab/v2.2.22/custom_components/bambu_lab/manifest.json) identifies a local-push integration and the exact `pybambu` dependency used by that release.
-- The tagged [models](https://raw.githubusercontent.com/greghesp/ha-bambulab/v2.2.22/custom_components/bambu_lab/pybambu/models.py) explicitly include the X2D model and dual-nozzle structures. This is stronger evidence than assuming compatibility from X1/P1 support.
-- The tagged [constants](https://raw.githubusercontent.com/greghesp/ha-bambulab/v2.2.22/custom_components/bambu_lab/pybambu/const.py) define the upstream print states used by the centralized mapper.
-- The upstream [entity reference](https://docs.page/greghesp/ha-bambulab/entities) documents print status/stage, job progress, current and total layers, remaining time, start/end timestamps, temperatures, active tray, and AMS-related data. Actual X2D entity availability still depends on the installed integration, firmware, connection mode, and printer state.
-- The upstream [setup guide](https://docs.page/greghesp/ha-bambulab/setup) supports local and cloud-backed configuration. A local IP/access-code path can avoid making this home-sensor adapter cloud-dependent, but the actual unit's allowed mode must be discovered without changing printer settings.
-
-Evidence favors Option A, subject to live entity discovery. It is already shaped
-for Home Assistant, explicitly supports X2D in the current release, and avoids a
-second Bambu protocol client on the 4 GB Pi.
-
-### Option B: Bambuddy
-
-- Current stable release reviewed: [`v0.2.4.4`](https://github.com/maziggy/bambuddy/releases/tag/v0.2.4.4). It is a critical security release fixing the fail-open authentication bypass identified as `GHSA-6mf4-q26m-47pv` / CVSS 9.8. An older release must not be installed.
-- The [project](https://github.com/maziggy/bambuddy) and [supported-printer reference](https://wiki.bambuddy.cool/reference/printers/) explicitly list X2D, dual-nozzle behavior, AMS 2 Pro/AMS HT support, and ARM64/Raspberry Pi deployment.
-- Bambuddy documents LAN-only X2D monitoring as read-only without Developer Mode and reserves full control for Developer Mode. This is useful fallback evidence, but was not verified against this printer.
-- Its [API](https://wiki.bambuddy.cool/reference/api/) exposes GET status/history data, but the same service also has control-capable POST endpoints. It therefore adds a resident database/web application and a larger control/security surface than Option A. CPU and RSS were not benchmarked because it was not installed.
-
-Bambuddy remains the second choice only if current HA X2D entities prove
-insufficient. If used later, it must be `v0.2.4.4` or newer, isolated in Docker,
-API-authenticated, and reachable only on LAN/Tailscale. Developer Mode is out of
-scope.
-
-### Option C: direct Bambu protocol
-
-No direct MQTT implementation was added. It would duplicate protocol/TLS/auth
-churn and create the highest risk of accidentally reaching a request/control
-topic. It remains a last resort only after Options A and B fail with the actual
-X2D.
-
-### Official firmware and security sources
-
-Bambu Lab's official [X2D firmware download page](https://bambulab.cn/zh-cn/support/firmware-download/x2d)
-listed `01.02.00.00` dated 2026-08-06 when researched. That is the latest
-available version shown by the page, **not** the observed firmware on this unit.
-Bambu's [security whitepaper](https://cdn1.bambulab.com/trust-center/file/bambulab-security-whitepaper-en.pdf)
-was also reviewed for the vendor's authentication, encryption, and local/cloud
-security model. No authentication or TLS setting was weakened.
-
-## Selected architecture
-
-The selected implementation target is Option A:
+## Verified live topology
 
 ```text
-Bambu Lab X2D
-    -> existing Home Assistant Bambu integration
-    -> allow-listed GET-only HA adapter (separate observer process)
-    -> normalized PrinterState
-       -> SQLite current state + restart-safe PrintSession tracker
-       -> environment_live/printer_state (high resolution)
-       -> environment/printer_state_5m + print_session (long term)
-       -> Flask read-only API and small dashboard status card
-       -> Grafana printer/environment dashboard
-       -> existing Butters entity/router/SkillRegistry/PolicyValidator
+Bambu Cloud metadata and task history
+                    +
+X2D encrypted local MQTT live state
+                    |
+         greghesp/ha-bambulab 2.2.22
+                    |
+     Home Assistant 2026.7.3 (integration layer)
+                    |
+       GET-only home-sensor observer
+          +---------+-----------+
+          |                     |
+ printer.sqlite3          InfluxDB state points
+ sessions/history/        live 72h + permanent 5m
+ usage/maintenance
+          |
+ dashboard + Butters + existing Active Monitoring
 ```
 
-The observer is separate from `home-sensor-bridge`. It never subscribes or
-publishes to Bambu MQTT, and failure cannot interrupt environmental MQTT
-ingestion. The dashboard reads the observer's small SQLite snapshot; Butters
-uses the existing dashboard integration boundary rather than accessing HA or
-the printer directly.
+The Home Assistant config entry has cloud authentication, a local host/access
+code, and `local_mqtt=true`. The current MQTT connection entity says `local`,
+MQTT encryption is on, Developer LAN Mode is off, and firmware-update support
+in the integration is disabled. This is the intended hybrid design: cloud
+metadata/history plus direct local MQTT live state. It does not enable LAN-Only
+Mode, Developer LAN Mode, or disconnect Bambu Cloud, Handy, or Studio.
 
-The observer is intentionally not enabled by the normal install path until
-authenticated entity discovery is complete. Its prepared systemd unit has
-bounded HTTP timeouts, exponential backoff (up to 300 seconds), a 192 MiB memory
-limit, a 25% CPU quota, no capabilities, and write access only to
-`/var/lib/home-sensor`.
+The installed integration is `greghesp/ha-bambulab` `2.2.22`, 130 files and
+7,103,721 bytes. HACS is neither installed nor configured. Home Assistant
+reported these devices:
 
-## Authenticated discovery boundary
+- X2D, hardware `AP04`, firmware `01.02.00.00`
+- one AMS 2 Pro, hardware `N3F05`, firmware `05.00.22.19`
+- two external spool endpoints, one per X2D toolhead
 
-The repository provides a GET-only, redacting discovery command. It reads
-`/api/config` and `/api/states`, reports loaded HACS/Bambu components, and emits
-only likely Bambu candidates. Attribute names containing token, password,
-secret, access code, IP address, or serial are removed; sensitive entity states
-are redacted.
+The integration exposes control-capable services, buttons, lights, switches,
+and commands. This project does not call them. It reads only `/api/states` and
+the cloud task-list GET endpoint. The chamber light and camera entities found by
+discovery are deliberately not mapped as actions.
 
-The minimal user-controlled action is:
+## Actual X2D entity coverage
 
-1. In Home Assistant, create or supply a long-lived access token suitable for
-   read-only inspection. Do not paste it into chat, a repository file, or shell
-   history.
-2. On the Pi, place it temporarily in `HOME_ASSISTANT_TOKEN` and run from
-   `server/backend`:
+Discovery found **77 enabled Bambu entities**: 59 sensors, 14 binary sensors,
+two images, one light, and one switch. Serial-bearing entity prefixes remain
+redacted. The suffixes below are the actual mappings for this printer.
 
-   ```bash
-   .venv/bin/python -m app.printer_discovery
-   ```
-
-3. Review the redacted result to determine whether HACS, `bambu_lab`, an X2D,
-   AMS/AMS 2 Pro, both nozzles, job metadata, and firmware sensors are actually
-   present. Observe timestamps over several minutes to establish update
-   frequency; do not start a print.
-
-If the current HA integration is absent, the next manual boundary is installing
-the latest compatible `ha-bambulab` through HACS and restarting Home Assistant.
-Neither action is authorized by this milestone session. If installation would
-require Developer Mode or a printer setting change, stop instead of enabling it.
-
-After discovery, copy `server/config/printer.example.toml` outside Git to
-`/etc/home-sensor/printer.toml` and replace only the fields actually observed.
-The HA token belongs in root-controlled `/etc/home-sensor/printer.env`:
-
-```text
-HOME_ASSISTANT_TOKEN=...
-```
-
-Both files should be root-owned and mode `0600`. The token is never returned by
-the API or logged. Do not configure an unavailable optional field.
-
-Repository implementation is not deployment. After discovery and a separate
-deployment approval, an operator still needs to copy the updated backend,
-install `home-sensor-printer-observer.service`, reload systemd, start that new
-observer, and restart `home-sensor-dashboard` so the new routes are served.
-Butters must be deployed through its existing procedure. Provisioning
-`home-sensor-printer.json` with the existing Grafana script restarts Grafana and
-therefore also requires explicit approval. None of these steps was performed in
-this milestone session.
-
-## Normalized `PrinterState`
-
-`server/backend/app/printer_model.py` is protocol-independent. Required fields
-are:
-
-- `printer_id`, `printer_model`
-- `online`, `normalized_state`
-- `source`, `source_timestamp`, `observed_at`
-
-Optional observed fields remain `None` when unavailable:
-
-- `unavailable_reason`, `current_stage`
-- `job_id`, `job_name`, `progress_percent`, `remaining_seconds`
-- `current_layer`, `total_layers`, `print_started_at`, `print_finished_at`
-- `nozzle_1_temperature/target`, `nozzle_2_temperature/target`
-- `bed_temperature/target`, `chamber_temperature`
-- `active_tool`, `active_material`, `active_filament`
-- `ams_state`, `ams_slot`, `print_source`, `firmware_version`
-- per-field `provenance`
-
-Derived `session_active` is true for `preparing`, `printing`, `paused`, and
-`finishing`. Derived `printer_is_printing` is deliberately narrower and true
-only when the printer is online and normalized state is exactly `printing`.
-Heating, preparation, pauses, and cooling are not silently described as active
-deposition.
-
-### Central state mapping
-
-| Normalized state | Accepted upstream values |
+| Area | Actual entity suffixes and availability |
 |---|---|
-| `offline` | forced whenever observed availability is false; raw `offline` |
+| Availability and state | `online`, `print_status`, `current_stage`, `print_progress`, `remaining_time`, `current_layer`, `total_layer_count` |
+| Job | `task_name`, `gcode_filename`, `print_type`, `print_bed_type`, `print_weight`, `print_length`, `start_time`, `end_time` |
+| Job IDs/result | no task/job-ID entity; terminal result is derived from confirmed `print_status`; cloud task IDs are stored separately |
+| Toolheads | `left_nozzle_temperature/target_temperature/type/size`, `right_nozzle_temperature/target_temperature/type/size`; the generic nozzle entities duplicate the active tool and are not required |
+| Bed/chamber | `bed_temperature`, `bed_target_temperature`, `chamber_temperature`, `chamber_target_temperature` |
+| Fans | `cooling_fan_speed`, `aux_fan_speed`, `chamber_fan_speed`, `heatbreak_fan_speed` |
+| Active tool/material | `tool_module`, `active_tray`; material/name/color/slot are inferred only from the explicitly mapped active-tray attributes |
+| Connectivity | `mqtt_connection_mode`, `mqtt_encryption`, `hybrid_mqtt_control_blocked`, `developer_lan_mode`, `wi_fi_signal` |
+| Other read-only metadata | `door`, `extruder_filament`, `hms_errors`, `print_error`, `firmware`, `sd_card_status`, `speed_profile`, `airduct_mode`, `cover_image`, `pick_image` |
+| Deliberately excluded sensitive/control surface | `serial_number`, `ip_address`, chamber light, camera switch, and all HA services/buttons |
+
+At discovery the printer was online and idle: stage `idle`, last print status
+`finish`, progress 100%, layer 238/238, no active tray, local encrypted MQTT,
+Wi-Fi -46 dBm, and both 0.4 mm hardened-steel nozzles present. An `end_time`
+during a live print is treated as an expected finish, not an observed actual end.
+The observer uses terminal-state confirmation time for local session completion
+unless a genuinely observed actual completion timestamp exists.
+
+### AMS 2 Pro and spool coverage
+
+The AMS 2 Pro exposes active/drying flags, humidity and humidity index,
+temperature, remaining drying time, and four tray entities. Tray attributes
+include slot, name, material type, color, active/empty state, and remaining
+percentage when the spool supplies it. At discovery the four materials were
+three PLA spools and one PETG spool; remaining percentages were available for
+three Bambu spools. Specific colors and inventory are operational data and are
+shown in the dashboard, not documented as configuration constants.
+
+Both external-spool endpoints expose an active flag and a spool entity with the
+same safe material/name/color attributes. AMS drying state is observational;
+this project cannot start, stop, or configure drying.
+
+### Idle state-change cadence
+
+Home Assistant recorder rows represent state changes, not every MQTT report, so
+these measurements are lower bounds on transport updates. During the idle
+snapshot, changed temperature values were recorded with median gaps of about
+7.8 seconds for the left/active nozzle and 8.9 seconds for the right nozzle.
+Bed changes had a 38.0-second median, AMS temperature about 635 seconds, Wi-Fi
+about 160 seconds, and image timestamp entities about 300 seconds. Most enum,
+target, fan, AMS tray, and binary states had only their initial row because the
+idle value did not change. No naturally occurring print was present, so loaded
+print cadence was not measured.
+
+No Bambu statistics ID existed in `statistics_meta` at discovery, even though
+some entity metadata declares state classes. Do not assume HA long-term
+statistics until rows are empirically present.
+
+## Normalization and live sessions
+
+`PrinterState` is protocol-independent and keeps unavailable values as `None`.
+It carries the exact dual-nozzle, bed/chamber, fan, connection, tool, AMS,
+usage, expected-finish, firmware, and job metadata listed above. Each inferred
+value has provenance; general AMS inventory is never silently called the active
+print material.
+
+The centralized state map is:
+
+| Normalized | Upstream values |
+|---|---|
+| `offline` | availability false or stale |
 | `idle` | `idle`, `ready` |
 | `preparing` | `init`, `initializing`, `prepare`, `preparing`, `slicing` |
 | `printing` | `running`, `printing` |
@@ -181,151 +122,236 @@ deposition.
 | `completed` | `finish`, `finished`, `complete`, `completed` |
 | `failed` | `failed`, `error` |
 | `cancelled` | `cancel`, `canceled`, `cancelled`, `stopped` |
-| `unknown` | `unknown` and every unmapped future value |
+| `unknown` | missing or future unmapped values |
 
-Raw strings occur only in `printer_adapter.py`; unmapped firmware values remain
-`unknown` rather than being guessed.
+SQLite enforces one active local session per printer. Preparation creates a
+session; pause/resume preserves it; duplicate observations are idempotent;
+offline/unknown observations never close it; reconnect/restart resumes it; and
+terminal states require two confirmations by default. A stable job-ID change
+closes the old session as unknown, but this X2D currently exposes no HA task-ID
+entity. Local source is `locally_observed`; `home_assistant` remains the state
+transport provenance.
 
-### Material provenance
+Locally observed usage is the wall-clock interval from session start through
+confirmed end, including preparation, pauses, and finishing. Only confirmed
+`completed`, `failed`, and `cancelled` outcomes count toward local usage hours;
+unknown outcomes do not. “Completed print count” counts only completed results.
 
-- A specifically mapped active-job/material entity is `observed`.
-- Material read from attributes of the specifically mapped **active AMS tray**
-  is `inferred_active_ams_tray`.
-- General AMS inventory is never equated with printed material.
-- Missing or contradictory information is `unknown`.
-- If the active material changes during one session, the session material is
-  stored as `multiple` with `unknown` provenance. It is not mislabeled as the
-  last spool seen.
+## Lifetime usage provenance
 
-This foundation permits material comparisons, but comparisons must filter for
-acceptable provenance. Filtered/unfiltered status is not currently observable
-and therefore is not invented.
+Three values remain separate:
 
-## `PrintSession` lifecycle
+- `printer_reported_lifetime_hours`: currently unavailable (`null`). Neither
+  the X2D entity set nor ha-bambulab exposes an authoritative printer counter.
+- `ha_bambulab_estimated_usage_hours`: the integration's `total_usage` entity.
+  Source review shows that v2.2.22 seeds this from its `usage_hours` config
+  option and increments locally. The configured seed is 0.0 hours, so this is
+  not represented as printer-reported lifetime usage.
+- `locally_observed_print_hours`: confirmed local `PrintSession` duration from
+  observer deployment onward.
 
-SQLite stores current state, sessions, and a small terminal-transition tracker.
-The file is mode `0600`; SQLite is an operational restart checkpoint, while
-InfluxDB remains the historical analytics store.
+`maintenance_effective_lifetime_hours` is a high-water calculation. At the
+first upstream observation it stores both upstream value and accumulated local
+duration. Thereafter it takes the greater of the latest upstream estimate and
+the initial upstream position plus new local duration. It never adds the same
+session to both counters. If an authoritative printer counter becomes available
+later, it takes precedence with the same high-water rule and preserved
+provenance.
 
-- Any `preparing`, `printing`, `paused`, or `finishing` observation creates or
-  resumes one active session.
-- Pause/resume, duplicate upstream updates, HA restarts, observer restarts, and
-  temporary printer offline/unknown states do not mint another session.
-- An active session remains open while upstream is offline or unknown. No
-  result is fabricated.
-- A different non-empty stable job ID closes the prior active session as
-  `unknown` and opens a new one.
-- Terminal states require two consecutive confirmations by default, reducing
-  state-flap errors. A terminal result followed by idle retains the observed
-  completed/failed/cancelled result.
-- Idle reached without an explicit terminal result closes the session as
-  `unknown`, not cancelled.
-- A repeated filename after a closed session receives a new UUID session ID.
-  Filename alone is never a key.
-- Reprocessing the same observation is idempotent. The database enforces one
-  active session per printer.
-- If the observer first reconnects during an already-active print and has no
-  persisted session, it reconstructs one using an observed print-start
-  timestamp when valid, otherwise the first observation timestamp with inferred
-  provenance.
+Cloud-history interval hours are reported separately and are never added to
+local or maintenance lifetime hours.
 
-## InfluxDB schema
+## Bambu Cloud history
 
-No retention policy is changed.
+The GET-only endpoint used by ha-bambulab is
+`/v1/user-service/my/tasks`. The [OpenBambuAPI cloud HTTP reference](https://github.com/Doridian/OpenBambuAPI/blob/main/cloud-http.md)
+documents `deviceId`, `after`, and `limit`; the implementation uses bounded
+100-record pages, a 15-second timeout, a 16 MiB response bound, and a default
+1,000-record safety limit.
 
-| Bucket/measurement | Purpose | Tags | Important fields |
-|---|---|---|---|
-| `environment_live/printer_state` | One high-resolution observation per poll; existing 72-hour live retention | `printer_id`, `printer_model`, `source` | state flags, progress, layers, temperatures, job/material text, provenance, source timestamp |
-| `environment/printer_state_5m` | State changes plus a maximum five-minute sample interval | `printer_id`, `printer_model`, `source` | same normalized fields |
-| `environment/print_session` | Idempotent start/update/final session record | `printer_id`, `source` | `session_id`, job ID/name, start/end, duration, result, material/provenance, tool/AMS slot |
+The live account returned **49 device-filtered tasks**, oldest start
+2026-05-23 19:25:15 UTC and newest start 2026-08-11 13:57:52 UTC. There were 39
+status-2 completed tasks and 10 status-3 aborted-or-failed tasks. Status 3 does
+not reliably distinguish cancelled from failed, so it is stored as
+`aborted_or_failed`. All 49 records had start/end timestamps, slicer `costTime`,
+weight, length, plate index, mode, device model, cover metadata, and AMS detail
+mappings. Bed type was present for 47; design title for 44; only one had a
+non-empty plate name. Materials are obtained from AMS mappings: PLA and PETG
+were present, with nozzle IDs 0 and 1. Modes were cloud file, LAN file,
+auto-repeat, and cloud slice.
 
-Job IDs, filenames, material labels, and session UUIDs are fields, never tags.
-This bounds series cardinality. Session updates reuse printer/source/start time,
-so Influx upserts the logical record.
+The sum of known start/end intervals is about 209.134 hours. This is not a
+lifetime total. The oldest result may be an API/account retention boundary, and
+the 49 tasks cannot prove completeness. `costTime`, weight, and length are
+slicer/task estimates; actual duration uses end minus start only. Repeating the
+import upserts the same `(printer_id, cloud_id)` row. Missing cloud IDs receive
+a stable content digest; missing timestamps remain null.
 
-## SEN66 environmental correlation
+Cloud records are stored separately from the live state machine so incomplete
+history cannot create an active session. Reconciliation first uses exact cloud
+ID versus local job ID, then a bounded title/time-overlap match. A reconciled
+item appears once in canonical history: local timestamps/result win, while
+cloud material/plate/cover/task metadata and both provenance labels remain.
 
-The analysis query reads `air_quality_reading` for configured location
-`printer_room` from the live 72-hour bucket. Its default windows are:
+Credentials, serial, host, access code, and signed cover URLs are not stored in
+the history database or returned by the API. Only `cover_available` is exposed;
+the dashboard does not leak a HA token or cloud URL to display an image.
 
-- baseline: 30 minutes before session start
-- print: session start through session end (or now for an active session)
-- recovery: 120 minutes after session end
+## Maintenance engine
 
-All windows are configurable. For CO2, PM1, PM2.5, PM4, PM10, VOC index, NOx
-index, temperature, and humidity, the foundation calculates baseline mean,
-print mean, print peak, post-print mean, and print-minus-baseline change. VOC
-recovery is the first of three consecutive post-print samples no more than the
-baseline plus `max(5 index points, 10%)`.
+Maintenance is generic and configuration-driven. The project ships **no
+numeric manufacturer interval**. A task may use operating hours, completed
+print count, calendar days, or an `any`/`all` combination. It stores:
 
-Raw SEN66 data expires after 72 hours. The API reports `raw_samples_expired`
-rather than substituting lower-resolution data with different semantics. The
-model supports last-print questions now: it prefers the newest finished session
-while another print is active, and uses the active session only when no finished
-history exists. Durable per-session aggregate material comparisons are a
-recommended next milestone.
+- stable task ID, name, description, enabled state, notes, and source/provenance
+- interval and warning threshold for each enabled trigger
+- accumulated value, remaining value, next threshold, and ok/warning/overdue
+- last completion time, usage position, and completed-print position
 
-Every API and Butters result describes an **observational association**. A
-change during a print does not alone establish that the printer caused it.
+`POST /api/printer/maintenance/<task>/complete` requires `confirm=true` and
+only appends a local SQLite audit event. It does not call HA, MQTT, or the
+printer. Prior completions are never overwritten. The dashboard repeats this
+boundary in the section text, confirmation dialog, button label, and response.
+Butters does not expose maintenance completion.
 
-## API, dashboard, Grafana, and Butters
+Intervals must cite an operator choice or a current source in `source`/`notes`.
+Bambu cleaning/lubrication guidance without a numeric interval is not converted
+into an invented hour schedule.
 
-Read-only Flask endpoints:
+## Automatic Active Monitoring
+
+The observer integrates with the existing `MonitoringExportStore`; it does not
+create a second collection pipeline. The SEN66 is already stored once at high
+resolution. Manual and printer-triggered intervals may overlap as metadata
+windows without duplicating sensor writes.
+
+On preparing/printing, a unique `printer_session_id` creates one
+`trigger_source=printer` monitoring session. Pause, resume, duplicate events,
+browser closure, restart, and temporary HA/MQTT loss preserve that association.
+The observer synchronizes the latest session every poll to close crash windows.
+After terminal confirmation it records the exact print end, schedules the
+configured recovery end (120 minutes by default), and lets the existing export
+worker close/export the interval. The monitoring database's unique index makes
+start handling restart-safe. Manual sessions retain their existing behavior.
+
+## Environmental association and retention
+
+The actual current SEN66 location is `office`; configuration remains explicit
+because room naming can change. For a session with a known interval, the query
+uses only raw `environment_live/air_quality_reading` samples:
+
+- 30-minute baseline before start
+- exact print start through end
+- 120-minute recovery after end
+
+It calculates mean, peak, post mean, and delta for CO2, PM1, PM2.5, PM4, PM10,
+VOC index, NOx index, temperature, and humidity, plus the existing VOC recovery
+heuristic. Results always say observational association, not causation.
+
+Raw retention is 72 hours. At the discovery instant, three cloud prints were
+fully within that window and one crossed its boundary; the other 45 had expired
+raw detail. If the full baseline/print interval is past retention, the API says
+`raw_samples_expired`. It never substitutes the permanent 15-minute aggregate.
+No retention setting is changed by this milestone.
+
+Influx remains cardinality-safe:
+
+| Measurement | Bucket | Retention/use |
+|---|---|---|
+| `printer_state` | `environment_live` | every observer poll, 72 hours |
+| `printer_state_5m` | `environment` | changes plus max 5-minute interval, permanent |
+| `print_session` | `environment` | local session updates, permanent |
+
+Job IDs, filenames, material, cloud IDs, and session UUIDs are fields or
+relational columns, never Influx tags. Cloud history and maintenance identity
+remain in SQLite.
+
+## Dashboard and API
+
+The top-level **Bambu / Printer** tab is failure-isolated from Monitoring,
+Active Monitoring, and Status. It has current job/state/stage/progress/times,
+layers, material provenance, tool/tray, both nozzle temperatures, bed/chamber,
+printer/firmware/connectivity, usage provenance, AMS inventory/drying,
+maintenance with local-only completion, canonical print history, and a selected
+session's environmental intervals/metrics. Responsive grids collapse for
+iPhone-width screens. There are no printer-control buttons.
+
+Routes:
 
 - `GET /api/printer`
-- `GET /api/printer/sessions?limit=20` (`1..100`)
-- `GET /api/printer/environment-summary`
+- `GET /api/printer/sessions?limit=...`
+- `GET /api/printer/sessions/<id>`
+- `GET /api/printer/history?limit=...`
+- `GET /api/printer/maintenance`
+- `GET /api/printer/environment-summary?session_id=...`
+- `POST /api/printer/maintenance/<task>/complete` — local audit only
 
-No POST/PUT/PATCH/DELETE printer route exists. The small dashboard status card
-refreshes separately, so a printer error cannot reject or delay sensor refresh.
+The dashboard has the same LAN/Tailscale trust boundary as existing monitoring
+mutations. No printer-control endpoint exists.
 
-`server/config/grafana/dashboards/home-sensor-printer.json` prepares a state
-timeline, print start/end annotations, progress, printer temperatures,
-printer-room PM2.5/VOC/NOx overlay, and session table. It has not been copied to
-the running Grafana instance; the existing provisioning script would restart
-Grafana, which was outside this session's authorization.
+## Butters
 
-Butters reuses its normal `EntityRegistry`, deterministic router,
-`SkillRegistry`, response formatter, and authoritative `PolicyValidator`. Entity
-`x2d` has aliases `printer`, `3d printer`, `X2D`, `Bambu`, and `Bambu printer`.
-Longest-alias resolution preserves `printer room` as the SEN66 entity. Registered
-printer skills are read-only:
+Butters continues to use bounded dashboard GETs. Its read-only skills now cover
+status, current print, both toolhead temperatures, latest-print environment,
+usage hours/counts, maintenance due/history, and latest-print duration. The
+deterministic router recognizes questions such as “how many hours has the
+printer run?”, “what maintenance is overdue?”, and “how long was the last
+print?”. Generic sensor skills still reject printer entities, and control verbs
+are rejected before tool routing. There is no maintenance-completion voice
+skill and no printer-control skill.
 
-- `get_printer_status`
-- `get_current_print`
-- `get_printer_temperatures`
-- `get_print_environment_summary`
+## Storage/resource audit
 
-There is no printer control skill. Generic sensor skills reject a printer
-entity, unknown printer IDs are denied, and control verbs are rejected before
-routing.
+At discovery Home Assistant's recorder database was 207,376,384 bytes with a
+4,334,272-byte WAL. The ha-bambulab media root, model/print cache, and timelapse
+cache were all zero bytes. The integration directory was about 6.78 MiB.
+All 77 entities had at least one recorder row and together produced 1,497 rows
+in the inspected 24-hour window. Churn during idle was primarily changed
+temperatures and the two five-minute image timestamp entities. No HA history was
+deleted and no recorder exclusion is applied. Evidence is currently
+insufficient to recommend an exclusion: our observer has not yet run in
+production, and loaded-print cadence has not been measured.
 
-## Failure and security properties
+The Pi resource snapshot reported `get_throttled=0x80000`. Bit 19 is the
+latched historical soft-temperature-limit flag; it is not an undervoltage bit.
+The current-condition bits were all clear, so no current throttle condition was
+reported.
 
-- The observer is a non-critical process, not a code path in the MQTT bridge.
-- HA reads use only bounded HTTP GET requests with a default 3-second timeout
-  and bounded response size.
-- Backoff doubles after failures and caps at five minutes.
-- Offline/malformed/unreachable state is explicit and timestamped.
-- Influx write failure is caught within the observer and cannot affect SQLite,
-  the sensor bridge, dashboard sensor queries, HA, or Butters sensor skills.
-- Only explicitly configured HA entity IDs are retained in normalized state.
-- HA tokens stay outside Git in a restricted environment file. Access codes,
-  cloud credentials, and printer secrets are neither required by nor exposed to
-  the generic model/API/assistant.
-- Direct Bambu MQTT request topics and all control operations are absent.
-- The architecture does not require a public listener or router/Tailscale rule.
+At a 15-second observer poll, one live state point is 5,760 points/day before
+field expansion and expires after 72 hours. Permanent state is at most 288
+points/day plus changes. The actual idle-shaped mapping produced 45 fields and
+a 2,860-byte line-protocol representation. That is an uncompressed wire upper
+estimate of 15.71 MiB/day and 47.13 MiB across the 72-hour live window;
+permanent five-minute sampling would be at most about 286.72 MiB/year before
+Influx compression. These are projections, not measured on-disk allocation.
+SQLite adds one small row per cloud job/session and one row per maintenance
+completion. No new large resident service is added: the prepared observer is a
+bounded Python process with `MemoryMax=192M` and `CPUQuota=25%`; history refresh
+is hourly and Active Monitoring reuses the existing export worker.
 
-## Known limitations and next step
+## Operations and recovery
 
-Actual HACS status, installed Bambu integration version, X2D entity IDs,
-attributes, update cadence, AMS 2 Pro representation, both nozzle entities,
-current job fields, connection mode, and unit firmware remain unverified until
-authenticated HA discovery. No field should be configured before that evidence
-exists.
+Secrets belong only in root-controlled `/etc/home-sensor/printer.env`:
 
-Once idle-state live validation succeeds, the recommended next milestone is
-durable per-session environmental aggregates (including material/provenance and
-explicit ventilation/filter labels) so comparisons remain available after the
-72-hour raw tier expires. Printer control should remain a separate, explicitly
-authorized project, not an extension of this read-only milestone.
+```text
+HOME_ASSISTANT_TOKEN=...
+BAMBU_CLOUD_TOKEN=...
+BAMBU_DEVICE_ID=...
+```
+
+Do not paste values into commands, logs, Git, tests, or reports. The non-secret
+entity allow-list and task definitions belong in `/etc/home-sensor/printer.toml`
+using `server/config/printer.example.toml` as the verified suffix map.
+
+On observer failure, sensor MQTT/Influx ingestion and the dashboard remain
+independent. HA/network errors use bounded timeouts and exponential backoff to
+five minutes. Influx printer-write errors do not roll back SQLite. Cloud history
+errors preserve the last successful import. Active local sessions remain open
+during telemetry loss. Restore `printer.sqlite3` and `monitoring.sqlite3`
+together when recovering associations; otherwise the idempotent unique keys
+rebuild future state without inventing old duration.
+
+Deployment is a separate approval boundary. Repository completion alone does
+not authorize copying files, installing the observer unit, populating
+configuration, starting/restarting services, provisioning Grafana, changing
+Influx retention, or changing Home Assistant.

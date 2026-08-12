@@ -172,12 +172,14 @@ to Mosquitto, InfluxDB, Grafana, or Flask.
 The active native deployment is `/opt/home-sensor/server`. The repository's
 `install.sh` is the authoritative deployment method: it copies the `server/`
 tree into that path while preserving `backend/.env` and `backend/.venv`, updates
-the virtual environment from `requirements.txt`, and installs the three Python
+the virtual environment from `requirements.txt`, and installs the four Python
 systemd units. The unit files confirm these service names and runtime split:
 
 - `home-sensor-bridge.service`: MQTT subscriptions and InfluxDB writes
 - `home-sensor-dashboard.service`: Gunicorn, Flask API, and static dashboard
 - `home-sensor-export-worker.service`: persistent SQLite/InfluxDB CSV worker
+- `home-sensor-printer-observer.service`: optional GET-only HA/cloud printer
+  observer, conditioned on its root-controlled configuration files
 - `mosquitto.service`, `influxdb.service`, and `grafana-server.service`: separate
   platform services; the Grafana dashboard is reprovisioned after this update
 
@@ -332,3 +334,61 @@ curl -fsS http://127.0.0.1:8080/api/exports | python3 -m json.tool
 
 On rollback, do not delete the SQLite database or export directory. Older code
 will ignore them, and redeploying this feature will reuse completed jobs/files.
+
+## Deploy The Read-Only X2D Observer And Printer Dashboard
+
+This remains a separate approval boundary. Confirm that no print is active
+before the first deployment, take backups of `monitoring.sqlite3` and any
+existing `printer.sqlite3`, and use the normal installer to copy the reviewed
+server tree. The installer installs (but does not start unless requested) the
+`home-sensor-printer-observer.service` unit alongside the existing three units.
+
+Install the pre-deployment-generated `printer.toml`, whose entity IDs were
+matched directly against the fresh HA registry. Do not hand-edit or guess the
+entity prefix. Keep the printer ID non-sensitive. Add only user-chosen or
+currently sourced maintenance intervals.
+
+Create `/etc/home-sensor/printer.env` only through the reviewed credential
+installer after the server tree is copied:
+
+```bash
+sudo /usr/bin/python3 \
+  /opt/home-sensor/server/scripts/configure_printer_credentials.py
+```
+
+The script reads the Home Assistant long-lived access token from a hidden
+terminal prompt and verifies it with one bounded local `GET /api/`. It copies
+the existing ha-bambulab cloud token and device ID directly from HA's protected
+config-entry storage. None of the three values enters argv, the process
+environment, shell history, stdout, or the deployment report. It atomically
+installs a root-owned, `home-sensor`-group-readable mode-`0640` environment
+file. Never display that file in logs or a deployment transcript.
+
+The dashboard environment must explicitly use the actual SEN66 location:
+
+```text
+PRINTER_DB_PATH=/var/lib/home-sensor/printer.sqlite3
+PRINTER_ENVIRONMENT_LOCATION=office
+PRINTER_BASELINE_MINUTES=30
+PRINTER_RECOVERY_MINUTES=120
+```
+
+After the reviewed files are installed, initialize the observer first so the
+shared SQLite schema exists, then restart the two application consumers:
+
+```bash
+sudo systemctl enable --now home-sensor-printer-observer.service
+sudo systemctl restart home-sensor-export-worker.service home-sensor-dashboard.service
+```
+
+Do not restart or reconfigure Home Assistant, Mosquitto, InfluxDB, Grafana,
+Docker, containerd, Tailscale, or the sensor bridge. Verify the read-only API,
+automatic-monitoring metadata, bounded process resources, and absence of HA
+service calls in observer logs. Do not induce a print for testing.
+
+Rollback stops/disables the observer, restores the prior `/opt/home-sensor/server`
+tree and prior application unit files, reloads systemd, restores the two SQLite
+backups if a full data rollback is required, and restarts only the dashboard and
+export worker. Retain the new SQLite files by default: older code ignores the
+additional tables/columns, and preserving them avoids losing maintenance audit
+events or imported provenance.

@@ -296,6 +296,12 @@ class MonitoringService:
             "csv_format": session["csv_format"],
             "created_at_utc": session["created_at_utc"],
             "updated_at_utc": session["updated_at_utc"],
+            "trigger_source": session.get("trigger_source", "manual"),
+            "printer_session_id": session.get("printer_session_id"),
+            "printer_ended_at_utc": session.get("printer_ended_at_utc"),
+            "recovery_end_time_utc": session.get("recovery_end_time_utc"),
+            "shares_existing_sensor_storage": session.get("trigger_source")
+            == "printer",
             "server_time_utc": iso_utc(now),
             "preview": dict(preview) if preview is not None else None,
             "export": serialized_export,

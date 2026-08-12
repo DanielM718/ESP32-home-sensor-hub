@@ -20,6 +20,7 @@
 
     <nav class="app-tabs" aria-label="Dashboard sections" role="tablist">
       <a id="tab-monitoring" class="tab-link" href="#monitoring" role="tab" aria-controls="panel-monitoring">Monitoring</a>
+      <a id="tab-bambu-printer" class="tab-link" href="#bambu-printer" role="tab" aria-controls="panel-bambu-printer">Bambu / Printer</a>
       <a id="tab-active-monitoring" class="tab-link" href="#active-monitoring" role="tab" aria-controls="panel-active-monitoring">Active Monitoring</a>
       <a id="tab-status" class="tab-link" href="#status" role="tab" aria-controls="panel-status">Status &amp; Debug</a>
     </nav>
@@ -53,18 +54,6 @@
           <div id="current-grid" class="current-grid" aria-live="polite"></div>
         </section>
 
-        <section aria-labelledby="printer-heading">
-          <div class="section-heading">
-            <div>
-              <h2 id="printer-heading">3D Printer</h2>
-              <p class="subtle">Read-only state observed through Home Assistant.</p>
-            </div>
-          </div>
-          <div id="printer-status" class="printer-status" aria-live="polite">
-            <p class="empty-state">Printer observer is not configured.</p>
-          </div>
-        </section>
-
         <section aria-labelledby="history-heading">
           <article class="chart-panel configurable-chart">
             <div class="section-heading chart-heading">
@@ -85,6 +74,55 @@
               <canvas id="history-chart" aria-label="Selected historical sensor measurements"></canvas>
             </div>
           </article>
+        </section>
+      </section>
+
+      <section id="panel-bambu-printer" class="tab-panel" role="tabpanel" aria-labelledby="tab-bambu-printer" hidden>
+        <section class="printer-hero" aria-labelledby="printer-current-heading">
+          <div class="section-heading">
+            <div>
+              <h2 id="printer-current-heading">Current Print</h2>
+              <p class="subtle">Observation only through Home Assistant and encrypted local MQTT. No printer controls are exposed.</p>
+            </div>
+            <span id="printer-read-only-badge" class="status-pill status-ok">Read only</span>
+          </div>
+          <div id="printer-status" class="printer-status" aria-live="polite">
+            <p class="empty-state">Printer observer is not configured.</p>
+          </div>
+        </section>
+
+        <div class="printer-dashboard-grid">
+          <section class="printer-panel" aria-labelledby="printer-details-heading">
+            <div class="section-heading"><div><h2 id="printer-details-heading">Printer</h2><p class="subtle">Identity, connectivity, usage provenance, and toolheads.</p></div></div>
+            <div id="printer-details" aria-live="polite"><p class="empty-state">Waiting for printer details.</p></div>
+          </section>
+
+          <section class="printer-panel" aria-labelledby="ams-heading">
+            <div class="section-heading"><div><h2 id="ams-heading">AMS Inventory</h2><p class="subtle">Observed AMS 2 Pro and external spool metadata.</p></div></div>
+            <div id="printer-ams" class="ams-grid" aria-live="polite"><p class="empty-state">Waiting for AMS state.</p></div>
+          </section>
+        </div>
+
+        <section class="printer-panel" aria-labelledby="maintenance-heading">
+          <div class="section-heading">
+            <div><h2 id="maintenance-heading">Maintenance</h2><p class="subtle">Local reminders configured by you. “Mark complete” records an audit event only—it never sends a command to the X2D.</p></div>
+          </div>
+          <div id="printer-maintenance" class="maintenance-grid" aria-live="polite"><p class="empty-state">No maintenance tasks configured.</p></div>
+        </section>
+
+        <section class="printer-panel" aria-labelledby="print-history-heading">
+          <div class="section-heading"><div><h2 id="print-history-heading">Print History</h2><p class="subtle">Locally observed sessions and idempotently imported Bambu Cloud task metadata.</p></div></div>
+          <div class="table-wrap printer-history-wrap">
+            <table class="printer-history-table">
+              <thead><tr><th>Date</th><th>Job / model</th><th>Duration</th><th>Result</th><th>Source</th><th>Material / tool</th><th>Environment</th></tr></thead>
+              <tbody id="printer-history"><tr><td colspan="7">Loading print history.</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="printer-panel" aria-labelledby="printer-environment-heading">
+          <div class="section-heading"><div><h2 id="printer-environment-heading">Environmental Association</h2><p class="subtle">Baseline, print, and recovery intervals from retained raw SEN66 samples. Associations do not establish causation.</p></div></div>
+          <div id="printer-environment" aria-live="polite"><p class="empty-state">Select a print from history to inspect its environment interval.</p></div>
         </section>
       </section>
 

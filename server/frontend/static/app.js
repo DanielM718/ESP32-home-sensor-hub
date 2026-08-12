@@ -9,6 +9,9 @@ const API = {
   exports: "/api/exports",
   status: "/api/status",
   printer: "/api/printer",
+  printerHistory: "/api/printer/history",
+  printerMaintenance: "/api/printer/maintenance",
+  printerEnvironment: "/api/printer/environment-summary",
 };
 
 const POLL_INTERVAL_MS = 7000;
@@ -92,6 +95,9 @@ const state = {
   previewInFlight: false,
   statusInFlight: false,
   printerInFlight: false,
+  printerDashboardInFlight: false,
+  printerCurrent: null,
+  selectedPrinterHistoryId: null,
   serverOffsetMs: 0,
   selectedChartFields: new Set(["temperature_c", "humidity"]),
   ready: false,
@@ -102,6 +108,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupWorkflowControllers();
   setupRangeButtons();
   setupNodeFilter();
+  setupPrinterActions();
   document.getElementById("refresh-button").addEventListener("click", () => refreshActiveTab(true));
 
   if (window.Chart) {
@@ -128,7 +135,7 @@ document.addEventListener("DOMContentLoaded", () => {
   });
 });
 
-const TAB_IDS = ["monitoring", "active-monitoring", "status"];
+const TAB_IDS = ["monitoring", "bambu-printer", "active-monitoring", "status"];
 
 function setupTabs() {
   const links = TAB_IDS.map((id) => document.getElementById(`tab-${id}`));
@@ -177,6 +184,8 @@ async function refreshActiveTab(force = false) {
   }
   if (state.activeTab === "monitoring") {
     await refreshAll();
+  } else if (state.activeTab === "bambu-printer") {
+    await refreshPrinterDashboard(force);
   } else if (state.activeTab === "active-monitoring") {
     try {
       await Promise.all([
@@ -221,7 +230,6 @@ async function refreshAll() {
     renderLatest(latest);
     renderChartMetricSelector();
     renderCharts(readings);
-    void refreshPrinter();
     setLastUpdated(latest.generated_at || readings.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
   } catch (error) {
@@ -234,6 +242,10 @@ async function refreshAll() {
 }
 
 async function refreshLatestOnly() {
+  if (state.activeTab === "bambu-printer" && !document.hidden) {
+    await refreshPrinter();
+    return;
+  }
   if (state.activeTab !== "monitoring" || document.hidden
       || state.fullRefreshInFlight || state.latestRefreshInFlight) {
     return;
@@ -250,7 +262,6 @@ async function refreshLatestOnly() {
     updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderChartMetricSelector();
-    void refreshPrinter();
     setLastUpdated(latest.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
     clearError();
@@ -268,9 +279,15 @@ async function refreshPrinter() {
   }
   state.printerInFlight = true;
   try {
-    renderPrinter(await fetchJson(API.printer));
+    const printer = await fetchJson(API.printer);
+    state.printerCurrent = printer;
+    renderPrinter(printer);
+    renderPrinterDetails(printer);
+    renderAms(printer.ams_units || []);
   } catch (_error) {
     renderPrinter({ available: false, status: "unavailable", reason: "Printer state is temporarily unavailable" });
+    renderPrinterSectionError("printer-details", "Printer details are temporarily unavailable.");
+    renderPrinterSectionError("printer-ams", "AMS state is temporarily unavailable.");
   } finally {
     state.printerInFlight = false;
   }
@@ -303,21 +320,240 @@ function renderPrinter(printer) {
   const material = printer.active_material
     ? `${printer.active_material}${materialQualifier}`
     : "Unknown";
+  const expectedFinish = printer.expected_finished_at
+    ? formatDateTime(printer.expected_finished_at)
+    : "Unknown";
   container.innerHTML = `
-    <article class="reading-card printer-card">
+    <article class="reading-card printer-card printer-current-card">
       <div class="air-station-heading">
-        <div><h3>${escapeHtml(printer.printer_model || "Printer")}</h3><span class="authority-label">Read only · ${escapeHtml(printer.source || "unavailable")}</span></div>
+        <div><h3>${escapeHtml(printer.job_name || printer.printer_model || "Printer")}</h3><span class="authority-label">Read only · ${escapeHtml(printer.source || "unavailable")} · observed values unless labeled inferred</span></div>
         <span class="status-pill ${printer.available ? "status-ok" : "status-error"}">${escapeHtml(formatLabel(printer.status || "unknown"))}</span>
       </div>
+      <div class="printer-progress" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Number.isFinite(printer.progress_percent) ? Math.round(printer.progress_percent) : 0}">
+        <span style="width:${Number.isFinite(printer.progress_percent) ? Math.max(0, Math.min(100, printer.progress_percent)) : 0}%"></span>
+      </div>
       <dl class="printer-facts">
-        <div><dt>Job</dt><dd>${escapeHtml(printer.job_name || "Unknown")}</dd></div>
+        <div><dt>Normalized state</dt><dd>${escapeHtml(formatLabel(printer.normalized_state || "unknown"))}</dd></div>
+        <div><dt>Stage</dt><dd>${escapeHtml(formatLabel(printer.current_stage || "unknown"))}</dd></div>
+        <div><dt>Print source</dt><dd>${escapeHtml(formatLabel(printer.print_source || "unknown"))}</dd></div>
         <div><dt>Progress</dt><dd>${escapeHtml(progress)}</dd></div>
         <div><dt>Remaining</dt><dd>${escapeHtml(remaining)}</dd></div>
         <div><dt>Layer</dt><dd>${escapeHtml(layer)}</dd></div>
         <div><dt>Material</dt><dd>${escapeHtml(material)}</dd></div>
+        <div><dt>Started</dt><dd>${escapeHtml(printer.print_started_at ? formatDateTime(printer.print_started_at) : "Unknown")}</dd></div>
+        <div><dt>Expected finish</dt><dd>${escapeHtml(expectedFinish)} <span class="subtle">(upstream estimate)</span></dd></div>
+        <div><dt>Tool / tray</dt><dd>${escapeHtml([printer.active_tool, printer.ams_slot].filter(Boolean).join(" · ") || "Unknown")}</dd></div>
+        <div><dt>Temperatures</dt><dd>${escapeHtml(printerTemperatureSummary(printer))}</dd></div>
         <div><dt>Observed</dt><dd>${escapeHtml(relativeTime(printer.observed_at))}</dd></div>
       </dl>
     </article>`;
+}
+
+async function refreshPrinterDashboard(force = false) {
+  if ((document.hidden && !force) || state.printerDashboardInFlight) {
+    return;
+  }
+  state.printerDashboardInFlight = true;
+  setRefreshButtonBusy(true);
+  try {
+    const requests = await Promise.allSettled([
+      fetchJson(API.printer),
+      fetchJson(`${API.printerHistory}?limit=100`),
+      fetchJson(API.printerMaintenance),
+    ]);
+    const [current, history, maintenance] = requests;
+    if (current.status === "fulfilled") {
+      state.printerCurrent = current.value;
+      renderPrinter(current.value);
+      renderPrinterDetails(current.value);
+      renderAms(current.value.ams_units || []);
+      setLastUpdated(current.value.observed_at);
+    } else {
+      renderPrinter({ available: false, status: "unavailable", reason: "Printer state is temporarily unavailable" });
+      renderPrinterSectionError("printer-details", "Printer details are temporarily unavailable.");
+      renderPrinterSectionError("printer-ams", "AMS state is temporarily unavailable.");
+    }
+    if (history.status === "fulfilled") {
+      renderPrinterHistory(history.value.history || []);
+    } else {
+      renderPrinterHistoryError("Print history is temporarily unavailable.");
+    }
+    if (maintenance.status === "fulfilled") {
+      renderMaintenance(maintenance.value);
+    } else {
+      renderPrinterSectionError("printer-maintenance", "Maintenance records are temporarily unavailable.");
+    }
+    const failures = requests.filter((result) => result.status === "rejected").length;
+    setStatus(failures ? `Printer partial (${failures})` : "Online", failures ? "loading" : "ok");
+  } finally {
+    state.printerDashboardInFlight = false;
+    setRefreshButtonBusy(false);
+  }
+}
+
+function renderPrinterDetails(printer) {
+  const usage = printer.usage || {};
+  const container = document.getElementById("printer-details");
+  if (!container) return;
+  container.innerHTML = `<dl class="printer-facts printer-detail-facts">
+    <div><dt>Model / firmware</dt><dd>${escapeHtml(printer.printer_model || "Unknown")} · ${escapeHtml(printer.firmware_version || "Unknown")}</dd></div>
+    <div><dt>Connection</dt><dd>${escapeHtml(formatLabel(printer.mqtt_connection_mode || "unknown"))} MQTT · ${printer.mqtt_encryption === true ? "encrypted" : printer.mqtt_encryption === false ? "not encrypted" : "encryption unknown"}</dd></div>
+    <div><dt>Hybrid protection</dt><dd>${printer.hybrid_mqtt_control_blocked === true ? "Control blocked" : printer.hybrid_mqtt_control_blocked === false ? "Not reported blocked" : "Unknown"} · Developer LAN ${printer.developer_lan_mode === true ? "on" : printer.developer_lan_mode === false ? "off" : "unknown"}</dd></div>
+    <div><dt>Wi-Fi</dt><dd>${Number.isFinite(printer.wifi_signal_dbm) ? `${printer.wifi_signal_dbm} dBm` : "Unknown"}</dd></div>
+    <div><dt>Left nozzle</dt><dd>${escapeHtml(nozzleDescription(printer, 1))}</dd></div>
+    <div><dt>Right nozzle</dt><dd>${escapeHtml(nozzleDescription(printer, 2))}</dd></div>
+    <div><dt>Printer-reported lifetime</dt><dd>${usage.printer_reported_lifetime_hours_available ? `${formatNumber(usage.printer_reported_lifetime_hours, 2, " h")}` : "Not exposed by X2D / ha-bambulab"}</dd></div>
+    <div><dt>HA integration estimate</dt><dd>${formatNumber(usage.ha_bambulab_estimated_usage_hours, 2, " h")} <span class="subtle">(not printer lifetime)</span></dd></div>
+    <div><dt>Locally observed</dt><dd>${formatNumber(usage.locally_observed_print_hours, 2, " h")} · ${Number(usage.locally_recorded_terminal_job_count || 0)} terminal jobs</dd></div>
+    <div><dt>Maintenance position</dt><dd>${formatNumber(usage.maintenance_effective_lifetime_hours, 2, " h")} <span class="subtle">(${escapeHtml(formatLabel(usage.maintenance_effective_provenance || "unknown"))})</span></dd></div>
+  </dl>`;
+}
+
+function renderAms(units) {
+  const container = document.getElementById("printer-ams");
+  if (!container) return;
+  if (!units.length) {
+    container.innerHTML = '<p class="empty-state">No mapped AMS or external spool state is available.</p>';
+    return;
+  }
+  container.innerHTML = units.map((unit) => `<article class="ams-card">
+    <div class="air-station-heading"><h3>${escapeHtml(unit.model || unit.ams_id)}</h3><span class="status-pill ${unit.active ? "status-ok" : "status-loading"}">${unit.active ? "Active" : "Standby"}</span></div>
+    <p class="subtle">${unit.humidity_percent == null ? "Humidity unavailable" : `Humidity ${escapeHtml(unit.humidity_percent)}%`} · ${unit.temperature == null ? "Temperature unavailable" : `${escapeHtml(unit.temperature)} °C`} · ${unit.drying ? `Drying (${formatDuration(unit.remaining_drying_seconds)} remaining)` : "Not drying"}</p>
+    <div class="tray-grid">${(unit.trays || []).map((tray) => `<div class="tray-card ${tray.active ? "is-active" : ""}">
+      <span class="tray-color" style="--tray-color:${safeColor(tray.color)}"></span>
+      <strong>Slot ${escapeHtml(tray.slot)}</strong><span>${escapeHtml(tray.name || (tray.empty ? "Empty" : "Unknown"))}</span><small>${escapeHtml(tray.material || "Material unknown")}${Number.isInteger(tray.remaining_percent) ? ` · ${tray.remaining_percent}%` : ""}</small>
+    </div>`).join("")}</div>
+  </article>`).join("");
+}
+
+function renderMaintenance(payload) {
+  const container = document.getElementById("printer-maintenance");
+  const tasks = (payload.tasks || []).filter((task) => task.enabled);
+  if (!tasks.length) {
+    container.innerHTML = '<p class="empty-state">No maintenance intervals are configured. The project deliberately ships no unsupported manufacturer interval.</p>';
+    return;
+  }
+  container.innerHTML = tasks.map((task) => `<article class="maintenance-card maintenance-${escapeHtml(task.state)}">
+    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${task.state === "overdue" || task.state === "due" ? "status-error" : task.state === "warning" ? "status-loading" : "status-ok"}">${escapeHtml(formatLabel(task.state))}</span></div>
+    <p>${escapeHtml(task.description || "No description")}</p>
+    <ul>${(task.triggers || []).map((trigger) => `<li>${escapeHtml(formatLabel(trigger.trigger_type))}: ${escapeHtml(String(trigger.current_accumulated_value))} / ${escapeHtml(String(trigger.interval))} (${escapeHtml(String(trigger.remaining))} remaining)</li>`).join("")}</ul>
+    <p class="subtle">Last complete: ${task.last_completed_at ? escapeHtml(formatDateTime(task.last_completed_at)) : "Never recorded"} · Source: ${escapeHtml(task.provenance || "unknown")}</p>
+    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">Mark complete locally</button>
+  </article>`).join("");
+}
+
+function renderPrinterHistory(history) {
+  const body = document.getElementById("printer-history");
+  if (!history.length) {
+    body.innerHTML = '<tr><td colspan="7">No local or imported print history.</td></tr>';
+    return;
+  }
+  body.innerHTML = history.map((item) => `<tr class="${state.selectedPrinterHistoryId === item.history_id ? "is-selected" : ""}">
+    <td>${item.started_at ? escapeHtml(formatDateTime(item.started_at)) : "Unknown"}</td>
+    <td><strong>${escapeHtml(item.job_name || item.design_title || "Unknown")}</strong><br><small>${escapeHtml(item.device_model || "X2D")}</small></td>
+    <td>${item.duration_seconds == null ? "Unknown" : escapeHtml(formatDurationLong(item.duration_seconds))}</td>
+    <td>${escapeHtml(formatLabel(item.result || "unknown"))}</td>
+    <td>${escapeHtml(item.source === "bambu_cloud_history" ? "Bambu cloud history" : "Local observed")}</td>
+    <td>${escapeHtml((item.materials || [item.material]).filter(Boolean).join(", ") || "Unknown")}<br><small>${escapeHtml((item.nozzle_ids || []).length ? `Nozzle ${item.nozzle_ids.join(", ")}` : item.active_tool || "Tool unknown")}</small></td>
+    <td><button class="secondary-button inspect-print" type="button" data-history-id="${escapeHtml(item.history_id)}" ${item.started_at && item.ended_at ? "" : "disabled"}>Inspect</button></td>
+  </tr>`).join("");
+}
+
+function renderPrinterHistoryError(message) {
+  document.getElementById("printer-history").innerHTML = `<tr><td colspan="7">${escapeHtml(message)}</td></tr>`;
+}
+
+async function inspectPrintEnvironment(historyId) {
+  state.selectedPrinterHistoryId = historyId;
+  renderPrinterSectionError("printer-environment", "Loading retained raw SEN66 association…");
+  try {
+    const payload = await fetchJson(`${API.printerEnvironment}?session_id=${encodeURIComponent(historyId)}`);
+    renderPrintEnvironment(payload);
+  } catch (_error) {
+    renderPrinterSectionError("printer-environment", "Environmental summary is temporarily unavailable.");
+  }
+}
+
+function renderPrintEnvironment(payload) {
+  const container = document.getElementById("printer-environment");
+  if (!payload.available) {
+    const reason = payload.reason === "raw_samples_expired"
+      ? "Raw SEN66 samples have expired; permanent downsampled data was not substituted."
+      : payload.reason === "print_interval_unknown"
+        ? "The print interval is incomplete, so correlation is unavailable."
+        : "No retained raw SEN66 samples are available for this interval.";
+    container.innerHTML = `<p class="empty-state">${escapeHtml(reason)}</p>`;
+    return;
+  }
+  const windows = payload.windows || {};
+  const metrics = payload.metrics || {};
+  container.innerHTML = `<div class="interval-markers">
+    <div><strong>Baseline</strong><span>${escapeHtml(formatDateTime(windows.baseline_start))} → ${escapeHtml(formatDateTime(windows.print_start))}</span></div>
+    <div><strong>Print</strong><span>${escapeHtml(formatDateTime(windows.print_start))} → ${escapeHtml(formatDateTime(windows.print_end))}</span></div>
+    <div><strong>Recovery</strong><span>${escapeHtml(formatDateTime(windows.print_end))} → ${escapeHtml(formatDateTime(windows.recovery_end))}</span></div>
+  </div><div class="table-wrap"><table class="environment-summary-table"><thead><tr><th>Metric</th><th>Baseline mean</th><th>Print mean</th><th>Print peak</th><th>Delta</th><th>Recovery mean</th></tr></thead><tbody>
+    ${Object.entries(metrics).map(([name, values]) => `<tr><th>${escapeHtml(formatLabel(name))}</th><td>${formatMetricValue(values.baseline_mean)}</td><td>${formatMetricValue(values.print_mean)}</td><td>${formatMetricValue(values.print_peak)}</td><td>${formatMetricValue(values.change_from_baseline)}</td><td>${formatMetricValue(values.post_mean)}</td></tr>`).join("")}
+  </tbody></table></div><p class="subtle">${escapeHtml((payload.limitations || ["Observational association only."]).join(" "))}</p>`;
+}
+
+function setupPrinterActions() {
+  document.getElementById("panel-bambu-printer").addEventListener("click", async (event) => {
+    const inspect = event.target.closest(".inspect-print");
+    if (inspect && !inspect.disabled) {
+      await inspectPrintEnvironment(inspect.dataset.historyId);
+      return;
+    }
+    const complete = event.target.closest(".maintenance-complete");
+    if (!complete) return;
+    const confirmed = window.confirm("Record this maintenance task as complete in the local dashboard database? This does not send any command to the printer.");
+    if (!confirmed) return;
+    complete.disabled = true;
+    try {
+      await fetchJson(`${API.printerMaintenance}/${encodeURIComponent(complete.dataset.maintenanceTask)}/complete`, {
+        method: "POST",
+        body: JSON.stringify({ confirm: true, notes: "" }),
+      });
+      renderMaintenance(await fetchJson(API.printerMaintenance));
+    } catch (error) {
+      showError(error.message || "Could not record maintenance completion");
+      complete.disabled = false;
+    }
+  });
+}
+
+function printerTemperatureSummary(printer) {
+  const parts = [];
+  for (const [name, value, target] of [
+    ["L", printer.nozzle_1_temperature, printer.nozzle_1_target],
+    ["R", printer.nozzle_2_temperature, printer.nozzle_2_target],
+    ["Bed", printer.bed_temperature, printer.bed_target],
+    ["Chamber", printer.chamber_temperature, printer.chamber_target],
+  ]) {
+    if (Number.isFinite(value)) parts.push(`${name} ${value} °C${Number.isFinite(target) ? ` → ${target} °C` : ""}`);
+  }
+  return parts.join(" · ") || "Unknown";
+}
+
+function nozzleDescription(printer, index) {
+  const name = index === 1 ? "Left" : "Right";
+  const type = printer[`nozzle_${index}_type`] || "type unknown";
+  const size = Number.isFinite(printer[`nozzle_${index}_size_mm`]) ? `${printer[`nozzle_${index}_size_mm`]} mm` : "size unknown";
+  const temperature = Number.isFinite(printer[`nozzle_${index}_temperature`]) ? `${printer[`nozzle_${index}_temperature`]} °C` : "temperature unknown";
+  return `${name}: ${type}, ${size}, ${temperature}`;
+}
+
+function safeColor(value) {
+  const match = String(value || "").match(/^#?([0-9a-f]{6})(?:[0-9a-f]{2})?$/i);
+  return match ? `#${match[1]}` : "#d1d5db";
+}
+
+function formatMetricValue(value) {
+  return Number.isFinite(value) ? escapeHtml(Number(value).toFixed(3)) : "-";
+}
+
+function renderPrinterSectionError(id, message) {
+  const container = document.getElementById(id);
+  if (container) container.innerHTML = `<p class="empty-state">${escapeHtml(message)}</p>`;
 }
 
 async function refreshKnownSources(force = false) {

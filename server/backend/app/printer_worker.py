@@ -6,17 +6,26 @@ import logging
 import os
 import signal
 import threading
+import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.config import configure_logging, load_settings
 from app.influx import InfluxWriter
+from app.persistence import MonitoringExportStore
 from app.printer_adapter import (
     HomeAssistantPrinterAdapter,
     PrinterAdapterError,
     unavailable_printer_state,
 )
 from app.printer_config import load_printer_settings
+from app.printer_intelligence import (
+    BambuCloudHistoryAdapter,
+    PrinterIntelligenceError,
+    PrinterIntelligenceStore,
+)
 from app.printer_model import print_session_point, printer_state_point
+from app.printer_monitoring import PrinterMonitoringCoordinator
 from app.printer_persistence import PrinterStore
 
 LOGGER = logging.getLogger("home_sensor.printer")
@@ -37,6 +46,38 @@ def run() -> int:
         terminal_confirmations=settings.terminal_confirmations,
     )
     store.initialize()
+    intelligence = PrinterIntelligenceStore(settings.database_path)
+    intelligence.initialize()
+    intelligence.sync_maintenance_tasks(
+        settings.maintenance_tasks, now=datetime.now(timezone.utc)
+    )
+    monitoring_coordinator = None
+    if settings.automatic_monitoring:
+        monitoring_store = MonitoringExportStore(
+            settings.monitoring_database_path,
+            settings.monitoring_output_dir,
+        )
+        monitoring_store.initialize()
+        monitoring_coordinator = PrinterMonitoringCoordinator(
+            monitoring_store,
+            environment_location=settings.environment_location,
+            recovery_minutes=settings.recovery_minutes,
+        )
+    cloud_adapter = None
+    cloud_token = os.environ.get("BAMBU_CLOUD_TOKEN", "")
+    cloud_device_id = os.environ.get("BAMBU_DEVICE_ID", "")
+    if settings.cloud_history_enabled and cloud_token and cloud_device_id:
+        cloud_adapter = BambuCloudHistoryAdapter(
+            cloud_token,
+            cloud_device_id,
+            timeout_seconds=settings.cloud_history_timeout_seconds,
+            max_records=settings.cloud_history_max_records,
+        )
+    elif settings.cloud_history_enabled:
+        LOGGER.warning(
+            "Bambu Cloud history is disabled because its root-controlled environment is incomplete"
+        )
+    last_cloud_attempt = time.monotonic() - settings.cloud_history_refresh_seconds
     stop_event = threading.Event()
     for signum in (signal.SIGTERM, signal.SIGINT):
         signal.signal(signum, lambda *_args: stop_event.set())
@@ -59,6 +100,50 @@ def run() -> int:
                 LOGGER.warning("printer observation unavailable: %s", exc)
 
             changed_sessions = store.process(state)
+            intelligence.observe_usage(
+                state.printer_id,
+                observed_at=state.observed_at,
+                ha_estimate_hours=state.ha_bambulab_estimated_usage_hours,
+                printer_reported_hours=state.printer_reported_lifetime_hours,
+            )
+            if monitoring_coordinator is not None:
+                try:
+                    # Synchronizing the latest session every poll closes the
+                    # crash window between a session transition and monitoring
+                    # metadata update. The store is unique/idempotent by print UUID.
+                    monitoring_coordinator.synchronize(
+                        store.latest_session(settings.printer_id)
+                    )
+                except Exception:
+                    LOGGER.exception("printer active-monitoring synchronization failed")
+            if (
+                cloud_adapter is not None
+                and time.monotonic() - last_cloud_attempt
+                >= settings.cloud_history_refresh_seconds
+            ):
+                last_cloud_attempt = time.monotonic()
+                attempted_at = datetime.now(timezone.utc)
+                try:
+                    cloud = cloud_adapter.fetch()
+                    imported = intelligence.import_cloud_records(
+                        settings.printer_id,
+                        cloud["records"],
+                        imported_at=attempted_at,
+                        api_total=cloud["api_total"],
+                        truncated=cloud["truncated"],
+                    )
+                    LOGGER.info(
+                        "Bambu Cloud history read: records=%d inserted=%d updated=%d reconciled=%d",
+                        cloud["records_retrieved"],
+                        imported["inserted"],
+                        imported["updated"],
+                        imported["reconciled"],
+                    )
+                except PrinterIntelligenceError as exc:
+                    intelligence.record_import_error(
+                        settings.printer_id, str(exc), attempted_at=attempted_at
+                    )
+                    LOGGER.warning("Bambu Cloud history read unavailable: %s", exc)
             try:
                 writer.write_point_data(
                     printer_state_point(state, measurement="printer_state"),

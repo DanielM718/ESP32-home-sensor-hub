@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import os
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,7 @@ from werkzeug.exceptions import HTTPException
 from app.config import AppSettings, ConfigError, configure_logging, load_settings
 from app.export_queries import InfluxExportQueryRepository
 from app.persistence import MonitoringExportStore
+from app.printer_intelligence import PrinterIntelligenceError
 from app.printer_queries import PrinterReadRepository
 from app.queries import (
     InfluxReadRepository,
@@ -71,11 +73,10 @@ def create_app(
         database_path=Path(
             os.environ.get("PRINTER_DB_PATH", "/var/lib/home-sensor/printer.sqlite3")
         ),
-        environment_location=os.environ.get(
-            "PRINTER_ENVIRONMENT_LOCATION", "printer_room"
-        ),
+        environment_location=os.environ.get("PRINTER_ENVIRONMENT_LOCATION", "office"),
         baseline_minutes=int(os.environ.get("PRINTER_BASELINE_MINUTES", "30")),
         recovery_minutes=int(os.environ.get("PRINTER_RECOVERY_MINUTES", "120")),
+        raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
     )
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
     app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = (
@@ -212,9 +213,56 @@ def register_routes(app: Flask) -> None:
             raise QueryValidationError("limit must be between 1 and 100")
         return jsonify(current_app.config["PRINTER_REPOSITORY"].sessions(limit=limit))
 
+    @app.get("/api/printer/sessions/<history_id>")
+    def printer_session(history_id: str) -> Any:
+        item = current_app.config["PRINTER_REPOSITORY"].history_item(history_id)
+        if item is None:
+            return jsonify(
+                {"error": "not_found", "message": "unknown print session"}
+            ), 404
+        return jsonify(item)
+
+    @app.get("/api/printer/history")
+    def printer_history() -> Any:
+        raw_limit = request.args.get("limit", "100")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise QueryValidationError("limit must be an integer") from exc
+        if not 1 <= limit <= 500:
+            raise QueryValidationError("limit must be between 1 and 500")
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].history(limit=limit))
+
+    @app.get("/api/printer/maintenance")
+    def printer_maintenance() -> Any:
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].maintenance())
+
+    @app.post("/api/printer/maintenance/<task_id>/complete")
+    def complete_printer_maintenance(task_id: str) -> Any:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
+            raise QueryValidationError(
+                "confirm=true is required; this records local maintenance only"
+            )
+        notes = payload.get("notes", "")
+        if not isinstance(notes, str):
+            raise QueryValidationError("notes must be a string")
+        result = current_app.config["PRINTER_REPOSITORY"].complete_maintenance(
+            task_id,
+            notes=notes,
+            completed_at=datetime.now(timezone.utc),
+        )
+        return jsonify(result), 201
+
     @app.get("/api/printer/environment-summary")
     def printer_environment_summary() -> Any:
-        return jsonify(current_app.config["PRINTER_REPOSITORY"].environment_summary())
+        repository = current_app.config["PRINTER_REPOSITORY"]
+        session_id = request.args.get("session_id")
+        return jsonify(
+            repository.environment_summary(session_id)
+            if session_id
+            else repository.environment_summary()
+        )
 
 
 def register_error_handlers(app: Flask) -> None:
@@ -232,6 +280,10 @@ def register_error_handlers(app: Flask) -> None:
 
     @app.errorhandler(QueryValidationError)
     def query_validation_error(exc: QueryValidationError) -> Any:
+        return jsonify({"error": "bad_request", "message": str(exc)}), 400
+
+    @app.errorhandler(PrinterIntelligenceError)
+    def printer_intelligence_error(exc: PrinterIntelligenceError) -> Any:
         return jsonify({"error": "bad_request", "message": str(exc)}), 400
 
     @app.errorhandler(HTTPException)

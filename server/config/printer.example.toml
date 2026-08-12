@@ -4,6 +4,7 @@
 [printer]
 id = "x2d"
 model = "X2D"
+firmware_version = "01.02.00.00" # observed in HA device registry; verify after updates
 
 [home_assistant]
 url = "http://127.0.0.1:8123"
@@ -18,35 +19,108 @@ permanent_sample_seconds = 300
 terminal_confirmations = 2
 
 [analysis]
-environment_location = "printer_room"
+environment_location = "office" # actual SEN66 location observed on this Pi
 baseline_minutes = 30
 recovery_minutes = 120
+
+[automatic_monitoring]
+enabled = true
+database_path = "/var/lib/home-sensor/monitoring.sqlite3"
+output_dir = "/var/lib/home-sensor/exports"
+
+[cloud_history]
+enabled = true
+refresh_seconds = 3600
+timeout_seconds = 15
+max_records = 1000
 
 # Required mappings. The remaining mappings are optional and omitted when HA
 # does not expose them. These syntactically valid IDs are deliberately non-real.
 [entities]
-online = "binary_sensor.replace_online_after_discovery"
-print_status = "sensor.replace_print_status_after_discovery"
-# current_stage = "sensor.actual_entity_id"
-# job_id = "sensor.actual_entity_id"
-# job_name = "sensor.actual_entity_id"
-# progress_percent = "sensor.actual_entity_id"
-# remaining_time = "sensor.actual_entity_id"
-# current_layer = "sensor.actual_entity_id"
-# total_layers = "sensor.actual_entity_id"
-# print_started_at = "sensor.actual_entity_id"
-# print_finished_at = "sensor.actual_entity_id"
-# nozzle_1_temperature = "sensor.actual_entity_id"
-# nozzle_1_target = "sensor.actual_entity_id"
-# nozzle_2_temperature = "sensor.actual_entity_id"
-# nozzle_2_target = "sensor.actual_entity_id"
-# bed_temperature = "sensor.actual_entity_id"
-# bed_target = "sensor.actual_entity_id"
-# chamber_temperature = "sensor.actual_entity_id"
-# active_tool = "sensor.actual_entity_id"
-# active_material = "sensor.actual_entity_id"
-# active_filament = "sensor.actual_entity_id"
-# ams_state = "sensor.actual_entity_id"
-# ams_slot = "sensor.actual_entity_id"
-# print_source = "sensor.actual_entity_id"
-# firmware_version = "sensor.actual_entity_id"
+online = "binary_sensor.replace_with_discovered_x2d_slug_online"
+print_status = "sensor.replace_with_discovered_x2d_slug_print_status"
+current_stage = "sensor.replace_with_discovered_x2d_slug_current_stage"
+job_name = "sensor.replace_with_discovered_x2d_slug_task_name"
+progress_percent = "sensor.replace_with_discovered_x2d_slug_print_progress"
+remaining_time = "sensor.replace_with_discovered_x2d_slug_remaining_time"
+current_layer = "sensor.replace_with_discovered_x2d_slug_current_layer"
+total_layers = "sensor.replace_with_discovered_x2d_slug_total_layer_count"
+print_started_at = "sensor.replace_with_discovered_x2d_slug_start_time"
+expected_finished_at = "sensor.replace_with_discovered_x2d_slug_end_time"
+nozzle_1_temperature = "sensor.replace_with_discovered_x2d_slug_left_nozzle_temperature"
+nozzle_1_target = "sensor.replace_with_discovered_x2d_slug_left_nozzle_target_temperature"
+nozzle_2_temperature = "sensor.replace_with_discovered_x2d_slug_right_nozzle_temperature"
+nozzle_2_target = "sensor.replace_with_discovered_x2d_slug_right_nozzle_target_temperature"
+bed_temperature = "sensor.replace_with_discovered_x2d_slug_bed_temperature"
+bed_target = "sensor.replace_with_discovered_x2d_slug_bed_target_temperature"
+chamber_temperature = "sensor.replace_with_discovered_x2d_slug_chamber_temperature"
+chamber_target = "sensor.replace_with_discovered_x2d_slug_chamber_target_temperature"
+active_tool = "sensor.replace_with_discovered_x2d_slug_tool_module"
+ams_slot = "sensor.replace_with_discovered_x2d_slug_active_tray"
+print_source = "sensor.replace_with_discovered_x2d_slug_print_type"
+gcode_filename = "sensor.replace_with_discovered_x2d_slug_gcode_filename"
+print_bed_type = "sensor.replace_with_discovered_x2d_slug_print_bed_type"
+print_weight_grams = "sensor.replace_with_discovered_x2d_slug_print_weight"
+print_length_meters = "sensor.replace_with_discovered_x2d_slug_print_length"
+nozzle_1_type = "sensor.replace_with_discovered_x2d_slug_left_nozzle_type"
+nozzle_1_size_mm = "sensor.replace_with_discovered_x2d_slug_left_nozzle_size"
+nozzle_2_type = "sensor.replace_with_discovered_x2d_slug_right_nozzle_type"
+nozzle_2_size_mm = "sensor.replace_with_discovered_x2d_slug_right_nozzle_size"
+cooling_fan_percent = "sensor.replace_with_discovered_x2d_slug_cooling_fan_speed"
+auxiliary_fan_percent = "sensor.replace_with_discovered_x2d_slug_aux_fan_speed"
+chamber_fan_percent = "sensor.replace_with_discovered_x2d_slug_chamber_fan_speed"
+heatbreak_fan_percent = "sensor.replace_with_discovered_x2d_slug_heatbreak_fan_speed"
+wifi_signal_dbm = "sensor.replace_with_discovered_x2d_slug_wi_fi_signal"
+mqtt_connection_mode = "sensor.replace_with_discovered_x2d_slug_mqtt_connection_mode"
+mqtt_encryption = "binary_sensor.replace_with_discovered_x2d_slug_mqtt_encryption"
+hybrid_mqtt_control_blocked = "binary_sensor.replace_with_discovered_x2d_slug_hybrid_mqtt_control_blocked"
+developer_lan_mode = "binary_sensor.replace_with_discovered_x2d_slug_developer_lan_mode"
+ha_bambulab_estimated_usage_hours = "sensor.replace_with_discovered_x2d_slug_total_usage"
+cover_image = "image.replace_with_discovered_x2d_slug_cover_image"
+
+# The real discovery found one AMS 2 Pro and two external spool endpoints.
+[[ams]]
+id = "ams_1"
+model = "AMS 2 Pro"
+tray_entities = [
+  "sensor.replace_with_discovered_x2d_slug_ams_1_tray_1",
+  "sensor.replace_with_discovered_x2d_slug_ams_1_tray_2",
+  "sensor.replace_with_discovered_x2d_slug_ams_1_tray_3",
+  "sensor.replace_with_discovered_x2d_slug_ams_1_tray_4",
+]
+[ams.entities]
+active = "binary_sensor.replace_with_discovered_x2d_slug_ams_1_active"
+humidity_percent = "sensor.replace_with_discovered_x2d_slug_ams_1_humidity"
+humidity_index = "sensor.replace_with_discovered_x2d_slug_ams_1_humidity_index"
+temperature = "sensor.replace_with_discovered_x2d_slug_ams_1_temperature"
+drying = "binary_sensor.replace_with_discovered_x2d_slug_ams_1_drying"
+remaining_drying_time = "sensor.replace_with_discovered_x2d_slug_ams_1_remaining_drying_time"
+
+[[ams]]
+id = "external_spool_1"
+model = "External Spool"
+tray_entities = ["sensor.replace_with_discovered_x2d_slug_externalspool_external_spool"]
+[ams.entities]
+active = "binary_sensor.replace_with_discovered_x2d_slug_externalspool_active"
+
+[[ams]]
+id = "external_spool_2"
+model = "External Spool"
+tray_entities = ["sensor.replace_with_discovered_x2d_slug_externalspool2_external_spool"]
+[ams.entities]
+active = "binary_sensor.replace_with_discovered_x2d_slug_externalspool2_active"
+
+# No Bambu numeric interval is asserted here. Add only user-chosen or sourced
+# recommendations; completion writes only to the local SQLite audit log.
+# [[maintenance]]
+# id = "example_inspection"
+# name = "Example user-defined inspection"
+# description = "A locally chosen reminder, not a manufacturer interval."
+# interval_hours = 100
+# warning_hours = 10
+# interval_prints = 25
+# warning_prints = 3
+# due_when = "any"
+# source = "user_configured"
+# notes = "Replace with a source URL or a note explaining the choice."
+# enabled = true

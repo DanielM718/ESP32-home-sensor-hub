@@ -8,6 +8,7 @@ from typing import TypeAlias
 
 from butters.integrations.model import (
     PrintEnvironmentSnapshot,
+    PrinterIntelligenceSnapshot,
     PrinterSnapshot,
     ServerHealthSnapshot,
 )
@@ -176,6 +177,21 @@ class PrintEnvironmentResult:
     summary: PrintEnvironmentSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class PrinterUsageResult:
+    intelligence: PrinterIntelligenceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class PrinterMaintenanceResult:
+    intelligence: PrinterIntelligenceSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class LastPrintResult:
+    intelligence: PrinterIntelligenceSnapshot
+
+
 SkillResult: TypeAlias = (
     SensorValueResult
     | SensorStatusResult
@@ -187,6 +203,9 @@ SkillResult: TypeAlias = (
     | CurrentPrintResult
     | PrinterTemperaturesResult
     | PrintEnvironmentResult
+    | PrinterUsageResult
+    | PrinterMaintenanceResult
+    | LastPrintResult
 )
 
 

@@ -566,8 +566,29 @@ class _PrinterRepository:
     def sessions(self, *, limit: int):
         return {"sessions": [], "limit": limit}
 
-    def environment_summary(self):
-        return {"available": False, "reason": "no_print_session"}
+    def history(self, *, limit: int):
+        return {"history": [{"history_id": "one"}], "limit": limit}
+
+    def history_item(self, history_id: str):
+        return {"history_id": history_id} if history_id == "one" else None
+
+    def maintenance(self):
+        return {"tasks": [], "local_record_only": True, "printer_control": False}
+
+    def complete_maintenance(self, task_id: str, *, notes: str, completed_at):
+        return {
+            "task_id": task_id,
+            "notes": notes,
+            "local_record_only": True,
+            "printer_control": False,
+        }
+
+    def environment_summary(self, history_id=None):
+        return {
+            "available": False,
+            "reason": "no_print_session",
+            "history_id": history_id,
+        }
 
 
 class _Status:
@@ -622,6 +643,32 @@ def test_printer_api_is_bounded_and_read_only(tmp_path: Path) -> None:
     assert client.get("/api/printer/sessions?limit=7").get_json()["limit"] == 7
     assert client.get("/api/printer/sessions?limit=101").status_code == 400
     assert client.post("/api/printer").status_code == 405
+    assert client.get("/api/printer/history?limit=500").status_code == 200
+    assert client.get("/api/printer/history?limit=501").status_code == 400
+    assert client.get("/api/printer/sessions/one").status_code == 200
+    assert client.get("/api/printer/sessions/missing").status_code == 404
+    assert (
+        client.get("/api/printer/environment-summary?session_id=one").get_json()[
+            "history_id"
+        ]
+        == "one"
+    )
+
+
+def test_maintenance_completion_is_explicit_and_local_only(tmp_path: Path) -> None:
+    client = _client(tmp_path, _PrinterRepository())
+    route = "/api/printer/maintenance/user_inspection/complete"
+    assert client.post(route, json={}).status_code == 400
+    response = client.post(route, json={"confirm": True, "notes": "done"})
+    assert response.status_code == 201
+    assert response.get_json() == {
+        "task_id": "user_inspection",
+        "notes": "done",
+        "local_record_only": True,
+        "printer_control": False,
+    }
+    for forbidden in ("start", "pause", "resume", "cancel", "command"):
+        assert client.post(f"/api/printer/{forbidden}").status_code in {404, 405}
 
 
 def test_printer_failure_does_not_break_sensor_api(tmp_path: Path) -> None:

@@ -10,7 +10,8 @@ from statistics import fmean
 from typing import Any
 
 from app.config import InfluxSettings
-from app.printer_model import PrintSession
+from app.printer_intelligence import PrinterIntelligenceStore
+from app.printer_model import PrintSession, ValueProvenance
 from app.printer_persistence import PrinterStore
 
 ENVIRONMENT_METRICS = (
@@ -35,6 +36,7 @@ class PrinterReadRepository:
         environment_location: str = "printer_room",
         baseline_minutes: int = 30,
         recovery_minutes: int = 120,
+        raw_retention_seconds: int = 72 * 60 * 60,
         query_api: Any | None = None,
     ) -> None:
         self.influx = influx
@@ -42,8 +44,10 @@ class PrinterReadRepository:
         self.environment_location = environment_location
         self.baseline_minutes = baseline_minutes
         self.recovery_minutes = recovery_minutes
+        self.raw_retention_seconds = raw_retention_seconds
         self._client = None
         self._query_api = query_api
+        self.intelligence = PrinterIntelligenceStore(self.database_path)
 
     def _query(self, flux: str) -> Any:
         if self._query_api is None:
@@ -74,6 +78,8 @@ class PrinterReadRepository:
         result = state.to_dict()
         result["available"] = state.online
         result["status"] = state.normalized_state.value
+        result["usage"] = self.intelligence.usage_summary(state.printer_id)
+        result["history_import"] = self.intelligence.history_status(state.printer_id)
         return result
 
     def sessions(self, *, limit: int = 20) -> dict[str, Any]:
@@ -82,20 +88,64 @@ class PrinterReadRepository:
         sessions = PrinterStore(self.database_path).list_sessions(limit=limit)
         return {"sessions": [item.to_dict() for item in sessions], "available": True}
 
-    def environment_summary(self) -> dict[str, Any]:
+    def history(self, *, limit: int = 100) -> dict[str, Any]:
+        if not self.database_path.exists():
+            return {"available": False, "history": [], "import": {}}
+        return {
+            "available": self.database_path.exists(),
+            "history": self.intelligence.history(limit=limit),
+            "import": self.intelligence.history_status(),
+        }
+
+    def history_item(self, history_id: str) -> dict[str, Any] | None:
+        if not self.database_path.exists():
+            return None
+        return self.intelligence.history_item(history_id)
+
+    def maintenance(self) -> dict[str, Any]:
+        if not self.database_path.exists():
+            return {
+                "available": False,
+                "usage": {},
+                "tasks": [],
+                "completion_history": [],
+                "local_record_only": True,
+                "printer_control": False,
+            }
+        return self.intelligence.maintenance()
+
+    def complete_maintenance(
+        self, task_id: str, *, notes: str, completed_at: datetime
+    ) -> dict[str, Any]:
+        if not self.database_path.exists():
+            raise RuntimeError("printer observer is not configured")
+        return self.intelligence.complete_maintenance(
+            task_id, notes=notes, completed_at=completed_at
+        )
+
+    def environment_summary(self, history_id: str | None = None) -> dict[str, Any]:
         if not self.database_path.exists():
             return _unavailable_summary("no_print_session")
         store = PrinterStore(self.database_path)
         # "Last print" prefers a finished session while an active print is in
         # progress. On a new installation with no history, the active session
         # is still useful as a partial observational window.
-        session = store.latest_finished_session() or store.latest_session()
+        session = None
+        if history_id:
+            history = self.intelligence.history_item(history_id)
+            session = _history_session(history) if history is not None else None
+            if session is None:
+                return _unavailable_summary("print_interval_unknown")
+        else:
+            session = store.latest_finished_session() or store.latest_session()
         if session is None:
             return _unavailable_summary("no_print_session")
         end = session.ended_at or datetime.now(timezone.utc)
         query_start = session.started_at - timedelta(minutes=self.baseline_minutes)
         query_stop = end + timedelta(minutes=self.recovery_minutes)
-        if datetime.now(timezone.utc) - query_start > timedelta(hours=72):
+        if datetime.now(timezone.utc) - query_start > timedelta(
+            seconds=self.raw_retention_seconds
+        ):
             return {
                 **_unavailable_summary("raw_samples_expired"),
                 "session": session.to_dict(),
@@ -277,6 +327,48 @@ def _recovery_seconds(
 
 def _unavailable_summary(reason: str) -> dict[str, Any]:
     return {"available": False, "reason": reason, "observational": True}
+
+
+def _history_session(history: dict[str, Any]) -> PrintSession | None:
+    started = _parse_time(history.get("started_at"))
+    ended = _parse_time(history.get("ended_at"))
+    if started is None:
+        return None
+    if history.get("source") == "bambu_cloud_history" and ended is None:
+        return None
+    return PrintSession(
+        session_id=str(history.get("history_id") or "history"),
+        printer_id=str(history.get("printer_id") or "x2d"),
+        job_id=str(history["job_id"]) if history.get("job_id") is not None else None,
+        job_name=str(history["job_name"]) if history.get("job_name") else None,
+        started_at=started,
+        start_provenance=ValueProvenance.OBSERVED,
+        ended_at=ended,
+        end_provenance=(
+            ValueProvenance.OBSERVED if ended is not None else ValueProvenance.UNKNOWN
+        ),
+        result=str(history["result"]) if history.get("result") else None,
+        material=str(history["material"]) if history.get("material") else None,
+        material_provenance=ValueProvenance.OBSERVED,
+        active_tool=(
+            str(history["active_tool"]) if history.get("active_tool") else None
+        ),
+        ams_slot=str(history["ams_slot"]) if history.get("ams_slot") else None,
+        source=str(history.get("source") or "unknown"),
+        updated_at=ended or started,
+    )
+
+
+def _parse_time(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        result = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if result.tzinfo is None:
+        result = result.replace(tzinfo=timezone.utc)
+    return result.astimezone(timezone.utc)
 
 
 def _rounded(value: float | None) -> float | None:
