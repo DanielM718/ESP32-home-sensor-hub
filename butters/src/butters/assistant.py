@@ -9,6 +9,10 @@ from queue import Full, Queue
 from threading import Thread
 
 from butters.assistant_config import AssistantSettings
+from butters.diagnostics.engine import DiagnosticEngine
+from butters.diagnostics.model import DiagnosticAnswer
+from butters.diagnostics.planner import DiagnosticPlanner
+from butters.diagnostics.tools import build_diagnostic_registry
 from butters.integrations.dashboard import DashboardSensorAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
 from butters.llm.catalog import (
@@ -44,6 +48,7 @@ class AssistantResponse:
     routing_path: str = "deterministic"
     llm_result: LanguageModelResult | None = None
     policy_status: str | None = None
+    diagnostic: DiagnosticAnswer | None = None
 
 
 class DeterministicAssistant:
@@ -57,6 +62,8 @@ class DeterministicAssistant:
         language_model: LanguageModel | None = None,
         llm_tools: tuple[ToolDefinition, ...] = (),
         llm_context: tuple[str, ...] = (),
+        diagnostic_planner: DiagnosticPlanner | None = None,
+        diagnostic_engine: DiagnosticEngine | None = None,
     ) -> None:
         self.router = router
         self.skills = skills
@@ -65,10 +72,37 @@ class DeterministicAssistant:
         self.language_model = language_model
         self.llm_tools = llm_tools
         self.llm_context = llm_context
+        self.diagnostic_planner = diagnostic_planner
+        self.diagnostic_engine = diagnostic_engine
 
     def handle_text(self, raw_text: str) -> AssistantResponse:
         started = time.perf_counter()
         normalized = normalize_transcript(raw_text.strip(), self.vocabulary)
+        if self.diagnostic_planner is not None and self.diagnostic_engine is not None:
+            request = self.diagnostic_planner.request_from_text(
+                normalized,
+                local_only=True,
+                allow_cloud=False,
+            )
+            if request is not None:
+                diagnostic = self.diagnostic_engine.diagnose(request)
+                route = RoutedIntent(
+                    "matched",
+                    normalized,
+                    "diagnose_read_only",
+                    {"domain": request.domain.value, "target": request.target},
+                    confidence=1.0,
+                )
+                return AssistantResponse(
+                    raw_text,
+                    normalized,
+                    route,
+                    diagnostic.concise_voice_text,
+                    time.perf_counter() - started,
+                    routing_path="diagnostic_local",
+                    policy_status="read_only",
+                    diagnostic=diagnostic,
+                )
         route = self.router.route(normalized)
         if not route.matched or route.skill is None:
             if route.allow_fallback and self.language_model is not None:
@@ -280,6 +314,15 @@ def create_assistant(
     skills = build_read_only_registry(
         sensor_provider, server_provider, entities, metrics
     )
+    diagnostic_planner = DiagnosticPlanner(entities)
+    diagnostic_engine = None
+    if settings.diagnostics.enabled:
+        diagnostic_engine = DiagnosticEngine(
+            diagnostic_planner,
+            build_diagnostic_registry(settings),
+            session_ttl_seconds=settings.diagnostics.session_ttl_seconds,
+            max_evidence_bytes=settings.diagnostics.max_evidence_bytes,
+        )
     if language_model is None and settings.llm.enabled:
         from butters.llm.llama_server import LlamaCppServerLanguageModel
 
@@ -301,4 +344,6 @@ def create_assistant(
             *(f"entity {item}" for item in entity_alias_summary(entities)),
             *(f"metric {item}" for item in metric_alias_summary(metrics)),
         ),
+        diagnostic_planner=diagnostic_planner if diagnostic_engine is not None else None,
+        diagnostic_engine=diagnostic_engine,
     )

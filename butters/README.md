@@ -5,7 +5,7 @@ inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
 Wake-on-LAN. It is not part of the critical monitoring data path.
 
-## Current status: Milestone 5, deterministic first; no resident LLM selected
+## Current status: local diagnostics complete; cloud and Codex remain opt-in
 
 The implementation now provides:
 
@@ -37,6 +37,17 @@ The implementation now provides:
 - local Piper-compatible TTS through the existing sherpa-onnx runtime;
 - a separate `TextToSpeechEngine`/`AudioOutput` boundary and explicit WAV output;
 - explicit diagnostics, finite recordings, tests, and actual Pi benchmarks.
+- a typed 43-tool read-only diagnostic catalog with strict target allow-lists;
+- bounded, sanitized, explicitly untrusted `EvidenceBundle` observations;
+- ten deterministic local diagnostic playbooks and categorical confidence;
+- two-phase request/evidence complexity and explicit escalation decisions;
+- a provider-neutral cloud reasoner and bounded local tool-call loop;
+- a current OpenAI Responses API request/parser implementation, disabled by
+  default when configuration or `OPENAI_API_KEY` is absent;
+- non-secret usage/cost accounting and configurable request/day/month bounds;
+- a separate Codex engineering-remediation interface with INSPECT/PATCH jobs
+  and DEPLOY always denied;
+- a 17-case A-Q offline diagnostic evaluation corpus.
 
 One persistent source owns ALSA across every normal state. KWS and STT consume
 the same standardized stream and never race to reopen the webcam. Normal
@@ -52,15 +63,17 @@ streaming WAVs, and simulated session handoff. It did not probe, reset, or
 reopen the wedged device. See **Hardware and human-validation status** and
 **Known limitations** below.
 
-Not implemented/enabled: a production LLM worker or accepted model,
-write/control skills, MQTT publication, Home Assistant actions, arbitrary
-database queries, conversational memory, physical speaker validation, or a
-permanent service. See [ARCHITECTURE.md](ARCHITECTURE.md),
+Not implemented/enabled: automatic paid cloud calls, live cloud model
+acceptance, production Codex execution/deployment, write/control skills, MQTT
+publication, Home Assistant actions, arbitrary database queries,
+conversational memory, physical speaker validation, or a permanent cloud
+service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/baseline.md](benchmarks/baseline.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
 [benchmarks/live-voice.md](benchmarks/live-voice.md), and
 [benchmarks/skills-tts.md](benchmarks/skills-tts.md), and
-[benchmarks/llm.md](benchmarks/llm.md).
+[benchmarks/llm.md](benchmarks/llm.md), and
+[benchmarks/diagnostics-cloud.md](benchmarks/diagnostics-cloud.md).
 
 ## Layout
 
@@ -68,16 +81,16 @@ permanent service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 butters/
   README.md
   ARCHITECTURE.md
-  benchmarks/{baseline,stt,live-voice,skills-tts,llm}.md
-  benchmarks/llm-corpus.json
+  benchmarks/{baseline,stt,live-voice,skills-tts,llm,diagnostics-cloud}.md
+  benchmarks/{llm-corpus,diagnostics-corpus}.json
   config/{audio.example,assistant,domain_vocabulary}.toml
   config/wakewords.txt
   requirements-stt.txt
   scripts/
     butters-audio, butters-stt, butters-wake, butters-live
-    butters-query, butters-speak
+    butters-query, butters-speak, butters-diagnose
     download-{stt,wake,tts}-model, download-{llama-runtime,llm-models}
-    benchmark-{stt,skills,tts,llm}, test-butters
+    benchmark-{stt,skills,tts,llm,diagnostics}, test-butters
   src/butters/
     audio/                 capture, conversion, VAD, pre-roll, chime
     stt/                   neutral engine, sherpa adapter, normalization
@@ -88,6 +101,9 @@ butters/
     integrations/          bounded dashboard and local-health adapters
     responses/             result-to-text templates
     llm/                   neutral proposal API, strict parsers, scorer/client
+    diagnostics/           planner, tools, evidence, rules, session, evaluator
+    cloud/                 provider contract, Responses adapter, bounded loop
+    remediation/           typed Codex jobs and disabled-by-default adapter
     tts/                   engine-neutral synthesis and output adapters
     assistant.py           common orchestration and bounded live handoff
     assistant_cli.py       text/WAV/TTS commands
@@ -302,6 +318,70 @@ from Filament box three.
 These are point-in-time examples, not fixtures or promised current readings.
 The cold first query took 1.354 seconds; cached queries in the same process took
 approximately 0.5-4 ms. See `benchmarks/skills-tts.md` for the full corpus.
+
+## Local diagnostic assistant
+
+Use direct text while the webcam remains unavailable:
+
+```bash
+./butters/scripts/butters-diagnose stack --local-only --show-route
+./butters/scripts/butters-diagnose sensor filament_box_3 --show-evidence
+./butters/scripts/butters-diagnose grafana --json
+./butters/scripts/butters-diagnose kr260
+./butters/scripts/butters-diagnose --request \
+  "why isn't Grafana showing current SEN66 data" --local-only
+./butters/scripts/benchmark-diagnostics
+```
+
+The diagnostic pipeline is independent of the six ordinary query skills:
+
+```text
+DiagnosticRequest -> planner -> typed READ_ONLY tools -> EvidenceBundle
+                  -> local rules -> DiagnosticAssessment
+                  -> concise voice text + detailed debug text
+                  -> optional explicit cloud escalation
+```
+
+Local playbooks cover sensor reporting, dashboard/current-data flow, Grafana,
+Home Assistant integration, MQTT, InfluxDB, server health, configured network
+hosts/ports, KR260 transport availability, and the complete monitoring path.
+Known causes such as an inactive bridge, unavailable broker/listener, failed
+InfluxDB/Grafana, or a stale upstream sensor need no cloud call. Contradictory
+healthy state, incomplete evidence, several remaining causes, unfamiliar logs,
+or an explicit deep dive can request escalation. Missing KR260 transport is
+reported locally because cloud reasoning cannot create observations.
+
+All 43 diagnostic tools are `READ_ONLY`. Services, containers, hosts,
+endpoints, entities, history ranges, and MQTT topics are allow-listed. Logs are
+time/line/byte bounded and sanitized. MQTT topic inspection is indirect
+persisted evidence and never publishes. There is no arbitrary shell, path,
+unit, container, host, topic, or database query. Retrieved text is always
+marked untrusted and cannot alter policy.
+
+The detailed answer labels `OBSERVED`, `CONCLUDED`, `POSSIBLE`, and
+`RECOMMENDED NEXT STEP`. The shorter `concise_voice_text` uses the existing
+local TTS boundary; this milestone does not add cloud speech.
+
+Cloud use requires all three conditions: `cloud.enabled = true`,
+`allow_paid_calls = true`, and `OPENAI_API_KEY` in the process environment.
+The committed defaults are false and the always-on assistant deliberately
+constructs a local-only diagnostic engine. `--dry-run-cloud` previews a route
+without a key or network request. Missing Internet, key, quota, budget, valid
+model output, or tool permission returns the best local evidence.
+
+Current provider policy is local -> Terra/high -> Sol/xhigh. Contradictory
+evidence may start with Sol. Sol/max plus Pro mode is only selected for an
+explicit exhaustive request or separately enabled maximum escalation. Luna is
+retained for future short language interpretation but is not on the default
+diagnostic route. No `OPENAI_API_KEY` was available during this milestone, so
+this is mock/replay validated and not a live model-quality claim.
+
+The separate `EngineeringRemediator` can render a structured Codex INSPECT or
+PATCH job for the single approved repository. INSPECT is read-only; PATCH
+requires a clean tree and cannot deploy, restart, commit, or push through
+Butters. `allow_codex_execution` is false, and DEPLOY is always rejected.
+See [benchmarks/diagnostics-cloud.md](benchmarks/diagnostics-cloud.md) for the
+catalog, security model, API sources, evaluation, and live resource results.
 
 ## Optional constrained LLM fallback
 
@@ -565,7 +645,7 @@ counter.
 ./butters/scripts/test-butters -q
 ```
 
-The 103-test Butters suite covers conversion/WAV metadata, standardized chunks,
+The original 103-test Butters suite covers conversion/WAV metadata, standardized chunks,
 VAD/clipping, bounded buffers, repeated ALSA cleanup, optional UVC warm-up,
 normalization, STT partial/final/reset, every live state recovery path, chime
 invocation, single capture ownership, repeated interactions, and real local
@@ -580,6 +660,12 @@ timeout/process-failure recovery, native/JSON normalization, rejection of
 prose/code/multiple calls, unknown skill/entity/metric and control denial,
 clarification safety, policy-only validation without adapter access, and all
 120 fixed-corpus invariants.
+This milestone expands the suite to 160 tests covering diagnostic schemas,
+allow-lists, bounded/redacted evidence, all local playbooks, contradiction and
+incomplete-evidence escalation, cloud budgets/timeouts/malformed calls,
+repeated-call prevention, prompt injection, provider request parsing, and
+Codex classification/job/path/immutability/timeout/dirty-tree boundaries.
+The separate 17-case diagnostic corpus is run by `benchmark-diagnostics`.
 
 ## Known limitations
 
@@ -616,6 +702,17 @@ clarification safety, policy-only validation without adapter access, and all
   them into percentages.
 - No write/control skill, permanent service, or production audit log exists
   yet.
+- Cloud execution is disabled and no live cloud benchmark was possible because
+  `OPENAI_API_KEY` was absent. Mock/replay tests cover the provider and loop;
+  model quality and real cost/latency remain unmeasured.
+- The paid-usage ledger is process-local. A future always-on paid deployment
+  needs durable daily/monthly accounting before enablement.
+- KR260 tools honestly report that no approved SSH, serial, agent, or API
+  transport exists. Docker observation also depends on a socket permission the
+  development user does not currently have.
+- Codex can render safe INSPECT/PATCH jobs, but programmatic execution is off,
+  autonomous isolated worktree management is not implemented, and DEPLOY is
+  denied.
 - `arecord` can count xrun events but not exact lost samples, so the drop count
   is an event estimate.
 - WAV input supports uncompressed integer PCM, not compressed/float WAV.

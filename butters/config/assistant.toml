@@ -23,6 +23,49 @@ profile = "lfm2"
 output_mode = "native_tools"
 timeout_seconds = 12.0
 
+# Local diagnostics are enabled and remain read-only. These bounds apply to one
+# short-lived investigation and are independent of the voice session.
+[diagnostics]
+enabled = true
+session_ttl_seconds = 900.0
+max_evidence_bytes = 65536
+max_log_bytes = 8192
+
+# Cloud analysis is development-only and opt-in twice: enabled plus
+# allow_paid_calls. OPENAI_API_KEY is read only from the process environment.
+[cloud]
+enabled = false
+allow_paid_calls = false
+provider = "openai"
+base_url = "https://api.openai.com"
+store_responses = false
+luna_model = "gpt-5.6-luna"
+terra_model = "gpt-5.6-terra"
+sol_model = "gpt-5.6-sol"
+allow_automatic_maximum = false
+timeout_seconds = 45.0
+max_tool_rounds = 4
+max_total_tool_calls = 8
+max_wall_seconds = 90.0
+max_output_tokens = 1200
+max_escalation_steps = 2
+max_retries = 1
+max_cloud_requests_per_diagnostic = 5
+max_estimated_cost_per_request_usd = 0.50
+daily_budget_usd = 2.0
+monthly_budget_usd = 20.0
+pricing_source = "https://developers.openai.com/api/docs/models/compare"
+pricing_date = "2026-08-11"
+
+# Codex engineering jobs are rendered locally by default. Programmatic Codex
+# execution and every production deployment operation remain disabled.
+[remediation]
+allow_codex_execution = false
+timeout_seconds = 900.0
+max_output_bytes = 131072
+repository_root = "../.."
+deployment_roots = ["/opt/home-sensor"]
+
 [[entities]]
 id = "printer_room"
 display_name = "Printer room"

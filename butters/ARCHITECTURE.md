@@ -22,6 +22,11 @@ USB microphone
   -> deterministic intent matching
        -> typed proposal for normal commands
        -> small local LLM only for unresolved language/tool selection
+       -> diagnostic request
+            -> local deterministic planner/playbook
+            -> typed read-only evidence collection
+            -> local assessment when confidence is sufficient
+            -> explicitly enabled cloud reasoning only when insufficient
   -> policy validation of every proposed tool call (default deny)
   -> restricted skill/tool registry
        -> read-only integration adapters
@@ -36,7 +41,7 @@ printer-room fan" should match a deterministic intent and typed arguments. They
 must not pay LLM latency. An LLM is a constrained fallback for phrasing and
 selection, not an authority and not the execution environment.
 
-## Current implementation through Milestone 5
+## Current implementation through the local diagnostic milestone
 
 Both sources implement the same pull-based `AudioSource` contract and emit
 16 kHz, mono, signed 16-bit little-endian PCM. Milestone 3 adds replaceable
@@ -236,6 +241,157 @@ leaves this fallback disabled and no model worker is selected or installed as
 a service. The fixed 120-case ground-truth corpus and model-independent scorer
 remain for future hardware. See [benchmarks/llm.md](benchmarks/llm.md).
 
+## Local diagnostics and safe escalation
+
+Diagnostics are a separate typed path, not another large intent function and
+not a synonym for cloud classification:
+
+```text
+DiagnosticRequest
+  -> DiagnosticPlanner
+       -> DiagnosticPlan / named playbook
+       -> bounded typed DiagnosticTool calls
+            -> existing default-deny PolicyValidator
+            -> local read-only implementation
+            -> EvidenceItem
+  -> EvidenceBundle
+  -> LocalDiagnosticRules
+  -> DiagnosticAssessment
+       status / categorical confidence
+       findings -> evidence IDs
+       root cause / hypotheses / unresolved questions
+       recommended next steps / escalation reason
+  -> DiagnosticAnswer
+       concise_voice_text
+       detailed_text
+```
+
+`DiagnosticPlanner` evaluates request complexity before tools run. Local rules
+evaluate observation complexity afterward: known playbook match, contradiction,
+number of unresolved causes, unfamiliar errors, missing/stale observations,
+systems implicated, and whether logs need interpretation. Saying “diagnose” is
+not sufficient for a cloud route. A stopped Grafana or bridge is solved
+locally. Conversely, a short question can escalate when its observations are
+contradictory.
+
+The ten initial playbooks cover a non-reporting sensor, sensor-to-dashboard
+flow, Grafana current data, Home Assistant sensor integration, MQTT, InfluxDB,
+server health, configured network host/port reachability, KR260 basic health,
+and the whole monitoring path. The pipeline rules inspect every planned stage
+but report the first known degraded stage as the supported causal boundary.
+Stale sensor plus healthy MQTT/bridge is only moderate confidence because the
+Pi cannot distinguish node power from radio delivery. Healthy current state
+that contradicts the reported symptom is insufficient and escalatable.
+
+Confidence is `CONFIRMED`, `HIGH`, `MODERATE`, `LOW`, or `INSUFFICIENT`.
+Unobservable tool state is never treated as proof that the target failed. A
+failed diagnosis is not a Butters failure; it is either a successful explicit
+escalation condition or, when cloud is disabled, a best-local-evidence result.
+
+### Diagnostic tool and evidence boundary
+
+`DiagnosticToolSpec` declares the tool name, natural-language description,
+argument dataclass/schema, strict parser, target authorizer, `READ_ONLY` action
+class, timeout, maximum output bytes, `EvidenceItem` output, error behavior,
+and sensitivity behavior. The 43 tools cover server, network, sensor stack,
+two approved containers, and an honest KR260 missing-transport abstraction.
+
+Target values are enums generated from reviewed local configuration. Systemd
+units, Docker names, localhost endpoints, host aliases, MQTT topics, sensor
+entities, metrics, and history ranges are never free strings after parsing.
+Direct procfs/sysfs/socket/HTTP APIs are preferred. Fixed subprocess argument
+arrays exist only where the platform API is the command (`systemctl`,
+`journalctl`, `vcgencmd`, `ping`, `tailscale`, and `docker`). No tool accepts a
+command or filesystem path.
+
+An `EvidenceItem` contains stable ID, kind, source, target, UTC observation
+time, status, structured values, optional excerpt, freshness/age, error,
+truncation, sensitivity/redaction metadata, and `untrusted=true`. Bundle IDs are
+unique and the serialized session is capped at 64 KiB. Log calls cap time,
+lines, and bytes. The sanitizer recursively handles values and text, redacts
+secret-like keys/headers/tokens/private keys, and omits unknown objects.
+
+Every cloud prompt treats evidence and request-carried text as untrusted data.
+Text in a log cannot add a function, target, permission, or policy. Even a
+syntactically valid model function call passes the same local parser,
+allow-list, action-class check, and `PolicyValidator`; only then can Butters run
+the read-only implementation.
+
+### Provider-neutral cloud analysis
+
+`CloudReasoner.analyze(request, evidence, available_tools,
+diagnostic_context, budget)` returns a typed tool request or conclusion and has
+no execution API. `CloudDiagnosticEscalator` owns the bounded loop:
+
+```text
+model function request
+  -> local schema + PolicyValidator
+  -> local read-only tool
+  -> sanitized EvidenceItem
+  -> model follow-up
+  -> submit_diagnosis with cited evidence IDs
+```
+
+The first provider is the OpenAI Responses API. Its request uses flat strict
+function definitions, disables parallel tool calls, defaults to `store=false`,
+and requires a strict non-executable `submit_diagnosis` function. Provider
+objects never cross the neutral interface. Model-produced conclusions are
+parsed and bounded again locally; invented evidence IDs fail closed.
+
+Official current documentation was checked for the Responses function-call
+loop, strict schema rules, `gpt-5.6-luna`/`terra`/`sol`, supported reasoning
+efforts, Pro mode, and pricing. Configuration—not diagnostic rules—holds model
+IDs, tier switches, budgets, and dated prices. The initial policy is local,
+Terra/high, then Sol/xhigh; contradictory evidence can start at Sol. Explicit
+exhaustive requests may use Sol/max plus Pro mode. Luna is not a default
+diagnostic hop absent benchmark evidence that it improves cost/quality.
+
+One investigation allows four tool rounds, eight tool calls, five Responses
+calls, 90 seconds, 1,200 output tokens, two escalation steps, and one retry by
+default. Repeated identical calls, duplicate evidence IDs, budget exhaustion,
+unavailable provider, malformed calls, invalid targets, and session expiry stop
+safely. The 15-minute `DiagnosticSession` retains only evidence, completed
+calls, hypotheses, escalation/usage accounting, and a stopping reason.
+
+Usage records deliberately omit request/evidence content. They include model,
+effort/tier, token categories, tool rounds, time, estimated dated-price cost,
+success/error, and escalation. Per-request and process-local daily/monthly
+limits apply before a call. Durable cross-process budgeting is required before
+any permanent paid deployment.
+
+Cloud requires explicit configuration plus `OPENAI_API_KEY`; the key is read
+only for the Authorization header, never put in a request body, diagnostic,
+benchmark, telemetry record, or tracked file. The default always-on assistant
+does not construct a cloud escalator. No permanent cloud service is installed.
+
+### Engineering remediation is a separate authority
+
+The general cloud analyst has no repository or shell tool. Potential software,
+configuration, or deployment defects are classified separately and can be
+rendered as an `EngineeringRemediationRequest` for an
+`EngineeringRemediator`:
+
+```text
+assessment -> local remediation classification -> CodexJobFactory
+           -> INSPECT or PATCH Codex CLI job -> typed remediation result
+```
+
+The local factory chooses the configured repository alias, validates the real
+path against symlink/traversal escape, records the base commit, maps only
+approved test IDs to fixed test commands, sanitizes evidence references, and
+never accepts a raw command or deployment target. INSPECT uses Codex's current
+ephemeral non-interactive read-only sandbox and checks that Git status is
+unchanged. PATCH requires a clean tree, uses workspace-write, reports bounded
+changed files/tests, and cannot deploy, restart production, commit, or push.
+Programmatic execution is disabled in current configuration, so a reviewed
+manual job is the default result.
+
+DEPLOY exists only as a future enum and is rejected. A later implementation
+needs an explicit confirmation transaction with pre/post health, recorded
+revisions, exact target/service allow-lists, regression probes, audit output,
+and safe rollback. A cloud failure does not automatically authorize Codex, and
+a Codex failure does not invalidate the diagnostic session.
+
 ## Future process layout
 
 Keep responsibilities separable even if the first deployment combines a few
@@ -251,7 +407,9 @@ of them:
   partial/final transcripts;
 - **router and skill host:** deterministic intents, policy enforcement, typed
   skill registry, audit events, and timeouts;
-- **LLM worker:** optional constrained fallback with no credentials and no
+- **diagnostic host:** short-lived local planner, read-only tools, evidence,
+  playbooks, and optional explicitly configured cloud loop;
+- **LLM worker:** optional local constrained fallback with no credentials and no
   direct integrations;
 - **TTS worker:** generates local response audio, preferably on demand unless
   model residency is justified;
@@ -299,6 +457,10 @@ timeouts. Policy defaults to deny.
 - STT failure ends the session with a short local error cue.
 - LLM failure falls back to deterministic intents; ordinary commands remain
   available.
+- Diagnostic cloud failure, missing key, rate limit, malformed output, or
+  budget exhaustion returns the best local assessment and evidence.
+- Codex unavailability/timeout/malformed output leaves the diagnostic session
+  intact and never expands into deployment authority.
 - TTS failure can use an acknowledgement/error tone and publish a semantic
   status event.
 - Integration timeouts are reported; they are not retried indefinitely.
