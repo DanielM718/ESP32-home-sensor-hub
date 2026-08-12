@@ -5,7 +5,7 @@ inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
 Wake-on-LAN. It is not part of the critical monitoring data path.
 
-## Current status: local diagnostics complete; cloud and Codex remain opt-in
+## Current status: human wake/STT accepted; semantic endpointing ready for trial
 
 The implementation now provides:
 
@@ -18,8 +18,9 @@ The implementation now provides:
 - the configured local phrase “Hey Butters” with threshold/boost controls;
 - a 110 ms asynchronous local acknowledgement chime;
 - a state machine for wake, listen, stream STT, finalize, normalize, and reset;
-- a replaceable `StreamingSTTEngine` and resident 20M INT8 English Zipformer;
-- partial/final transcripts, 600 ms endpointing, and conservative aliases;
+- a replaceable `StreamingSTTEngine` and accurate 2023-06-21 INT8 Zipformer;
+- 1.0-second router-aware provisional and 2.0-second hard endpointing;
+- bounded targeted clarification/continuation state with no blind concatenation;
 - no-speech, empty-result, STT-error, audio-error, and timeout recovery;
 - concept-based intent routing with explicit clarification/unsupported paths;
 - a typed, default-deny registry containing six read-only skills;
@@ -57,11 +58,11 @@ The deterministic assistant answers real sensor questions without a generative
 model. Milestone 5 tested three local GGUF candidates, but none met this shared
 Pi's latency, RAM/swap, thermal, and first-proposal quality gates. LLM fallback
 therefore remains disabled by default; ordinary requests are unchanged and no
-model service is installed. The webcam endpoint remains in the persistent
-`EIO` state discovered in Milestone 3 and the user is away, so this milestone deliberately used direct text,
-streaming WAVs, and simulated session handoff. It did not probe, reset, or
-reopen the wedged device. See **Hardware and human-validation status** and
-**Known limitations** below.
+model service is installed. After a physical webcam replug, native capture was
+clean and “Hey Butters” passed 5/5 deliberate human attempts. A fixed real-user
+recording also rejected the old 20M STT model and accepted the larger selected
+model. See **Hardware and human-validation status** and **Known limitations**
+below.
 
 Not implemented/enabled: automatic paid cloud calls, live cloud model
 acceptance, production Codex execution/deployment, write/control skills, MQTT
@@ -70,7 +71,8 @@ conversational memory, physical speaker validation, or a permanent cloud
 service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/baseline.md](benchmarks/baseline.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
-[benchmarks/live-voice.md](benchmarks/live-voice.md), and
+[benchmarks/live-voice.md](benchmarks/live-voice.md),
+[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md),
 [benchmarks/skills-tts.md](benchmarks/skills-tts.md), and
 [benchmarks/llm.md](benchmarks/llm.md), and
 [benchmarks/diagnostics-cloud.md](benchmarks/diagnostics-cloud.md).
@@ -132,8 +134,9 @@ butters/.venv/bin/python -m pip install \
 ./butters/scripts/download-tts-model
 ```
 
-Both downloaders verify pinned SHA-256 values. The STT archive is 127,887,156
-bytes and selected inference files are 43,649,301 bytes. The wake archive is
+The model installers verify pinned SHA-256 values. The STT installer retains
+only four required larger-model INT8 files totaling 188,627,621 bytes
+(179.9 MiB) and does not run implicitly. The wake archive is
 32,885,699 bytes; active chunk-8 files are 5,449,043 bytes, while its clean
 installed directory is about 15.4 MiB because both latency variants, the
 English lexicon, and small natural fixtures are retained.
@@ -187,11 +190,10 @@ Leave `video_warmup_device` empty for normal microphones. Use `plughw` instead
 of `hw` only when discovery shows ALSA conversion is required.
 
 That workaround enabled the measured recordings and five clean reopen cycles.
-After extended repeated testing, however, the endpoint later stayed in `EIO`
-at both 16 and 48 kHz even after verified UVC frames and while video remained
-active. ALSA still enumerated the idle device and no process owned it. A
-physical webcam replug is required before the remaining positive voice trial;
-the software deliberately does not reset the shared USB bus.
+After a later persistent `EIO` condition, a physical webcam replug restored the
+endpoint. A subsequent 12.020-second native capture had 601 frames, no
+overruns/drops/clipping, and usable human speech. The software deliberately
+does not reset the shared USB bus.
 
 ## Discover and diagnose microphones
 
@@ -523,11 +525,9 @@ Expected output:
 [READY] Waiting for wake word
 ```
 
-`--assistant` sends each non-empty final transcript to a bounded two-item
+`--assistant` sends each non-empty logical transcript to a bounded two-item
 worker queue. Dashboard latency therefore never blocks the sole audio-capture
-loop; a full queue drops only the semantic request with a visible error. The
-webcam is currently wedged, so this handoff is automated-test/file prepared but
-was not invoked against ALSA in Milestone 4.
+loop; a full queue drops only the semantic request with a visible error.
 
 Useful bounded variants:
 
@@ -538,11 +538,16 @@ Useful bounded variants:
   --source wave --input /path/to/test.wav --no-realtime
 ```
 
-States are `WAITING_FOR_WAKE`, `WAKE_DETECTED`, `LISTENING`, `FINALIZING`, and
-`RETURNING_TO_IDLE`. No speech after wake times out in four seconds. A command
-ends after about 600 ms silence or a native recognizer endpoint.
+States are `WAITING_FOR_WAKE`, `WAKE_DETECTED`, `LISTENING`, `FINALIZING`,
+bounded `AWAITING_CONTINUATION`, and `RETURNING_TO_IDLE`. No speech after wake
+times out in four seconds. After 1.0 second silence, a local router preview
+finalizes only a complete request. Incomplete or unrecognized speech remains
+open until 2.0 seconds. A recognized incomplete hard endpoint asks the router's
+targeted question and accepts one bounded 12-second continuation; a complete
+standalone command wins over stale context. Sherpa internal endpointing is off.
 
-The KWS token-end timestamp estimates how much audio follows the wake phrase.
+The KWS token-end timestamp estimates how much audio follows the wake phrase;
+diagnostics call this `token_end_lag`, not inference or model latency.
 Only that tail, bounded to 0.3 seconds, is moved from the 0.8-second history to
 command STT. This supports “Hey Butters what's the temperature” without
 deliberately feeding the whole wake phrase. The 110 ms chime launches
@@ -552,7 +557,9 @@ asynchronously and uses a 120 ms VAD guard while new audio remains buffered.
 
 Verified on the actual webcam:
 
-- native 16 kHz capture and valid 12-/30-second PCM WAV metadata;
+- native 16 kHz capture; the latest 12.020-second test had 601 frames;
+- zero latest-test overruns, drops, clipping, or empty capture;
+- room noise generally -42 to -47 dBFS and normal speech roughly -22 to -30 dBFS;
 - five repeated open/capture/close cycles without lock or error;
 - several 30- to 120-second continuous live sessions;
 - zero observed overruns, drops, or clipping;
@@ -564,29 +571,34 @@ Verified on the actual webcam:
 - no-speech timeout returned to ready automatically;
 - full real KWS -> partial STT -> final -> ready flow with the model archive's
   natural `LIGHT UP` fixture.
+- “Hey Butters” detected in 5/5 deliberate human attempts at threshold 0.25;
+- the old 20M STT model failed the fixed real-user carbon-dioxide query;
+- the larger 2023-06-21 model decoded that same query exactly.
 
-No unmistakable human phrase reached the captured audio during the requested
-interactive windows. Therefore positive “Hey Butters” reliability, varied
-distance/volume, real user-command transcripts, project-vocabulary errors, and
-human-speech endpoint latency remain pending. Do not interpret a window with no
-spoken input as a missed-wake trial.
+The remaining human step is semantic interaction acceptance after this code
+change: a complete command, a 1-1.5-second mid-sentence pause, a filler, a hard
+targeted clarification, and a complete unrelated command replacing pending
+context. Earlier unattended windows remain historical non-observations.
 
 Finish that validation with:
 
 ```bash
-./butters/scripts/butters-audio discover --probe
-./butters/scripts/butters-wake --max-detections 5
-./butters/scripts/butters-live --cycles 5
+./butters/scripts/butters-live --source alsa \
+  --model-dir butters/models/sherpa-onnx-streaming-zipformer-en-2023-06-21 \
+  --no-chime --assistant --cycles 5
 ```
 
-First physically replug only the webcam and confirm that both capture probes
-say `yes`. Then say the wake phrase at varied distances/volumes in the wake
-command. In the live command, try temperature, humidity/box three, printer
-exhaust, desktop, CO2, printer-room air quality, SEN66, Grafana, Home Assistant,
-and KR260 phrases. Record the recognizer output exactly; do not correct it
-manually.
+Do not run this unattended: a person must supply each wake and spoken command.
+The ignored local audio config already selects the native A4Tech device.
 
 ## Measured resource summary
+
+Current selected larger-model measurements are 6-7.7 seconds initialization,
+roughly 240-293 MiB process RSS, RTF 0.45-0.52, and STT CPU-per-audio 45-52%
+with one thread. Wake-only human testing averaged about 19.8% process CPU and
+uses approximately 5.2 MiB active KWS files. These remain below real time with
+ample measured host memory, but Butters stays secondary to the monitoring
+stack. The older figures below are retained as historical 20M-model baselines.
 
 The original Milestone 1 baseline had 2.205-2.219 GiB RAM available, about 1.5
 GiB used, 25.5 MiB of 2 GiB zram occupied with no paging, 93-97% CPU idle,
@@ -660,30 +672,30 @@ timeout/process-failure recovery, native/JSON normalization, rejection of
 prose/code/multiple calls, unknown skill/entity/metric and control denial,
 clarification safety, policy-only validation without adapter access, and all
 120 fixed-corpus invariants.
-This milestone expands the suite to 160 tests covering diagnostic schemas,
+The diagnostic milestone expanded the suite to 160 tests covering diagnostic schemas,
 allow-lists, bounded/redacted evidence, all local playbooks, contradiction and
 incomplete-evidence escalation, cloud budgets/timeouts/malformed calls,
 repeated-call prevention, prompt injection, provider request parsing, and
 Codex classification/job/path/immutability/timeout/dirty-tree boundaries.
 The separate 17-case diagnostic corpus is run by `benchmark-diagnostics`.
+The current milestone adds semantic endpoint, incomplete-route, continuation,
+expiry, filler, duplicate-prevention, default-model, wake-metric, and Sherpa
+non-preemption coverage.
 
 ## Known limitations
 
-- Positive user-voice wake and STT validation remains pending as described
-  above.
+- Semantic endpoint behavior still needs the five-case human acceptance run.
 - The A4Tech webcam needs its configured UVC warm-up, emits a short
   non-clipping capture-start transient, and eventually wedged in persistent
   `EIO` during the extended test session. Replug/recovery validation is still
   required before always-on use.
 - Energy VAD is a level gate, not a trained speech/noise classifier; another
   room/microphone needs new calibration.
-- Domain STT hotword biasing is not enabled because the selected 20M STT
+- Domain STT hotword biasing is not enabled because the selected STT
   archive lacks the required SentencePiece artifacts. Raw and normalized text
   remain separate; aliases only cover unambiguous whole phrases.
-- SEN66, SHT41, Bambu, KR260, Kria, Grafana, and Home Assistant are expected to
-  be difficult until actual user speech is measured.
-- The small STT model performed poorly on the low-quality Kathleen synthetic
-  voice, so no successful synthetic domain-query transcript is claimed.
+- Only one fixed real-user command has been measured on the larger STT model;
+  broader vocabulary and distance/noise accuracy remain unknown.
 - `api/latest` is deliberately reused for correctness, but a cold query takes
   about 1.35 seconds on this deployment. Persistent caching limits load; a
   future narrowly scoped latest-state IPC/API can improve latency if the

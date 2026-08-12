@@ -1,5 +1,9 @@
 # Deterministic skills and local TTS benchmark
 
+> STT figures in this historical pipeline benchmark used the former 20M model.
+> Current human/STT selection is documented in
+> [human-voice-semantic-endpoint.md](human-voice-semantic-endpoint.md).
+
 Measured on the repository Raspberry Pi 4 on 2026-08-11. The A4Tech webcam
 remained physically connected but its USB audio endpoint was already in the
 persistent `EIO` state documented by Milestone 3. This milestone did not open,

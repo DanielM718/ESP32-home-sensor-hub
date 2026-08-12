@@ -28,12 +28,14 @@ class SherpaOnnxStreamingSTT(StreamingSTTEngine):
         *,
         num_threads: int = 1,
         decoding_method: str = "greedy_search",
-        endpoint_silence_seconds: float = 0.6,
+        sherpa_endpoint_enabled: bool = False,
+        sherpa_endpoint_silence_seconds: float = 2.0,
         max_utterance_seconds: float = 20.0,
     ) -> None:
         self.model_dir = Path(model_dir)
         self.num_threads = num_threads
         self.decoding_method = decoding_method
+        self.sherpa_endpoint_enabled = sherpa_endpoint_enabled
         paths = {name: self.model_dir / filename for name, filename in MODEL_FILES.items()}
         missing = [str(path) for path in paths.values() if not path.is_file()]
         if missing:
@@ -59,9 +61,9 @@ class SherpaOnnxStreamingSTT(StreamingSTTEngine):
                 num_threads=num_threads,
                 sample_rate=INTERNAL_AUDIO_FORMAT.sample_rate,
                 feature_dim=80,
-                enable_endpoint_detection=True,
+                enable_endpoint_detection=sherpa_endpoint_enabled,
                 rule1_min_trailing_silence=2.4,
-                rule2_min_trailing_silence=endpoint_silence_seconds,
+                rule2_min_trailing_silence=sherpa_endpoint_silence_seconds,
                 rule3_min_utterance_length=max_utterance_seconds,
                 decoding_method=decoding_method,
                 max_active_paths=4,
@@ -133,7 +135,11 @@ class SherpaOnnxStreamingSTT(StreamingSTTEngine):
         return self._partial
 
     def endpoint_detected(self) -> bool:
-        if not self._active or self._stream is None:
+        if (
+            not self.sherpa_endpoint_enabled
+            or not self._active
+            or self._stream is None
+        ):
             return False
         return bool(self._require_open().is_endpoint(self._stream))
 

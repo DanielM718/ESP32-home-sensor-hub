@@ -17,7 +17,8 @@ USB microphone
   -> bounded pre-roll
   -> lightweight wake-word detector
   -> acknowledgement sound
-  -> streaming speech recognition and endpointing
+  -> streaming speech recognition
+  -> acoustic silence + router-aware semantic endpoint policy
   -> transcript normalization
   -> deterministic intent matching
        -> typed proposal for normal commands
@@ -57,10 +58,12 @@ PCM WAV -> streaming channel/rate conversion ----+     -> 20 ms standardized fra
                                                              -> 3M sherpa KWS
                                                         -> wake event + async chime
                                                         -> 0.3 s command pre-roll
-                                                        -> energy VAD / endpointing
+                                                        -> energy VAD observations
                                                         -> StreamingSTTEngine
-                                                             -> resident 20M INT8 Zipformer
+                                                             -> resident 2023-06-21 INT8 Zipformer
                                                              -> partial/final raw text
+                                                        -> semantic endpoint evaluator
+                                                             -> complete / incomplete / unrecognized
                                                         -> conservative normalization
                                                         -> return to wake listening
 ```
@@ -79,8 +82,8 @@ reopen/retry path recovers ordinary source failures, but this hardware state
 currently requires a physical replug rather than a risky shared-bus reset.
 
 The `LiveVoiceController` is a per-frame state machine with
-`WAITING_FOR_WAKE`, `WAKE_DETECTED`, `LISTENING`, `FINALIZING`, and
-`RETURNING_TO_IDLE` states. It owns no device. One persistent source supplies
+`WAITING_FOR_WAKE`, `WAKE_DETECTED`, `LISTENING`, `FINALIZING`, bounded
+`AWAITING_CONTINUATION`, and `RETURNING_TO_IDLE` states. It owns no device. One persistent source supplies
 both KWS and STT, so a wake never closes/reopens the microphone. Source reopen
 is reserved for an actual capture error and includes bounded retry/backoff.
 No-speech, empty transcript, recognizer error, maximum command duration, and
@@ -105,10 +108,23 @@ has a matching 120 ms acknowledgement guard while audio remains buffered.
 
 For an STT session, two active 20 ms frames open an utterance. The coordinator
 feeds the bounded post-wake command pre-roll into a fresh recognizer stream,
-then accepts each subsequent frame incrementally. Approximately 600 ms of VAD
-silence or a native recognizer endpoint finalizes promptly. The stream is
-discarded/reset while both models remain resident, preventing partial or
-decoder state from leaking to the next interaction.
+then accepts each subsequent frame incrementally. VAD release is only acoustic
+hysteresis. At 1.0 second of below-threshold audio, the current partial is
+previewed through local deterministic/diagnostic routing without executing a
+skill or invoking a model. A complete route finalizes promptly; a route with
+required missing arguments or an unrecognized fragment remains open until the
+2.0-second hard acoustic endpoint. Sherpa's internal endpoint is explicitly
+disabled by production configuration so it cannot preempt this policy.
+
+At a hard endpoint, a recognized incomplete route carries its intended skill,
+resolved arguments, and `missing_arguments`. It emits the targeted router
+question and enters `AWAITING_CONTINUATION` for at most 12 seconds. Speech that
+arrives before the hard endpoint stays in the same recognizer stream. A later
+clarification turn is merged only while this explicit pending request exists;
+a complete standalone route is evaluated first and cancels stale context.
+Unrecognized text gains no pending authority. A successful logical request
+emits one executable handoff, then all recognizer and conversational state is
+cleared while both models remain resident.
 
 `StreamingSTTEngine` owns the lifecycle operations (`start_utterance`,
 `accept_audio`, partial lookup, endpoint detection, `finalize`, `reset`, and
@@ -117,13 +133,14 @@ sherpa-onnx. Replacing the recognizer therefore does not require rewriting the
 assistant. The current adapter is local CPU-only inference; neither audio nor
 transcripts leave the Pi.
 
-The STT default remains one inference thread based on this Pi's measured RTF 0.268,
-roughly 107-110 MiB loaded process RSS, and negligible model-idle CPU. Higher
-thread values used most of the four cores, ran hotter, and did not provide a
-worthwhile latency improvement. Full results and accuracy limitations are in
-[benchmarks/stt.md](benchmarks/stt.md). The combined live process measured
-approximately 117-126 MiB RSS, about 22% of one core while continuously running
-KWS, and no capture drops. See [benchmarks/live-voice.md](benchmarks/live-voice.md).
+The STT default remains one inference thread, but production selection is now
+`sherpa-onnx-streaming-zipformer-en-2023-06-21`. It exactly decoded the fixed
+real-user carbon-dioxide query that the old 20M model repeatedly truncated.
+Measured larger-model initialization is 6-7.7 seconds, RSS 240-293 MiB, RTF
+0.45-0.52, and CPU-per-audio 45-52%. Accuracy is preferred over the old
+107 MiB process footprint while still comfortably below real time and leaving
+monitoring services priority. See
+[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md).
 
 The current energy VAD remains deterministic RMS hysteresis, not a trained
 speech/noise classifier. Actual room noise calibrated this host's local gate to
@@ -501,29 +518,32 @@ AccessKey and separate terms. See the
 [Porcupine Raspberry Pi documentation](https://picovoice.ai/docs/quick-start/porcupine-raspberrypi/).
 
 The configured “Hey Butters” token sequence loads successfully and live room
-audio produced no false wakes in five minutes of practical observation.
-However, no deliberate human wake utterances reached the microphone during the
-interactive windows, so positive detection reliability is not yet claimed.
+audio produced no false wakes in five minutes of practical observation. After
+the camera replug, deliberate human testing detected 5/5 attempts at threshold
+0.25 with no capture overruns or drops.
 
 ### Streaming STT
 
-Milestone 2 selected and tested **sherpa-onnx 1.13.4** and
-`sherpa-onnx-streaming-zipformer-en-20M-2023-02-17`, using the int8 encoder and
-decoder/joiner. The official model inventory describes it as a small English
-streaming model; its int8 ONNX files total 43,649,301 bytes. The runtime's
-current CPython 3.13 ARM64 wheel runs directly on this Pi without a general ML
-framework and exposes online transducer/endpoint APIs. See
+The adapter remains **sherpa-onnx 1.13.4**, but real-user A/B evidence replaced
+the original 20M selection with
+`sherpa-onnx-streaming-zipformer-en-2023-06-21`. Its required INT8 files total
+188,627,621 bytes. The runtime's current CPython 3.13 ARM64 wheel runs directly
+on this Pi without a general ML framework. Model files remain ignored, and the
+explicit installer downloads only when invoked, retains required INT8 files,
+and checks their pinned SHA-256 digests. Missing weights fail with an explicit
+incomplete-model error. See
 [sherpa-onnx Linux installation](https://k2-fsa.github.io/sherpa/onnx/install/linux.html)
 and the
-[streaming Zipformer model inventory](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html#csukuangfj-sherpa-onnx-streaming-zipformer-en-20m-2023-02-17-english).
+[streaming Zipformer model inventory](https://k2-fsa.github.io/sherpa/onnx/pretrained_models/online-transducer/zipformer-transducer-models.html).
 
 The engine supports contextual hotwords under modified beam search, but the
-chosen archive lacks the SentencePiece `bpe.model`/`bpe.vocab` needed to encode
+selected archive lacks the SentencePiece `bpe.model`/`bpe.vocab` needed to encode
 English phrases. Hotwords are therefore intentionally off; `tokens.txt` is not
 silently treated as a different file format. A configured domain-term list and
 small whole-phrase normalization layer prepare for later comparison with a
-compatible model. Human household-command audio, room noise, and the webcam
-remain the important accuracy tests before deployment.
+compatible model. The fixed real-user query is exact on the selected model;
+broader household vocabulary/noise acceptance and the new semantic pauses
+remain human tests before deployment.
 
 ### Local LLM
 

@@ -1,13 +1,26 @@
 #!/bin/sh
 set -eu
 
-model="sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+model="sherpa-onnx-streaming-zipformer-en-2023-06-21"
 url="https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/$model.tar.bz2"
-sha256="9c559283e8498d3fe95913c79ca1cb454bb26281ac2b102b41306c7d752765d9"
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 butters_dir=$(dirname -- "$script_dir")
 destination="${1:-$butters_dir/models/$model}"
+
+verify_model() {
+    directory=$1
+    printf '%s  %s\n' \
+        "49e3c2646595fd907228b3c6787069658f67b17377c60aeb8619c4551b2316fb" \
+        "$directory/tokens.txt" \
+        "32c98281c7bd8b63e3e142d007251b37f120572e8fdea9a4f5a79ce22b10ec4f" \
+        "$directory/encoder-epoch-99-avg-1.int8.onnx" \
+        "093e23c90869898f761f60aa3363f96d43b9c6e5c06a57860c3a5b3407ab8320" \
+        "$directory/decoder-epoch-99-avg-1.int8.onnx" \
+        "831477d390e59a61f1b6a6f763b9903e6c6366ff6034f1ddba613be82637122f" \
+        "$directory/joiner-epoch-99-avg-1.int8.onnx" \
+        | sha256sum --check --status -
+}
 
 complete=true
 for filename in tokens.txt encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg-1.int8.onnx joiner-epoch-99-avg-1.int8.onnx; do
@@ -16,8 +29,12 @@ for filename in tokens.txt encoder-epoch-99-avg-1.int8.onnx decoder-epoch-99-avg
     fi
 done
 if [ "$complete" = true ]; then
-    echo "model already installed: $destination"
-    exit 0
+    if verify_model "$destination"; then
+        echo "checksum-verified model already installed: $destination"
+        exit 0
+    fi
+    echo "error: installed model failed checksum verification: $destination" >&2
+    exit 2
 fi
 if [ -e "$destination" ]; then
     echo "error: incomplete destination already exists: $destination" >&2
@@ -30,15 +47,14 @@ archive="$temporary/$model.tar.bz2"
 
 echo "downloading $url"
 curl --fail --location --output "$archive" "$url"
-printf '%s  %s\n' "$sha256" "$archive" | sha256sum --check --status -
 
 mkdir -p "$temporary/extracted"
 tar -xjf "$archive" -C "$temporary/extracted" \
     "$model/tokens.txt" \
     "$model/encoder-epoch-99-avg-1.int8.onnx" \
     "$model/decoder-epoch-99-avg-1.int8.onnx" \
-    "$model/joiner-epoch-99-avg-1.int8.onnx" \
-    "$model/test_wavs"
+    "$model/joiner-epoch-99-avg-1.int8.onnx"
+verify_model "$temporary/extracted/$model"
 mkdir -p "$(dirname -- "$destination")"
 mv "$temporary/extracted/$model" "$destination"
-echo "installed INT8 streaming model and test WAVs: $destination"
+echo "installed checksum-verified INT8 streaming model: $destination"

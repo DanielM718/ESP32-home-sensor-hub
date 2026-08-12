@@ -58,12 +58,16 @@ class IntentRouter:
         if len(resolution.candidates) > 1:
             names = ", ".join(entity.display_name for entity in resolution.candidates)
             return self._clarification(
-                normalized, f"Which sensor did you mean: {names}?"
+                normalized,
+                f"Which sensor did you mean: {names}?",
+                missing_arguments=("entity",),
             )
         entity = resolution.entity
 
         if self._last_seen_request(normalized):
-            entity_or_result = self._require_entity(normalized, entity)
+            entity_or_result = self._require_entity(
+                normalized, entity, skill="get_sensor_last_seen"
+            )
             if isinstance(entity_or_result, RoutedIntent):
                 return entity_or_result
             return self._matched(
@@ -74,7 +78,9 @@ class IntentRouter:
             )
 
         if self._entity_status_request(normalized):
-            entity_or_result = self._require_entity(normalized, entity)
+            entity_or_result = self._require_entity(
+                normalized, entity, skill="get_sensor_status"
+            )
             if isinstance(entity_or_result, RoutedIntent):
                 return entity_or_result
             return self._matched(
@@ -85,9 +91,14 @@ class IntentRouter:
             )
 
         if self._air_quality_request(normalized):
-            air_entity = entity or self._single_entity_for_type("air_quality")
+            air_entity = entity
             if air_entity is None or air_entity.sensor_type != "air_quality":
-                return self._clarification(normalized, "Which room did you mean?")
+                return self._clarification(
+                    normalized,
+                    "Which room did you mean?",
+                    skill="get_room_air_quality",
+                    missing_arguments=("entity",),
+                )
             return self._matched(
                 normalized,
                 "get_room_air_quality",
@@ -97,6 +108,11 @@ class IntentRouter:
 
         matched_metrics = self.metrics.resolve(normalized)
         if not matched_metrics:
+            if len(normalized.split()) <= 4:
+                return self._unsupported(
+                    normalized,
+                    "I couldn't understand that. Please repeat the full request.",
+                )
             return self._unsupported(
                 normalized,
                 "That request is not supported by the read-only deterministic router.",
@@ -106,24 +122,31 @@ class IntentRouter:
         if metric is None:
             names = ", ".join(item.display_name for item in matched_metrics)
             return self._clarification(
-                normalized, f"Which measurement did you mean: {names}?"
+                normalized,
+                f"Which measurement did you mean: {names}?",
+                skill="get_sensor_value",
+                arguments=(
+                    {"entity": entity.entity_id} if entity is not None else {}
+                ),
+                missing_arguments=("metric",),
             )
 
         if entity is None:
-            compatible = tuple(
-                candidate
-                for candidate in self.entities.entities
-                if candidate.sensor_type in metric.sensor_types
-            )
-            if len(compatible) == 1:
-                entity = compatible[0]
-                confidence = 0.91
-            elif self._mentions_unnumbered_box(normalized):
+            if self._mentions_unnumbered_box(normalized):
                 return self._clarification(
-                    normalized, "Which filament box did you mean?"
+                    normalized,
+                    "Which filament box did you mean?",
+                    skill="get_sensor_value",
+                    arguments={"metric": metric.metric_id},
+                    missing_arguments=("entity",),
                 )
-            else:
-                return self._clarification(normalized, "Which sensor did you mean?")
+            return self._clarification(
+                normalized,
+                "Which sensor did you mean?",
+                skill="get_sensor_value",
+                arguments={"metric": metric.metric_id},
+                missing_arguments=("entity",),
+            )
         else:
             confidence = 0.98
 
@@ -200,27 +223,33 @@ class IntentRouter:
             words & {str(value) for value in range(1, 10)}
         )
 
-    def _single_entity_for_type(self, sensor_type: str) -> Entity | None:
-        candidates = tuple(
-            entity
-            for entity in self.entities.entities
-            if entity.sensor_type == sensor_type
-        )
-        return candidates[0] if len(candidates) == 1 else None
-
     @staticmethod
     def _choose_metric(metrics: tuple[Metric, ...]) -> Metric | None:
         unique = {metric.metric_id: metric for metric in metrics}
         return next(iter(unique.values())) if len(unique) == 1 else None
 
     def _require_entity(
-        self, normalized: str, entity: Entity | None
+        self,
+        normalized: str,
+        entity: Entity | None,
+        *,
+        skill: str,
     ) -> Entity | RoutedIntent:
         if entity is not None:
             return entity
         if self._mentions_unnumbered_box(normalized):
-            return self._clarification(normalized, "Which filament box did you mean?")
-        return self._clarification(normalized, "Which sensor did you mean?")
+            return self._clarification(
+                normalized,
+                "Which filament box did you mean?",
+                skill=skill,
+                missing_arguments=("entity",),
+            )
+        return self._clarification(
+            normalized,
+            "Which sensor did you mean?",
+            skill=skill,
+            missing_arguments=("entity",),
+        )
 
     @staticmethod
     def _matched(
@@ -232,8 +261,22 @@ class IntentRouter:
         return RoutedIntent("matched", text, skill, arguments, confidence)
 
     @staticmethod
-    def _clarification(text: str, message: str) -> RoutedIntent:
-        return RoutedIntent("clarification", text, message=message)
+    def _clarification(
+        text: str,
+        message: str,
+        *,
+        skill: str | None = None,
+        arguments: dict[str, object] | None = None,
+        missing_arguments: tuple[str, ...] = (),
+    ) -> RoutedIntent:
+        return RoutedIntent(
+            "clarification",
+            text,
+            skill=skill,
+            arguments=arguments or {},
+            message=message,
+            missing_arguments=missing_arguments,
+        )
 
     @staticmethod
     def _unsupported(

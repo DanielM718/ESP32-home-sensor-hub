@@ -13,6 +13,7 @@ from butters.audio.analysis import EnergyVad, analyze_frame
 from butters.audio.buffer import PreRollBuffer
 from butters.audio.chime import ChimePlayer
 from butters.audio.model import AudioFrame, AudioSource, AudioSourceError
+from butters.live.semantic import SemanticEndpointAssessment, SemanticEndpointEvaluator
 from butters.stt.model import StreamingSTTEngine
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 from butters.stt.session import UtteranceResult
@@ -24,6 +25,7 @@ class LiveState(str, Enum):
     WAKE_DETECTED = "wake_detected"
     LISTENING = "listening"
     FINALIZING = "finalizing"
+    AWAITING_CONTINUATION = "awaiting_continuation"
     RETURNING_TO_IDLE = "returning_to_idle"
     STOPPED = "stopped"
 
@@ -37,6 +39,8 @@ class LiveEvent:
         "speech_start",
         "partial",
         "final",
+        "awaiting_continuation",
+        "continuation_timeout",
         "timeout",
         "error",
         "returning",
@@ -46,6 +50,7 @@ class LiveEvent:
     detection: WakeDetection | None = None
     result: UtteranceResult | None = None
     acknowledgement_launch_seconds: float | None = None
+    completes_cycle: bool = False
 
 
 LiveEventCallback = Callable[[LiveEvent], None]
@@ -73,6 +78,10 @@ class LiveVoiceController:
         max_command_seconds: float = 20.0,
         acknowledgement_guard_seconds: float = 0.12,
         clip_threshold: float = 0.98,
+        semantic_endpoint: SemanticEndpointEvaluator | None = None,
+        provisional_silence_seconds: float = 1.0,
+        hard_silence_seconds: float = 2.0,
+        continuation_timeout_seconds: float = 12.0,
     ) -> None:
         self.wake_detector = wake_detector
         self.stt_engine = stt_engine
@@ -85,6 +94,10 @@ class LiveVoiceController:
         self.max_command_seconds = max_command_seconds
         self.acknowledgement_guard_seconds = acknowledgement_guard_seconds
         self.clip_threshold = clip_threshold
+        self.semantic_endpoint = semantic_endpoint
+        self.provisional_silence_seconds = provisional_silence_seconds
+        self.hard_silence_seconds = hard_silence_seconds
+        self.continuation_timeout_seconds = continuation_timeout_seconds
         self.state = LiveState.STOPPED
         self._audio_position = 0.0
         self._listening_started = 0.0
@@ -95,6 +108,9 @@ class LiveVoiceController:
         self._utterance_samples = 0
         self._processing_seconds = 0.0
         self._processing_cpu_seconds = 0.0
+        self._last_semantic_check: tuple[str | None, str] | None = None
+        self._pending_text: str | None = None
+        self._continuation_started = 0.0
 
     def start(self) -> tuple[LiveEvent, ...]:
         self.wake_detector.reset()
@@ -103,6 +119,7 @@ class LiveVoiceController:
         self.wake_preroll.clear()
         self.command_preroll.clear()
         self._clear_utterance()
+        self._clear_pending()
         self.state = LiveState.WAITING_FOR_WAKE
         return (LiveEvent("ready", self.state),)
 
@@ -114,6 +131,11 @@ class LiveVoiceController:
         self._processing_cpu_seconds = 0.0
         self._speech_started = 0.0
         self._last_signal_position = 0.0
+        self._last_semantic_check = None
+
+    def _clear_pending(self) -> None:
+        self._pending_text = None
+        self._continuation_started = 0.0
 
     def _seed_post_keyword_audio(self, detection: WakeDetection) -> None:
         """Keep only audio estimated to follow the wake phrase.
@@ -124,13 +146,13 @@ class LiveVoiceController:
         """
 
         self.command_preroll.clear()
-        if not detection.model_latency_seconds:
+        if not detection.token_end_lag_seconds:
             return
         retained = self.wake_preroll.snapshot()
         if not retained:
             return
         frame_seconds = retained[-1].duration_seconds
-        frames = math.ceil(detection.model_latency_seconds / frame_seconds)
+        frames = math.ceil(detection.token_end_lag_seconds / frame_seconds)
         frames = min(frames, self.command_preroll.max_frames)
         for frame in retained[-frames:]:
             self.command_preroll.append(frame)
@@ -142,6 +164,7 @@ class LiveVoiceController:
         self.command_vad.reset()
         self.stt_engine.reset()
         self._clear_utterance()
+        self._clear_pending()
         self._listening_started = self._audio_position
         acknowledgement_latency: float | None = None
         try:
@@ -195,6 +218,17 @@ class LiveVoiceController:
         finalization = time.perf_counter() - started
         self._processing_seconds += finalization
         self._processing_cpu_seconds += time.process_time() - cpu_started
+        assessment: SemanticEndpointAssessment | None = None
+        if raw.strip() and self.semantic_endpoint is not None:
+            assessment = self.semantic_endpoint.assess(
+                raw,
+                pending_text=self._pending_text,
+            )
+        effective_text = assessment.effective_text if assessment is not None else raw
+        semantic_status = (
+            assessment.status if assessment is not None else "unclassified"
+        )
+        incomplete = assessment is not None and assessment.status == "incomplete"
         result = UtteranceResult(
             raw=raw,
             normalized=normalize_transcript(raw, self.vocabulary),
@@ -208,10 +242,42 @@ class LiveVoiceController:
             ),
             endpoint_reason=reason,
             processing_cpu_seconds=self._processing_cpu_seconds,
+            effective_text=effective_text,
+            semantic_status=semantic_status,
         )
-        events = [LiveEvent("final", self.state, text=raw, result=result)]
-        events.extend(self._return_to_idle())
+        events = [
+            LiveEvent(
+                "final",
+                self.state,
+                text=raw,
+                result=result,
+                completes_cycle=not incomplete,
+            )
+        ]
+        if incomplete and assessment is not None:
+            events.extend(self._await_continuation(assessment))
+        else:
+            events.extend(self._return_to_idle())
         return events
+
+    def _await_continuation(
+        self, assessment: SemanticEndpointAssessment
+    ) -> list[LiveEvent]:
+        self.stt_engine.reset()
+        self.command_vad.reset()
+        self.command_preroll.clear()
+        self._clear_utterance()
+        self._pending_text = assessment.effective_text
+        self._continuation_started = self._audio_position
+        self._listening_started = self._audio_position
+        self.state = LiveState.AWAITING_CONTINUATION
+        return [
+            LiveEvent(
+                "awaiting_continuation",
+                self.state,
+                text=assessment.route.message or "Please complete the request.",
+            )
+        ]
 
     def _return_to_idle(self) -> list[LiveEvent]:
         self.state = LiveState.RETURNING_TO_IDLE
@@ -220,6 +286,7 @@ class LiveVoiceController:
         self.wake_detector.reset()
         self.command_vad.reset()
         self.command_preroll.clear()
+        self._clear_pending()
         self.wake_preroll.clear()
         self._clear_utterance()
         self.state = LiveState.WAITING_FOR_WAKE
@@ -249,12 +316,30 @@ class LiveVoiceController:
                     return ()
                 return tuple(self._begin_listening(detection))
 
-            if self.state is not LiveState.LISTENING:
+            if self.state is LiveState.AWAITING_CONTINUATION:
+                if (
+                    self._audio_position - self._continuation_started
+                    >= self.continuation_timeout_seconds
+                ):
+                    events = [
+                        LiveEvent(
+                            "continuation_timeout",
+                            self.state,
+                            text="Incomplete request expired.",
+                            completes_cycle=True,
+                        )
+                    ]
+                    events.extend(self._return_to_idle())
+                    return tuple(events)
+            elif self.state is not LiveState.LISTENING:
                 return ()
 
             self.command_preroll.append(frame)
             elapsed = self._audio_position - self._listening_started
-            if elapsed < self.acknowledgement_guard_seconds:
+            if (
+                self._pending_text is None
+                and elapsed < self.acknowledgement_guard_seconds
+            ):
                 return ()
 
             analysis = analyze_frame(
@@ -265,6 +350,8 @@ class LiveVoiceController:
             events: list[LiveEvent] = []
             just_started = False
             if not self._in_utterance and analysis.speech_active:
+                if self.state is LiveState.AWAITING_CONTINUATION:
+                    self.state = LiveState.LISTENING
                 events.extend(self._start_utterance())
                 just_started = True
             elif self._in_utterance:
@@ -276,16 +363,45 @@ class LiveVoiceController:
                 self._last_signal_position = self._audio_position
 
             if not self._in_utterance:
-                if elapsed >= self.no_speech_timeout_seconds:
-                    events.append(LiveEvent("timeout", self.state))
+                if (
+                    self._pending_text is None
+                    and elapsed >= self.no_speech_timeout_seconds
+                ):
+                    events.append(
+                        LiveEvent("timeout", self.state, completes_cycle=True)
+                    )
                     events.extend(self._return_to_idle())
                 return tuple(events)
 
             if self.stt_engine.endpoint_detected():
                 events.extend(self._finalize("recognizer"))
-            elif not analysis.speech_active and not just_started:
-                events.extend(self._finalize("vad_silence"))
-            elif self._audio_position - self._speech_started >= self.max_command_seconds:
+                return tuple(events)
+
+            silence_seconds = max(
+                0.0, self._audio_position - self._last_signal_position
+            )
+            if (
+                not just_started
+                and silence_seconds >= self.provisional_silence_seconds
+                and self.semantic_endpoint is not None
+            ):
+                partial = self.stt_engine.get_partial_transcript().strip()
+                check_key = (self._pending_text, partial)
+                if partial and check_key != self._last_semantic_check:
+                    self._last_semantic_check = check_key
+                    assessment = self.semantic_endpoint.assess(
+                        partial,
+                        pending_text=self._pending_text,
+                    )
+                    if assessment.status == "complete":
+                        events.extend(self._finalize("semantic_complete"))
+                        return tuple(events)
+
+            if not just_started and silence_seconds >= self.hard_silence_seconds:
+                events.extend(self._finalize("acoustic_hard"))
+            elif (
+                self._audio_position - self._speech_started >= self.max_command_seconds
+            ):
                 events.extend(self._finalize("max_command"))
             return tuple(events)
         except Exception as exc:  # noqa: BLE001 - state machine must recover
@@ -326,15 +442,14 @@ def run_live_source(
         for event in events:
             if on_event is not None:
                 on_event(event)
-            if event.kind in {"final", "timeout"}:
+            if event.completes_cycle:
                 cycles += 1
 
     emit(controller.start())
     source.open()
     try:
-        while (
-            (max_cycles <= 0 or cycles < max_cycles)
-            and (max_audio_seconds <= 0 or audio_seconds < max_audio_seconds)
+        while (max_cycles <= 0 or cycles < max_cycles) and (
+            max_audio_seconds <= 0 or audio_seconds < max_audio_seconds
         ):
             try:
                 frame = source.read_frame()

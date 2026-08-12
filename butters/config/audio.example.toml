@@ -28,10 +28,13 @@ clip_threshold = 0.98
 
 [stt]
 # Paths are relative to this configuration file unless absolute.
-model_dir = "../models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+model_dir = "../models/sherpa-onnx-streaming-zipformer-en-2023-06-21"
 num_threads = 1
 decoding_method = "greedy_search"
-endpoint_silence_ms = 600
+# Conversational endpoint policy belongs to [live]. Keep Sherpa from
+# independently finalizing a hesitation before semantic completeness is known.
+sherpa_endpoint_enabled = false
+sherpa_endpoint_silence_ms = 2000
 max_utterance_seconds = 20.0
 vocabulary_path = "domain_vocabulary.toml"
 
@@ -51,6 +54,9 @@ max_command_seconds = 20.0
 command_preroll_ms = 300
 audio_retry_seconds = 1.0
 max_audio_retries = 3
+provisional_endpoint_silence_ms = 1000
+hard_endpoint_silence_ms = 2000
+continuation_timeout_seconds = 12.0
 
 [playback]
 acknowledge = true

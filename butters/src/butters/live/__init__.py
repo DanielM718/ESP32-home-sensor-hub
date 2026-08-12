@@ -6,5 +6,16 @@ from butters.live.controller import (
     LiveVoiceController,
     run_live_source,
 )
+from butters.live.semantic import (
+    SemanticEndpointAssessment,
+    SemanticEndpointEvaluator,
+)
 
-__all__ = ["LiveEvent", "LiveState", "LiveVoiceController", "run_live_source"]
+__all__ = [
+    "LiveEvent",
+    "LiveState",
+    "LiveVoiceController",
+    "SemanticEndpointAssessment",
+    "SemanticEndpointEvaluator",
+    "run_live_source",
+]

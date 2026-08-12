@@ -18,9 +18,15 @@ class WakeDetection:
     keyword: str
     confidence: float | None
     threshold: float
-    model_latency_seconds: float | None = None
+    token_end_lag_seconds: float | None = None
     tokens: tuple[str, ...] = ()
     token_timestamps: tuple[float, ...] = ()
+
+    @property
+    def model_latency_seconds(self) -> float | None:
+        """Deprecated alias; this is token-end-to-observation audio lag."""
+
+        return self.token_end_lag_seconds
 
 
 class WakeWordDetector(ABC):

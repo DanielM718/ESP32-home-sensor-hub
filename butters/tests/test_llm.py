@@ -94,7 +94,9 @@ def _assistant(model: LanguageModel):
 def test_deterministic_request_bypasses_llm() -> None:
     model = FakeModel(ToolProposal(ProposalKind.UNSUPPORTED))
 
-    response = _assistant(model).handle_text("what is the CO2 level")
+    response = _assistant(model).handle_text(
+        "what is the CO2 level in the printer room"
+    )
 
     assert response.routing_path == "deterministic"
     assert response.response_text == "Printer room CO2 is 742 ppm."
@@ -207,7 +209,9 @@ def test_model_failure_is_safe_and_deterministic_path_still_works(
     assistant = _assistant(model)
 
     failed = assistant.handle_text("how damp is the third filament container")
-    deterministic = assistant.handle_text("what is the CO2 level")
+    deterministic = assistant.handle_text(
+        "what is the CO2 level in the printer room"
+    )
 
     assert failed.route.status == "unsupported"
     assert failed.execution is None

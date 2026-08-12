@@ -123,14 +123,14 @@ class SherpaOnnxWakeWordDetector(WakeWordDetector):
             if not keyword:
                 continue
             timestamps = tuple(float(value) for value in result.timestamps)
-            model_latency = None
+            token_end_lag = None
             if timestamps:
-                model_latency = max(0.0, self._audio_seconds - timestamps[-1])
+                token_end_lag = max(0.0, self._audio_seconds - timestamps[-1])
             return WakeDetection(
                 keyword=keyword.replace("_", " "),
                 confidence=None,
                 threshold=self.threshold,
-                model_latency_seconds=model_latency,
+                token_end_lag_seconds=token_end_lag,
                 tokens=tuple(result.tokens),
                 token_timestamps=timestamps,
             )

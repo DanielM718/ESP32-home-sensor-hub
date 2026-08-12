@@ -424,7 +424,6 @@ def command_stt_test(args: argparse.Namespace) -> int:
         model_dir=args.model_dir,
         num_threads=args.threads,
     )
-    settings = replace(settings, vad_release_ms=stt_settings.endpoint_silence_ms)
     source = _source(settings)
     frontend = _frontend(source, settings)
     vocabulary = load_domain_vocabulary(stt_settings.vocabulary_path)
@@ -436,7 +435,10 @@ def command_stt_test(args: argparse.Namespace) -> int:
         stt_settings.model_dir,
         num_threads=stt_settings.num_threads,
         decoding_method=stt_settings.decoding_method,
-        endpoint_silence_seconds=stt_settings.endpoint_silence_ms / 1000,
+        sherpa_endpoint_enabled=stt_settings.sherpa_endpoint_enabled,
+        sherpa_endpoint_silence_seconds=(
+            stt_settings.sherpa_endpoint_silence_ms / 1000
+        ),
         max_utterance_seconds=stt_settings.max_utterance_seconds,
     )
     print(
@@ -449,7 +451,8 @@ def command_stt_test(args: argparse.Namespace) -> int:
         f"source={settings.source} internal=16000 Hz mono S16_LE "
         f"frame={settings.frame_ms} ms "
         f"mode={'real-time' if settings.source == 'alsa' or settings.wave_realtime else 'accelerated'} "
-        f"endpoint_silence={stt_settings.endpoint_silence_ms} ms"
+        f"vad_release={settings.vad_release_ms} ms "
+        f"sherpa_endpoint={'on' if stt_settings.sherpa_endpoint_enabled else 'off'}"
     )
 
     def report(event: TranscriptionEvent) -> None:
@@ -558,13 +561,13 @@ def command_wake_test(args: argparse.Namespace) -> int:
                 )
                 latency = (
                     "n/a"
-                    if detection.model_latency_seconds is None
-                    else f"{detection.model_latency_seconds * 1000:.0f}ms"
+                    if detection.token_end_lag_seconds is None
+                    else f"{detection.token_end_lag_seconds * 1000:.0f}ms"
                 )
                 print(
                     f"[WAKE] keyword={detection.keyword!r} confidence={confidence} "
                     f"threshold={detection.threshold:.3f} "
-                    f"model_delay={latency} audio_time={audio_seconds:.2f}s"
+                    f"token_end_lag={latency} audio_time={audio_seconds:.2f}s"
                 )
                 detector.reset()
     finally:
@@ -610,7 +613,10 @@ def command_live(args: argparse.Namespace) -> int:
         stt_settings.model_dir,
         num_threads=stt_settings.num_threads,
         decoding_method=stt_settings.decoding_method,
-        endpoint_silence_seconds=stt_settings.endpoint_silence_ms / 1000,
+        sherpa_endpoint_enabled=stt_settings.sherpa_endpoint_enabled,
+        sherpa_endpoint_silence_seconds=(
+            stt_settings.sherpa_endpoint_silence_ms / 1000
+        ),
         max_utterance_seconds=stt_settings.max_utterance_seconds,
     )
     try:
@@ -629,9 +635,17 @@ def command_live(args: argparse.Namespace) -> int:
     )
     attack_frames = max(1, math.ceil(settings.vad_attack_ms / settings.frame_ms))
     release_frames = max(
-        1, math.ceil(stt_settings.endpoint_silence_ms / settings.frame_ms)
+        1, math.ceil(settings.vad_release_ms / settings.frame_ms)
     )
+    from butters.assistant import create_assistant
+    from butters.assistant_config import load_assistant_settings
     from butters.live.controller import LiveEvent, LiveVoiceController, run_live_source
+    from butters.live.semantic import SemanticEndpointEvaluator
+
+    assistant = create_assistant(
+        load_assistant_settings(args.assistant_config), vocabulary
+    )
+    semantic_endpoint = SemanticEndpointEvaluator(assistant.preview_route)
 
     controller = LiveVoiceController(
         wake_detector=detector,
@@ -658,18 +672,26 @@ def command_live(args: argparse.Namespace) -> int:
             else 0.0
         ),
         clip_threshold=settings.clip_threshold,
+        semantic_endpoint=semantic_endpoint,
+        provisional_silence_seconds=(
+            live_settings.provisional_endpoint_silence_ms / 1000
+        ),
+        hard_silence_seconds=live_settings.hard_endpoint_silence_ms / 1000,
+        continuation_timeout_seconds=live_settings.continuation_timeout_seconds,
     )
     responder = None
     if args.assistant:
         from butters.assistant import (
             AssistantResponse,
             AsyncAssistantResponder,
-            create_assistant,
         )
-        from butters.assistant_config import load_assistant_settings
+        from butters.live.conversation import BoundedVoiceConversation
 
-        assistant = create_assistant(
-            load_assistant_settings(args.assistant_config), vocabulary
+        conversation = BoundedVoiceConversation(
+            assistant,
+            continuation_timeout_seconds=(
+                live_settings.continuation_timeout_seconds
+            ),
         )
 
         def report_assistant(response: AssistantResponse) -> None:
@@ -684,7 +706,7 @@ def command_live(args: argparse.Namespace) -> int:
                 print(f"[ROUTE] {route.status}", flush=True)
             print(f"[RESPONSE] {response.response_text}", flush=True)
 
-        responder = AsyncAssistantResponder(assistant, report_assistant)
+        responder = AsyncAssistantResponder(conversation, report_assistant)
     input_name = settings.alsa_device if settings.source == "alsa" else settings.wave_path
     print(
         f"live source={settings.source} input={input_name} "
@@ -700,7 +722,12 @@ def command_live(args: argparse.Namespace) -> int:
     )
     print(
         f"no_speech_timeout={live_settings.no_speech_timeout_seconds:.1f}s "
-        f"endpoint_silence={stt_settings.endpoint_silence_ms}ms "
+        f"semantic_provisional="
+        f"{live_settings.provisional_endpoint_silence_ms}ms "
+        f"acoustic_hard={live_settings.hard_endpoint_silence_ms}ms "
+        f"continuation_timeout={live_settings.continuation_timeout_seconds:.1f}s "
+        f"sherpa_endpoint="
+        f"{'on' if stt_settings.sherpa_endpoint_enabled else 'off'} "
         f"chime={'on' if live_settings.acknowledge else 'off'}"
     )
 
@@ -714,12 +741,12 @@ def command_live(args: argparse.Namespace) -> int:
             )
             delay = (
                 "n/a"
-                if detection.model_latency_seconds is None
-                else f"{detection.model_latency_seconds * 1000:.0f}ms"
+                if detection.token_end_lag_seconds is None
+                else f"{detection.token_end_lag_seconds * 1000:.0f}ms"
             )
             print(
                 f"[WAKE] phrase={detection.keyword!r} confidence={confidence} "
-                f"threshold={detection.threshold:.3f} model_delay={delay}",
+                f"threshold={detection.threshold:.3f} token_end_lag={delay}",
                 flush=True,
             )
         elif event.kind == "listening":
@@ -741,19 +768,24 @@ def command_live(args: argparse.Namespace) -> int:
                 f"{result.processing_cpu_seconds / max(result.audio_seconds, 1e-9) * 100:.1f}% "
                 f"speech_end_to_final="
                 f"{result.speech_end_to_final_seconds * 1000:.1f}ms "
-                f"endpoint={result.endpoint_reason}",
+                f"endpoint={result.endpoint_reason} "
+                f"semantic={result.semantic_status}",
                 flush=True,
             )
             if (
                 responder is not None
-                and result.normalized
-                and not responder.submit(result.normalized)
+                and result.effective_text
+                and not responder.submit(result.effective_text)
             ):
                 print(
                     "[ERROR] read-only response queue is full; transcript dropped",
                     file=sys.stderr,
                     flush=True,
                 )
+        elif event.kind == "awaiting_continuation":
+            print(f"[CLARIFYING] {event.text}", flush=True)
+        elif event.kind == "continuation_timeout":
+            print("[TIMEOUT] Incomplete request expired", flush=True)
         elif event.kind == "timeout":
             print("[TIMEOUT] No speech; returning to wake listening", flush=True)
         elif event.kind == "error":

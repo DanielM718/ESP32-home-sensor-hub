@@ -36,27 +36,27 @@ def router() -> IntentRouter:
             {"entity": "filament_box_3", "metric": "humidity"},
         ),
         (
-            "what's the co two level",
+            "what's the co two level in the printer room",
             "get_sensor_value",
             {"entity": "printer_room", "metric": "co2"},
         ),
         (
-            "carbon dioxide reading",
+            "printer room carbon dioxide reading",
             "get_sensor_value",
             {"entity": "printer_room", "metric": "co2"},
         ),
         (
-            "what's the p m two point five",
+            "what's the printer room p m two point five",
             "get_sensor_value",
             {"entity": "printer_room", "metric": "pm25"},
         ),
         (
-            "what is the VOC index",
+            "what is the printer room VOC index",
             "get_sensor_value",
             {"entity": "printer_room", "metric": "voc_index"},
         ),
         (
-            "what is the NOx index",
+            "what is the printer room NOx index",
             "get_sensor_value",
             {"entity": "printer_room", "metric": "nox_index"},
         ),
@@ -118,7 +118,28 @@ def test_ambiguous_requests_require_clarification(
 
     assert route.status == "clarification"
     assert message in (route.message or "")
-    assert route.skill is None
+    if phrase != "box one and box two humidity":
+        assert route.incomplete
+        assert route.missing_arguments == ("entity",)
+
+
+def test_metric_without_location_is_explicitly_incomplete(router: IntentRouter) -> None:
+    route = router.route("what is the carbon dioxide level")
+
+    assert route.incomplete
+    assert route.skill == "get_sensor_value"
+    assert route.arguments == {"metric": "co2"}
+    assert route.missing_arguments == ("entity",)
+
+
+def test_benign_fillers_do_not_change_router_meaning(router: IntentRouter) -> None:
+    route = router.route(
+        "what is the uh carbon dioxide level in the printer room"
+    )
+
+    assert route.matched
+    assert route.arguments == {"entity": "printer_room", "metric": "co2"}
+    assert "uh" not in route.normalized_text
 
 
 @pytest.mark.parametrize(

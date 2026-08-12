@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from queue import Full, Queue
 from threading import Thread
+from typing import Protocol
 
 from butters.assistant_config import AssistantSettings
 from butters.diagnostics.engine import DiagnosticEngine
@@ -51,6 +52,10 @@ class AssistantResponse:
     diagnostic: DiagnosticAnswer | None = None
 
 
+class TextAssistant(Protocol):
+    def handle_text(self, raw_text: str) -> AssistantResponse: ...
+
+
 class DeterministicAssistant:
     def __init__(
         self,
@@ -74,6 +79,26 @@ class DeterministicAssistant:
         self.llm_context = llm_context
         self.diagnostic_planner = diagnostic_planner
         self.diagnostic_engine = diagnostic_engine
+
+    def preview_route(self, raw_text: str) -> RoutedIntent:
+        """Classify locally without executing a skill or invoking a model."""
+
+        normalized = normalize_transcript(raw_text.strip(), self.vocabulary)
+        if self.diagnostic_planner is not None:
+            request = self.diagnostic_planner.request_from_text(
+                normalized,
+                local_only=True,
+                allow_cloud=False,
+            )
+            if request is not None:
+                return RoutedIntent(
+                    "matched",
+                    normalized,
+                    "diagnose_read_only",
+                    {"domain": request.domain.value, "target": request.target},
+                    confidence=1.0,
+                )
+        return self.router.route(normalized)
 
     def handle_text(self, raw_text: str) -> AssistantResponse:
         started = time.perf_counter()
@@ -250,7 +275,7 @@ class AsyncAssistantResponder:
 
     def __init__(
         self,
-        assistant: DeterministicAssistant,
+        assistant: TextAssistant,
         on_response: Callable[[AssistantResponse], None],
         *,
         max_pending: int = 2,

@@ -19,7 +19,11 @@ def subsystem_root() -> Path:
 
 
 def default_stt_model_dir() -> Path:
-    return subsystem_root() / "models" / "sherpa-onnx-streaming-zipformer-en-20M-2023-02-17"
+    return (
+        subsystem_root()
+        / "models"
+        / "sherpa-onnx-streaming-zipformer-en-2023-06-21"
+    )
 
 
 def default_vocabulary_path() -> Path:
@@ -75,9 +79,16 @@ class STTSettings:
     model_dir: Path = field(default_factory=default_stt_model_dir)
     num_threads: int = 1
     decoding_method: str = "greedy_search"
-    endpoint_silence_ms: int = 600
+    sherpa_endpoint_enabled: bool = False
+    sherpa_endpoint_silence_ms: int = 2000
     max_utterance_seconds: float = 20.0
     vocabulary_path: Path = field(default_factory=default_vocabulary_path)
+
+    @property
+    def endpoint_silence_ms(self) -> int:
+        """Deprecated milestone-3 alias for the Sherpa-only rule value."""
+
+        return self.sherpa_endpoint_silence_ms
 
     def validated(self) -> STTSettings:
         if not 1 <= self.num_threads <= 8:
@@ -87,8 +98,10 @@ class STTSettings:
                 "stt.decoding_method must be 'greedy_search' or "
                 "'modified_beam_search'"
             )
-        if not 200 <= self.endpoint_silence_ms <= 3000:
-            raise ConfigError("stt.endpoint_silence_ms must be between 200 and 3000")
+        if not 200 <= self.sherpa_endpoint_silence_ms <= 5000:
+            raise ConfigError(
+                "stt.sherpa_endpoint_silence_ms must be between 200 and 5000"
+            )
         if not 1.0 <= self.max_utterance_seconds <= 120.0:
             raise ConfigError("stt.max_utterance_seconds must be between 1 and 120")
         return self
@@ -129,6 +142,9 @@ class LiveSettings:
     acknowledgement_guard_ms: int = 120
     audio_retry_seconds: float = 1.0
     max_audio_retries: int = 3
+    provisional_endpoint_silence_ms: int = 1000
+    hard_endpoint_silence_ms: int = 2000
+    continuation_timeout_seconds: float = 12.0
 
     def validated(self) -> LiveSettings:
         if not 1.0 <= self.no_speech_timeout_seconds <= 30.0:
@@ -147,6 +163,21 @@ class LiveSettings:
             raise ConfigError("live.audio_retry_seconds must be 0 to 30")
         if not 0 <= self.max_audio_retries <= 100:
             raise ConfigError("live.max_audio_retries must be 0 to 100")
+        if not 500 <= self.provisional_endpoint_silence_ms <= 2000:
+            raise ConfigError(
+                "live.provisional_endpoint_silence_ms must be between 500 and 2000"
+            )
+        if not 1000 <= self.hard_endpoint_silence_ms <= 5000:
+            raise ConfigError(
+                "live.hard_endpoint_silence_ms must be between 1000 and 5000"
+            )
+        if self.hard_endpoint_silence_ms <= self.provisional_endpoint_silence_ms:
+            raise ConfigError(
+                "live.hard_endpoint_silence_ms must be greater than "
+                "live.provisional_endpoint_silence_ms"
+            )
+        if not 3.0 <= self.continuation_timeout_seconds <= 60.0:
+            raise ConfigError("live.continuation_timeout_seconds must be 3 to 60")
         return self
 
 
@@ -228,7 +259,15 @@ def load_stt_settings(path: Path | None = None) -> STTSettings:
         ),
         num_threads=int(stt.get("num_threads", 1)),
         decoding_method=str(stt.get("decoding_method", "greedy_search")),
-        endpoint_silence_ms=int(stt.get("endpoint_silence_ms", 600)),
+        sherpa_endpoint_enabled=bool(stt.get("sherpa_endpoint_enabled", False)),
+        # Accept the milestone-3 name only as an internal Sherpa rule setting.
+        # Live acoustic endpoint timing is loaded independently below.
+        sherpa_endpoint_silence_ms=int(
+            stt.get(
+                "sherpa_endpoint_silence_ms",
+                stt.get("endpoint_silence_ms", 2000),
+            )
+        ),
         max_utterance_seconds=float(stt.get("max_utterance_seconds", 20.0)),
         vocabulary_path=_required_path_value(
             stt.get("vocabulary_path"), config_dir, default_vocabulary_path()
@@ -281,6 +320,15 @@ def load_live_settings(path: Path | None = None) -> LiveSettings:
         ),
         audio_retry_seconds=float(live.get("audio_retry_seconds", 1.0)),
         max_audio_retries=int(live.get("max_audio_retries", 3)),
+        provisional_endpoint_silence_ms=int(
+            live.get("provisional_endpoint_silence_ms", 1000)
+        ),
+        hard_endpoint_silence_ms=int(
+            live.get("hard_endpoint_silence_ms", 2000)
+        ),
+        continuation_timeout_seconds=float(
+            live.get("continuation_timeout_seconds", 12.0)
+        ),
     )
     return settings.validated()
 

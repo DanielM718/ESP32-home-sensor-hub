@@ -1,5 +1,9 @@
 # Live voice frontend benchmark
 
+> Historical pre-replug/20M-model baseline. Later human wake, microphone, STT,
+> and semantic-endpoint evidence is recorded in
+> [human-voice-semantic-endpoint.md](human-voice-semantic-endpoint.md).
+
 Measured on the repository Raspberry Pi 4 on 2026-08-10. Unlike Milestones 1
 and 2, the intended webcam was attached and ALSA capture was exercised on the
 host. Temporary diagnostic WAVs remain under `/tmp`; none are source assets.

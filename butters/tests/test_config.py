@@ -88,6 +88,8 @@ vocabulary_path = "vocabulary.toml"
     assert settings.model_dir == tmp_path / "models/streaming"
     assert settings.num_threads == 1
     assert settings.endpoint_silence_ms == 700
+    assert settings.sherpa_endpoint_silence_ms == 700
+    assert not settings.sherpa_endpoint_enabled
     assert settings.vocabulary_path == tmp_path / "vocabulary.toml"
     overridden = with_stt_overrides(settings, num_threads=2)
     assert overridden.num_threads == 2
@@ -115,6 +117,9 @@ threshold = 0.3
 [live]
 no_speech_timeout_seconds = 3.5
 command_preroll_ms = 260
+provisional_endpoint_silence_ms = 950
+hard_endpoint_silence_ms = 2100
+continuation_timeout_seconds = 15
 
 [playback]
 acknowledge = false
@@ -133,5 +138,20 @@ acknowledgement_guard_ms = 90
     assert with_wakeword_overrides(wake, threshold=0.4).threshold == 0.4
     assert live.no_speech_timeout_seconds == 3.5
     assert live.command_preroll_ms == 260
+    assert live.provisional_endpoint_silence_ms == 950
+    assert live.hard_endpoint_silence_ms == 2100
+    assert live.continuation_timeout_seconds == 15
     assert not live.acknowledge
     assert live.acknowledgement_guard_ms == 90
+
+
+def test_semantic_endpoint_ranges_and_order_are_validated(tmp_path: Path) -> None:
+    config_path = tmp_path / "invalid-live.toml"
+    config_path.write_text(
+        "[live]\nprovisional_endpoint_silence_ms = 1200\n"
+        "hard_endpoint_silence_ms = 1000\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="must be greater"):
+        load_live_settings(config_path)

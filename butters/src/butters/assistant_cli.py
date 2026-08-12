@@ -189,7 +189,7 @@ def _transcribe_wav(
         1, math.ceil(audio_settings.vad_attack_ms / audio_settings.frame_ms)
     )
     release_frames = max(
-        1, math.ceil(stt_settings.endpoint_silence_ms / audio_settings.frame_ms)
+        1, math.ceil(audio_settings.vad_release_ms / audio_settings.frame_ms)
     )
     frontend = AudioFrontend(
         source,
@@ -211,7 +211,10 @@ def _transcribe_wav(
         stt_settings.model_dir,
         num_threads=stt_settings.num_threads,
         decoding_method=stt_settings.decoding_method,
-        endpoint_silence_seconds=stt_settings.endpoint_silence_ms / 1000,
+        sherpa_endpoint_enabled=stt_settings.sherpa_endpoint_enabled,
+        sherpa_endpoint_silence_seconds=(
+            stt_settings.sherpa_endpoint_silence_ms / 1000
+        ),
         max_utterance_seconds=stt_settings.max_utterance_seconds,
     )
 

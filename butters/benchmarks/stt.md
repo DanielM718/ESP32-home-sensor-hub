@@ -1,5 +1,9 @@
 # Streaming STT benchmark
 
+> Historical 20M-model baseline. Real-user A/B testing rejected this model and
+> selected the larger 2023-06-21 Zipformer; see
+> [human-voice-semantic-endpoint.md](human-voice-semantic-endpoint.md).
+
 Measured on the repository's Raspberry Pi 4 on 2026-08-10. The webcam
 microphone was not connected. Recognition validation used the model archive's
 small natural LibriSpeech WAVs through the same `WaveAudioSource`, conversion,

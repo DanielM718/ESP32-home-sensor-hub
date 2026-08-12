@@ -24,6 +24,8 @@ class UtteranceResult:
     speech_end_to_final_seconds: float
     endpoint_reason: str
     processing_cpu_seconds: float = 0.0
+    effective_text: str = ""
+    semantic_status: str = "unclassified"
 
 
 @dataclass(frozen=True, slots=True)

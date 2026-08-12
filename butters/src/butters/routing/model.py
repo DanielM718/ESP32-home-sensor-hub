@@ -15,7 +15,18 @@ class RoutedIntent:
     confidence: float = 0.0
     message: str | None = None
     allow_fallback: bool = False
+    missing_arguments: tuple[str, ...] = ()
 
     @property
     def matched(self) -> bool:
         return self.status == "matched" and self.skill is not None
+
+    @property
+    def incomplete(self) -> bool:
+        """Whether a known skill is blocked only by required arguments."""
+
+        return (
+            self.status == "clarification"
+            and self.skill is not None
+            and bool(self.missing_arguments)
+        )

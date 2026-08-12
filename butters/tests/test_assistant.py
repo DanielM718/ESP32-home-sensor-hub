@@ -47,9 +47,9 @@ def test_text_mode_runs_normalize_route_skill_and_format() -> None:
         server_adapter=Health(),  # type: ignore[arg-type]
     )
 
-    response = assistant.handle_text("what's the co two level")
+    response = assistant.handle_text("what's the co two level in the printer room")
 
-    assert response.normalized_text == "what's the CO2 level"
+    assert response.normalized_text == "what's the CO2 level in the printer room"
     assert response.route.skill == "get_sensor_value"
     assert response.execution is not None and response.execution.ok
     assert response.response_text == "Printer room CO2 is 742 ppm."
@@ -72,6 +72,25 @@ def test_text_mode_ambiguity_never_calls_skill() -> None:
     assert response.response_text == "Which sensor did you mean?"
 
 
+def test_filler_is_preserved_in_transcript_but_ignored_for_routing() -> None:
+    settings = load_assistant_settings()
+    assistant = create_assistant(
+        settings,
+        load_domain_vocabulary(default_vocabulary_path()),
+        sensor_adapter=Sensors(),  # type: ignore[arg-type]
+        server_adapter=Health(),  # type: ignore[arg-type]
+    )
+
+    response = assistant.handle_text(
+        "what is the uh carbon dioxide level in the printer room"
+    )
+
+    assert "uh" in response.raw_text
+    assert "uh" in response.normalized_text
+    assert "uh" not in response.route.normalized_text
+    assert response.route.matched
+
+
 def test_async_responder_keeps_live_handoff_bounded_and_closes() -> None:
     settings = load_assistant_settings()
     assistant = create_assistant(
@@ -83,10 +102,10 @@ def test_async_responder_keeps_live_handoff_bounded_and_closes() -> None:
     responses = []
     responder = AsyncAssistantResponder(assistant, responses.append, max_pending=1)
 
-    assert responder.submit("what is the CO2 level")
+    assert responder.submit("what is the printer room CO2 level")
     responder.close()
 
     assert [response.response_text for response in responses] == [
         "Printer room CO2 is 742 ppm."
     ]
-    assert not responder.submit("what is the CO2 level")
+    assert not responder.submit("what is the printer room CO2 level")
