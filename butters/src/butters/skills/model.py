@@ -64,6 +64,32 @@ class PrinterArgs:
     entity: str
 
 
+@dataclass(frozen=True, slots=True)
+class HostObservationArgs:
+    metric: str
+
+
+@dataclass(frozen=True, slots=True)
+class StackObservationArgs:
+    component: str
+
+
+@dataclass(frozen=True, slots=True)
+class NetworkObservationArgs:
+    view: str
+
+
+@dataclass(frozen=True, slots=True)
+class SensorHistorySummaryArgs:
+    entity: str
+    range_key: str
+
+
+@dataclass(frozen=True, slots=True)
+class ProjectStatusArgs:
+    view: str
+
+
 SkillArguments: TypeAlias = (
     SensorValueArgs
     | SensorStatusArgs
@@ -72,6 +98,11 @@ SkillArguments: TypeAlias = (
     | AirQualityArgs
     | ServerHealthArgs
     | PrinterArgs
+    | HostObservationArgs
+    | StackObservationArgs
+    | NetworkObservationArgs
+    | SensorHistorySummaryArgs
+    | ProjectStatusArgs
 )
 
 
@@ -192,6 +223,16 @@ class LastPrintResult:
     intelligence: PrinterIntelligenceSnapshot
 
 
+@dataclass(frozen=True, slots=True)
+class ReadOnlyObservationResult:
+    name: str
+    status: str
+    values: dict[str, object]
+    text_excerpt: str | None = None
+    error_code: str | None = None
+    truncated: bool = False
+
+
 SkillResult: TypeAlias = (
     SensorValueResult
     | SensorStatusResult
@@ -206,6 +247,7 @@ SkillResult: TypeAlias = (
     | PrinterUsageResult
     | PrinterMaintenanceResult
     | LastPrintResult
+    | ReadOnlyObservationResult
 )
 
 

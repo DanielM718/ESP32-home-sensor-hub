@@ -5,7 +5,27 @@ inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
 Wake-on-LAN. It is not part of the critical monitoring data path.
 
-## Current status: human wake/STT accepted; semantic endpointing ready for trial
+## Current status: Beta 1 private web service ready for Pi/iPhone acceptance
+
+Butters Beta 1 adds a persistent, loopback-only Starlette/Uvicorn web service,
+a clean mobile conversation page, a separately authorized engineering console,
+bounded PCM/WebSocket browser voice, in-memory expiring conversations and live
+traces, provider-neutral general cloud reasoning, persistent SQLite usage and
+budgets, independent paid text/STT/TTS switches, named voice presets, and a
+review-gated local Codex skill-authoring workflow. The existing physical
+wake/ALSA/STT/TTS and CLI paths remain independent and unchanged.
+
+The normal fast path is still normalization -> deterministic router -> typed
+`READ_ONLY` skill -> `PolicyValidator` -> bounded adapter -> response ->
+selected TTS. The original inventory was 13 normal skills and 43 diagnostic
+tools. Beta 1 retains those and promotes five reviewed capabilities—host,
+monitoring stack, network, deterministic sensor history, and fixed Git project
+inspection—for 18 inspectable normal skills without adding broad authority.
+
+Production exposure is private Tailscale HTTPS Serve to `127.0.0.1:8090`,
+never Funnel. See [BETA1.md](BETA1.md) for install, security, acceptance,
+rollback, and known limitations, and [SKILL_DEVELOPMENT.md](SKILL_DEVELOPMENT.md)
+for the canonical skill contract.
 
 The implementation now provides:
 
@@ -23,7 +43,7 @@ The implementation now provides:
 - bounded targeted clarification/continuation state with no blind concatenation;
 - no-speech, empty-result, STT-error, audio-error, and timeout recovery;
 - concept-based intent routing with explicit clarification/unsupported paths;
-- a typed, default-deny registry containing thirteen read-only skills;
+- a typed, default-deny registry containing eighteen read-only skills;
 - explicit entity/metric allow-lists and strict argument validation;
 - bounded read-only current-data access through the deployed dashboard API;
 - a fixed-command, fixed-service server-health adapter with no shell skill;
@@ -45,7 +65,8 @@ The implementation now provides:
 - a provider-neutral cloud reasoner and bounded local tool-call loop;
 - a current OpenAI Responses API request/parser implementation, disabled by
   default when configuration or `OPENAI_API_KEY` is absent;
-- non-secret usage/cost accounting and configurable request/day/month bounds;
+- persistent non-secret SQLite usage/cost accounting and configurable
+  request/day/month bounds;
 - a separate Codex engineering-remediation interface with INSPECT/PATCH jobs
   and DEPLOY always denied;
 - a 17-case A-Q offline diagnostic evaluation corpus.
@@ -64,11 +85,11 @@ recording also rejected the old 20M STT model and accepted the larger selected
 model. See **Hardware and human-validation status** and **Known limitations**
 below.
 
-Not implemented/enabled: automatic paid cloud calls, live cloud model
-acceptance, production Codex execution/deployment, write/control skills, MQTT
-publication, Home Assistant actions, arbitrary database queries,
-conversational memory, physical speaker validation, or a permanent cloud
-service. See [ARCHITECTURE.md](ARCHITECTURE.md),
+Disabled or still requiring manual acceptance: paid cloud calls, live provider
+quality, production Codex execution, patch deployment/restart, write/control
+skills, MQTT publication, Home Assistant actions, arbitrary database queries,
+long-term memory, iPhone microphone/Tailscale/browser audio acceptance, and
+physical speaker validation. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/baseline.md](benchmarks/baseline.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
 [benchmarks/live-voice.md](benchmarks/live-voice.md),
@@ -83,13 +104,16 @@ service. See [ARCHITECTURE.md](ARCHITECTURE.md),
 butters/
   README.md
   ARCHITECTURE.md
+  BETA1.md
+  SKILL_DEVELOPMENT.md
   benchmarks/{baseline,stt,live-voice,skills-tts,llm,diagnostics-cloud}.md
   benchmarks/{llm-corpus,diagnostics-corpus}.json
   config/{audio.example,assistant,domain_vocabulary}.toml
   config/wakewords.txt
-  requirements-stt.txt
+  requirements-{stt,web}.txt
   scripts/
-    butters-audio, butters-stt, butters-wake, butters-live
+    butters-audio, butters-stt, butters-wake, butters-live, butters-web
+    install-beta1, verify-beta1
     butters-query, butters-speak, butters-diagnose
     download-{stt,wake,tts}-model, download-{llama-runtime,llm-models}
     benchmark-{stt,skills,tts,llm,diagnostics}, test-butters
@@ -107,6 +131,7 @@ butters/
     cloud/                 provider contract, Responses adapter, bounded loop
     remediation/           typed Codex jobs and disabled-by-default adapter
     tts/                   engine-neutral synthesis and output adapters
+    web/                   ASGI app, sessions, PCM transport, traces, providers
     assistant.py           common orchestration and bounded live handoff
     assistant_cli.py       text/WAV/TTS commands
   tests/
@@ -262,7 +287,7 @@ co two level” is conservatively normalized to `CO2`. An unqualified humidity
 question asks which sensor; multiple boxes ask for clarification; controls and
 unknown complex requests are explicitly unsupported.
 
-Thirteen skills are registered, and every one is classified `READ_ONLY`:
+The original thirteen skills remain registered and classified `READ_ONLY`:
 
 | Skill | Allow-listed operation |
 | --- | --- |
@@ -279,6 +304,12 @@ Thirteen skills are registered, and every one is classified `READ_ONLY`:
 | `get_printer_usage` | Local/upstream usage provenance and local print counts |
 | `get_printer_maintenance` | Local maintenance due state and completion audit history |
 | `get_last_print` | Latest canonical local/cloud print duration and result |
+
+Beta 1 promotes five reviewed capabilities as normal read-only skills:
+`get_host_observation`, `get_stack_observation`,
+`get_network_observation`, `get_sensor_history_summary`, and
+`get_project_status`. They reuse bounded diagnostic evidence or five fixed Git
+views. Historical min/max/mean/difference/trend is computed locally.
 
 Unknown skills, unexpected/missing arguments, unknown entities, incompatible
 metrics, non-allow-listed comparisons, and every action class other than
@@ -342,7 +373,7 @@ Use direct text while the webcam remains unavailable:
 ./butters/scripts/benchmark-diagnostics
 ```
 
-The diagnostic pipeline is independent of the thirteen ordinary query skills:
+The diagnostic pipeline remains distinct from the normal query skills:
 
 ```text
 DiagnosticRequest -> planner -> typed READ_ONLY tools -> EvidenceBundle
@@ -719,20 +750,21 @@ non-preemption coverage.
   aborted after zram reached about 1 GiB and a soft-temperature-limit event was
   recorded. `benchmarks/llm.md` reports probe-level outcomes without inflating
   them into percentages.
-- No write/control skill, permanent service, or production audit log exists
-  yet.
+- No write/control skill or content-bearing production audit log exists.
 - Cloud execution is disabled and no live cloud benchmark was possible because
   `OPENAI_API_KEY` was absent. Mock/replay tests cover the provider and loop;
   model quality and real cost/latency remain unmeasured.
-- The paid-usage ledger is process-local. A future always-on paid deployment
-  needs durable daily/monthly accounting before enablement.
+- Beta 1 persists non-content request/provider usage and daily/monthly budgets
+  in SQLite. Unknown pricing fails closed.
 - KR260 tools honestly report that no approved SSH, serial, agent, or API
   transport exists. Docker observation also depends on a socket permission the
   development user does not currently have.
-- Codex can render safe INSPECT/PATCH jobs, but programmatic execution is off,
-  autonomous isolated worktree management is not implemented, and DEPLOY is
-  denied.
+- Codex can create isolated review-gated worktree jobs, but programmatic
+  execution is off by default. The in-daemon skill runner refuses a
+  secret-bearing parent, production deployment is never automatic, and DEPLOY
+  is denied.
 - `arecord` can count xrun events but not exact lost samples, so the drop count
   is an event estimate.
 - WAV input supports uncompressed integer PCM, not compressed/float WAV.
-- No systemd service has been installed or enabled.
+- The Beta 1 systemd unit and installer are tracked; live install/service and
+  iPhone/Tailscale acceptance status must be reported separately per run.

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from butters.integrations.model import IntegrationError
@@ -31,12 +31,42 @@ class SkillSpec:
     authorize: Authorizer
     implementation: Implementation
     timeout_seconds: float
+    version: str = "1.0.0"
+    category: str = "general"
+    input_schema: dict[str, object] = field(default_factory=dict)
+    result_description: str = "Structured read-only result."
+    permission_summary: tuple[str, ...] = ("read_only",)
+    positive_examples: tuple[str, ...] = ()
+    negative_examples: tuple[str, ...] = ()
+    source_reference: str = "butters.skills.implementations"
+    validation_status: str = "covered_by_registry_tests"
+
+    def metadata(self, *, enabled: bool = True) -> dict[str, object]:
+        """Return safe declarative metadata; never return executable callables."""
+
+        return {
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "category": self.category,
+            "action_class": self.action_class.value,
+            "enabled": enabled,
+            "input_schema": self.input_schema,
+            "result_description": self.result_description,
+            "permission_summary": list(self.permission_summary),
+            "timeout_seconds": self.timeout_seconds,
+            "positive_examples": list(self.positive_examples),
+            "negative_examples": list(self.negative_examples),
+            "source_reference": self.source_reference,
+            "validation_status": self.validation_status,
+        }
 
 
 class SkillRegistry:
     def __init__(self, policy: PolicyValidator | None = None) -> None:
         self._policy = policy or PolicyValidator()
         self._skills: dict[str, SkillSpec] = {}
+        self._disabled: set[str] = set()
 
     @property
     def skills(self) -> tuple[SkillSpec, ...]:
@@ -49,6 +79,29 @@ class SkillRegistry:
             raise ValueError("skill timeout must be positive")
         self._skills[spec.name] = spec
 
+    def get(self, skill_name: str) -> SkillSpec | None:
+        return self._skills.get(skill_name)
+
+    def is_enabled(self, skill_name: str) -> bool:
+        return skill_name in self._skills and skill_name not in self._disabled
+
+    def set_enabled(self, skill_name: str, enabled: bool) -> None:
+        spec = self._skills.get(skill_name)
+        if spec is None:
+            raise SkillError("unknown_skill", "skill is not registered")
+        if spec.action_class is not ActionClass.READ_ONLY:
+            raise SkillError("policy_denied", "only read-only skills may be toggled")
+        if enabled:
+            self._disabled.discard(skill_name)
+        else:
+            self._disabled.add(skill_name)
+
+    def metadata(self) -> tuple[dict[str, object], ...]:
+        return tuple(
+            spec.metadata(enabled=self.is_enabled(spec.name))
+            for spec in self._skills.values()
+        )
+
     def execute(
         self, skill_name: str, arguments: Mapping[str, object]
     ) -> SkillExecution:
@@ -60,6 +113,14 @@ class SkillRegistry:
                 None,
                 time.perf_counter() - started,
                 failure=SkillFailure("unknown_skill", "skill is not registered"),
+                arguments=dict(arguments),
+            )
+        if not self.is_enabled(skill_name):
+            return SkillExecution(
+                skill_name,
+                spec.action_class,
+                time.perf_counter() - started,
+                failure=SkillFailure("skill_disabled", "skill is disabled"),
                 arguments=dict(arguments),
             )
         try:
@@ -110,6 +171,8 @@ class SkillRegistry:
         spec = self._skills.get(skill_name)
         if spec is None:
             return SkillFailure("unknown_skill", "skill is not registered")
+        if not self.is_enabled(skill_name):
+            return SkillFailure("skill_disabled", "skill is disabled")
         try:
             parsed = spec.parse_arguments(arguments)
             self._policy.authorize(

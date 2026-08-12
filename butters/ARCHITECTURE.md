@@ -9,6 +9,61 @@ Mosquitto, the sensor bridge, InfluxDB, Grafana, Home Assistant, dashboards, and
 historical data continue to operate when every Butters process is stopped or
 failed.
 
+## Beta 1 deployed topology
+
+Beta 1 implements the first persistent browser service without merging into
+the Flask dashboard:
+
+```text
+private HTTPS browser
+  -> Tailscale Serve (tailnet only; terminates TLS and adds identity)
+  -> 127.0.0.1:8090 Starlette/Uvicorn
+       -> bounded sessions + structured in-memory TraceBuffer
+       -> shared BetaAssistantService
+            -> deterministic SkillRegistry (default)
+            -> local diagnostic planner/playbooks
+            -> optional bounded general/diagnostic cloud provider
+       -> browser PCM -> explicit downmix/resample -> existing StreamingSTTEngine
+       -> local or explicitly paid TTS -> WAV response
+       -> SQLite non-content usage/budgets + non-secret voice presets
+       -> review-gated Codex job metadata
+```
+
+The web daemon is an unprivileged `butters` systemd service with a strict
+loopback bind, bounded worker pool/queues, clean executor shutdown, restart
+limits, no capabilities, protected system/home, and only `/var/lib/butters`
+writable. It does not own ALSA. Tailscale identity headers are authoritative
+only in this loopback proxy topology; every admin API and admin WebSocket also
+checks the exact configured login allow-list. Mutations require same-origin
+HTTPS plus a session CSRF token. Development bypass requires loopback,
+`development_mode`, and an explicit `BUTTERS_DEV_ADMIN=1`.
+
+Browser sessions use 256-bit random opaque IDs in HttpOnly/Secure/SameSite
+cookies, expire on inactivity, and cap active sessions, messages, and context
+characters. Detailed traces are a bounded memory ring and expose only
+programmatic stages/reason codes—not model chain-of-thought. Persistent usage
+stores provider/route/model/token/cost/latency/error metadata only; no prompt,
+transcript, response, evidence, raw log, audio, or secret columns exist.
+All paid text/STT/TTS permit-call-record sequences share one daemon gate so
+concurrent requests cannot race persistent totals. Uncertain failures consume
+their conservative preflight estimate.
+
+The general cloud path receives only bounded recent context and up to six
+relevant read-only schemas. Every requested tool re-enters typed parsing and
+`PolicyValidator`. The loop caps output, context bytes, retries, wall time,
+rounds, tools, and cost. Unknown model/speech pricing denies the call. The
+diagnostic-specific cloud path remains intact for diagnostic requests.
+
+Codex has no normal-chat endpoint. Administrator skill descriptions are
+validated as untrusted, explicitly read-only job data. A clean base commit,
+detached worktree, allowed path set, file/patch bounds, tests, and explicit
+approval gate the patch. The subprocess environment is constructed from a
+small allow-list and excludes provider, MQTT, Home Assistant, database, and
+admin secrets. The in-daemon skill runner also refuses a parent containing
+recognized secrets, because stripping child variables alone does not prevent
+same-user parent inspection through `/proc`; such deployments need a distinct
+secret-free worker. Codex completion cannot commit, push, deploy, or restart.
+
 The intended pipeline is:
 
 ```text
@@ -42,7 +97,7 @@ printer-room fan" should match a deterministic intent and typed arguments. They
 must not pay LLM latency. An LLM is a constrained fallback for phrasing and
 selection, not an authority and not the execution environment.
 
-## Current implementation through the local diagnostic milestone
+## Physical voice implementation retained by Beta 1
 
 Both sources implement the same pull-based `AudioSource` contract and emit
 16 kHz, mono, signed 16-bit little-endian PCM. Milestone 3 adds replaceable
@@ -167,9 +222,11 @@ raw text / final STT transcript
        -> separate explicit AudioOutput
 ```
 
-The six current skills cover one sensor metric, sensor reporting status,
-last-seen time, maximum filament-box humidity, printer-room air quality, and
-server health. All are `READ_ONLY`. Every skill declares its stable name,
+The initial skills covered sensor metrics/status/last-seen/comparison,
+printer-room air quality, and server health; printer work brought the pre-Beta
+inventory to thirteen. Beta 1 adds five promoted host/stack/network/history/
+project skills for eighteen total. All are `READ_ONLY`. Every skill declares
+its stable name,
 description, argument parser, action class, policy authorizer, implementation,
 and deadline. The registry rejects unknown names, missing/unexpected fields,
 unknown entities/metrics, incompatible entity/metric pairs, non-allow-listed
@@ -372,14 +429,16 @@ calls, hypotheses, escalation/usage accounting, and a stopping reason.
 
 Usage records deliberately omit request/evidence content. They include model,
 effort/tier, token categories, tool rounds, time, estimated dated-price cost,
-success/error, and escalation. Per-request and process-local daily/monthly
-limits apply before a call. Durable cross-process budgeting is required before
-any permanent paid deployment.
+success/error, and escalation. Beta 1 writes this non-content metadata plus
+model-free request summaries to SQLite under `/var/lib/butters`. Per-request
+and durable daily/monthly limits apply before a call, so daemon restart does
+not reset spending totals.
 
 Cloud requires explicit configuration plus `OPENAI_API_KEY`; the key is read
 only for the Authorization header, never put in a request body, diagnostic,
-benchmark, telemetry record, or tracked file. The default always-on assistant
-does not construct a cloud escalator. No permanent cloud service is installed.
+benchmark, telemetry record, or tracked file. The persistent service constructs
+the provider boundary, but committed defaults make no paid calls; availability
+still requires explicit paid configuration, reviewed pricing, and a key.
 
 ### Engineering remediation is a separate authority
 

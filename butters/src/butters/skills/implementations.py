@@ -53,6 +53,94 @@ from butters.skills.registry import (
 )
 
 
+_SKILL_METADATA: dict[str, dict[str, object]] = {
+    "get_sensor_value": {
+        "category": "sensors",
+        "input_schema": {"entity": "allow-listed entity ID", "metric": "allow-listed metric ID"},
+        "result_description": "Current value, unit, reporting state, timestamp, and age.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("what is the humidity in box three", "printer room CO2"),
+        "negative_examples": ("set the humidity", "read an unknown sensor"),
+    },
+    "get_sensor_status": {
+        "category": "sensors",
+        "input_schema": {"entity": "optional allow-listed entity ID"},
+        "result_description": "Bounded reporting state for one or all configured sensors.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("is every sensor reporting",),
+        "negative_examples": ("restart the offline sensor",),
+    },
+    "get_sensor_last_seen": {
+        "category": "sensors",
+        "input_schema": {"entity": "allow-listed entity ID"},
+        "result_description": "Latest receive time and age for one sensor.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("when was box two last seen",),
+        "negative_examples": ("change its timestamp",),
+    },
+    "compare_sensor_metric": {
+        "category": "sensors",
+        "input_schema": {"group": "filament_boxes", "metric": "humidity", "operation": "max"},
+        "result_description": "Deterministically calculated maximum and missing observations.",
+        "permission_summary": ("dashboard_api_read", "local_computation"),
+        "positive_examples": ("which filament box is most humid",),
+        "negative_examples": ("change the driest box",),
+    },
+    "get_room_air_quality": {
+        "category": "sensors",
+        "input_schema": {"entity": "allow-listed air-quality entity ID"},
+        "result_description": "Current bounded air-quality measurements and category.",
+        "permission_summary": ("dashboard_api_read", "air_quality_entities_only"),
+        "positive_examples": ("how is the printer room air quality",),
+        "negative_examples": ("turn on an air purifier",),
+    },
+    "get_server_health": {
+        "category": "system",
+        "input_schema": {},
+        "result_description": "Host resources and fixed allow-listed service states.",
+        "permission_summary": ("procfs_read", "fixed_system_commands", "allowlisted_services"),
+        "positive_examples": ("what is the server status",),
+        "negative_examples": ("run a command", "restart the server"),
+    },
+}
+
+
+def _skill(
+    name: str,
+    description: str,
+    action_class: ActionClass,
+    parser: object,
+    authorizer: object,
+    implementation: object,
+    timeout_seconds: float,
+) -> SkillSpec:
+    metadata = dict(_SKILL_METADATA.get(name, {}))
+    if name.startswith("get_printer") or name in {
+        "get_current_print",
+        "get_print_environment_summary",
+        "get_last_print",
+    }:
+        metadata = {
+            "category": "printer",
+            "input_schema": {"entity": "configured printer entity ID"},
+            "result_description": "Read-only observation from the bounded printer adapter.",
+            "permission_summary": ("dashboard_api_read", "configured_printer_only"),
+            "positive_examples": (description.removeprefix("Return ").rstrip("."),),
+            "negative_examples": ("control the printer", "start or stop a print"),
+        }
+    return SkillSpec(
+        name,
+        description,
+        action_class,
+        parser,  # type: ignore[arg-type]
+        authorizer,  # type: ignore[arg-type]
+        implementation,  # type: ignore[arg-type]
+        timeout_seconds,
+        source_reference="butters.skills.implementations",
+        **metadata,
+    )
+
+
 class ReadOnlySkillImplementations:
     def __init__(
         self,
@@ -372,7 +460,7 @@ def build_read_only_registry(
     )
     registry = SkillRegistry()
     registry.register(
-        SkillSpec(
+        _skill(
             "get_sensor_value",
             "Return one current allow-listed sensor measurement.",
             ActionClass.READ_ONLY,
@@ -383,7 +471,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_sensor_status",
             "Return reporting status for one or all configured sensors.",
             ActionClass.READ_ONLY,
@@ -394,7 +482,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_sensor_last_seen",
             "Return the latest timestamp and age for one configured sensor.",
             ActionClass.READ_ONLY,
@@ -405,7 +493,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "compare_sensor_metric",
             "Compare current values across one allow-listed sensor group.",
             ActionClass.READ_ONLY,
@@ -416,7 +504,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_room_air_quality",
             "Return a concise structured room air-quality snapshot.",
             ActionClass.READ_ONLY,
@@ -427,7 +515,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_server_health",
             "Return local host resources and fixed allow-listed service status.",
             ActionClass.READ_ONLY,
@@ -475,7 +563,7 @@ def build_read_only_registry(
         ),
     ):
         registry.register(
-            SkillSpec(
+            _skill(
                 name,
                 description,
                 ActionClass.READ_ONLY,

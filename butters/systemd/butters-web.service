@@ -1,0 +1,51 @@
+[Unit]
+Description=Butters Beta 1 Private Web Assistant
+Documentation=file:/opt/butters/BETA1.md
+Wants=network-online.target
+After=network-online.target home-sensor-dashboard.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=butters
+Group=butters
+WorkingDirectory=/opt/butters
+EnvironmentFile=-/etc/butters/butters.conf
+EnvironmentFile=-/etc/butters/butters.env
+Environment=BUTTERS_CONFIG=/opt/butters/config/assistant.toml
+Environment=PYTHONPATH=/opt/butters/src
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/butters/.venv/bin/python -m butters.web
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/butters
+RuntimeDirectory=butters
+RuntimeDirectoryMode=0700
+StateDirectory=butters
+StateDirectoryMode=0700
+TasksMax=96
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

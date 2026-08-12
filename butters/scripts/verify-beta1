@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8090/healthz
+echo
+curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8090/readyz
+echo
+systemctl --no-pager --full status butters-web.service
+tailscale serve status

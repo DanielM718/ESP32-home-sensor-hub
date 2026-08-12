@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable
 from pathlib import Path
@@ -15,6 +16,7 @@ from butters.remediation.model import (
     EngineeringRemediationRequest,
     RemediationMode,
 )
+from butters.remediation.environment import minimal_codex_environment
 
 
 APPROVED_SUBSYSTEMS = frozenset(
@@ -126,7 +128,8 @@ class CodexJobFactory:
     def _git(self, root: Path, *args: str) -> str:
         try:
             completed = self.git_runner(
-                ["git", *args], cwd=root, capture_output=True, text=True, timeout=10, check=False
+                ["git", *args], cwd=root, capture_output=True, text=True, timeout=10,
+                check=False, env=minimal_codex_environment(os.environ),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise RemediationPolicyError("git_unavailable", "Git inspection failed") from exc

@@ -39,6 +39,42 @@ class IntentRouter:
         if self._server_health_request(normalized):
             return self._matched(normalized, "get_server_health", {}, 0.99)
 
+        host_metric = self._host_observation(normalized)
+        if host_metric is not None:
+            return self._matched(
+                normalized,
+                "get_host_observation",
+                {"metric": host_metric},
+                0.96,
+            )
+
+        stack_component = self._stack_observation(normalized)
+        if stack_component is not None:
+            return self._matched(
+                normalized,
+                "get_stack_observation",
+                {"component": stack_component},
+                0.96,
+            )
+
+        network_view = self._network_observation(normalized)
+        if network_view is not None:
+            return self._matched(
+                normalized,
+                "get_network_observation",
+                {"view": network_view},
+                0.96,
+            )
+
+        project_view = self._project_observation(normalized)
+        if project_view is not None:
+            return self._matched(
+                normalized,
+                "get_project_status",
+                {"view": project_view},
+                0.96,
+            )
+
         if self._all_sensor_status_request(normalized):
             return self._matched(
                 normalized,
@@ -64,6 +100,24 @@ class IntentRouter:
                 missing_arguments=("entity",),
             )
         entity = resolution.entity
+
+        history_range = self._history_range(normalized)
+        if history_range is not None:
+            entity_or_result = self._require_entity(
+                normalized, entity, skill="get_sensor_history_summary"
+            )
+            if isinstance(entity_or_result, RoutedIntent):
+                return entity_or_result
+            if entity_or_result.sensor_type == "printer":
+                return self._unsupported(
+                    normalized, "Printer history uses the dedicated read-only printer skills."
+                )
+            return self._matched(
+                normalized,
+                "get_sensor_history_summary",
+                {"entity": entity_or_result.entity_id, "range_key": history_range},
+                0.94,
+            )
 
         if self._print_environment_request(normalized):
             printer_or_result = self._require_printer(normalized, entity)
@@ -254,6 +308,93 @@ class IntentRouter:
                 "pi status",
             )
         )
+
+    @staticmethod
+    def _host_observation(text: str) -> str | None:
+        mappings = (
+            ("uptime", ("uptime", "how long has the pi", "how long has the server")),
+            ("load", ("load average", "server load", "pi load", "cpu load")),
+            ("memory", ("memory usage", "available memory", "server memory", "pi memory")),
+            ("swap", ("swap usage", "swap status", "zram")),
+            ("disk", ("disk usage", "disk space", "free disk", "root filesystem")),
+            ("temperature", ("cpu temperature", "pi temperature", "server temperature")),
+            ("throttle", ("throttle status", "throttled", "undervoltage")),
+            ("failed_units", ("failed units", "failed services", "services failed")),
+        )
+        for value, phrases in mappings:
+            if any(phrase in text for phrase in phrases):
+                return value
+        return None
+
+    @staticmethod
+    def _stack_observation(text: str) -> str | None:
+        if not any(word in text for word in ("health", "healthy", "status", "running", "reachable", "working", "up")):
+            return None
+        mappings = (
+            ("home_assistant", ("home assistant",)),
+            ("influxdb", ("influxdb", "influx")),
+            ("grafana", ("grafana",)),
+            ("dashboard", ("dashboard",)),
+            ("bridge", ("sensor bridge", "mqtt bridge", "bridge")),
+            ("mqtt", ("mqtt", "mosquitto", "broker")),
+            ("services", ("all services", "critical services")),
+        )
+        for value, phrases in mappings:
+            if any(phrase in text for phrase in phrases):
+                return value
+        return None
+
+    @staticmethod
+    def _network_observation(text: str) -> str | None:
+        mappings = (
+            ("tailscale", ("tailscale status", "tailnet status")),
+            ("interfaces", ("network interfaces", "interface status")),
+            ("routes", ("route summary", "network routes", "routing table")),
+            ("listeners", ("local listeners", "listening ports", "service ports")),
+        )
+        for value, phrases in mappings:
+            if any(phrase in text for phrase in phrases):
+                return value
+        return None
+
+    @staticmethod
+    def _project_observation(text: str) -> str | None:
+        if any(phrase in text for phrase in ("repo dirty", "repository dirty", "git status", "repo status")):
+            return "status"
+        if any(phrase in text for phrase in ("current branch", "git branch")):
+            return "branch"
+        if any(phrase in text for phrase in ("base commit", "current commit", "git commit are we on")):
+            return "base_commit"
+        if any(phrase in text for phrase in ("recent commits", "git history")):
+            return "recent_commits"
+        if any(phrase in text for phrase in ("diff summary", "changed files")):
+            return "diff_summary"
+        return None
+
+    @staticmethod
+    def _history_range(text: str) -> str | None:
+        historical = any(
+            phrase in text
+            for phrase in (
+                "history",
+                "historical",
+                "trend",
+                "average",
+                "mean",
+                "baseline",
+                "over the last",
+                "past hour",
+                "past day",
+                "past week",
+            )
+        )
+        if not historical:
+            return None
+        if any(phrase in text for phrase in ("7 day", "seven day", "past week", "last week")):
+            return "7d"
+        if any(phrase in text for phrase in ("1 hour", "one hour", "past hour", "last hour")):
+            return "1h"
+        return "24h"
 
     @staticmethod
     def _all_sensor_status_request(text: str) -> bool:

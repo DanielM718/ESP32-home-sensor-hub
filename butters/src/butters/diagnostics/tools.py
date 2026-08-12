@@ -626,10 +626,48 @@ class DiagnosticImplementations:
             query["location"] = entity.source_id
         payload = self.dashboard.get("/api/readings?" + urllib.parse.urlencode(query))
         timestamps = _collect_timestamps(payload)
+        summaries: dict[str, dict[str, float | int | str]] = {}
+        raw_series = payload.get("series")
+        if isinstance(raw_series, list):
+            for series in raw_series[:4]:
+                if not isinstance(series, dict):
+                    continue
+                points = series.get("points")
+                if not isinstance(points, list):
+                    continue
+                values_by_metric: dict[str, list[float]] = {}
+                for point in points[:2048]:
+                    if not isinstance(point, dict):
+                        continue
+                    for field, raw in point.items():
+                        if field == "time" or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                            continue
+                        values_by_metric.setdefault(str(field), []).append(float(raw))
+                for field, samples in list(values_by_metric.items())[:16]:
+                    if not samples:
+                        continue
+                    difference = samples[-1] - samples[0]
+                    summaries[field] = {
+                        "count": len(samples),
+                        "minimum": round(min(samples), 4),
+                        "maximum": round(max(samples), 4),
+                        "mean": round(sum(samples) / len(samples), 4),
+                        "first": round(samples[0], 4),
+                        "last": round(samples[-1], 4),
+                        "difference": round(difference, 4),
+                        "trend": "rising" if difference > 0 else "falling" if difference < 0 else "flat",
+                    }
         return EvidenceItem.create(
             f"sensor.{entity.entity_id}.history.{values.range_key}", "sensor_history_summary", "dashboard_api", entity.entity_id,
             EvidenceStatus.OK if timestamps else EvidenceStatus.DEGRADED,
-            values={"range": values.range_key, "point_timestamps_found": len(timestamps), "oldest": min(timestamps) if timestamps else None, "newest": max(timestamps) if timestamps else None},
+            values={
+                "range": values.range_key,
+                "point_timestamps_found": len(timestamps),
+                "oldest": min(timestamps) if timestamps else None,
+                "newest": max(timestamps) if timestamps else None,
+                "metric_summaries": summaries,
+                "calculation": "local deterministic min/max/mean/first/last difference",
+            },
         )
 
     def get_air_quality(self, args: ToolArguments) -> EvidenceItem:

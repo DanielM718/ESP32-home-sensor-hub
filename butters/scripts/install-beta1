@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_dir="$(dirname "${script_dir}")"
+repository_dir="$(dirname "${butters_dir}")"
+install_dir="/opt/butters"
+state_dir="/var/lib/butters"
+config_dir="/etc/butters"
+unit_name="butters-web.service"
+enable_service=0
+start_service=0
+
+usage() {
+  echo "Usage: sudo ./butters/scripts/install-beta1 [--enable] [--start]"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) enable_service=1 ;;
+    --start) enable_service=1; start_service=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run this installer with sudo." >&2
+  exit 2
+fi
+command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
+[[ -x "${butters_dir}/.venv/bin/python" ]] || { echo "Butters .venv is missing" >&2; exit 2; }
+[[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
+
+if ! getent group butters >/dev/null; then
+  groupadd --system butters
+fi
+if ! id butters >/dev/null 2>&1; then
+  useradd --system --gid butters --home-dir "${state_dir}" --shell /usr/sbin/nologin butters
+fi
+
+install -d -m 0755 -o root -g root "${install_dir}"
+install -d -m 0700 -o butters -g butters "${state_dir}" "${state_dir}/codex-jobs"
+install -d -m 0750 -o root -g butters "${config_dir}"
+rsync -a \
+  --exclude runtime \
+  --exclude models/llm \
+  --exclude models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17 \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  "${butters_dir}/" "${install_dir}/"
+chown -R root:root "${install_dir}"
+find "${install_dir}" -type d -exec chmod go-w {} +
+find "${install_dir}" -type f -exec chmod go-w {} +
+
+if [[ ! -e "${config_dir}/butters.env" ]]; then
+  install -m 0640 -o root -g butters "${butters_dir}/config/butters.env.example" "${config_dir}/butters.env"
+fi
+install -m 0640 -o root -g butters /dev/null "${config_dir}/butters.conf"
+printf 'BUTTERS_REPOSITORY_ROOT=%s\n' "${repository_dir}" >"${config_dir}/butters.conf"
+chown root:butters "${config_dir}/butters.conf"
+chmod 0640 "${config_dir}/butters.conf"
+install -m 0644 -o root -g root "${butters_dir}/systemd/${unit_name}" "/etc/systemd/system/${unit_name}"
+
+systemctl daemon-reload
+if [[ "${enable_service}" == "1" ]]; then
+  systemctl enable "${unit_name}"
+fi
+if [[ "${start_service}" == "1" ]]; then
+  systemctl restart "${unit_name}"
+fi
+
+echo "Installed Butters Beta 1 at ${install_dir}."
+echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
+echo "State: ${state_dir} (butters:butters 0700)."

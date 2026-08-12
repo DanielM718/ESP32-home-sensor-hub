@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable, Mapping
@@ -10,6 +11,7 @@ from pathlib import Path
 
 from butters.assistant_config import RemediationSettings
 from butters.diagnostics.sanitizer import sanitize_text
+from butters.remediation.environment import minimal_codex_environment
 from butters.remediation.jobs import APPROVED_AFFECTED_SERVICES, CodexJobFactory, RemediationPolicyError
 from butters.remediation.model import (
     CodexJob,
@@ -69,6 +71,7 @@ class CodexCliRemediator:
                 text=True,
                 timeout=job.timeout_seconds,
                 check=False,
+                env=minimal_codex_environment(os.environ),
             )
         except subprocess.TimeoutExpired:
             return self._failure(request, job, EngineeringStatus.TIMEOUT, "codex_timeout")
@@ -150,6 +153,7 @@ class CodexCliRemediator:
             completed = self.runner(
                 ["git", "status", "--porcelain=v1"], cwd=root, capture_output=True,
                 text=True, timeout=10, check=False,
+                env=minimal_codex_environment(os.environ),
             )
         except (OSError, subprocess.SubprocessError):
             return "<git-unavailable>"

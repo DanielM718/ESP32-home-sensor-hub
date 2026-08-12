@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 from butters.skills.model import (
     AirQualityResult,
     ComparisonResult,
@@ -12,6 +14,7 @@ from butters.skills.model import (
     PrinterStatusResult,
     PrinterTemperaturesResult,
     PrinterUsageResult,
+    ReadOnlyObservationResult,
     SensorLastSeenResult,
     SensorStatusResult,
     SensorValueResult,
@@ -51,6 +54,8 @@ class ResponseFormatter:
             return self._printer_maintenance(result)
         if isinstance(result, LastPrintResult):
             return self._last_print(result)
+        if isinstance(result, ReadOnlyObservationResult):
+            return self._observation(result)
         return "The read-only skill returned no usable result."
 
     @staticmethod
@@ -348,6 +353,27 @@ class ResponseFormatter:
             else "local observation"
         )
         return f"The latest print was {job}; result {outcome}, from {source}.{duration_text}"
+
+    @staticmethod
+    def _observation(result: ReadOnlyObservationResult) -> str:
+        if result.error_code:
+            return f"{result.name.replace('_', ' ')} is unavailable: {result.error_code}."
+        summaries = result.values.get("metric_summaries")
+        if isinstance(summaries, dict) and summaries:
+            field, raw = next(iter(summaries.items()))
+            if isinstance(raw, dict):
+                return (
+                    f"For {result.values.get('range', 'the selected range')}, {field} "
+                    f"ranged from {raw.get('minimum')} to {raw.get('maximum')}, "
+                    f"with mean {raw.get('mean')} and a {raw.get('trend', 'unknown')} trend."
+                )
+        if result.name == "project_status" and isinstance(result.values.get("output"), str):
+            output = str(result.values["output"])
+            return f"Project {result.values.get('view', 'status')}: {output[:500]}"
+        text = json.dumps(result.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        if len(text) > 500:
+            text = text[:497] + "..."
+        return f"{result.name.replace('_', ' ')} status is {result.status}: {text}."
 
     @staticmethod
     def _failure(code: str, message: str) -> str:

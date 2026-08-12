@@ -17,6 +17,7 @@ from butters.diagnostics.tools import build_diagnostic_registry
 from butters.integrations.dashboard import DashboardSensorAdapter
 from butters.integrations.model import PrinterSnapshotProvider
 from butters.integrations.printer import DashboardPrinterAdapter
+from butters.integrations.project import ProjectInspectionAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
 from butters.llm.catalog import (
     build_tool_catalog,
@@ -37,6 +38,7 @@ from butters.routing.router import IntentRouter
 from butters.skills.implementations import build_read_only_registry
 from butters.skills.model import SkillExecution
 from butters.skills.registry import SkillRegistry
+from butters.skills.promoted import register_promoted_skills
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 
 
@@ -340,15 +342,21 @@ def create_assistant(
     sensor_provider = sensor_adapter or DashboardSensorAdapter(settings.integration)
     server_provider = server_adapter or LocalServerHealthAdapter()
     printer_provider = printer_adapter or DashboardPrinterAdapter(settings.integration)
+    diagnostic_tools = build_diagnostic_registry(settings)
     skills = build_read_only_registry(
         sensor_provider, server_provider, entities, metrics, printer_provider
+    )
+    register_promoted_skills(
+        skills,
+        diagnostic_tools,
+        ProjectInspectionAdapter(settings.remediation.repository_root),
     )
     diagnostic_planner = DiagnosticPlanner(entities)
     diagnostic_engine = None
     if settings.diagnostics.enabled:
         diagnostic_engine = DiagnosticEngine(
             diagnostic_planner,
-            build_diagnostic_registry(settings),
+            diagnostic_tools,
             session_ttl_seconds=settings.diagnostics.session_ttl_seconds,
             max_evidence_bytes=settings.diagnostics.max_evidence_bytes,
         )

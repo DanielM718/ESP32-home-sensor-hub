@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111512">
+  <title>Butters Beta 1 · Admin</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="admin-body">
+  <aside class="admin-sidebar">
+    <div class="admin-brand"><div class="identity-mark small"><span>B</span></div><div><strong>Butters</strong><small>Beta 1 instrument</small></div></div>
+    <nav id="admin-nav" aria-label="Administrator sections">
+      <button data-panel="overview" class="active">Overview</button>
+      <button data-panel="trace">Live Trace</button>
+      <button data-panel="sessions">Conversations</button>
+      <button data-panel="routing">Routing</button>
+      <button data-panel="models">Models / STT</button>
+      <button data-panel="voice">TTS / Voice</button>
+      <button data-panel="skills">Skills</button>
+      <button data-panel="tools">Tools</button>
+      <button data-panel="usage">Usage</button>
+      <button data-panel="system">System</button>
+      <button data-panel="logs">Logs</button>
+      <button data-panel="security">Security</button>
+      <button data-panel="codex">Codex Jobs</button>
+    </nav>
+    <a href="/" class="back-link">← Normal mode</a>
+  </aside>
+
+  <main class="admin-main">
+    <header class="admin-topbar"><div><p class="eyebrow">Administrator console</p><h1 id="panel-title">Overview</h1></div><span id="admin-status" class="status-pill">Connecting</span></header>
+
+    <section id="panel-overview" class="admin-panel active"><div id="overview-grid" class="metric-grid"></div></section>
+
+    <section id="panel-trace" class="admin-panel">
+      <div class="panel-head"><p>Engineering-observable events only. Hidden model reasoning is never requested or displayed.</p><button id="refresh-traces" class="secondary-button">Refresh</button></div>
+      <div id="trace-list" class="trace-list"></div>
+    </section>
+
+    <section id="panel-sessions" class="admin-panel"><div id="session-list" class="data-list"></div></section>
+
+    <section id="panel-routing" class="admin-panel">
+      <form id="routing-form" class="control-card">
+        <label>Test request<textarea id="routing-text" maxlength="4000" required>Why might box three stay more humid than the others?</textarea></label>
+        <div class="form-row">
+          <label>Route<select id="route-override"><option value="auto">Auto</option><option value="deterministic_local">Deterministic / local only</option><option value="local_diagnostic">Local diagnostic / planner</option><option value="cloud_auto">Cloud automatic</option><option value="force_cloud_model">Force configured cloud model</option><option value="cloud_disabled">Cloud disabled</option></select></label>
+          <label>Model<select id="route-model"></select></label>
+          <label>Effort<select id="route-effort"><option>none</option><option>low</option><option selected>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+          <label>Max output tokens<input id="route-output" type="number" min="64" max="1200" step="1" value="1200"></label>
+        </div>
+        <button class="primary-button" type="submit">Run one-request test</button>
+      </form>
+      <pre id="routing-result" class="code-output">No test run.</pre>
+    </section>
+
+    <section id="panel-models" class="admin-panel"><div id="model-status" class="data-list"></div><div class="control-card"><label>Cloud STT WAV diagnostic<input id="stt-file" type="file" accept="audio/wav,.wav"></label><button id="stt-test" class="secondary-button" type="button">Transcribe bounded WAV</button><pre id="stt-result" class="code-output">No cloud STT test run. Local browser STT is exercised from normal push-to-talk.</pre></div></section>
+
+    <section id="panel-voice" class="admin-panel">
+      <form id="voice-form" class="control-card">
+        <div class="form-row"><label>Provider<select id="voice-provider"><option value="local">Local Piper</option><option value="openai">OpenAI</option></select></label><label>Model<input id="voice-model" value="local-piper" maxlength="128"></label><label>Voice<input id="voice-name" value="kathleen" maxlength="128"></label><label>Speed<input id="voice-speed" type="number" min="0.25" max="4" step="0.05" value="1"></label></div>
+        <label>Style / instructions<textarea id="voice-instructions" maxlength="1000" placeholder="Supported by configured cloud voices"></textarea></label>
+        <label>Preview phrase<input id="voice-phrase" maxlength="500" value="Hello. This is Butters, checking the home sensor stack."></label>
+        <div class="button-row"><button class="primary-button" type="submit">Generate preview</button><button id="save-preset" class="secondary-button" type="button">Save as default preset</button></div>
+        <audio id="voice-audio" controls></audio>
+      </form>
+      <div id="voice-presets" class="data-list"></div>
+    </section>
+
+    <section id="panel-skills" class="admin-panel">
+      <div class="panel-head"><input id="skill-search" placeholder="Search skills" aria-label="Search skills"><button id="create-skill-shortcut" class="primary-button">Create Skill</button></div>
+      <div class="split-view"><div id="skill-list" class="data-list"></div><div><pre id="skill-detail" class="code-output">Select a skill.</pre><label class="json-label">Bounded test arguments<textarea id="skill-test-args" maxlength="4000">{}</textarea></label><div class="button-row"><button id="skill-test" class="secondary-button" type="button" disabled>Run test</button><button id="skill-toggle" class="secondary-button" type="button" disabled>Disable</button></div><pre id="skill-test-result" class="code-output">No invocation run.</pre></div></div>
+    </section>
+
+    <section id="panel-tools" class="admin-panel"><div id="tool-list" class="data-list"></div></section>
+    <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>
+    <section id="panel-system" class="admin-panel"><div id="system-view" class="data-list"></div></section>
+    <section id="panel-logs" class="admin-panel"><pre id="logs-view" class="code-output"></pre></section>
+    <section id="panel-security" class="admin-panel"><div id="security-view" class="data-list"></div></section>
+
+    <section id="panel-codex" class="admin-panel">
+      <div class="warning-card">Codex jobs are read-only-skill authoring jobs. Completion never deploys or restarts Butters. Applying a tested patch requires a separate explicit approval.</div>
+      <form id="codex-form" class="control-card"><label>Describe the read-only capability<textarea id="codex-description" maxlength="2000" required>Create a read-only skill that tells me which Butters services have restarted during the last 24 hours.</textarea></label><button class="primary-button" type="submit">Create bounded Codex job</button></form>
+      <pre id="codex-result" class="code-output">No job submitted.</pre>
+      <div id="codex-jobs" class="data-list"></div>
+      <pre id="codex-job-detail" class="code-output">Select a job to inspect its bounded diff and test results.</pre>
+      <div class="button-row"><button id="codex-run" class="secondary-button" type="button" disabled>Run isolated job</button><button id="codex-approve" class="primary-button" type="button" disabled>Approve and apply patch</button><button id="codex-reject" class="secondary-button" type="button" disabled>Reject</button></div>
+    </section>
+  </main>
+  <script src="/assets/admin.js" defer></script>
+</body>
+</html>

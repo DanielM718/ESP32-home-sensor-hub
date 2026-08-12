@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,117 @@ class TTSSettings:
             raise ConfigError("tts.speed must be between 0.5 and 2.0")
         if not 1 <= self.max_text_chars <= 2000:
             raise ConfigError("tts.max_text_chars must be between 1 and 2000")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class WebSettings:
+    """Non-secret limits for the separate browser service."""
+
+    host: str = "127.0.0.1"
+    port: int = 8090
+    state_dir: Path = Path("/var/lib/butters")
+    trusted_tailscale_proxy: bool = True
+    development_mode: bool = False
+    admin_identities: tuple[str, ...] = ()
+    allowed_origins: tuple[str, ...] = ()
+    max_active_sessions: int = 32
+    session_ttl_seconds: float = 1800.0
+    max_messages_per_session: int = 24
+    max_context_chars: int = 12000
+    max_request_bytes: int = 16384
+    max_workers: int = 4
+    max_queued_requests: int = 12
+    trace_capacity: int = 256
+
+    def validated(self) -> WebSettings:
+        if self.host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ConfigError("web.host must be loopback")
+        if not 1024 <= self.port <= 65535:
+            raise ConfigError("web.port must be between 1024 and 65535")
+        if not 1 <= self.max_active_sessions <= 256:
+            raise ConfigError("web.max_active_sessions must be 1 to 256")
+        if not 60 <= self.session_ttl_seconds <= 86400:
+            raise ConfigError("web.session_ttl_seconds must be 60 to 86400")
+        if not 2 <= self.max_messages_per_session <= 100:
+            raise ConfigError("web.max_messages_per_session must be 2 to 100")
+        if not 1000 <= self.max_context_chars <= 100000:
+            raise ConfigError("web.max_context_chars must be 1000 to 100000")
+        if not 1024 <= self.max_request_bytes <= 1024 * 1024:
+            raise ConfigError("web.max_request_bytes must be 1024 to 1048576")
+        if not 1 <= self.max_workers <= 16:
+            raise ConfigError("web.max_workers must be 1 to 16")
+        if not 1 <= self.max_queued_requests <= 128:
+            raise ConfigError("web.max_queued_requests must be 1 to 128")
+        if not 32 <= self.trace_capacity <= 4096:
+            raise ConfigError("web.trace_capacity must be 32 to 4096")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class BrowserAudioSettings:
+    max_utterance_seconds: float = 30.0
+    max_chunk_bytes: int = 32768
+    max_buffered_bytes: int = 1024 * 1024
+    idle_timeout_seconds: float = 10.0
+    session_timeout_seconds: float = 60.0
+    max_concurrent_sessions: int = 2
+    max_queue_depth: int = 2
+    allowed_sample_rates: tuple[int, ...] = (16000, 44100, 48000)
+
+    def validated(self) -> BrowserAudioSettings:
+        if not 1 <= self.max_utterance_seconds <= 120:
+            raise ConfigError("browser_audio.max_utterance_seconds must be 1 to 120")
+        if not 640 <= self.max_chunk_bytes <= 256 * 1024:
+            raise ConfigError("browser_audio.max_chunk_bytes must be 640 to 262144")
+        if not self.max_chunk_bytes <= self.max_buffered_bytes <= 8 * 1024 * 1024:
+            raise ConfigError("browser_audio.max_buffered_bytes is outside its safe range")
+        if not 1 <= self.idle_timeout_seconds <= 60:
+            raise ConfigError("browser_audio.idle_timeout_seconds must be 1 to 60")
+        if not self.idle_timeout_seconds <= self.session_timeout_seconds <= 300:
+            raise ConfigError("browser_audio.session_timeout_seconds is outside its safe range")
+        if not 1 <= self.max_concurrent_sessions <= 8:
+            raise ConfigError("browser_audio.max_concurrent_sessions must be 1 to 8")
+        if not 0 <= self.max_queue_depth <= 16:
+            raise ConfigError("browser_audio.max_queue_depth must be 0 to 16")
+        if not self.allowed_sample_rates or any(
+            rate < 8000 or rate > 96000 for rate in self.allowed_sample_rates
+        ):
+            raise ConfigError("browser_audio.allowed_sample_rates contains an unsafe rate")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class SpeechProviderSettings:
+    stt_default: str = "local"
+    tts_default: str = "local"
+    allow_paid_stt: bool = False
+    allow_paid_tts: bool = False
+    cloud_stt_model: str = "gpt-4o-mini-transcribe"
+    cloud_tts_model: str = "gpt-4o-mini-tts"
+    cloud_tts_voice: str = "cedar"
+    cloud_tts_speed: float = 1.0
+    cloud_tts_instructions: str = "Warm, concise, calm home assistant."
+    cloud_stt_price_per_minute_usd: float | None = None
+    cloud_tts_price_per_million_characters_usd: float | None = None
+
+    def validated(self) -> SpeechProviderSettings:
+        if self.stt_default not in {"local", "openai"}:
+            raise ConfigError("providers.stt_default must be local or openai")
+        if self.tts_default not in {"local", "openai"}:
+            raise ConfigError("providers.tts_default must be local or openai")
+        if not self.cloud_stt_model.strip() or not self.cloud_tts_model.strip():
+            raise ConfigError("providers cloud model names cannot be empty")
+        if not 0.25 <= self.cloud_tts_speed <= 4.0:
+            raise ConfigError("providers.cloud_tts_speed must be 0.25 to 4")
+        if len(self.cloud_tts_instructions) > 1000:
+            raise ConfigError("providers.cloud_tts_instructions is too long")
+        for name, value in (
+            ("cloud_stt_price_per_minute_usd", self.cloud_stt_price_per_minute_usd),
+            ("cloud_tts_price_per_million_characters_usd", self.cloud_tts_price_per_million_characters_usd),
+        ):
+            if value is not None and value <= 0:
+                raise ConfigError(f"providers.{name} must be positive when configured")
         return self
 
 
@@ -126,6 +238,7 @@ class CloudSettings:
     max_estimated_cost_per_request_usd: float = 0.50
     daily_budget_usd: float = 2.0
     monthly_budget_usd: float = 20.0
+    max_usage_records: int = 50000
     pricing_source: str = "https://developers.openai.com/api/docs/models/compare"
     pricing_date: str = "2026-08-11"
 
@@ -157,6 +270,8 @@ class CloudSettings:
             raise ConfigError("cloud.max_escalation_steps must be 1 to 3")
         if not 1 <= self.max_cloud_requests_per_diagnostic <= 16:
             raise ConfigError("cloud.max_cloud_requests_per_diagnostic must be 1 to 16")
+        if not 1000 <= self.max_usage_records <= 1_000_000:
+            raise ConfigError("cloud.max_usage_records must be 1000 to 1000000")
         for label, value in (
             ("max_estimated_cost_per_request_usd", self.max_estimated_cost_per_request_usd),
             ("daily_budget_usd", self.daily_budget_usd),
@@ -184,12 +299,19 @@ class RemediationSettings:
     max_output_bytes: int = 128 * 1024
     repository_root: Path = Path(".")
     deployment_roots: tuple[Path, ...] = (Path("/opt/home-sensor"),)
+    jobs_dir: Path = Path("/var/lib/butters/codex-jobs")
+    max_patch_bytes: int = 512 * 1024
+    max_retained_jobs: int = 50
 
     def validated(self) -> RemediationSettings:
         if not 30 <= self.timeout_seconds <= 3600:
             raise ConfigError("remediation.timeout_seconds must be 30 to 3600")
         if not 4096 <= self.max_output_bytes <= 4 * 1024 * 1024:
             raise ConfigError("remediation.max_output_bytes must be 4096 to 4194304")
+        if not 16384 <= self.max_patch_bytes <= 4 * 1024 * 1024:
+            raise ConfigError("remediation.max_patch_bytes must be 16384 to 4194304")
+        if not 1 <= self.max_retained_jobs <= 500:
+            raise ConfigError("remediation.max_retained_jobs must be 1 to 500")
         return self
 
 
@@ -212,6 +334,9 @@ class AssistantSettings:
     cloud: CloudSettings
     remediation: RemediationSettings
     entities: tuple[EntitySettings, ...]
+    web: WebSettings = WebSettings()
+    browser_audio: BrowserAudioSettings = BrowserAudioSettings()
+    providers: SpeechProviderSettings = SpeechProviderSettings()
 
 
 def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
@@ -248,6 +373,58 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         num_threads=int(tts_table.get("num_threads", 2)),
         speed=float(tts_table.get("speed", 1.0)),
         max_text_chars=int(tts_table.get("max_text_chars", 500)),
+    ).validated()
+
+    web_table = _table(data, "web")
+    state_dir = Path(
+        os.getenv("BUTTERS_STATE_DIR", str(web_table.get("state_dir", "/var/lib/butters")))
+    ).expanduser()
+    web = WebSettings(
+        host=str(web_table.get("host", "127.0.0.1")),
+        port=int(web_table.get("port", 8090)),
+        state_dir=state_dir,
+        trusted_tailscale_proxy=bool(web_table.get("trusted_tailscale_proxy", True)),
+        development_mode=bool(web_table.get("development_mode", False)),
+        admin_identities=_string_tuple(web_table.get("admin_identities", []), "web.admin_identities"),
+        allowed_origins=_string_tuple(web_table.get("allowed_origins", []), "web.allowed_origins"),
+        max_active_sessions=int(web_table.get("max_active_sessions", 32)),
+        session_ttl_seconds=float(web_table.get("session_ttl_seconds", 1800.0)),
+        max_messages_per_session=int(web_table.get("max_messages_per_session", 24)),
+        max_context_chars=int(web_table.get("max_context_chars", 12000)),
+        max_request_bytes=int(web_table.get("max_request_bytes", 16384)),
+        max_workers=int(web_table.get("max_workers", 4)),
+        max_queued_requests=int(web_table.get("max_queued_requests", 12)),
+        trace_capacity=int(web_table.get("trace_capacity", 256)),
+    ).validated()
+
+    audio_table = _table(data, "browser_audio")
+    raw_rates = audio_table.get("allowed_sample_rates", [16000, 44100, 48000])
+    if not isinstance(raw_rates, list) or not all(isinstance(item, int) for item in raw_rates):
+        raise ConfigError("browser_audio.allowed_sample_rates must be an integer array")
+    browser_audio = BrowserAudioSettings(
+        max_utterance_seconds=float(audio_table.get("max_utterance_seconds", 30.0)),
+        max_chunk_bytes=int(audio_table.get("max_chunk_bytes", 32768)),
+        max_buffered_bytes=int(audio_table.get("max_buffered_bytes", 1024 * 1024)),
+        idle_timeout_seconds=float(audio_table.get("idle_timeout_seconds", 10.0)),
+        session_timeout_seconds=float(audio_table.get("session_timeout_seconds", 60.0)),
+        max_concurrent_sessions=int(audio_table.get("max_concurrent_sessions", 2)),
+        max_queue_depth=int(audio_table.get("max_queue_depth", 2)),
+        allowed_sample_rates=tuple(raw_rates),
+    ).validated()
+
+    provider_table = _table(data, "providers")
+    providers = SpeechProviderSettings(
+        stt_default=str(provider_table.get("stt_default", "local")),
+        tts_default=str(provider_table.get("tts_default", "local")),
+        allow_paid_stt=bool(provider_table.get("allow_paid_stt", False)),
+        allow_paid_tts=bool(provider_table.get("allow_paid_tts", False)),
+        cloud_stt_model=str(provider_table.get("cloud_stt_model", "gpt-4o-mini-transcribe")),
+        cloud_tts_model=str(provider_table.get("cloud_tts_model", "gpt-4o-mini-tts")),
+        cloud_tts_voice=str(provider_table.get("cloud_tts_voice", "cedar")),
+        cloud_tts_speed=float(provider_table.get("cloud_tts_speed", 1.0)),
+        cloud_tts_instructions=str(provider_table.get("cloud_tts_instructions", "Warm, concise, calm home assistant.")),
+        cloud_stt_price_per_minute_usd=_optional_float(provider_table.get("cloud_stt_price_per_minute_usd")),
+        cloud_tts_price_per_million_characters_usd=_optional_float(provider_table.get("cloud_tts_price_per_million_characters_usd")),
     ).validated()
 
     llm_table = _table(data, "llm")
@@ -292,12 +469,18 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_estimated_cost_per_request_usd=float(cloud_table.get("max_estimated_cost_per_request_usd", 0.50)),
         daily_budget_usd=float(cloud_table.get("daily_budget_usd", 2.0)),
         monthly_budget_usd=float(cloud_table.get("monthly_budget_usd", 20.0)),
+        max_usage_records=int(cloud_table.get("max_usage_records", 50000)),
         pricing_source=str(cloud_table.get("pricing_source", "https://developers.openai.com/api/docs/models/compare")),
         pricing_date=str(cloud_table.get("pricing_date", "2026-08-11")),
     ).validated()
 
     remediation_table = _table(data, "remediation")
-    repository_value = Path(str(remediation_table.get("repository_root", "../.."))).expanduser()
+    repository_value = Path(
+        os.getenv(
+            "BUTTERS_REPOSITORY_ROOT",
+            str(remediation_table.get("repository_root", "../..")),
+        )
+    ).expanduser()
     if not repository_value.is_absolute():
         repository_value = (config_path.resolve().parent / repository_value).resolve()
     raw_deployment_roots = remediation_table.get("deployment_roots", ["/opt/home-sensor"])
@@ -309,6 +492,14 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_output_bytes=int(remediation_table.get("max_output_bytes", 128 * 1024)),
         repository_root=repository_value,
         deployment_roots=tuple(Path(item).expanduser().resolve() for item in raw_deployment_roots),
+        jobs_dir=Path(
+            os.getenv(
+                "BUTTERS_CODEX_JOBS_DIR",
+                str(remediation_table.get("jobs_dir", "/var/lib/butters/codex-jobs")),
+            )
+        ).expanduser(),
+        max_patch_bytes=int(remediation_table.get("max_patch_bytes", 512 * 1024)),
+        max_retained_jobs=int(remediation_table.get("max_retained_jobs", 50)),
     ).validated()
 
     raw_entities = data.get("entities", [])
@@ -329,6 +520,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         cloud=cloud,
         remediation=remediation,
         entities=entities,
+        web=web,
+        browser_audio=browser_audio,
+        providers=providers,
     )
 
 
@@ -367,3 +561,11 @@ def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
     ):
         raise ConfigError(f"{label} must be an array of non-empty strings")
     return tuple(item.strip() for item in value)
+
+
+def _optional_float(value: object) -> float | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError("optional price values must be numeric")
+    return float(value)
