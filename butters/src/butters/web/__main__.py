@@ -21,6 +21,9 @@ def main() -> None:
         timeout_keep_alive=10,
         log_level=os.getenv("BUTTERS_LOG_LEVEL", "info").lower(),
         access_log=False,
+        # Preserve the TCP peer established by Tailscale Serve. Butters trusts
+        # proxy-supplied identity only after independently checking that peer.
+        proxy_headers=False,
     )
 
 
