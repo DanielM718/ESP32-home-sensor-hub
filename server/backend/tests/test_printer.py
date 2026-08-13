@@ -201,19 +201,106 @@ def test_direct_material_entity_is_observed_not_inferred(tmp_path: Path) -> None
     assert state.provenance["active_material"] is ValueProvenance.OBSERVED
 
 
-def test_stale_home_assistant_entities_become_explicitly_offline(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("raw_status", "expected"),
+    (
+        ("idle", NormalizedPrinterState.IDLE),
+        ("failed", NormalizedPrinterState.FAILED),
+        ("running", NormalizedPrinterState.PRINTING),
+    ),
+)
+def test_old_entity_timestamps_do_not_force_offline(
+    tmp_path: Path, raw_status: str, expected: NormalizedPrinterState
 ) -> None:
+    """A quiet printer stops changing mapped entities; that is not offline.
+
+    Home Assistant reports these entities on change, so a settled X2D can
+    legitimately exceed stale_after_seconds while remaining reachable.
+    Availability comes from the mapped online entity, never from entity age.
+    """
+
     settings = _settings(tmp_path)
     old = NOW - timedelta(seconds=settings.stale_after_seconds + 1)
     states = {
         settings.entities["online"]: _ha_entity("on", timestamp=old),
-        settings.entities["print_status"]: _ha_entity("running", timestamp=old),
+        settings.entities["print_status"]: _ha_entity(raw_status, timestamp=old),
     }
+
     state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
-    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+
+    assert state.online
+    assert state.normalized_state is expected
+    assert state.unavailable_reason is None
+    # Provenance is still reported even though the observation is old.
+    assert state.source_timestamp == old
+
+
+def test_old_timestamps_preserve_source_timestamp_provenance(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    older = NOW - timedelta(hours=3)
+    newer = NOW - timedelta(minutes=30)
+    states = {
+        settings.entities["online"]: _ha_entity("on", timestamp=older),
+        settings.entities["print_status"]: _ha_entity("idle", timestamp=newer),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert state.online
+    assert state.normalized_state is NormalizedPrinterState.IDLE
+    assert state.source_timestamp == newer  # newest mapped observation wins
+    assert (
+        state.observed_at - state.source_timestamp
+    ).total_seconds() > settings.stale_after_seconds
+
+
+def test_explicit_offline_online_entity_is_offline(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    states = {
+        settings.entities["online"]: _ha_entity("off", timestamp=NOW),
+        settings.entities["print_status"]: _ha_entity("running", timestamp=NOW),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
     assert not state.online
-    assert state.unavailable_reason == "Home Assistant printer entities are stale"
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert state.unavailable_reason == "Home Assistant reports the printer offline"
+
+
+@pytest.mark.parametrize("raw", ("unavailable", "unknown"))
+def test_unavailable_online_entity_is_offline_with_reason(
+    tmp_path: Path, raw: str
+) -> None:
+    settings = _settings(tmp_path)
+    states = {
+        settings.entities["online"]: _ha_entity(raw, timestamp=NOW),
+        settings.entities["print_status"]: _ha_entity("idle", timestamp=NOW),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert not state.online
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert (
+        state.unavailable_reason
+        == "Home Assistant reports printer availability as unknown"
+    )
+
+
+def test_missing_online_entity_is_offline_with_reason(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    states = {settings.entities["print_status"]: _ha_entity("idle", timestamp=NOW)}
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert not state.online
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert (
+        state.unavailable_reason == "online entity was not returned by Home Assistant"
+    )
 
 
 @pytest.mark.parametrize(
