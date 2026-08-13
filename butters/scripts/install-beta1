@@ -22,6 +22,29 @@ usage() {
 cleanup() {
   rm -rf "${staging_dir}"
 }
+
+# Seal a staged tree for the unprivileged service user. rsync -a faithfully
+# reproduces the checkout's private modes (0700 directories, 0600 files), which
+# root can read but `butters` cannot, so ownership and modes must both be reset
+# before the tree is published. Existing executable bits are preserved so the
+# interpreter, helper scripts, and native libraries stay runnable; everything
+# else becomes read-only data. Nothing is world-accessible or group-writable.
+normalize_application_tree() {
+  local root="$1" owner="$2" group="$3"
+  # -h changes a symlink's own ownership and never follows it out of the tree:
+  # .venv/bin/python3 points at /usr/bin/python3.
+  chown -h -R "${owner}:${group}" "${root}"
+  # -type d and -type f never match symlinks, so link targets are untouched here
+  # too. Leading zeroes also clear any setuid/setgid/sticky bit.
+  find "${root}" -type d -exec chmod 0750 {} +
+  find "${root}" -type f -perm /111 -exec chmod 0750 {} +
+  find "${root}" -type f ! -perm /111 -exec chmod 0640 {} +
+}
+
+# Sourcing this file defines the helpers without performing an installation, so
+# the regression tests can exercise normalize_application_tree() directly.
+(return 0 2>/dev/null) && return 0
+
 trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
@@ -69,17 +92,21 @@ rsync -a --delete \
   --exclude __pycache__ \
   --exclude '*.pyc' \
   "${butters_dir}/" "${staging_dir}/"
-chown -R root:root "${staging_dir}"
-find "${staging_dir}" -type d -exec chmod go-w {} +
-find "${staging_dir}" -type f -exec chmod go-w {} +
 
-# 2. Verify the staged tree before it can ever be executed.
+# 2. Verify the staged tree before it can ever be executed. Byte-compiling
+#    writes __pycache__ into the staging tree, so it has to finish before the
+#    tree is sealed in step 3.
 "${staging_dir}/.venv/bin/python" -m compileall -q "${staging_dir}/src" >/dev/null \
   || { echo "Staged tree failed to compile; nothing was replaced." >&2; exit 3; }
 [[ -f "${staging_dir}/src/butters/web/app.py" ]] \
   || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
 
-# 3. Swap. Renames are atomic, so no mixed tree is ever importable, and the
+# 3. Seal the staged tree. This is the last write to it, so the swap below
+#    publishes an already-correct tree and /opt/butters is never momentarily
+#    unreadable by the service user.
+normalize_application_tree "${staging_dir}" root butters
+
+# 4. Swap. Renames are atomic, so no mixed tree is ever importable, and the
 #    replaced tree is kept for rollback.
 if [[ -d "${install_dir}" ]]; then
   rm -rf "${previous_dir}"
@@ -124,6 +151,7 @@ if [[ "${start_service}" == "1" ]]; then
 fi
 
 echo "Installed Butters Beta 1 at ${install_dir}."
+echo "Application tree: ${install_dir} (root:butters, 0750 directories, 0640 files)."
 echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then restart)."
 echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
 echo "Deployment values: ${config_dir}/butters.conf (set BUTTERS_ALLOWED_ORIGINS)."

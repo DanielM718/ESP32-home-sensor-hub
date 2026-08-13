@@ -111,10 +111,20 @@ sudoedit /etc/butters/butters.env
 sudo systemctl restart butters-web.service
 ```
 
-The installer stages a complete tree, byte-compiles it, and only then swaps it
-into place with atomic renames. A failure before the swap leaves the running
-installation untouched. The replaced tree is retained at `/opt/butters.previous`
-for rollback. Obsolete files cannot linger: the staged copy is authoritative.
+The installer stages a complete tree, byte-compiles it, seals its ownership and
+permissions, and only then swaps it into place with atomic renames. A failure
+before the swap leaves the running installation untouched. The replaced tree is
+retained at `/opt/butters.previous` for rollback. Obsolete files cannot linger:
+the staged copy is authoritative.
+
+Sealing is what makes the tree usable by the unprivileged unit: a source
+checkout is private to the developer (0700 directories, 0600 files), so the
+installer resets the staged tree to `root:butters` with 0750 directories and
+0640 files, keeping the execute bit only where one already existed. The service
+user can traverse `/opt/butters`, exec `.venv/bin/python`, and read models,
+native libraries, and static assets; nobody else has any access, and the tree
+stays read-only to the unit. No manual `chmod` after installation is required
+or expected.
 
 Set `BUTTERS_ADMIN_IDENTITIES` to exact comma-separated
 `Tailscale-User-Login` values. `OPENAI_API_KEY` may remain blank; deterministic
