@@ -92,6 +92,11 @@ rsync -a --delete \
   --exclude __pycache__ \
   --exclude '*.pyc' \
   "${butters_dir}/" "${staging_dir}/"
+# Freeze the snapshot before root executes anything out of it. Running as root,
+# rsync -a preserves the *source* owner, so without this the staged tree would
+# still be owned by the invoking user while the interpreter below runs as root.
+# -h retargets the copied symlinks themselves, never their referents.
+chown -h -R root:butters "${staging_dir}"
 
 # 2. Verify the staged tree before it can ever be executed. Byte-compiling
 #    writes __pycache__ into the staging tree, so it has to finish before the
@@ -101,9 +106,11 @@ rsync -a --delete \
 [[ -f "${staging_dir}/src/butters/web/app.py" ]] \
   || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
 
-# 3. Seal the staged tree. This is the last write to it, so the swap below
-#    publishes an already-correct tree and /opt/butters is never momentarily
-#    unreadable by the service user.
+# 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
+#    also covers the bytecode compileall just generated and establishes the final
+#    modes. It is the last write to the tree, so the swap below publishes an
+#    already-correct tree and /opt/butters is never momentarily unreadable by the
+#    service user.
 normalize_application_tree "${staging_dir}" root butters
 
 # 4. Swap. Renames are atomic, so no mixed tree is ever importable, and the
