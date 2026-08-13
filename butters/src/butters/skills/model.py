@@ -20,6 +20,19 @@ class ActionClass(str, Enum):
     DISRUPTIVE = "disruptive"
 
 
+class SkillAudience(str, Enum):
+    """Who may invoke a skill, independent of what the skill is allowed to do.
+
+    A skill can be strictly read-only and still expose deployment internals
+    (repository state, listener inventory) that the ordinary conversation
+    surface must never reveal. Audience is declared on the SkillSpec so the
+    registry enforces it once, rather than each caller re-deriving it.
+    """
+
+    NORMAL = "normal"
+    ADMINISTRATOR = "administrator"
+
+
 class SkillError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)

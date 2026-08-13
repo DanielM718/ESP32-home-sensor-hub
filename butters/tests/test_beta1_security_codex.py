@@ -115,6 +115,8 @@ def test_skill_builder_protects_dirty_base_commit(tmp_path: Path) -> None:
     ("generated_size", "expected_status"),
     ((200, "patch_ready"), (20_000, "failed")),
 )
+# The oversized case is now refused by the pre-diff artifact gate, so Git is
+# never asked to render the patch into memory.
 def test_skill_builder_captures_untracked_patch_and_enforces_diff_bound(
     tmp_path: Path,
     generated_size: int,
@@ -154,7 +156,8 @@ def test_skill_builder_captures_untracked_patch_and_enforces_diff_bound(
         assert "test_generated.py" in result.diff
         assert result.tests_passed is True
     else:
-        assert result.stopping_reason == "patch_too_large"
+        assert result.stopping_reason == "generated_bytes_too_large"
+        assert result.diff == ""
 
 
 def test_skill_builder_refuses_same_process_execution_when_parent_has_secret(tmp_path: Path) -> None:

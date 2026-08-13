@@ -6,6 +6,7 @@ import secrets
 import threading
 import time
 from collections import deque
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -52,6 +53,7 @@ class ExecutionTrace:
     events: list[TraceEvent] = field(default_factory=list)
     completed: bool = False
     max_events: int = 256
+    created_clock: float = 0.0
 
     def emit(
         self,
@@ -113,14 +115,27 @@ class ExecutionTrace:
 
 
 class TraceBuffer:
-    """In-memory detailed trace ring; persistent logs should use summaries only."""
+    """In-memory detailed trace ring; persistent logs should use summaries only.
 
-    def __init__(self, capacity: int = 256) -> None:
+    Traces carry conversation text, so they are bounded by count *and* by time,
+    and they are dropped with the conversation that produced them.
+    """
+
+    def __init__(
+        self,
+        capacity: int = 256,
+        *,
+        ttl_seconds: float = 900.0,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self._traces: deque[ExecutionTrace] = deque(maxlen=capacity)
         self._by_id: dict[str, ExecutionTrace] = {}
         self._lock = threading.RLock()
+        self.ttl_seconds = ttl_seconds
+        self.clock = clock
 
     def start(self, session_id: str, source: str) -> ExecutionTrace:
+        self.expire()
         trace = ExecutionTrace(
             secrets.token_urlsafe(18),
             session_id,
@@ -128,6 +143,7 @@ class TraceBuffer:
             source,
             _now(),
             time.perf_counter(),
+            created_clock=self.clock(),
         )
         with self._lock:
             if len(self._traces) == self._traces.maxlen and self._traces:
@@ -139,14 +155,44 @@ class TraceBuffer:
     def get(self, trace_id: str) -> ExecutionTrace | None:
         if not isinstance(trace_id, str) or len(trace_id) > 128:
             return None
+        self.expire()
         with self._lock:
             return self._by_id.get(trace_id)
 
     def recent(self, limit: int = 50, *, include_text: bool = True) -> list[dict[str, object]]:
         bounded = max(1, min(limit, 200))
+        self.expire()
         with self._lock:
             selected = list(self._traces)[-bounded:]
         return [item.as_dict(include_text=include_text) for item in reversed(selected)]
+
+    def expire(self) -> int:
+        """Drop traces older than the configured TTL."""
+
+        deadline = self.clock() - self.ttl_seconds
+        with self._lock:
+            retained = [item for item in self._traces if item.created_clock > deadline]
+            removed = len(self._traces) - len(retained)
+            if removed:
+                self._replace(retained)
+        return removed
+
+    def drop_sessions(self, session_ids: tuple[str, ...]) -> int:
+        """Forget the conversation content of expired or cleared sessions."""
+
+        dropped = frozenset(session_ids)
+        if not dropped:
+            return 0
+        with self._lock:
+            retained = [item for item in self._traces if item.session_id not in dropped]
+            removed = len(self._traces) - len(retained)
+            if removed:
+                self._replace(retained)
+        return removed
+
+    def _replace(self, retained: list[ExecutionTrace]) -> None:
+        self._traces = deque(retained, maxlen=self._traces.maxlen)
+        self._by_id = {item.trace_id: item for item in retained}
 
 
 def _now() -> str:

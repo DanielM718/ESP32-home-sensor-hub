@@ -38,6 +38,7 @@ from butters.web.speech import (
     TranscriptionResult,
     VoicePreset,
     VoicePresetStore,
+    validate_preset,
 )
 from butters.web.trace import ExecutionTrace, TraceBuffer, TraceStage
 
@@ -123,13 +124,21 @@ class BetaAssistantService:
             settings.cloud,
             self.state_dir / "usage.sqlite3",
         )
+        self.traces = traces or TraceBuffer(
+            settings.web.trace_capacity,
+            ttl_seconds=settings.web.trace_ttl_seconds,
+        )
         self.sessions = sessions or SessionManager(
             max_active=settings.web.max_active_sessions,
             ttl_seconds=settings.web.session_ttl_seconds,
             max_messages=settings.web.max_messages_per_session,
             max_context_chars=settings.web.max_context_chars,
+            max_per_peer=settings.web.max_sessions_per_peer,
+            admin_reserve=settings.web.admin_session_reserve,
+            # Conversation text lives in traces too, so an expiring session takes
+            # its traces with it rather than leaving them for the trace TTL.
+            on_expire=self.traces.drop_sessions,
         )
-        self.traces = traces or TraceBuffer(settings.web.trace_capacity)
         self.general_reasoner = general_reasoner or OpenAIGeneralReasoner(settings.cloud)
         self.voice_presets = VoicePresetStore(self.state_dir / "state.sqlite3")
         self.skill_builder = CodexSkillBuilder(
@@ -191,6 +200,32 @@ class BetaAssistantService:
         )
 
         route = self.assistant.router.route(normalized)
+        if (
+            route.matched
+            and route.skill is not None
+            and not administrator
+            and self.assistant.skills.requires_administrator(route.skill)
+        ):
+            # Administrator-sensitive observations are refused before any skill,
+            # diagnostic, or cloud stage runs: the ordinary surface must neither
+            # answer them nor escalate them to a paid model to try.
+            current_trace.emit(
+                TraceStage.POLICY,
+                "denied",
+                reason_code="administrator_required",
+                fields={"skill": route.skill, "audience": "administrator"},
+            )
+            denied_route = RoutedIntent(
+                "unsupported", normalized, message="That request is not supported."
+            )
+            result = self._unsupported_response(
+                text, normalized, denied_route, "administrator_required"
+            )
+            decision = RouteDecision(
+                "unsupported", ("administrator_required",), _denied_features(normalized), None, True
+            )
+            response = self._from_assistant_result(result, current_trace, decision)
+            return self._finish(session, current_trace, response, started)
         diagnostic_request = self._diagnostic_request(normalized, override)
         if (
             diagnostic_request is not None
@@ -250,9 +285,10 @@ class BetaAssistantService:
                     max_output_tokens=output_limit,
                     route=route,
                     reason_code="open_ended_reasoning_required",
+                    administrator=administrator,
                 )
                 return self._finish(session, current_trace, response, started)
-            result = self._execute_skill(text, normalized, route, current_trace)
+            result = self._execute_skill(text, normalized, route, current_trace, administrator)
             result = replace(
                 result,
                 response_text=(
@@ -272,7 +308,7 @@ class BetaAssistantService:
             RouteOverride.DETERMINISTIC_LOCAL,
             RouteOverride.CLOUD_DISABLED,
         }:
-            result = self._execute_skill(text, normalized, route, current_trace)
+            result = self._execute_skill(text, normalized, route, current_trace, administrator)
             decision = RouteDecision(
                 "deterministic",
                 ("deterministic_skill_match",),
@@ -291,6 +327,7 @@ class BetaAssistantService:
                 max_output_tokens=output_limit,
                 route=route,
                 reason_code="admin_forced_cloud",
+                administrator=administrator,
             )
             return self._finish(session, current_trace, response, started)
         elif route.incomplete:
@@ -310,6 +347,7 @@ class BetaAssistantService:
                 max_output_tokens=output_limit,
                 route=route,
                 reason_code="open_ended_reasoning_required",
+                administrator=administrator,
             )
             return self._finish(session, current_trace, response, started)
         else:
@@ -376,6 +414,9 @@ class BetaAssistantService:
         request_id: str | None = None,
         session_id: str | None = None,
     ) -> SpeechResult:
+        # Previews and saved presets share one validation boundary, so an
+        # out-of-range or non-finite speed is rejected before any engine loads.
+        validate_preset(preset, settings=self.settings)
         if preset.provider == "local":
             return self.local_tts.synthesize(text, preset)
         if preset.provider != "openai":
@@ -458,6 +499,34 @@ class BetaAssistantService:
             )
         return result
 
+    def usage_report(self, session_id: str | None = None) -> dict[str, object]:
+        """Bounded administrator usage view; runs on a worker, never the loop."""
+
+        return {
+            "summary": self.ledger.summary(),
+            "current_session": (
+                self.ledger.summary(session_id=session_id) if session_id else None
+            ),
+            "recent": self.ledger.recent(100),
+            "recent_requests": self.ledger.recent_requests(100),
+        }
+
+    def repository_status(self) -> dict[str, object]:
+        adapter = getattr(self.assistant, "project_adapter", None)
+        configured = self.settings.remediation.project_inspection_root is not None
+        return {
+            "configured": configured,
+            "available": bool(adapter is not None and adapter.available),
+            "write_authority": False,
+            "reason": None if configured else "no repository is configured for this deployment",
+        }
+
+    def clear_conversation(self, session: BrowserSession) -> None:
+        """Clear a conversation and the detailed traces that quote it."""
+
+        self.sessions.clear(session)
+        self.traces.drop_sessions((session.session_id,))
+
     def credential_status(self) -> dict[str, object]:
         return {
             "openai": {
@@ -476,17 +545,30 @@ class BetaAssistantService:
         normalized: str,
         route: RoutedIntent,
         trace: ExecutionTrace,
+        administrator: bool = False,
     ) -> AssistantResponse:
         assert route.skill is not None
         trace.emit(TraceStage.SKILL, "requested", fields={"skill": route.skill, "arguments": route.arguments})
-        validation = self.assistant.skills.validate_proposal(route.skill, route.arguments)
+        validation = self.assistant.skills.validate_proposal(
+            route.skill, route.arguments, administrator=administrator
+        )
         trace.emit(
             TraceStage.POLICY,
             "allowed" if validation is None else "denied",
             reason_code=None if validation is None else validation.code,
             fields={"skill": route.skill, "action_class": "read_only"},
         )
-        execution = self.assistant.skills.execute(route.skill, route.arguments)
+        if validation is not None and validation.code == "administrator_required":
+            # Do not confirm that an administrator-sensitive observation exists.
+            return self._unsupported_response(
+                raw,
+                normalized,
+                RoutedIntent("unsupported", normalized, message="That request is not supported."),
+                "administrator_required",
+            )
+        execution = self.assistant.skills.execute(
+            route.skill, route.arguments, administrator=administrator
+        )
         trace.emit(
             TraceStage.TOOL,
             "complete" if execution.ok else "failed",
@@ -610,6 +692,7 @@ class BetaAssistantService:
         max_output_tokens: int,
         route: RoutedIntent,
         reason_code: str,
+        administrator: bool = False,
     ) -> ServiceResponse:
         with self._paid_operation_gate:
             return self._general_cloud_locked(
@@ -621,6 +704,7 @@ class BetaAssistantService:
                 max_output_tokens=max_output_tokens,
                 route=route,
                 reason_code=reason_code,
+                administrator=administrator,
             )
 
     def _general_cloud_locked(
@@ -634,15 +718,16 @@ class BetaAssistantService:
         max_output_tokens: int,
         route: RoutedIntent,
         reason_code: str,
+        administrator: bool = False,
     ) -> ServiceResponse:
         normalized = normalize_transcript(text, self.vocabulary)
         if model not in self.settings.cloud.pricing:
             return self._cloud_failure(trace, normalized, "model_denied", route)
-        tools = self._relevant_skill_tools(normalized)
+        tools = self._relevant_skill_tools(normalized, administrator)
         context = self.sessions.context(session)
         if context and context[-1].get("role") == "user" and context[-1].get("content") == text:
             context = context[:-1]
-        observations = self._prefetch_local_evidence(normalized, route, trace)
+        observations = self._prefetch_local_evidence(normalized, route, trace, administrator)
         if observations:
             context = (
                 *context,
@@ -765,7 +850,9 @@ class BetaAssistantService:
             if tool_calls > self.settings.cloud.max_total_tool_calls:
                 return self._cloud_failure(trace, normalized, "tool_call_limit", route)
             request = turn.tool_request
-            failure = self.assistant.skills.validate_proposal(request.name, request.arguments)
+            failure = self.assistant.skills.validate_proposal(
+                request.name, request.arguments, administrator=administrator
+            )
             trace.emit(
                 TraceStage.POLICY,
                 "allowed" if failure is None else "denied",
@@ -774,7 +861,9 @@ class BetaAssistantService:
             )
             if failure is not None:
                 return self._cloud_failure(trace, normalized, "tool_policy_" + failure.code, route)
-            execution = self.assistant.skills.execute(request.name, request.arguments)
+            execution = self.assistant.skills.execute(
+                request.name, request.arguments, administrator=administrator
+            )
             if not execution.ok:
                 return self._cloud_failure(trace, normalized, "tool_execution_failed", route)
             safe_result = _bounded_result(execution.result)
@@ -924,7 +1013,9 @@ class BetaAssistantService:
             "admin_override": override.value if override is not RouteOverride.AUTO else None,
         }
 
-    def _relevant_skill_tools(self, text: str) -> tuple[dict[str, object], ...]:
+    def _relevant_skill_tools(
+        self, text: str, administrator: bool = False
+    ) -> tuple[dict[str, object], ...]:
         names: set[str] = set()
         if any(word in text for word in ("sensor", "humidity", "temperature", "box", "co2", "air quality")):
             names.update({"get_sensor_value", "compare_sensor_metric", "get_sensor_status", "get_sensor_history_summary"})
@@ -934,6 +1025,14 @@ class BetaAssistantService:
             names.update({"get_stack_observation", "get_network_observation"})
         if any(word in text for word in ("printer", "x2d", "bambu")):
             names.update({"get_printer_status", "get_current_print", "get_printer_temperatures"})
+        if not administrator:
+            # A cloud model must never be handed a tool the caller could not
+            # have invoked directly.
+            names = {
+                name
+                for name in names
+                if not self.assistant.skills.requires_administrator(name)
+            }
         catalog = {item.name: item for item in self.assistant.llm_tools if item.executable}
         tools: list[dict[str, object]] = []
         for name in sorted(names):
@@ -952,6 +1051,7 @@ class BetaAssistantService:
         text: str,
         route: RoutedIntent,
         trace: ExecutionTrace,
+        administrator: bool = False,
     ) -> tuple[dict[str, object], ...]:
         candidates: list[tuple[str, dict[str, object]]] = []
         if route.matched and route.skill:
@@ -970,7 +1070,9 @@ class BetaAssistantService:
             if key in seen:
                 continue
             seen.add(key)
-            failure = self.assistant.skills.validate_proposal(name, arguments)
+            failure = self.assistant.skills.validate_proposal(
+                name, arguments, administrator=administrator
+            )
             if failure is not None:
                 trace.emit(
                     TraceStage.POLICY,
@@ -979,7 +1081,9 @@ class BetaAssistantService:
                     fields={"skill": name, "prefetch": True},
                 )
                 continue
-            execution = self.assistant.skills.execute(name, arguments)
+            execution = self.assistant.skills.execute(
+                name, arguments, administrator=administrator
+            )
             trace.emit(
                 TraceStage.TOOL,
                 "prefetch_complete" if execution.ok else "prefetch_failed",
@@ -1048,6 +1152,16 @@ class BetaAssistantService:
             else "That request is not supported."
         )
         return AssistantResponse(raw, normalized, route, message, 0.0, routing_path="unsupported", policy_status=code)
+
+
+def _denied_features(normalized: str) -> dict[str, object]:
+    """Minimal feature record for a request refused before classification."""
+
+    return {
+        "deterministic_route_matched": False,
+        "administrator_required": True,
+        "word_count": len(normalized.split()),
+    }
 
 
 def _object_schema(properties: dict[str, object], required: list[str]) -> dict[str, object]:

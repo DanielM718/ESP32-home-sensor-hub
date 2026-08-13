@@ -15,6 +15,7 @@ from butters.skills.model import (
     ReadOnlyObservationResult,
     SensorHistorySummaryArgs,
     SkillArguments,
+    SkillAudience,
     SkillError,
     SkillResult,
     StackObservationArgs,
@@ -179,6 +180,10 @@ def register_promoted_skills(
             positive_examples=("what is the Tailscale status",),
             negative_examples=("scan my network", "probe an arbitrary host"),
             source_reference="butters.skills.promoted",
+            # Interface, route, and listener inventories describe the deployment
+            # rather than the home, so the ordinary conversation surface must not
+            # return them even though the observation itself is read-only.
+            audience=SkillAudience.ADMINISTRATOR,
         )
     )
     registry.register(
@@ -215,6 +220,9 @@ def register_promoted_skills(
             positive_examples=("what commit is Butters on", "is the repo dirty"),
             negative_examples=("git reset", "read another path"),
             source_reference="butters.skills.promoted",
+            # Branch names, commit subjects, and untracked file names are
+            # development internals; the normal page never exposes them.
+            audience=SkillAudience.ADMINISTRATOR,
         )
     )
 

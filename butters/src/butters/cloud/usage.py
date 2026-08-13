@@ -142,20 +142,34 @@ class UsageLedger:
             except OSError:
                 pass
 
+    _PROVIDER_COLUMNS = (
+        "timestamp, request_category, model, reasoning_effort, "
+        "escalation_level, input_tokens, cached_tokens, cache_write_tokens, "
+        "output_tokens, reasoning_tokens, tool_rounds, wall_seconds, "
+        "estimated_cost_usd, success, escalation_occurred, error_code, "
+        "provider, operation_category, tool_calls, route_category, "
+        "request_id, session_id"
+    )
+    _REQUEST_COLUMNS = (
+        "timestamp, request_id, session_id, source, route_category, "
+        "model, provider, model_avoided, wall_seconds, success, error_code"
+    )
+
     @property
     def records(self) -> list[CloudUsageRecord]:
+        """Every retained provider row.
+
+        Diagnostic/test accessor only. Reporting paths use bounded queries: at
+        the configured retention cap this materializes tens of thousands of rows.
+        """
+
         if self.database_path is None:
             return list(self._memory_records)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT timestamp, request_category, model, reasoning_effort, "
-                "escalation_level, input_tokens, cached_tokens, cache_write_tokens, "
-                "output_tokens, reasoning_tokens, tool_rounds, wall_seconds, "
-                "estimated_cost_usd, success, escalation_occurred, error_code, "
-                "provider, operation_category, tool_calls, route_category, "
-                "request_id, session_id FROM provider_usage ORDER BY id"
+                f"SELECT {self._PROVIDER_COLUMNS} FROM provider_usage ORDER BY id"
             ).fetchall()
-        return [CloudUsageRecord(*row[:13], bool(row[13]), bool(row[14]), *row[15:]) for row in rows]
+        return [_provider_row(row) for row in rows]
 
     def estimated_cost(self, model: str, usage: CloudTokenUsage) -> float:
         price = self.settings.pricing.get(model)
@@ -388,18 +402,15 @@ class UsageLedger:
         return record
 
     def request_records(self) -> list[RequestUsageSummary]:
+        """Every retained request row; see `records` for the bounding caveat."""
+
         if self.database_path is None:
             return list(self._memory_requests)
         with self._lock, self._connect() as connection:
             rows = connection.execute(
-                "SELECT timestamp, request_id, session_id, source, route_category, "
-                "model, provider, model_avoided, wall_seconds, success, error_code "
-                "FROM request_usage ORDER BY id"
+                f"SELECT {self._REQUEST_COLUMNS} FROM request_usage ORDER BY id"
             ).fetchall()
-        return [
-            RequestUsageSummary(*row[:7], bool(row[7]), float(row[8]), bool(row[9]), row[10])
-            for row in rows
-        ]
+        return [_request_row(row) for row in rows]
 
     def _append_provider_record(self, record: CloudUsageRecord) -> None:
         with self._lock:
@@ -462,15 +473,161 @@ class UsageLedger:
                         "DELETE FROM spend_totals WHERE day < date('now', '-400 days')"
                     )
     def summary(self, *, session_id: str | None = None) -> dict[str, object]:
-        records = self.records
-        requests = self.request_records()
+        """Aggregate retained usage without materializing the whole ledger.
+
+        Every figure is computed by a bounded SQL aggregate or a small
+        `GROUP BY` over low-cardinality category columns, so the cost of this
+        report does not grow with the retention cap.
+        """
+
+        now = datetime.now(timezone.utc)
+        today = now.date().isoformat()
+        tomorrow = (now.date() + timedelta(days=1)).isoformat()
+        week_start = (now - timedelta(days=6)).date().isoformat()
+        month = today[:7]
+        month_start = month + "-01"
+
+        if self.database_path is None:
+            return self._memory_summary(session_id, today, tomorrow, week_start, month)
+
+        with self._lock, self._connect() as connection:
+            has_requests = bool(
+                connection.execute(
+                    "SELECT EXISTS(SELECT 1 FROM request_usage"
+                    + (" WHERE session_id=?" if session_id is not None else "")
+                    + ")",
+                    (session_id,) if session_id is not None else (),
+                ).fetchone()[0]
+            )
+
+            def window(table: str, low: str, high: str | None) -> tuple[str, tuple[object, ...]]:
+                clauses = ["timestamp >= ?"]
+                values: list[object] = [low]
+                if high is not None:
+                    clauses.append("timestamp < ?")
+                    values.append(high)
+                if session_id is not None:
+                    clauses.append("session_id = ?")
+                    values.append(session_id)
+                return f"FROM {table} WHERE " + " AND ".join(clauses), tuple(values)
+
+            def provider_totals(low: str, high: str | None) -> dict[str, object]:
+                clause, values = window("provider_usage", low, high)
+                row = connection.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(estimated_cost_usd),0), "
+                    "COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0), "
+                    "COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),0) " + clause,
+                    values,
+                ).fetchone()
+                return {
+                    "requests": int(row[0]),
+                    "cost_usd": round(float(row[1]), 6),
+                    "input_tokens": int(row[2]),
+                    "output_tokens": int(row[3]),
+                    "errors": int(row[4]),
+                }
+
+            def request_totals(low: str, high: str | None) -> tuple[int, int, int]:
+                clause, values = window("request_usage", low, high)
+                row = connection.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(CASE WHEN success=0 THEN 1 ELSE 0 END),0), "
+                    "COALESCE(SUM(model_avoided),0) " + clause,
+                    values,
+                ).fetchone()
+                return int(row[0]), int(row[1]), int(row[2])
+
+            def combined(low: str, high: str | None) -> dict[str, object]:
+                values = provider_totals(low, high)
+                count, errors, avoided = request_totals(low, high)
+                if has_requests:
+                    values["requests"] = count
+                    values["errors"] = errors
+                values["model_avoided"] = avoided
+                return values
+
+            def distribution(table: str, column: str) -> dict[str, int]:
+                clause = f" WHERE session_id=?" if session_id is not None else ""
+                rows = connection.execute(
+                    f"SELECT {column}, COUNT(*) FROM {table}{clause} "
+                    f"GROUP BY {column} ORDER BY {column}",
+                    (session_id,) if session_id is not None else (),
+                ).fetchall()
+                return {str(row[0]): int(row[1]) for row in rows}
+
+            def latency(table: str, column: str) -> dict[str, dict[str, float | int]]:
+                clause = " WHERE session_id=?" if session_id is not None else ""
+                rows = connection.execute(
+                    f"SELECT {column}, COUNT(*), AVG(wall_seconds), MAX(wall_seconds) "
+                    f"FROM {table}{clause} GROUP BY {column} ORDER BY {column}",
+                    (session_id,) if session_id is not None else (),
+                ).fetchall()
+                return {
+                    str(row[0]): {
+                        "count": int(row[1]),
+                        "average_ms": round(float(row[2] or 0.0) * 1000, 3),
+                        "max_ms": round(float(row[3] or 0.0) * 1000, 3),
+                    }
+                    for row in rows
+                }
+
+            routes = distribution("request_usage", "route_category") if has_requests else {}
+            if not routes:
+                routes = distribution("provider_usage", "route_category")
+            route_latency = latency("request_usage", "route_category") if has_requests else {}
+            if not route_latency:
+                route_latency = latency("provider_usage", "route_category")
+            error_clause = " AND session_id=?" if session_id is not None else ""
+            error_rows = connection.execute(
+                "SELECT timestamp, provider, model, error_code, route_category "
+                f"FROM provider_usage WHERE success=0{error_clause} ORDER BY id DESC LIMIT 20",
+                (session_id,) if session_id is not None else (),
+            ).fetchall()
+            avoided_total = connection.execute(
+                "SELECT COALESCE(SUM(model_avoided),0) FROM request_usage"
+                + (" WHERE session_id=?" if session_id is not None else ""),
+                (session_id,) if session_id is not None else (),
+            ).fetchone()[0]
+
+            return {
+                "today": combined(today, tomorrow),
+                "last_7_days": combined(week_start, tomorrow),
+                "current_month": combined(month_start, tomorrow),
+                "route_distribution": routes,
+                "deterministic_or_model_avoided": int(avoided_total),
+                "model_distribution": distribution("provider_usage", "model"),
+                "provider_distribution": distribution("provider_usage", "provider"),
+                "latency_by_route": route_latency,
+                "latency_by_operation": latency("provider_usage", "operation_category"),
+                "recent_errors": [
+                    {
+                        "timestamp": row[0],
+                        "provider": row[1],
+                        "model": row[2],
+                        "error_code": row[3],
+                        "route": row[4],
+                    }
+                    for row in reversed(error_rows)
+                ],
+                "pricing": {
+                    "source": self.settings.pricing_source,
+                    "date": self.settings.pricing_date,
+                    "unknown_models_fail_closed": True,
+                },
+            }
+
+    def _memory_summary(
+        self,
+        session_id: str | None,
+        today: str,
+        tomorrow: str,
+        week_start: str,
+        month: str,
+    ) -> dict[str, object]:
+        records = self._memory_records
+        requests = self._memory_requests
         if session_id is not None:
             records = [item for item in records if item.session_id == session_id]
             requests = [item for item in requests if item.session_id == session_id]
-        now = datetime.now(timezone.utc)
-        today = now.date().isoformat()
-        week_start = (now - timedelta(days=6)).date().isoformat()
-        month = today[:7]
 
         def aggregate(selected: list[CloudUsageRecord]) -> dict[str, object]:
             return {
@@ -482,39 +639,24 @@ class UsageLedger:
             }
 
         routes: dict[str, int] = {}
-        models: dict[str, int] = {}
-        providers: dict[str, int] = {}
         for item in requests:
             routes[item.route_category] = routes.get(item.route_category, 0) + 1
         if not requests:
             for item in records:
                 routes[item.route_category] = routes.get(item.route_category, 0) + 1
+        models: dict[str, int] = {}
+        providers: dict[str, int] = {}
         for item in records:
             models[item.model] = models.get(item.model, 0) + 1
             providers[item.provider] = providers.get(item.provider, 0) + 1
-        recent_errors = [
-            {
-                "timestamp": item.timestamp,
-                "provider": item.provider,
-                "model": item.model,
-                "error_code": item.error_code,
-                "route": item.route_category,
-            }
-            for item in records
-            if not item.success
-        ][-20:]
-        request_today = [item for item in requests if item.timestamp.startswith(today)]
-        request_week = [item for item in requests if item.timestamp[:10] >= week_start]
-        request_month = [item for item in requests if item.timestamp.startswith(month)]
 
-        def combined(request_items: list[RequestUsageSummary], provider_items: list[CloudUsageRecord]) -> dict[str, object]:
+        def combined(low: str, high: str) -> dict[str, object]:
+            provider_items = [item for item in records if low <= item.timestamp < high]
+            request_items = [item for item in requests if low <= item.timestamp < high]
             values = aggregate(provider_items)
-            values["requests"] = len(request_items) if requests else len(provider_items)
-            values["errors"] = (
-                sum(not item.success for item in request_items)
-                if requests
-                else sum(not item.success for item in provider_items)
-            )
+            if requests:
+                values["requests"] = len(request_items)
+                values["errors"] = sum(not item.success for item in request_items)
             values["model_avoided"] = sum(item.model_avoided for item in request_items)
             return values
 
@@ -532,26 +674,33 @@ class UsageLedger:
             }
         provider_latency: dict[str, dict[str, float | int]] = {}
         for operation in sorted({item.operation_category for item in records}):
-            values = [
-                item.wall_seconds for item in records
-                if item.operation_category == operation
-            ]
+            values = [item.wall_seconds for item in records if item.operation_category == operation]
             provider_latency[operation] = {
                 "count": len(values),
                 "average_ms": round(sum(values) * 1000 / len(values), 3),
                 "max_ms": round(max(values) * 1000, 3),
             }
         return {
-            "today": combined(request_today, [item for item in records if item.timestamp.startswith(today)]),
-            "last_7_days": combined(request_week, [item for item in records if item.timestamp[:10] >= week_start]),
-            "current_month": combined(request_month, [item for item in records if item.timestamp.startswith(month)]),
+            "today": combined(today, tomorrow),
+            "last_7_days": combined(week_start, tomorrow),
+            "current_month": combined(month + "-01", tomorrow),
             "route_distribution": routes,
             "deterministic_or_model_avoided": sum(item.model_avoided for item in requests),
             "model_distribution": models,
             "provider_distribution": providers,
             "latency_by_route": latency,
             "latency_by_operation": provider_latency,
-            "recent_errors": recent_errors,
+            "recent_errors": [
+                {
+                    "timestamp": item.timestamp,
+                    "provider": item.provider,
+                    "model": item.model,
+                    "error_code": item.error_code,
+                    "route": item.route_category,
+                }
+                for item in records
+                if not item.success
+            ][-20:],
             "pricing": {
                 "source": self.settings.pricing_source,
                 "date": self.settings.pricing_date,
@@ -561,11 +710,25 @@ class UsageLedger:
 
     def recent(self, limit: int = 100) -> list[dict[str, object]]:
         bounded = max(1, min(limit, 500))
-        return [asdict(item) for item in self.records[-bounded:]]
+        if self.database_path is None:
+            return [asdict(item) for item in self._memory_records[-bounded:]]
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {self._PROVIDER_COLUMNS} FROM provider_usage ORDER BY id DESC LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return [asdict(_provider_row(row)) for row in reversed(rows)]
 
     def recent_requests(self, limit: int = 100) -> list[dict[str, object]]:
         bounded = max(1, min(limit, 500))
-        return [asdict(item) for item in self.request_records()[-bounded:]]
+        if self.database_path is None:
+            return [asdict(item) for item in self._memory_requests[-bounded:]]
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                f"SELECT {self._REQUEST_COLUMNS} FROM request_usage ORDER BY id DESC LIMIT ?",
+                (bounded,),
+            ).fetchall()
+        return [asdict(_request_row(row)) for row in reversed(rows)]
 
     def _cost_totals(self, day_prefix: str, month_prefix: str) -> tuple[float, float]:
         if self.database_path is None:
@@ -593,3 +756,13 @@ class UsageLedger:
         connection.execute("PRAGMA synchronous=FULL")
         connection.execute("PRAGMA busy_timeout=5000")
         return connection
+
+
+def _provider_row(row: tuple[object, ...]) -> CloudUsageRecord:
+    return CloudUsageRecord(*row[:13], bool(row[13]), bool(row[14]), *row[15:])
+
+
+def _request_row(row: tuple[object, ...]) -> RequestUsageSummary:
+    return RequestUsageSummary(
+        *row[:7], bool(row[7]), float(row[8]), bool(row[9]), row[10]
+    )

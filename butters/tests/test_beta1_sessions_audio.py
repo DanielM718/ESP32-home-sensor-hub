@@ -76,9 +76,16 @@ def test_browser_audio_rejects_malformed_oversized_and_overlong_frames() -> None
 
 def test_session_ids_are_unpredictable_bounded_reconnectable_and_expire() -> None:
     now = [100.0]
-    manager = SessionManager(max_active=2, ttl_seconds=60, max_messages=4, max_context_chars=20, clock=lambda: now[0])
-    first = manager.create()
-    second = manager.create()
+    manager = SessionManager(
+        max_active=2,
+        ttl_seconds=60,
+        max_messages=4,
+        max_context_chars=20,
+        admin_reserve=0,
+        clock=lambda: now[0],
+    )
+    first = manager.create(peer_key="identity:one@example.com")
+    second = manager.create(peer_key="identity:two@example.com")
 
     assert first.session_id != second.session_id
     assert len(first.session_id) >= 32

@@ -25,8 +25,14 @@ UMask=0077
 
 NoNewPrivileges=true
 PrivateTmp=true
+# The web daemon never owns physical audio; butters-live and the wake-word
+# assistant keep exclusive ALSA access.
 PrivateDevices=true
+# /opt/butters is read-only to this unit. The daemon has no repository write
+# authority, and gaining it would be a separate reviewed deployment change.
 ProtectSystem=strict
+# read-only rather than tmpfs so an operator-configured, deliberately readable
+# repository under a home directory can still be inspected when one is set.
 ProtectHome=read-only
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -34,6 +40,9 @@ ProtectControlGroups=true
 ProtectClock=true
 ProtectHostname=true
 LockPersonality=true
+# AF_INET/AF_INET6 reach the loopback proxy and the optional provider endpoint;
+# AF_UNIX reaches systemd and the journal. AF_NETLINK is deliberately absent:
+# interface observation enumerates /sys/class/net instead of if_nameindex().
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 SystemCallArchitectures=native
 CapabilityBoundingSet=

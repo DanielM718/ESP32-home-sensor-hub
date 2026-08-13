@@ -1,10 +1,14 @@
 #!/usr/bin/env bash
+# Stage, verify, then atomically swap. A failure before the swap leaves the
+# previously installed tree untouched, and the replaced tree is retained as
+# /opt/butters.previous for rollback.
 set -Eeuo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 butters_dir="$(dirname "${script_dir}")"
-repository_dir="$(dirname "${butters_dir}")"
 install_dir="/opt/butters"
+staging_dir="/opt/butters.staging.$$"
+previous_dir="/opt/butters.previous"
 state_dir="/var/lib/butters"
 config_dir="/etc/butters"
 unit_name="butters-web.service"
@@ -14,6 +18,11 @@ start_service=0
 usage() {
   echo "Usage: sudo ./butters/scripts/install-beta1 [--enable] [--start]"
 }
+
+cleanup() {
+  rm -rf "${staging_dir}"
+}
+trap cleanup EXIT
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -33,6 +42,13 @@ command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
 [[ -x "${butters_dir}/.venv/bin/python" ]] || { echo "Butters .venv is missing" >&2; exit 2; }
 [[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
 
+# A production install must never ship the development authorization bypass.
+if grep -Eq '^[[:space:]]*development_mode[[:space:]]*=[[:space:]]*true' \
+    "${butters_dir}/config/assistant.toml"; then
+  echo "Refusing to install: config/assistant.toml sets development_mode = true" >&2
+  exit 2
+fi
+
 if ! getent group butters >/dev/null; then
   groupadd --system butters
 fi
@@ -40,27 +56,63 @@ if ! id butters >/dev/null 2>&1; then
   useradd --system --gid butters --home-dir "${state_dir}" --shell /usr/sbin/nologin butters
 fi
 
-install -d -m 0755 -o root -g root "${install_dir}"
 install -d -m 0700 -o butters -g butters "${state_dir}" "${state_dir}/codex-jobs"
 install -d -m 0750 -o root -g butters "${config_dir}"
-rsync -a \
+
+# 1. Stage a complete tree next to the target.
+rm -rf "${staging_dir}"
+install -d -m 0755 -o root -g root "${staging_dir}"
+rsync -a --delete \
   --exclude runtime \
   --exclude models/llm \
   --exclude models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17 \
   --exclude __pycache__ \
   --exclude '*.pyc' \
-  "${butters_dir}/" "${install_dir}/"
-chown -R root:root "${install_dir}"
-find "${install_dir}" -type d -exec chmod go-w {} +
-find "${install_dir}" -type f -exec chmod go-w {} +
+  "${butters_dir}/" "${staging_dir}/"
+chown -R root:root "${staging_dir}"
+find "${staging_dir}" -type d -exec chmod go-w {} +
+find "${staging_dir}" -type f -exec chmod go-w {} +
+
+# 2. Verify the staged tree before it can ever be executed.
+"${staging_dir}/.venv/bin/python" -m compileall -q "${staging_dir}/src" >/dev/null \
+  || { echo "Staged tree failed to compile; nothing was replaced." >&2; exit 3; }
+[[ -f "${staging_dir}/src/butters/web/app.py" ]] \
+  || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
+
+# 3. Swap. Renames are atomic, so no mixed tree is ever importable, and the
+#    replaced tree is kept for rollback.
+if [[ -d "${install_dir}" ]]; then
+  rm -rf "${previous_dir}"
+  mv "${install_dir}" "${previous_dir}"
+fi
+mv "${staging_dir}" "${install_dir}"
 
 if [[ ! -e "${config_dir}/butters.env" ]]; then
   install -m 0640 -o root -g butters "${butters_dir}/config/butters.env.example" "${config_dir}/butters.env"
 fi
-install -m 0640 -o root -g butters /dev/null "${config_dir}/butters.conf"
-printf 'BUTTERS_REPOSITORY_ROOT=%s\n' "${repository_dir}" >"${config_dir}/butters.conf"
-chown root:butters "${config_dir}/butters.conf"
-chmod 0640 "${config_dir}/butters.conf"
+chown root:butters "${config_dir}/butters.env"
+chmod 0640 "${config_dir}/butters.env"
+
+# Non-secret deployment values. BUTTERS_ALLOWED_ORIGINS is required before the
+# daemon will issue sessions or accept mutations in production; the private
+# Tailscale HTTPS origin is only known after `tailscale serve` has been run.
+if [[ ! -e "${config_dir}/butters.conf" ]]; then
+  install -m 0640 -o root -g butters /dev/null "${config_dir}/butters.conf"
+  cat >"${config_dir}/butters.conf" <<'CONF'
+# Exact private Tailscale HTTPS origin, e.g.
+# BUTTERS_ALLOWED_ORIGINS=https://pi.tailnet-name.ts.net
+BUTTERS_ALLOWED_ORIGINS=
+
+# Optional. Only set this to a repository that is deliberately readable by the
+# butters service user. Leave it empty on an ordinary deployment; repository
+# inspection then reports repository_unavailable instead of reaching into a
+# private home directory.
+# BUTTERS_PROJECT_INSPECTION_ROOT=
+CONF
+  chown root:butters "${config_dir}/butters.conf"
+  chmod 0640 "${config_dir}/butters.conf"
+fi
+
 install -m 0644 -o root -g root "${butters_dir}/systemd/${unit_name}" "/etc/systemd/system/${unit_name}"
 
 systemctl daemon-reload
@@ -72,5 +124,7 @@ if [[ "${start_service}" == "1" ]]; then
 fi
 
 echo "Installed Butters Beta 1 at ${install_dir}."
+echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then restart)."
 echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
+echo "Deployment values: ${config_dir}/butters.conf (set BUTTERS_ALLOWED_ORIGINS)."
 echo "State: ${state_dir} (butters:butters 0700)."

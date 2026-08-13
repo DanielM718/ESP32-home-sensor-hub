@@ -82,7 +82,7 @@ class WebSocketHarness:
             "query_string": b"",
             "root_path": "",
             "headers": [(key.lower().encode(), value.encode()) for key, value in request_headers.items()],
-            "client": ("testclient", 1234),
+            "client": ("127.0.0.1", 1234),
             "server": ("testserver", 80),
             "subprotocols": [],
             "state": {},

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import math
 import os
 import secrets
 import sqlite3
@@ -345,7 +346,20 @@ class OpenAISTTProvider:
         )
 
 
-def _validate_preset(preset: VoicePreset) -> None:
+LOCAL_TTS_MODEL = "local-piper"
+# Piper is time-scaled by this factor; values outside the reviewed band either
+# divide by zero or ask the engine to synthesize minutes of audio per sentence.
+LOCAL_SPEED_RANGE = (0.5, 2.0)
+CLOUD_SPEED_RANGE = (0.25, 4.0)
+
+
+def validate_preset(
+    preset: VoicePreset,
+    *,
+    settings: AssistantSettings | None = None,
+) -> None:
+    """Single validation boundary for saved presets and one-off previews."""
+
     if not preset.name or len(preset.name) > 64 or not all(
         character.isalnum() or character in " _-" for character in preset.name
     ):
@@ -354,8 +368,28 @@ def _validate_preset(preset: VoicePreset) -> None:
         raise SpeechProviderError("invalid_preset", "preset provider is invalid")
     if not preset.model or len(preset.model) > 128 or not preset.voice or len(preset.voice) > 128:
         raise SpeechProviderError("invalid_preset", "preset model or voice is invalid")
-    if not 0.25 <= preset.speed <= 4.0 or len(preset.instructions) > 1000:
+    if len(preset.instructions) > 1000:
         raise SpeechProviderError("invalid_preset", "preset parameters exceed their limits")
+    speed = preset.speed
+    if isinstance(speed, bool) or not isinstance(speed, (int, float)):
+        raise SpeechProviderError("invalid_preset", "preset speed must be numeric")
+    speed = float(speed)
+    if not math.isfinite(speed):
+        raise SpeechProviderError("invalid_preset", "preset speed must be a finite number")
+    low, high = LOCAL_SPEED_RANGE if preset.provider == "local" else CLOUD_SPEED_RANGE
+    if not low <= speed <= high:
+        raise SpeechProviderError(
+            "invalid_preset", f"preset speed must be {low} to {high} for {preset.provider}"
+        )
+    if preset.provider == "local" and preset.model != LOCAL_TTS_MODEL:
+        raise SpeechProviderError("invalid_preset", "local TTS uses the reviewed local model")
+    if settings is not None and preset.provider == "openai":
+        if preset.model != settings.providers.cloud_tts_model:
+            raise SpeechProviderError("model_denied", "TTS model is not configured")
+
+
+def _validate_preset(preset: VoicePreset) -> None:
+    validate_preset(preset)
 
 
 def _speech_to_wav(speech: SynthesizedSpeech) -> bytes:

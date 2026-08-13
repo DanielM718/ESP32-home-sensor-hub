@@ -68,6 +68,17 @@ authorizer must independently prove that arguments are in reviewed sets:
 Do not weaken `PolicyValidator`. An output schema validates shape, not
 authorization.
 
+## Audience
+
+`ActionClass` answers "what may this do"; `SkillSpec.audience` answers "who may
+ask". A strictly read-only skill that exposes deployment internals — repository
+state, detailed network inventory — must declare
+`audience=SkillAudience.ADMINISTRATOR`. The registry then denies it for ordinary
+callers, the orchestrator refuses the request before any adapter or cloud stage
+runs, and the skill is never offered to a cloud model as a tool for a
+non-administrator request. Default to `NORMAL` only for observations the normal
+conversation surface should genuinely answer.
+
 ## Integrations and diagnostic tools
 
 Prefer an existing adapter or `DiagnosticToolRegistry` tool. The current
@@ -152,6 +163,7 @@ Do not require paid/live APIs in automated tests. Use fakes or replay fixtures.
 - [ ] Adapter owns time, byte, row, and target limits.
 - [ ] External text is sanitized and remains untrusted data.
 - [ ] `SkillSpec` metadata and positive/negative examples are complete.
+- [ ] `audience` is ADMINISTRATOR if the result exposes deployment internals.
 - [ ] Router preserves clarification and rejects controls.
 - [ ] Formatter is concise and provenance-aware.
 - [ ] Positive, negative, policy, error, timeout, and corpus tests pass.

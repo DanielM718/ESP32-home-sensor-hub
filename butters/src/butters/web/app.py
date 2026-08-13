@@ -40,6 +40,9 @@ from butters.web.trace import TraceStage
 LOGGER = logging.getLogger("butters.web")
 WEB_ROOT = Path(__file__).resolve().parent
 STATIC_ROOT = WEB_ROOT / "static"
+# Only non-privileged shared assets are publicly mountable. The HTML documents
+# stay outside the mount so /admin cannot be fetched anonymously.
+ASSET_ROOT = STATIC_ROOT / "assets"
 SESSION_COOKIE = "butters_session"
 
 
@@ -84,16 +87,27 @@ def create_app(
     vocabulary: DomainVocabulary | None = None,
     service: BetaAssistantService | None = None,
     stt_engine_factory: Any | None = None,
+    *,
+    trusted_peers: frozenset[str] | None = None,
 ) -> Starlette:
     configured = settings or load_assistant_settings(
         Path(os.environ["BUTTERS_CONFIG"]) if os.getenv("BUTTERS_CONFIG") else None
     )
     domain_vocabulary = vocabulary or load_domain_vocabulary(default_vocabulary_path())
     runtime = service or BetaAssistantService(configured, domain_vocabulary)
-    auth = AuthPolicy(configured.web)
+    auth = AuthPolicy(configured.web, trusted_peers=trusted_peers)
+    if not configured.web.production_origin_configured:
+        LOGGER.warning(
+            "web.allowed_origins is empty; mutations and session allocation stay "
+            "closed until the private HTTPS origin is configured"
+        )
     normal_rate = RateLimiter(rate_per_minute=30, burst=8)
     expensive_rate = RateLimiter(rate_per_minute=6, burst=2)
     admin_rate = RateLimiter(rate_per_minute=20, burst=5)
+    session_rate = RateLimiter(
+        rate_per_minute=configured.web.session_create_rate_per_minute,
+        burst=configured.web.session_create_burst,
+    )
     worker_capacity = asyncio.Semaphore(
         configured.web.max_workers + configured.web.max_queued_requests
     )
@@ -106,8 +120,21 @@ def create_app(
         max_workers=configured.web.max_workers,
         thread_name_prefix="butters-web",
     )
+    # Teardown must never queue behind admitted work: releasing a recognizer is
+    # what frees the capacity that the admission gate is rationing.
+    teardown_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="butters-teardown")
     started = time.monotonic()
     make_stt_engine = stt_engine_factory or _new_stt_engine
+
+    async def _await_future(future: Any, timeout: float | None = None) -> Any:
+        # Polling avoids a Python 3.13/aarch64 executor wake-up failure seen
+        # after worker-side entropy calls, while keeping the event loop free.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not future.done():
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("worker did not finish within its deadline")
+            await asyncio.sleep(0.005)
+        return future.result()
 
     async def run_blocking(function: Any, /, *args: Any, **kwargs: Any) -> Any:
         invocation = partial(function, *args, **kwargs)
@@ -115,16 +142,27 @@ def create_app(
             raise SecurityError("queue_full", "assistant worker queue is full", 503)
         future = worker_pool.submit(invocation)
         try:
-            # Polling avoids a Python 3.13/aarch64 executor wake-up failure seen
-            # after worker-side entropy calls, while keeping the event loop free.
-            while not future.done():
-                await asyncio.sleep(0.005)
-            return future.result()
+            return await _await_future(future)
         except asyncio.CancelledError:
             future.cancel()
             raise
         finally:
             worker_capacity.release()
+
+    async def run_teardown(function: Any, /, *args: Any) -> None:
+        """Best-effort release that can never fail the caller's cleanup path."""
+
+        try:
+            future = teardown_pool.submit(partial(function, *args))
+        except RuntimeError:  # pool already shut down
+            LOGGER.warning("teardown pool unavailable; releasing without close")
+            return
+        try:
+            await _await_future(future, timeout=5.0)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - teardown never propagates
+            LOGGER.warning("voice stream teardown failed", exc_info=True)
 
     async def index(_request: Request) -> Response:
         return FileResponse(STATIC_ROOT / "index.html")
@@ -137,47 +175,60 @@ def create_app(
         return JSONResponse({"status": "ok", "service": "butters", "version": "beta1"})
 
     async def ready(_request: Request) -> Response:
+        origin_ready = configured.web.production_origin_configured
         checks = {
             "configuration": "ready",
             "state_directory": "ready" if runtime.state_dir.is_dir() else "unavailable",
             "deterministic_router": "ready",
             "cloud_optional": "ready" if runtime.general_reasoner.available else "disabled",
+            "production_origin": "ready" if origin_ready else "unconfigured",
         }
-        status = 200 if checks["state_directory"] == "ready" else 503
-        return JSONResponse({"status": "ready" if status == 200 else "not_ready", "checks": checks}, status_code=status)
+        healthy = checks["state_directory"] == "ready" and origin_ready
+        status = 200 if healthy else 503
+        return JSONResponse({"status": "ready" if healthy else "not_ready", "checks": checks}, status_code=status)
 
     async def session_endpoint(request: Request) -> Response:
-        existing = _session_from_request(request, runtime, required=False)
-        if existing is None:
-            try:
-                existing = runtime.sessions.create()
-            except SessionError as exc:
-                return _error(exc.code, str(exc), 503)
-        response = JSONResponse(
-            {
-                "session": "ready",
-                "csrf_token": existing.csrf_token,
-                "messages": [
-                    {"role": item.role, "text": item.text, "trace_id": item.trace_id}
-                    for item in existing.messages
-                ],
-            }
-        )
-        response.set_cookie(
-            SESSION_COOKIE,
-            existing.session_id,
-            max_age=int(configured.web.session_ttl_seconds),
-            httponly=True,
-            secure=not configured.web.development_mode,
-            samesite="strict",
-            path="/",
-        )
-        return response
+        try:
+            existing = _session_from_request(request, runtime, required=False)
+            if existing is None:
+                # Admission control happens before any allocation so a flood is
+                # refused rather than absorbed, and administrators keep a reserve.
+                auth.require_browser_context(request.headers)
+                client = request.client.host if request.client else None
+                peer = auth.peer_key(request.headers, client)
+                if not session_rate.check("session:" + peer):
+                    return _error("rate_limited", "session request rate limit exceeded", 429)
+                existing = runtime.sessions.create(
+                    peer_key=peer,
+                    administrator=auth.is_administrator(request.headers, client),
+                )
+            response = JSONResponse(
+                {
+                    "session": "ready",
+                    "csrf_token": existing.csrf_token,
+                    "messages": [
+                        {"role": item.role, "text": item.text, "trace_id": item.trace_id}
+                        for item in existing.messages
+                    ],
+                }
+            )
+            response.set_cookie(
+                SESSION_COOKIE,
+                existing.session_id,
+                max_age=int(configured.web.session_ttl_seconds),
+                httponly=True,
+                secure=not configured.web.development_mode,
+                samesite="strict",
+                path="/",
+            )
+            return response
+        except (SecurityError, SessionError) as exc:
+            return _exception_response(exc)
 
     async def clear_session(request: Request) -> Response:
         try:
             session = _mutation_session(request, runtime, auth)
-            runtime.sessions.clear(session)
+            runtime.clear_conversation(session)
             return JSONResponse({"status": "cleared", "csrf_token": session.csrf_token})
         except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
@@ -403,7 +454,11 @@ def create_app(
             arguments = payload.get("arguments", {})
             if not isinstance(name, str) or not isinstance(arguments, dict):
                 return _error("invalid_request", "name and object arguments are required", 400)
-            execution = await run_blocking(runtime.assistant.skills.execute, name, arguments)
+            execution = await run_blocking(
+                partial(runtime.assistant.skills.execute, administrator=True),
+                name,
+                arguments,
+            )
             safe = {
                 "skill": execution.skill,
                 "ok": execution.ok,
@@ -441,17 +496,15 @@ def create_app(
         try:
             _admin(request, auth)
             session = _session_from_request(request, runtime, required=False)
+            # Bounded SQL only, and off the event loop: the retained ledger can
+            # hold tens of thousands of rows.
             return JSONResponse(
-                {
-                    "summary": runtime.ledger.summary(),
-                    "current_session": runtime.ledger.summary(
-                        session_id=session.session_id if session else None
-                    ) if session else None,
-                    "recent": runtime.ledger.recent(100),
-                    "recent_requests": runtime.ledger.recent_requests(100),
-                }
+                await run_blocking(
+                    runtime.usage_report,
+                    session.session_id if session else None,
+                )
             )
-        except SecurityError as exc:
+        except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
 
     async def security_status(request: Request) -> Response:
@@ -463,11 +516,15 @@ def create_app(
                     "backend_loopback_only": configured.web.host in {"127.0.0.1", "::1", "localhost"},
                     "trusted_tailscale_proxy": configured.web.trusted_tailscale_proxy,
                     "admin_allowlist_configured": bool(auth.admin_identities),
+                    "production_origin_configured": configured.web.production_origin_configured,
+                    "allowed_origin_count": len(configured.web.allowed_origins),
                     "secrets_returned": False,
                     "codex_inherits_environment": False,
                     "codex_execution": runtime.skill_builder.execution_status(),
+                    "repository_inspection": runtime.repository_status(),
                     "audio_persisted": False,
                     "transcripts_persisted": False,
+                    "trace_ttl_seconds": configured.web.trace_ttl_seconds,
                 }
             )
         except SecurityError as exc:
@@ -547,11 +604,12 @@ def create_app(
                 {
                     "state_dir": str(runtime.state_dir),
                     "usage_db": str(runtime.ledger.database_path),
-                    "repository_root": str(configured.remediation.repository_root),
+                    "repository_inspection": runtime.repository_status(),
                     "jobs_dir": str(configured.remediation.jobs_dir),
                     "web_workers": configured.web.max_workers,
                     "queue_depth": configured.web.max_queued_requests,
                     "voice_concurrency": configured.browser_audio.max_concurrent_sessions,
+                    "sessions": runtime.sessions.capacity(),
                 }
             )
         except SecurityError as exc:
@@ -763,16 +821,21 @@ def create_app(
                 trace.emit(TraceStage.ERROR, "failed", reason_code="internal_error")
             await _safe_ws_error(websocket, "internal_error", "Voice processing failed safely.")
         finally:
-            if stream is not None:
-                await run_blocking(stream.close)
-            if acquired:
-                voice_slots.release()
-            if capacity_acquired:
-                voice_capacity.release()
+            # Every release below must happen even when teardown, cancellation,
+            # or the socket close itself fails; otherwise a single recognizer
+            # error would retire a voice slot for the life of the process.
             try:
-                await websocket.close()
-            except RuntimeError:
-                pass
+                if stream is not None:
+                    await run_teardown(stream.close)
+            finally:
+                if acquired:
+                    voice_slots.release()
+                if capacity_acquired:
+                    voice_capacity.release()
+                try:
+                    await websocket.close()
+                except (RuntimeError, WebSocketDisconnect, OSError):
+                    pass
 
     async def trace_socket(websocket: WebSocket) -> None:
         try:
@@ -822,10 +885,11 @@ def create_app(
         Route("/api/admin/codex/jobs/{job_id}/decision", decide_skill_job, methods=["POST"]),
         WebSocketRoute("/ws/voice", voice_socket),
         WebSocketRoute("/ws/admin/traces", trace_socket),
-        Mount("/assets", app=StaticFiles(directory=STATIC_ROOT), name="assets"),
+        Mount("/assets", app=StaticFiles(directory=ASSET_ROOT), name="assets"),
     ]
     async def shutdown_workers() -> None:
         worker_pool.shutdown(wait=True, cancel_futures=True)
+        teardown_pool.shutdown(wait=True, cancel_futures=True)
         runtime.local_tts.close()
 
     @asynccontextmanager
@@ -835,7 +899,18 @@ def create_app(
         finally:
             await shutdown_workers()
 
-    app = Starlette(routes=routes, lifespan=lifespan)
+    # Registered centrally so a future route cannot leak an uncaught security or
+    # session failure into ServerErrorMiddleware as an opaque 500.
+    app = Starlette(
+        routes=routes,
+        lifespan=lifespan,
+        exception_handlers={
+            SecurityError: _handle_typed_exception,
+            SessionError: _handle_typed_exception,
+            SpeechProviderError: _handle_typed_exception,
+            SkillAuthoringError: _handle_typed_exception,
+        },
+    )
     app.state.service = runtime
     app.state.settings = configured
     app.state.worker_pool = worker_pool
@@ -906,12 +981,18 @@ async def _json_body(request: Request, maximum: int) -> dict[str, object]:
     if len(raw) > maximum:
         raise ValueError("request body is too large")
     try:
-        value = json.loads(raw)
+        # Python accepts the non-standard NaN/Infinity literals by default; they
+        # would otherwise flow into numeric parameters as unusable floats.
+        value = json.loads(raw, parse_constant=_reject_constant)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise ValueError("request body is invalid JSON") from exc
     if not isinstance(value, dict):
         raise ValueError("request JSON must be an object")
     return value
+
+
+def _reject_constant(name: str) -> float:
+    raise ValueError(f"request JSON must not contain {name}")
 
 
 async def _bounded_body(request: Request, maximum: int) -> bytes:
@@ -949,15 +1030,32 @@ async def _safe_ws_error(websocket: WebSocket, code: str, message: str) -> None:
         pass
 
 
+async def _handle_typed_exception(_request: Request, exc: Exception) -> JSONResponse:
+    return _exception_response(exc)
+
+
 def _exception_response(exc: Exception) -> JSONResponse:
     if isinstance(exc, SecurityError):
         return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SessionError):
-        return _error(exc.code, str(exc), 401)
+        return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SpeechProviderError):
         return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)
     if isinstance(exc, SkillAuthoringError):
-        status = 404 if exc.code == "job_not_found" else 409 if exc.code in {"dirty_worktree", "base_commit_changed", "invalid_job_state"} else 400
+        status = (
+            404
+            if exc.code == "job_not_found"
+            else 409
+            if exc.code in {
+                "dirty_worktree",
+                "base_commit_changed",
+                "invalid_job_state",
+                "job_already_running",
+            }
+            else 503
+            if exc.code == "repository_unavailable"
+            else 400
+        )
         return _error(exc.code, str(exc), status)
     if isinstance(exc, PermissionError):
         return _error("forbidden", "request is not authorized", 403)

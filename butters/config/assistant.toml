@@ -23,10 +23,18 @@ trusted_tailscale_proxy = true
 development_mode = false
 # Populate with exact Tailscale-User-Login values before using admin APIs.
 admin_identities = []
-# If empty, same-origin requests are accepted. Add the exact private HTTPS
-# origin only when an explicit origin allow-list is desired.
+# Production requires the exact private HTTPS origin. It is normally supplied by
+# BUTTERS_ALLOWED_ORIGINS in /etc/butters/butters.conf because the Tailscale
+# Serve URL is only known after deployment. While it is unset, /readyz reports
+# not_ready and the daemon refuses to issue sessions or accept mutations.
 allowed_origins = []
 max_active_sessions = 32
+# Anonymous callers can never take the last slots: a session flood cannot lock
+# an administrator out of the privileged surface.
+admin_session_reserve = 4
+max_sessions_per_peer = 4
+session_create_rate_per_minute = 12.0
+session_create_burst = 6
 session_ttl_seconds = 1800.0
 max_messages_per_session = 24
 max_context_chars = 12000
@@ -34,6 +42,8 @@ max_request_bytes = 16384
 max_workers = 4
 max_queued_requests = 12
 trace_capacity = 256
+# Traces quote conversation text, so they expire by time as well as by count.
+trace_ttl_seconds = 900.0
 
 [browser_audio]
 max_utterance_seconds = 30.0
@@ -116,7 +126,12 @@ repository_root = "../.."
 deployment_roots = ["/opt/home-sensor"]
 jobs_dir = "/var/lib/butters/codex-jobs"
 max_patch_bytes = 524288
+max_generated_file_bytes = 262144
 max_retained_jobs = 50
+# Read-only repository inspection is opt-in per deployment. Leave empty unless a
+# repository is deliberately readable by the butters service user; the skill then
+# reports repository_unavailable instead of reaching into a private checkout.
+project_inspection_root = ""
 
 [[entities]]
 id = "printer_room"

@@ -328,7 +328,12 @@ class IntentRouter:
 
     @staticmethod
     def _stack_observation(text: str) -> str | None:
-        if not any(word in text for word in ("health", "healthy", "status", "running", "reachable", "working", "up")):
+        # Word-boundary matching keeps "support", "update", and "upstairs" from
+        # standing in for the health question word "up".
+        if not any(
+            contains_phrase(text, word)
+            for word in ("health", "healthy", "status", "running", "reachable", "working", "up")
+        ):
             return None
         mappings = (
             ("home_assistant", ("home assistant",)),
@@ -340,7 +345,7 @@ class IntentRouter:
             ("services", ("all services", "critical services")),
         )
         for value, phrases in mappings:
-            if any(phrase in text for phrase in phrases):
+            if any(contains_phrase(text, phrase) for phrase in phrases):
                 return value
         return None
 

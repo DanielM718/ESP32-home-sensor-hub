@@ -481,8 +481,18 @@ class DiagnosticImplementations:
 
     # Network tools
     def get_network_interfaces(self, _args: ToolArguments) -> EvidenceItem:
+        # sysfs enumeration keeps this observation inside the read-only
+        # procfs/sysfs boundary. glibc's if_nameindex() needs an AF_NETLINK
+        # socket, which the hardened unit deliberately does not grant.
+        names = _list_interface_names()
+        if names is None:
+            return EvidenceItem.create(
+                "network.interfaces", "network_interfaces", "kernel", "butters",
+                EvidenceStatus.UNAVAILABLE,
+                error="interface enumeration is unavailable in this sandbox",
+            )
         interfaces: list[dict[str, object]] = []
-        for _index, name in socket.if_nameindex()[:32]:
+        for name in names:
             state = _read_text(Path("/sys/class/net") / name / "operstate", 64)
             carrier = _read_text(Path("/sys/class/net") / name / "carrier", 8)
             interfaces.append({"name": name, "state": state.strip() if state else None, "carrier": carrier.strip() == "1" if carrier else None})
@@ -1133,6 +1143,19 @@ def _target_from_arguments(values: Mapping[str, object]) -> str:
 
 def _metric_evidence(evidence_id: str, kind: str, target: str, value: float | None, key: str) -> EvidenceItem:
     return EvidenceItem.create(evidence_id, kind, "procfs", target, EvidenceStatus.OK if value is not None else EvidenceStatus.UNAVAILABLE, values={key: value}, error=None if value is not None else f"{kind} unavailable")
+
+
+def _list_interface_names(maximum: int = 32) -> list[str] | None:
+    """Enumerate interfaces from sysfs, falling back to the netlink helper."""
+
+    try:
+        return sorted(item.name for item in Path("/sys/class/net").iterdir())[:maximum]
+    except OSError:
+        pass
+    try:
+        return [name for _index, name in socket.if_nameindex()[:maximum]]
+    except OSError:
+        return None
 
 
 def _read_text(path: Path, maximum: int) -> str | None:

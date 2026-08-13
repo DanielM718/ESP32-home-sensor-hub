@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from urllib.parse import urlparse
 
 import tomllib
 
@@ -65,6 +66,13 @@ class WebSettings:
     admin_identities: tuple[str, ...] = ()
     allowed_origins: tuple[str, ...] = ()
     max_active_sessions: int = 32
+    # Anonymous callers may never consume the whole pool: this many slots stay
+    # reserved for callers that already present an authorized administrator
+    # identity, so a session flood cannot lock the operator out of /admin.
+    admin_session_reserve: int = 4
+    max_sessions_per_peer: int = 4
+    session_create_rate_per_minute: float = 12.0
+    session_create_burst: int = 6
     session_ttl_seconds: float = 1800.0
     max_messages_per_session: int = 24
     max_context_chars: int = 12000
@@ -72,6 +80,7 @@ class WebSettings:
     max_workers: int = 4
     max_queued_requests: int = 12
     trace_capacity: int = 256
+    trace_ttl_seconds: float = 900.0
 
     def validated(self) -> WebSettings:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
@@ -80,6 +89,14 @@ class WebSettings:
             raise ConfigError("web.port must be between 1024 and 65535")
         if not 1 <= self.max_active_sessions <= 256:
             raise ConfigError("web.max_active_sessions must be 1 to 256")
+        if not 0 <= self.admin_session_reserve < self.max_active_sessions:
+            raise ConfigError("web.admin_session_reserve must be 0 to max_active_sessions - 1")
+        if not 1 <= self.max_sessions_per_peer <= self.max_active_sessions:
+            raise ConfigError("web.max_sessions_per_peer must be 1 to max_active_sessions")
+        if not 1 <= self.session_create_rate_per_minute <= 600:
+            raise ConfigError("web.session_create_rate_per_minute must be 1 to 600")
+        if not 1 <= self.session_create_burst <= 64:
+            raise ConfigError("web.session_create_burst must be 1 to 64")
         if not 60 <= self.session_ttl_seconds <= 86400:
             raise ConfigError("web.session_ttl_seconds must be 60 to 86400")
         if not 2 <= self.max_messages_per_session <= 100:
@@ -94,7 +111,15 @@ class WebSettings:
             raise ConfigError("web.max_queued_requests must be 1 to 128")
         if not 32 <= self.trace_capacity <= 4096:
             raise ConfigError("web.trace_capacity must be 32 to 4096")
+        if not 60 <= self.trace_ttl_seconds <= 86400:
+            raise ConfigError("web.trace_ttl_seconds must be 60 to 86400")
         return self
+
+    @property
+    def production_origin_configured(self) -> bool:
+        """Production browsers are only trusted against a server-known origin."""
+
+        return self.development_mode or bool(self.allowed_origins)
 
 
 @dataclass(frozen=True, slots=True)
@@ -301,7 +326,13 @@ class RemediationSettings:
     deployment_roots: tuple[Path, ...] = (Path("/opt/home-sensor"),)
     jobs_dir: Path = Path("/var/lib/butters/codex-jobs")
     max_patch_bytes: int = 512 * 1024
+    max_generated_file_bytes: int = 256 * 1024
     max_retained_jobs: int = 50
+    # Read-only repository inspection is a deliberate, separately configured
+    # deployment decision. An ordinary deployed daemon has no readable checkout
+    # and must report repository_unavailable instead of reaching into a private
+    # developer home directory.
+    project_inspection_root: Path | None = None
 
     def validated(self) -> RemediationSettings:
         if not 30 <= self.timeout_seconds <= 3600:
@@ -310,6 +341,10 @@ class RemediationSettings:
             raise ConfigError("remediation.max_output_bytes must be 4096 to 4194304")
         if not 16384 <= self.max_patch_bytes <= 4 * 1024 * 1024:
             raise ConfigError("remediation.max_patch_bytes must be 16384 to 4194304")
+        if not 4096 <= self.max_generated_file_bytes <= self.max_patch_bytes:
+            raise ConfigError(
+                "remediation.max_generated_file_bytes must be 4096 to max_patch_bytes"
+            )
         if not 1 <= self.max_retained_jobs <= 500:
             raise ConfigError("remediation.max_retained_jobs must be 1 to 500")
         return self
@@ -386,8 +421,12 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         trusted_tailscale_proxy=bool(web_table.get("trusted_tailscale_proxy", True)),
         development_mode=bool(web_table.get("development_mode", False)),
         admin_identities=_string_tuple(web_table.get("admin_identities", []), "web.admin_identities"),
-        allowed_origins=_string_tuple(web_table.get("allowed_origins", []), "web.allowed_origins"),
+        allowed_origins=_origin_tuple(web_table.get("allowed_origins", [])),
         max_active_sessions=int(web_table.get("max_active_sessions", 32)),
+        admin_session_reserve=int(web_table.get("admin_session_reserve", 4)),
+        max_sessions_per_peer=int(web_table.get("max_sessions_per_peer", 4)),
+        session_create_rate_per_minute=float(web_table.get("session_create_rate_per_minute", 12.0)),
+        session_create_burst=int(web_table.get("session_create_burst", 6)),
         session_ttl_seconds=float(web_table.get("session_ttl_seconds", 1800.0)),
         max_messages_per_session=int(web_table.get("max_messages_per_session", 24)),
         max_context_chars=int(web_table.get("max_context_chars", 12000)),
@@ -395,6 +434,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_workers=int(web_table.get("max_workers", 4)),
         max_queued_requests=int(web_table.get("max_queued_requests", 12)),
         trace_capacity=int(web_table.get("trace_capacity", 256)),
+        trace_ttl_seconds=float(web_table.get("trace_ttl_seconds", 900.0)),
     ).validated()
 
     audio_table = _table(data, "browser_audio")
@@ -486,6 +526,15 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
     raw_deployment_roots = remediation_table.get("deployment_roots", ["/opt/home-sensor"])
     if not isinstance(raw_deployment_roots, list) or not all(isinstance(item, str) for item in raw_deployment_roots):
         raise ConfigError("remediation.deployment_roots must be an array of paths")
+    raw_project_root = os.getenv(
+        "BUTTERS_PROJECT_INSPECTION_ROOT",
+        str(remediation_table.get("project_inspection_root", "")),
+    ).strip()
+    project_root: Path | None = None
+    if raw_project_root:
+        project_root = Path(raw_project_root).expanduser()
+        if not project_root.is_absolute():
+            project_root = (config_path.resolve().parent / project_root).resolve()
     remediation = RemediationSettings(
         allow_codex_execution=bool(remediation_table.get("allow_codex_execution", False)),
         timeout_seconds=float(remediation_table.get("timeout_seconds", 900.0)),
@@ -499,7 +548,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
             )
         ).expanduser(),
         max_patch_bytes=int(remediation_table.get("max_patch_bytes", 512 * 1024)),
+        max_generated_file_bytes=int(remediation_table.get("max_generated_file_bytes", 256 * 1024)),
         max_retained_jobs=int(remediation_table.get("max_retained_jobs", 50)),
+        project_inspection_root=project_root,
     ).validated()
 
     raw_entities = data.get("entities", [])
@@ -561,6 +612,34 @@ def _string_tuple(value: Any, label: str) -> tuple[str, ...]:
     ):
         raise ConfigError(f"{label} must be an array of non-empty strings")
     return tuple(item.strip() for item in value)
+
+
+def _origin_tuple(value: Any) -> tuple[str, ...]:
+    """Merge configured origins with the deployment override, normalizing form.
+
+    The private Tailscale HTTPS origin is only known after `tailscale serve`
+    runs, so the installer records it in the non-secret deployment file rather
+    than in the reviewed application config.
+    """
+
+    configured = list(_string_tuple(value, "web.allowed_origins"))
+    configured.extend(
+        item.strip()
+        for item in os.getenv("BUTTERS_ALLOWED_ORIGINS", "").split(",")
+        if item.strip()
+    )
+    normalized: list[str] = []
+    for item in configured:
+        candidate = item.rstrip("/")
+        parsed = urlparse(candidate)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path:
+            raise ConfigError(
+                "web.allowed_origins entries must be scheme://host[:port] values"
+            )
+        entry = f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
+        if entry not in normalized:
+            normalized.append(entry)
+    return tuple(normalized)
 
 
 def _optional_float(value: object) -> float | None:

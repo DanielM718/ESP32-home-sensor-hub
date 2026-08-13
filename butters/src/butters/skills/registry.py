@@ -11,6 +11,7 @@ from butters.integrations.model import IntegrationError
 from butters.skills.model import (
     ActionClass,
     SkillArguments,
+    SkillAudience,
     SkillError,
     SkillExecution,
     SkillFailure,
@@ -40,6 +41,7 @@ class SkillSpec:
     negative_examples: tuple[str, ...] = ()
     source_reference: str = "butters.skills.implementations"
     validation_status: str = "covered_by_registry_tests"
+    audience: SkillAudience = SkillAudience.NORMAL
 
     def metadata(self, *, enabled: bool = True) -> dict[str, object]:
         """Return safe declarative metadata; never return executable callables."""
@@ -50,6 +52,7 @@ class SkillSpec:
             "description": self.description,
             "category": self.category,
             "action_class": self.action_class.value,
+            "audience": self.audience.value,
             "enabled": enabled,
             "input_schema": self.input_schema,
             "result_description": self.result_description,
@@ -96,14 +99,23 @@ class SkillRegistry:
         else:
             self._disabled.add(skill_name)
 
-    def metadata(self) -> tuple[dict[str, object], ...]:
+    def metadata(self, *, administrator: bool = True) -> tuple[dict[str, object], ...]:
         return tuple(
             spec.metadata(enabled=self.is_enabled(spec.name))
             for spec in self._skills.values()
+            if administrator or spec.audience is SkillAudience.NORMAL
         )
 
+    def requires_administrator(self, skill_name: str) -> bool:
+        spec = self._skills.get(skill_name)
+        return spec is not None and spec.audience is SkillAudience.ADMINISTRATOR
+
     def execute(
-        self, skill_name: str, arguments: Mapping[str, object]
+        self,
+        skill_name: str,
+        arguments: Mapping[str, object],
+        *,
+        administrator: bool = False,
     ) -> SkillExecution:
         started = time.perf_counter()
         spec = self._skills.get(skill_name)
@@ -121,6 +133,17 @@ class SkillRegistry:
                 spec.action_class,
                 time.perf_counter() - started,
                 failure=SkillFailure("skill_disabled", "skill is disabled"),
+                arguments=dict(arguments),
+            )
+        if spec.audience is SkillAudience.ADMINISTRATOR and not administrator:
+            return SkillExecution(
+                skill_name,
+                spec.action_class,
+                time.perf_counter() - started,
+                failure=SkillFailure(
+                    "administrator_required",
+                    "this observation requires administrator authorization",
+                ),
                 arguments=dict(arguments),
             )
         try:
@@ -165,7 +188,11 @@ class SkillRegistry:
             )
 
     def validate_proposal(
-        self, skill_name: str, arguments: Mapping[str, object]
+        self,
+        skill_name: str,
+        arguments: Mapping[str, object],
+        *,
+        administrator: bool = False,
     ) -> SkillFailure | None:
         """Apply typed parsing and policy without calling an integration adapter."""
         spec = self._skills.get(skill_name)
@@ -173,6 +200,11 @@ class SkillRegistry:
             return SkillFailure("unknown_skill", "skill is not registered")
         if not self.is_enabled(skill_name):
             return SkillFailure("skill_disabled", "skill is disabled")
+        if spec.audience is SkillAudience.ADMINISTRATOR and not administrator:
+            return SkillFailure(
+                "administrator_required",
+                "this observation requires administrator authorization",
+            )
         try:
             parsed = spec.parse_arguments(arguments)
             self._policy.authorize(

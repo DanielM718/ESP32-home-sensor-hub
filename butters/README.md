@@ -305,11 +305,19 @@ The original thirteen skills remain registered and classified `READ_ONLY`:
 | `get_printer_maintenance` | Local maintenance due state and completion audit history |
 | `get_last_print` | Latest canonical local/cloud print duration and result |
 
-Beta 1 promotes five reviewed capabilities as normal read-only skills:
+Beta 1 promotes five reviewed capabilities as read-only skills:
 `get_host_observation`, `get_stack_observation`,
 `get_network_observation`, `get_sensor_history_summary`, and
 `get_project_status`. They reuse bounded diagnostic evidence or five fixed Git
 views. Historical min/max/mean/difference/trend is computed locally.
+
+Each skill also declares an audience. `get_network_observation` and
+`get_project_status` are `ADMINISTRATOR`: they describe the deployment rather
+than the home, so the ordinary conversation surface refuses them before any
+adapter runs and never offers them to a cloud model. `get_project_status`
+additionally reports `repository_unavailable` unless a repository is explicitly
+configured as readable for the service user, which an ordinary deployment does
+not do. The remaining three are normal read-only skills.
 
 Unknown skills, unexpected/missing arguments, unknown entities, incompatible
 metrics, non-allow-listed comparisons, and every action class other than

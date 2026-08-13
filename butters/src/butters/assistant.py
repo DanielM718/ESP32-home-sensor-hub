@@ -73,6 +73,7 @@ class DeterministicAssistant:
         llm_context: tuple[str, ...] = (),
         diagnostic_planner: DiagnosticPlanner | None = None,
         diagnostic_engine: DiagnosticEngine | None = None,
+        project_adapter: ProjectInspectionAdapter | None = None,
     ) -> None:
         self.router = router
         self.skills = skills
@@ -83,6 +84,7 @@ class DeterministicAssistant:
         self.llm_context = llm_context
         self.diagnostic_planner = diagnostic_planner
         self.diagnostic_engine = diagnostic_engine
+        self.project_adapter = project_adapter
 
     def preview_route(self, raw_text: str) -> RoutedIntent:
         """Classify locally without executing a skill or invoking a model."""
@@ -346,11 +348,8 @@ def create_assistant(
     skills = build_read_only_registry(
         sensor_provider, server_provider, entities, metrics, printer_provider
     )
-    register_promoted_skills(
-        skills,
-        diagnostic_tools,
-        ProjectInspectionAdapter(settings.remediation.repository_root),
-    )
+    project_adapter = ProjectInspectionAdapter(settings.remediation.project_inspection_root)
+    register_promoted_skills(skills, diagnostic_tools, project_adapter)
     diagnostic_planner = DiagnosticPlanner(entities)
     diagnostic_engine = None
     if settings.diagnostics.enabled:
@@ -383,4 +382,5 @@ def create_assistant(
         ),
         diagnostic_planner=diagnostic_planner if diagnostic_engine is not None else None,
         diagnostic_engine=diagnostic_engine,
+        project_adapter=project_adapter,
     )

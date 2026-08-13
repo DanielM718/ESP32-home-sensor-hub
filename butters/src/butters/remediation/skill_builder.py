@@ -97,9 +97,25 @@ class CodexSkillBuilder:
                 """
             )
 
+    def _repository_root(self) -> Path:
+        """Resolve the authoring repository, reporting absence as a typed error.
+
+        A deployed daemon normally has no readable checkout at all, so an
+        unreadable or missing root is an expected deployment condition rather
+        than an internal server error.
+        """
+
+        try:
+            return self.settings.repository_root.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            raise SkillAuthoringError(
+                "repository_unavailable",
+                "no readable authoring repository is configured for this deployment",
+            ) from exc
+
     def submit(self, description: str) -> SkillAuthoringJob:
         clean = self.validate_request(description)
-        root = self.settings.repository_root.resolve(strict=True)
+        root = self._repository_root()
         base = self._git(root, "rev-parse", "HEAD").strip()
         status = self._git(root, "status", "--porcelain=v1")
         if status.strip():
@@ -149,13 +165,34 @@ class CodexSkillBuilder:
                 "codex_secret_boundary",
                 "Codex execution requires a separate parent process with no deployment/provider secrets",
             )
-        root = self.settings.repository_root.resolve(strict=True)
+        # Claim the job transactionally so two concurrent /run requests cannot
+        # both create a worktree; the loser sees a typed conflict.
+        if not self._claim(job.job_id, {"queued", "manual_launch_required"}, "running"):
+            raise SkillAuthoringError("job_already_running", "job is already being executed")
+        try:
+            return self._run_claimed(replace_job(job, status="running"))
+        except SkillAuthoringError:
+            self._release(job)
+            raise
+        except Exception:
+            self._save(replace_job(job, status="failed", stopping_reason="codex_error"))
+            raise
+
+    def _run_claimed(self, job: SkillAuthoringJob) -> SkillAuthoringJob:
+        root = self._repository_root()
         if self._git(root, "rev-parse", "HEAD").strip() != job.base_commit:
             raise SkillAuthoringError("base_commit_changed", "repository base commit changed")
         if self._git(root, "status", "--porcelain=v1").strip():
             raise SkillAuthoringError("dirty_worktree", "repository is no longer clean")
-        worktree = self.settings.jobs_dir / job.job_id / "worktree"
-        worktree.parent.mkdir(parents=True, exist_ok=False)
+        # A fresh attempt directory keeps a failed or interrupted run from
+        # permanently wedging the job on a leftover path.
+        worktree = self.settings.jobs_dir / job.job_id / ("worktree-" + secrets.token_hex(4))
+        try:
+            worktree.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise SkillAuthoringError(
+                "jobs_dir_unavailable", "the Codex job directory is not writable"
+            ) from exc
         self._run_checked(
             ["git", "worktree", "add", "--detach", str(worktree), job.base_commit],
             cwd=root,
@@ -207,6 +244,13 @@ class CodexSkillBuilder:
             return self._finish_worktree_job(root, worktree, failed)
         if any((worktree / item).is_symlink() for item in files):
             failed = replace_job(job, status="failed", files_changed=files, stopping_reason="symlink_change_denied")
+            return self._finish_worktree_job(root, worktree, failed)
+        # Inspect the generated artifacts before asking Git to render them: a
+        # single large or binary file would otherwise be buffered in full before
+        # max_patch_bytes could reject it.
+        artifact_failure = self._artifact_violation(worktree, files)
+        if artifact_failure is not None:
+            failed = replace_job(job, status="failed", files_changed=files, stopping_reason=artifact_failure)
             return self._finish_worktree_job(root, worktree, failed)
         if untracked:
             self._run_checked(
@@ -263,7 +307,13 @@ class CodexSkillBuilder:
         job = self.require(job_id)
         if job.status != "patch_ready" or not job.tests_passed or not job.diff:
             raise SkillAuthoringError("patch_not_ready", "only a passing patch-ready job may be approved")
-        root = self.settings.repository_root.resolve(strict=True)
+        # The stored patch is untrusted input at approval time: it is re-parsed
+        # and re-checked against the canonical path policy rather than trusting
+        # the validation that run() performed against the worktree.
+        violation = _patch_violation(job.diff, self.settings.max_patch_bytes)
+        if violation is not None:
+            raise SkillAuthoringError(violation, "the stored patch failed re-validation")
+        root = self._repository_root()
         if self._git(root, "rev-parse", "HEAD").strip() != job.base_commit:
             raise SkillAuthoringError("base_commit_changed", "repository base commit changed")
         if self._git(root, "status", "--porcelain=v1").strip():
@@ -356,6 +406,49 @@ class CodexSkillBuilder:
                 (self.settings.max_retained_jobs,),
             )
 
+    def _artifact_violation(self, worktree: Path, files: tuple[str, ...]) -> str | None:
+        """Reject artifacts a reviewable read-only skill patch may not contain."""
+
+        total = 0
+        for item in files:
+            candidate = worktree / item
+            try:
+                if not candidate.exists():
+                    continue  # a deletion is already refused by the status gate
+                stat = candidate.stat()
+            except OSError:
+                return "artifact_unreadable"
+            if not candidate.is_file():
+                return "unsupported_artifact"
+            if stat.st_mode & 0o111:
+                return "executable_artifact_denied"
+            if stat.st_size > self.settings.max_generated_file_bytes:
+                return "generated_file_too_large"
+            total += stat.st_size
+            if total > self.settings.max_patch_bytes:
+                return "generated_bytes_too_large"
+            try:
+                with candidate.open("rb") as source:
+                    if b"\x00" in source.read(8192):
+                        return "binary_artifact_denied"
+            except OSError:
+                return "artifact_unreadable"
+        return None
+
+    def _claim(self, job_id: str, expected: set[str], new_status: str) -> bool:
+        placeholders = ",".join("?" for _ in expected)
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE skill_jobs SET status=? WHERE job_id=? AND status IN ({placeholders})",
+                (new_status, job_id, *sorted(expected)),
+            )
+            return cursor.rowcount == 1
+
+    def _release(self, job: SkillAuthoringJob) -> None:
+        """Return a claimed job to its pre-run state after a rejected attempt."""
+
+        self._claim(job.job_id, {"running"}, job.status)
+
     def _prompt(self, job: SkillAuthoringJob, worktree: Path) -> str:
         data = {
             "description": job.description,
@@ -447,6 +540,53 @@ def replace_job(job: SkillAuthoringJob, **changes: object) -> SkillAuthoringJob:
     values = asdict(job)
     values.update(changes)
     return SkillAuthoringJob(**values)
+
+
+_MODE_LINE = re.compile(r"^(?:new|deleted|old|new file|deleted file) mode (\d+)$")
+
+
+def _patch_violation(diff: str, max_bytes: int) -> str | None:
+    """Re-derive every target of a unified diff and re-apply the path policy."""
+
+    if len(diff.encode("utf-8")) > max_bytes:
+        return "patch_too_large"
+    targets: list[str] = []
+    for line in diff.splitlines():
+        if line.startswith("GIT binary patch") or line.startswith("Binary files "):
+            return "binary_patch_denied"
+        if line.startswith(("rename from ", "rename to ", "copy from ", "copy to ")):
+            return "rename_or_copy_denied"
+        if line.startswith("deleted file mode"):
+            return "destructive_change_denied"
+        mode = _MODE_LINE.match(line)
+        if mode is not None:
+            value = mode.group(1)
+            if value.startswith("120"):
+                return "symlink_change_denied"
+            # A reviewable read-only skill patch is plain non-executable source.
+            if value != "100644":
+                return "unsupported_mode_denied"
+        if line.startswith("diff --git "):
+            parts = line.split(" ")
+            if len(parts) != 4:
+                return "unparsable_patch"
+            targets.extend(_strip_prefix(item) for item in parts[2:])
+        elif line.startswith("--- ") or line.startswith("+++ "):
+            candidate = line[4:].strip()
+            if candidate != "/dev/null":
+                targets.append(_strip_prefix(candidate))
+    if not targets:
+        return "unparsable_patch"
+    if any(item is None or not _allowed_skill_path(item) for item in targets):
+        return "path_scope_denied"
+    return None
+
+
+def _strip_prefix(value: str) -> str | None:
+    candidate = value.strip().strip('"')
+    if candidate.startswith(("a/", "b/")):
+        candidate = candidate[2:]
+    return candidate or None
 
 
 def _allowed_skill_path(value: str) -> bool:

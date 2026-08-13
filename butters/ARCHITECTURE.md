@@ -30,13 +30,33 @@ private HTTPS browser
 ```
 
 The web daemon is an unprivileged `butters` systemd service with a strict
-loopback bind, bounded worker pool/queues, clean executor shutdown, restart
-limits, no capabilities, protected system/home, and only `/var/lib/butters`
-writable. It does not own ALSA. Tailscale identity headers are authoritative
-only in this loopback proxy topology; every admin API and admin WebSocket also
-checks the exact configured login allow-list. Mutations require same-origin
-HTTPS plus a session CSRF token. Development bypass requires loopback,
-`development_mode`, and an explicit `BUTTERS_DEV_ADMIN=1`.
+loopback bind, bounded worker pool/queues, a separate unqueued teardown path,
+clean executor shutdown, restart limits, no capabilities, protected
+system/home, and only `/var/lib/butters` writable. It has no repository write
+authority. It does not own ALSA.
+
+Tailscale identity headers are authoritative only in this loopback proxy
+topology; every admin API, the `/admin` document, and the admin WebSocket check
+the exact configured login allow-list, and an unauthorized identity always
+receives a bounded 403 rather than an opaque error. The loopback peer check is
+a topology assumption, not a perimeter: any local process that can reach the
+port can present a header, so tailnet ACLs and host hygiene remain part of the
+control set.
+
+Production mutations require an allow-listed HTTPS `Origin` — a server-known
+value, never a client-supplied `Host` comparison — plus a session CSRF token.
+Session allocation is admission-controlled before allocation: same-origin
+browser context, per-identity rate limit, per-identity session cap, and an
+administrator reserve that a flood cannot consume. When the production origin
+is unconfigured the daemon reports `not_ready` and refuses sessions and
+mutations rather than weakening the check. Development bypass requires
+loopback, `development_mode`, and an explicit `BUTTERS_DEV_ADMIN=1`; no
+test-only peer identity exists in the deployed authorization path.
+
+Skills carry an audience alongside their action class, so a read-only
+observation that describes the deployment (repository state, detailed network
+views) is refused for ordinary callers by the registry, by the orchestrator
+before any adapter or cloud stage, and by the cloud tool-exposure filter.
 
 Browser sessions use 256-bit random opaque IDs in HttpOnly/Secure/SameSite
 cookies, expire on inactivity, and cap active sessions, messages, and context
@@ -432,7 +452,15 @@ effort/tier, token categories, tool rounds, time, estimated dated-price cost,
 success/error, and escalation. Beta 1 writes this non-content metadata plus
 model-free request summaries to SQLite under `/var/lib/butters`. Per-request
 and durable daily/monthly limits apply before a call, so daemon restart does
-not reset spending totals.
+not reset spending totals. The administrator report is computed with bounded
+SQL aggregates on a worker thread; it never materializes the retained ledger.
+
+Two accounting limits are stated rather than claimed away. A per-request
+estimate is a conservative preflight *reservation*, not a hard ceiling across
+multi-round tool use, so the durable daily/monthly budgets are the effective
+control. A crash between a provider call and its accounting write loses that
+charge; a pending-charge reservation design would close this and is deferred
+while paid providers remain disabled by default.
 
 Cloud requires explicit configuration plus `OPENAI_API_KEY`; the key is read
 only for the Authorization header, never put in a request body, diagnostic,

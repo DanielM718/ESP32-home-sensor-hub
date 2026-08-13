@@ -5,7 +5,11 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
+
+
+ANONYMOUS_PEER = "peer:unknown"
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,15 +27,25 @@ class BrowserSession:
     created_monotonic: float
     last_active_monotonic: float
     messages: list[ConversationMessage] = field(default_factory=list)
+    peer_key: str = ANONYMOUS_PEER
+    administrator: bool = False
 
 
 class SessionError(ValueError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(self, code: str, message: str, status_code: int = 401) -> None:
         super().__init__(message)
         self.code = code
+        self.status_code = status_code
 
 
 class SessionManager:
+    """Bounded session pool with per-peer fairness and an administrator reserve.
+
+    Capacity is never freed by evicting a live conversation. A flood is refused
+    at admission instead, so one tailnet caller cannot displace another or lock
+    the operator out of the administrative surface.
+    """
+
     def __init__(
         self,
         *,
@@ -39,27 +53,50 @@ class SessionManager:
         ttl_seconds: float = 1800.0,
         max_messages: int = 24,
         max_context_chars: int = 12000,
-        clock: callable = time.monotonic,
+        max_per_peer: int = 4,
+        admin_reserve: int = 4,
+        clock: Callable[[], float] = time.monotonic,
+        on_expire: Callable[[tuple[str, ...]], None] | None = None,
     ) -> None:
         self.max_active = max_active
         self.ttl_seconds = ttl_seconds
         self.max_messages = max_messages
         self.max_context_chars = max_context_chars
+        self.max_per_peer = max(1, min(max_per_peer, max_active))
+        self.admin_reserve = max(0, min(admin_reserve, max(0, max_active - 1)))
         self.clock = clock
+        self.on_expire = on_expire
         self._sessions: dict[str, BrowserSession] = {}
         self._lock = threading.RLock()
 
-    def create(self) -> BrowserSession:
+    def create(
+        self,
+        *,
+        peer_key: str = ANONYMOUS_PEER,
+        administrator: bool = False,
+    ) -> BrowserSession:
+        self.expire()
         with self._lock:
-            self.expire()
-            if len(self._sessions) >= self.max_active:
-                raise SessionError("session_capacity", "too many active sessions")
+            key = str(peer_key)[:192] or ANONYMOUS_PEER
+            owned = sum(1 for item in self._sessions.values() if item.peer_key == key)
+            if owned >= self.max_per_peer:
+                raise SessionError(
+                    "peer_session_limit",
+                    "this caller already holds the maximum number of conversations",
+                    429,
+                )
+            # Anonymous callers may only fill the unreserved part of the pool.
+            ceiling = self.max_active if administrator else self.max_active - self.admin_reserve
+            if len(self._sessions) >= ceiling:
+                raise SessionError("session_capacity", "too many active sessions", 503)
             now = self.clock()
             session = BrowserSession(
                 secrets.token_urlsafe(32),
                 secrets.token_urlsafe(24),
                 now,
                 now,
+                peer_key=key,
+                administrator=administrator,
             )
             self._sessions[session.session_id] = session
             return session
@@ -74,6 +111,7 @@ class SessionManager:
             now = self.clock()
             if now - session.last_active_monotonic >= self.ttl_seconds:
                 self._sessions.pop(session.session_id, None)
+                self._notify((session.session_id,))
                 return None
             if touch:
                 session.last_active_monotonic = now
@@ -93,7 +131,7 @@ class SessionManager:
         trace_id: str | None = None,
     ) -> None:
         if role not in {"user", "assistant"}:
-            raise SessionError("invalid_role", "conversation role is invalid")
+            raise SessionError("invalid_role", "conversation role is invalid", 400)
         clean = " ".join(text.replace("\x00", "").split())[:4000]
         if not clean:
             return
@@ -127,13 +165,14 @@ class SessionManager:
     def expire(self) -> int:
         now = self.clock()
         with self._lock:
-            expired = [
+            expired = tuple(
                 key
                 for key, session in self._sessions.items()
                 if now - session.last_active_monotonic >= self.ttl_seconds
-            ]
+            )
             for key in expired:
                 self._sessions.pop(key, None)
+        self._notify(expired)
         return len(expired)
 
     def summaries(self) -> tuple[dict[str, object], ...]:
@@ -147,9 +186,24 @@ class SessionManager:
                     "idle_seconds": round(now - item.last_active_monotonic, 1),
                     "message_count": len(item.messages),
                     "context_chars": sum(len(message.text) for message in item.messages),
+                    "administrator": item.administrator,
                 }
                 for item in self._sessions.values()
             )
+
+    def capacity(self) -> dict[str, int]:
+        with self._lock:
+            active = len(self._sessions)
+        return {
+            "active": active,
+            "max_active": self.max_active,
+            "admin_reserve": self.admin_reserve,
+            "max_per_peer": self.max_per_peer,
+        }
+
+    def _notify(self, expired: tuple[str, ...]) -> None:
+        if expired and self.on_expire is not None:
+            self.on_expire(expired)
 
     @staticmethod
     def valid_identifier(value: object) -> bool:
