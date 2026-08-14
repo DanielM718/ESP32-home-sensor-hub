@@ -15,6 +15,33 @@ CONTROL_START = re.compile(
 )
 
 
+def _distinct_metrics(metrics: tuple[Metric, ...]) -> tuple[Metric, ...]:
+    unique: dict[str, Metric] = {}
+    for metric in metrics:
+        unique.setdefault(metric.metric_id, metric)
+    return tuple(unique.values())
+
+
+def _sensor_value_call(
+    entity_id: str | None, metrics: tuple[Metric, ...]
+) -> tuple[str, dict[str, object]]:
+    """Route one measurement through the single-value skill and several through the set skill."""
+
+    arguments: dict[str, object] = {} if entity_id is None else {"entity": entity_id}
+    if len(metrics) == 1:
+        return "get_sensor_value", {**arguments, "metric": metrics[0].metric_id}
+    return "get_sensor_values", {
+        **arguments,
+        "metrics": [metric.metric_id for metric in metrics],
+    }
+
+
+def _joined_names(names: tuple[str, ...]) -> str:
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} or {names[-1]}"
+
+
 class IntentRouter:
     def __init__(
         self,
@@ -255,47 +282,40 @@ class IntentRouter:
                 "That request is not supported by the read-only deterministic router.",
                 allow_fallback=True,
             )
-        metric = self._choose_metric(matched_metrics)
-        if metric is None:
-            names = ", ".join(item.display_name for item in matched_metrics)
-            return self._clarification(
-                normalized,
-                f"Which measurement did you mean: {names}?",
-                skill="get_sensor_value",
-                arguments=({"entity": entity.entity_id} if entity is not None else {}),
-                missing_arguments=("metric",),
-            )
+        # Naming several compatible measurements is a complete request, not an
+        # ambiguity: the caller already said which ones they want.
+        requested = _distinct_metrics(matched_metrics)
 
         if entity is None:
-            if self._mentions_unnumbered_box(normalized):
-                return self._clarification(
-                    normalized,
-                    "Which filament box did you mean?",
-                    skill="get_sensor_value",
-                    arguments={"metric": metric.metric_id},
-                    missing_arguments=("entity",),
-                )
+            skill, arguments = _sensor_value_call(None, requested)
+            question = (
+                "Which filament box did you mean?"
+                if self._mentions_unnumbered_box(normalized)
+                else "Which sensor did you mean?"
+            )
             return self._clarification(
                 normalized,
-                "Which sensor did you mean?",
-                skill="get_sensor_value",
-                arguments={"metric": metric.metric_id},
+                question,
+                skill=skill,
+                arguments=arguments,
                 missing_arguments=("entity",),
             )
-        else:
-            confidence = 0.98
 
-        if entity.sensor_type not in metric.sensor_types:
+        unsupported = tuple(
+            metric
+            for metric in requested
+            if entity.sensor_type not in metric.sensor_types
+        )
+        if unsupported:
+            names = _joined_names(
+                tuple(metric.display_name for metric in unsupported)
+            )
             return self._unsupported(
                 normalized,
-                f"{entity.display_name} does not provide {metric.display_name}.",
+                f"{entity.display_name} does not provide {names}.",
             )
-        return self._matched(
-            normalized,
-            "get_sensor_value",
-            {"entity": entity.entity_id, "metric": metric.metric_id},
-            confidence,
-        )
+        skill, arguments = _sensor_value_call(entity.entity_id, requested)
+        return self._matched(normalized, skill, arguments, 0.98)
 
     @staticmethod
     def _server_health_request(text: str) -> bool:
@@ -573,11 +593,6 @@ class IntentRouter:
         return bool(words & {"box", "container"}) and not bool(
             words & {str(value) for value in range(1, 10)}
         )
-
-    @staticmethod
-    def _choose_metric(metrics: tuple[Metric, ...]) -> Metric | None:
-        unique = {metric.metric_id: metric for metric in metrics}
-        return next(iter(unique.values())) if len(unique) == 1 else None
 
     def _require_entity(
         self,

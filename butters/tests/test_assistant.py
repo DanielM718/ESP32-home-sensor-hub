@@ -37,6 +37,24 @@ class Health:
         )
 
 
+class MultiSensors:
+    def snapshot(self) -> SensorSnapshot:
+        return SensorSnapshot(
+            "2026-08-11T12:00:00Z",
+            (
+                SensorRecord(
+                    "environment",
+                    "3",
+                    "2026-08-11T11:59:55Z",
+                    5,
+                    "online",
+                    {"temperature_c": 24.2, "humidity": 18.4},
+                    ("temperature_c", "humidity"),
+                ),
+            ),
+        )
+
+
 def test_text_mode_runs_normalize_route_skill_and_format() -> None:
     settings = load_assistant_settings()
     vocabulary = load_domain_vocabulary(default_vocabulary_path())
@@ -53,6 +71,32 @@ def test_text_mode_runs_normalize_route_skill_and_format() -> None:
     assert response.route.skill == "get_sensor_value"
     assert response.execution is not None and response.execution.ok
     assert response.response_text == "Printer room CO2 is 742 ppm."
+
+
+def test_text_mode_returns_several_requested_measurements_end_to_end() -> None:
+    settings = load_assistant_settings()
+    vocabulary = load_domain_vocabulary(default_vocabulary_path())
+    assistant = create_assistant(
+        settings,
+        vocabulary,
+        sensor_adapter=MultiSensors(),  # type: ignore[arg-type]
+        server_adapter=Health(),  # type: ignore[arg-type]
+    )
+
+    response = assistant.handle_text(
+        "what is the humidity and temperature in box three"
+    )
+
+    assert response.route.skill == "get_sensor_values"
+    assert response.route.arguments == {
+        "entity": "filament_box_3",
+        "metrics": ["humidity", "temperature"],
+    }
+    assert response.execution is not None and response.execution.ok
+    assert response.response_text == (
+        "Filament box three humidity is 18 percent "
+        "and temperature is 24.2 degrees Celsius."
+    )
 
 
 def test_text_mode_ambiguity_never_calls_skill() -> None:

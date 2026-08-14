@@ -6,7 +6,11 @@ from dataclasses import dataclass
 
 from butters.assistant_config import EntitySettings
 from butters.config import ConfigError
-from butters.routing.normalization import contains_phrase, normalize_request
+from butters.routing.normalization import (
+    contains_phrase,
+    normalize_request,
+    phrase_position,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,11 +122,24 @@ class MetricRegistry:
         return metric
 
     def resolve(self, normalized_text: str) -> tuple[Metric, ...]:
-        matched = []
-        for metric in self._metrics:
-            if any(contains_phrase(normalized_text, alias) for alias in metric.aliases):
-                matched.append(metric)
-        return tuple(matched)
+        """Return every distinct requested metric, in the order it was asked for.
+
+        A request may name more than one compatible measurement, so this reports
+        the full requested set rather than a single winner. Ordering follows the
+        earliest alias match, with the registry order breaking ties, so a reply
+        can be phrased in the order the caller used.
+        """
+
+        matched: list[tuple[int, int, Metric]] = []
+        for order, metric in enumerate(self._metrics):
+            positions = [
+                position
+                for alias in metric.aliases
+                if (position := phrase_position(normalized_text, alias)) is not None
+            ]
+            if positions:
+                matched.append((min(positions), order, metric))
+        return tuple(metric for _position, _order, metric in sorted(matched))
 
 
 DEFAULT_METRICS = (

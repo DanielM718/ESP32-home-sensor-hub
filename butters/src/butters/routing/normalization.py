@@ -43,6 +43,13 @@ def normalize_request(text: str) -> str:
     return value
 
 
-def contains_phrase(text: str, phrase: str) -> bool:
+def phrase_position(text: str, phrase: str) -> int | None:
+    """Index of the first whole-word phrase match, or None when it is absent."""
+
     normalized = normalize_request(phrase)
-    return bool(re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text))
+    match = re.search(rf"(?<![a-z0-9]){re.escape(normalized)}(?![a-z0-9])", text)
+    return match.start() if match is not None else None
+
+
+def contains_phrase(text: str, phrase: str) -> bool:
+    return phrase_position(text, phrase) is not None

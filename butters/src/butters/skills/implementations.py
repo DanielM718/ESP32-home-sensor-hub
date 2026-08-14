@@ -37,6 +37,8 @@ from butters.skills.model import (
     SensorStatusResult,
     SensorValueArgs,
     SensorValueResult,
+    SensorValuesArgs,
+    SensorValuesResult,
     ServerHealthArgs,
     ServerHealthResult,
     SkillArguments,
@@ -49,6 +51,7 @@ from butters.skills.registry import (
     SkillSpec,
     optional_string,
     required_string,
+    required_string_tuple,
     strict_arguments,
 )
 
@@ -60,6 +63,17 @@ _SKILL_METADATA: dict[str, dict[str, object]] = {
         "result_description": "Current value, unit, reporting state, timestamp, and age.",
         "permission_summary": ("dashboard_api_read", "configured_entities_only"),
         "positive_examples": ("what is the humidity in box three", "printer room CO2"),
+        "negative_examples": ("set the humidity", "read an unknown sensor"),
+    },
+    "get_sensor_values": {
+        "category": "sensors",
+        "input_schema": {
+            "entity": "allow-listed entity ID",
+            "metrics": "ordered list of allow-listed metric IDs",
+        },
+        "result_description": "One current value, unit, and availability per requested metric.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("what is the temperature and humidity in box three",),
         "negative_examples": ("set the humidity", "read an unknown sensor"),
     },
     "get_sensor_status": {
@@ -166,6 +180,17 @@ class ReadOnlySkillImplementations:
                 f"{entity.entity_id} does not allow metric {metric.metric_id}",
             )
 
+    def authorize_values(self, arguments: SkillArguments) -> None:
+        args = cast(SensorValuesArgs, arguments)
+        entity = self._allowed_entity(args.entity)
+        for metric_id in args.metrics:
+            metric = self._allowed_metric(metric_id)
+            if entity.sensor_type not in metric.sensor_types:
+                raise SkillError(
+                    "policy_denied",
+                    f"{entity.entity_id} does not allow metric {metric.metric_id}",
+                )
+
     def authorize_status(self, arguments: SkillArguments) -> None:
         args = cast(SensorStatusArgs, arguments)
         if args.entity is not None:
@@ -207,6 +232,27 @@ class ReadOnlySkillImplementations:
         entity = self.entities.require(args.entity)
         metric = self.metrics.require(args.metric)
         record = self._record_or_missing(self.sensor_provider.snapshot(), entity)
+        return self._measurement(entity, metric, record)
+
+    def get_sensor_values(self, arguments: SkillArguments) -> SkillResult:
+        args = cast(SensorValuesArgs, arguments)
+        entity = self.entities.require(args.entity)
+        # One snapshot serves every requested metric, so the measurements in a
+        # single answer are read from the same reported packet.
+        record = self._record_or_missing(self.sensor_provider.snapshot(), entity)
+        return SensorValuesResult(
+            entity.entity_id,
+            entity.display_name,
+            record.status,
+            tuple(
+                self._measurement(entity, self.metrics.require(metric_id), record)
+                for metric_id in args.metrics
+            ),
+        )
+
+    def _measurement(
+        self, entity: Entity, metric: Metric, record: SensorRecord
+    ) -> SensorValueResult:
         raw = record.values.get(metric.field)
         battery_valid = not (
             metric.field == "battery_mv"
@@ -472,6 +518,17 @@ def build_read_only_registry(
     )
     registry.register(
         _skill(
+            "get_sensor_values",
+            "Return several current allow-listed measurements from one sensor.",
+            ActionClass.READ_ONLY,
+            _parse_sensor_values,
+            implementation.authorize_values,
+            implementation.get_sensor_values,
+            5.0,
+        )
+    )
+    registry.register(
+        _skill(
             "get_sensor_status",
             "Return reporting status for one or all configured sensors.",
             ActionClass.READ_ONLY,
@@ -580,6 +637,13 @@ def _parse_sensor_value(values: Mapping[str, object]) -> SkillArguments:
     strict_arguments(values, required=frozenset({"entity", "metric"}))
     return SensorValueArgs(
         required_string(values, "entity"), required_string(values, "metric")
+    )
+
+
+def _parse_sensor_values(values: Mapping[str, object]) -> SkillArguments:
+    strict_arguments(values, required=frozenset({"entity", "metrics"}))
+    return SensorValuesArgs(
+        required_string(values, "entity"), required_string_tuple(values, "metrics")
     )
 
 

@@ -18,6 +18,7 @@ from butters.skills.model import (
     SensorLastSeenResult,
     SensorStatusResult,
     SensorValueResult,
+    SensorValuesResult,
     ServerHealthResult,
     SkillExecution,
 )
@@ -30,6 +31,8 @@ class ResponseFormatter:
         result = execution.result
         if isinstance(result, SensorValueResult):
             return self._sensor_value(result)
+        if isinstance(result, SensorValuesResult):
+            return self._sensor_values(result)
         if isinstance(result, SensorStatusResult):
             return self._sensor_status(result)
         if isinstance(result, SensorLastSeenResult):
@@ -69,6 +72,31 @@ class ResponseFormatter:
         unit = _spoken_unit(result.unit)
         suffix = f" {unit}" if unit else ""
         return f"{result.display_name} {result.metric_name} is {value}{suffix}."
+
+    @staticmethod
+    def _sensor_values(result: SensorValuesResult) -> str:
+        """Answer every requested measurement, naming the ones that are missing."""
+
+        available = []
+        missing = []
+        for item in result.measurements:
+            target = available if item.available and item.value is not None else missing
+            target.append(item)
+        sentences = []
+        if available:
+            parts = []
+            for item in available:
+                unit = _spoken_unit(item.unit)
+                suffix = f" {unit}" if unit else ""
+                value = _format_value(item.metric, item.value)
+                parts.append(f"{item.metric_name} is {value}{suffix}")
+            sentences.append(f"{result.display_name} {_joined(parts)}.")
+        for item in missing:
+            reason = item.reason or "the measurement is unavailable"
+            sentences.append(
+                f"{result.display_name} {item.metric_name} is unavailable: {reason}."
+            )
+        return " ".join(sentences)
 
     @staticmethod
     def _sensor_status(result: SensorStatusResult) -> str:
@@ -384,6 +412,14 @@ class ResponseFormatter:
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
         return "The read-only request could not be completed."
+
+
+def _joined(parts: list[str]) -> str:
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}"
 
 
 def _format_value(metric: str, value: float) -> str:

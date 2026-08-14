@@ -13,6 +13,7 @@ from butters.skills.model import (
     ComparisonResult,
     SensorStatusResult,
     SensorValueResult,
+    SensorValuesResult,
 )
 
 
@@ -166,6 +167,144 @@ def test_single_status_is_structured() -> None:
     assert execution.ok
     assert isinstance(execution.result, SensorStatusResult)
     assert execution.result.all_reporting
+
+
+def test_several_measurements_come_from_one_snapshot() -> None:
+    provider = SnapshotProvider(
+        (_record("environment", "3", temperature_c=24.2, humidity=18.4),)
+    )
+    settings = load_assistant_settings()
+    registry = build_read_only_registry(
+        provider, HealthProvider(), EntityRegistry(settings.entities), MetricRegistry()
+    )
+
+    execution = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["temperature", "humidity"]},
+    )
+
+    assert execution.ok
+    assert isinstance(execution.result, SensorValuesResult)
+    assert [item.metric for item in execution.result.measurements] == [
+        "temperature",
+        "humidity",
+    ]
+    assert [item.value for item in execution.result.measurements] == [24.2, 18.4]
+    assert all(item.available for item in execution.result.measurements)
+    assert provider.calls == 1
+
+
+def test_a_missing_measurement_is_reported_rather_than_invented() -> None:
+    registry = _registry((_record("environment", "3", temperature_c=24.2),))
+
+    execution = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["temperature", "humidity"]},
+    )
+
+    assert execution.ok
+    assert isinstance(execution.result, SensorValuesResult)
+    temperature, humidity = execution.result.measurements
+    assert temperature.available and temperature.value == 24.2
+    assert not humidity.available
+    assert humidity.value is None
+    assert humidity.reason == "measurement is unavailable"
+
+
+def test_multi_measurement_policy_denies_disallowed_entities_and_metrics() -> None:
+    registry = _registry((_record("environment", "3", temperature_c=24.2),))
+
+    invalid_entity = registry.execute(
+        "get_sensor_values", {"entity": "secret_sensor", "metrics": ["temperature"]}
+    )
+    invalid_metric = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["temperature", "password"]},
+    )
+    wrong_sensor_type = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["temperature", "co2"]},
+    )
+    empty = registry.execute(
+        "get_sensor_values", {"entity": "filament_box_3", "metrics": []}
+    )
+    not_a_list = registry.execute(
+        "get_sensor_values", {"entity": "filament_box_3", "metrics": "temperature"}
+    )
+
+    assert invalid_entity.failure and invalid_entity.failure.code == "policy_denied"
+    assert invalid_metric.failure and invalid_metric.failure.code == "policy_denied"
+    assert wrong_sensor_type.failure
+    assert wrong_sensor_type.failure.code == "policy_denied"
+    assert empty.failure and empty.failure.code == "invalid_arguments"
+    assert not_a_list.failure and not_a_list.failure.code == "invalid_arguments"
+
+
+def test_multi_measurement_arguments_are_bounded_and_deduplicated() -> None:
+    provider = SnapshotProvider(
+        (_record("environment", "3", temperature_c=24.2, humidity=18.4),)
+    )
+    settings = load_assistant_settings()
+    registry = build_read_only_registry(
+        provider, HealthProvider(), EntityRegistry(settings.entities), MetricRegistry()
+    )
+
+    one = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["humidity"]},
+    )
+    eight_duplicates = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["humidity"] * 8},
+    )
+    ordered_duplicates = registry.execute(
+        "get_sensor_values",
+        {
+            "entity": "filament_box_3",
+            "metrics": ["humidity", "temperature", "humidity"],
+        },
+    )
+    nine = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["humidity"] * 9},
+    )
+    non_string = registry.execute(
+        "get_sensor_values",
+        {"entity": "filament_box_3", "metrics": ["humidity", 7]},
+    )
+    malformed_entity = registry.execute(
+        "get_sensor_values", {"entity": "  ", "metrics": ["humidity"]}
+    )
+    unexpected = registry.execute(
+        "get_sensor_values",
+        {
+            "entity": "filament_box_3",
+            "metrics": ["humidity"],
+            "command": "write",
+        },
+    )
+
+    assert one.ok and isinstance(one.result, SensorValuesResult)
+    assert [item.metric for item in one.result.measurements] == ["humidity"]
+    assert eight_duplicates.ok and isinstance(
+        eight_duplicates.result, SensorValuesResult
+    )
+    assert [item.metric for item in eight_duplicates.result.measurements] == [
+        "humidity"
+    ]
+    assert ordered_duplicates.ok and isinstance(
+        ordered_duplicates.result, SensorValuesResult
+    )
+    assert [item.metric for item in ordered_duplicates.result.measurements] == [
+        "humidity",
+        "temperature",
+    ]
+    assert nine.failure and nine.failure.code == "invalid_arguments"
+    assert non_string.failure and non_string.failure.code == "invalid_arguments"
+    assert malformed_entity.failure
+    assert malformed_entity.failure.code == "invalid_arguments"
+    assert unexpected.failure and unexpected.failure.code == "invalid_arguments"
+    assert provider.calls == 3
 
 
 def test_policy_denies_unknown_entity_metric_and_skill() -> None:

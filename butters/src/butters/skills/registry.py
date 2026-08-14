@@ -247,6 +247,30 @@ def required_string(values: Mapping[str, object], key: str) -> str:
     return value.strip()
 
 
+def required_string_tuple(
+    values: Mapping[str, object], key: str, *, maximum: int = 8
+) -> tuple[str, ...]:
+    """Parse a bounded, de-duplicated, order-preserving list of identifiers."""
+
+    value = values.get(key)
+    if not isinstance(value, (list, tuple)) or not value:
+        raise SkillError("invalid_arguments", f"{key} must be a non-empty list")
+    if len(value) > maximum:
+        raise SkillError(
+            "invalid_arguments", f"{key} accepts at most {maximum} entries"
+        )
+    items: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise SkillError(
+                "invalid_arguments", f"{key} entries must be non-empty strings"
+            )
+        cleaned = item.strip()
+        if cleaned not in items:
+            items.append(cleaned)
+    return tuple(items)
+
+
 def optional_string(values: Mapping[str, object], key: str) -> str | None:
     value: Any = values.get(key)
     if value is None:

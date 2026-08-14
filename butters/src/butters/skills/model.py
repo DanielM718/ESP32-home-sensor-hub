@@ -46,6 +46,14 @@ class SensorValueArgs:
 
 
 @dataclass(frozen=True, slots=True)
+class SensorValuesArgs:
+    """One entity with an ordered set of requested measurements."""
+
+    entity: str
+    metrics: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SensorStatusArgs:
     entity: str | None
 
@@ -105,6 +113,7 @@ class ProjectStatusArgs:
 
 SkillArguments: TypeAlias = (
     SensorValueArgs
+    | SensorValuesArgs
     | SensorStatusArgs
     | SensorLastSeenArgs
     | ComparisonArgs
@@ -132,6 +141,20 @@ class SensorValueResult:
     status: str
     available: bool
     reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SensorValuesResult:
+    """Several measurements read from one entity in a single snapshot.
+
+    Each requested measurement keeps its own availability and reason, so a
+    partially reporting sensor answers what it has without inventing the rest.
+    """
+
+    entity: str
+    display_name: str
+    status: str
+    measurements: tuple[SensorValueResult, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,6 +271,7 @@ class ReadOnlyObservationResult:
 
 SkillResult: TypeAlias = (
     SensorValueResult
+    | SensorValuesResult
     | SensorStatusResult
     | SensorLastSeenResult
     | ComparisonResult
