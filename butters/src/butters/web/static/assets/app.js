@@ -9,6 +9,7 @@ const sendButton = document.querySelector("#send-button");
 const partial = document.querySelector("#partial");
 const clearButton = document.querySelector("#clear-button");
 const stopAudio = document.querySelector("#stop-audio");
+const voiceOutputToggle = document.querySelector("#voice-output-toggle");
 // This is a backstop against a lost HTTP response, so it must never fire on a
 // request the service will still answer. cloud.max_wall_seconds (90s) only
 // gates entry to a tool round, so the last round starts under that budget and
@@ -18,6 +19,25 @@ const stopAudio = document.querySelector("#stop-audio");
 const CHAT_LIMIT_MS = 240000;
 // A media element that never reports an outcome must not hold a turn open.
 const PLAYBACK_LIMIT_MS = 120000;
+const VOICE_OUTPUT_KEY = "butters.voice-output-enabled";
+const VOICE_STATE = Object.freeze({
+  IDLE: "idle",
+  REQUESTING_PERMISSION: "requesting_permission",
+  CONNECTING: "connecting",
+  LISTENING: "listening",
+  STOPPING: "stopping",
+  TRANSCRIBING: "transcribing",
+  ROUTING: "routing",
+  ERROR: "error",
+});
+const VOICE_TIMEOUT_MS = Object.freeze({
+  requesting_permission: 60000,
+  connecting: 30000,
+  listening: 30000,
+  stopping: 5000,
+  transcribing: 30000,
+  routing: CHAT_LIMIT_MS,
+});
 let csrf = "";
 let socket = null;
 let mediaStream = null;
@@ -25,15 +45,47 @@ let audioContext = null;
 let processor = null;
 let sourceNode = null;
 let currentPlayback = null;
-let holding = false;
 let voiceTurn = 0;
 let voiceReadyResolve = null;
+let voiceReadyReject = null;
+let voiceState = VOICE_STATE.IDLE;
+let voiceStateTimer = 0;
+let voiceSession = null;
+let voiceOutputEnabled = true;
 let pending = false;
 let currentTurn = 0;
 
 function setState(label, key = "idle") {
   stateLabel.textContent = label;
   stateLabel.dataset.state = key;
+}
+
+function loadVoiceOutputPreference() {
+  try {
+    const stored = window.localStorage.getItem(VOICE_OUTPUT_KEY);
+    voiceOutputEnabled = stored === null ? true : stored === "true";
+  } catch (_) {
+    voiceOutputEnabled = true;
+  }
+  renderVoiceOutputPreference();
+}
+
+function renderVoiceOutputPreference() {
+  const label = voiceOutputEnabled ? "Voice: On" : "Voice: Off";
+  voiceOutputToggle.textContent = label;
+  voiceOutputToggle.setAttribute("aria-checked", voiceOutputEnabled ? "true" : "false");
+  voiceOutputToggle.setAttribute("aria-label", `Voice output ${voiceOutputEnabled ? "on" : "off"}`);
+}
+
+function setVoiceOutputPreference(enabled) {
+  voiceOutputEnabled = Boolean(enabled);
+  try {
+    window.localStorage.setItem(VOICE_OUTPUT_KEY, String(voiceOutputEnabled));
+  } catch (_) {
+    // The visible in-memory preference remains authoritative for this page.
+  }
+  renderVoiceOutputPreference();
+  if (!voiceOutputEnabled) stopPlayback();
 }
 
 // Only the newest exchange may write the header, so a reply that finishes
@@ -139,7 +191,7 @@ async function sendText(text) {
 
 async function playResponse(turn, traceId) {
   if (!isCurrentTurn(turn)) return;
-  if (traceId) {
+  if (traceId && voiceOutputEnabled) {
     setState("Speaking", "speaking");
     await speak(traceId);
   }
@@ -190,6 +242,7 @@ async function speak(traceId) {
   currentPlayback = playback;
   let url = "";
   try {
+    if (!voiceOutputEnabled) return;
     const response = await fetch("/api/speech", {
       method: "POST",
       credentials: "same-origin",
@@ -198,7 +251,7 @@ async function speak(traceId) {
     });
     if (!response.ok) return;
     const blob = await response.blob();
-    if (!blob.size || playback.stopped || currentPlayback !== playback) return;
+    if (!blob.size || !voiceOutputEnabled || playback.stopped || currentPlayback !== playback) return;
     url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     playback.audio = audio;
@@ -268,65 +321,169 @@ clearButton.addEventListener("click", async () => {
 });
 
 stopAudio.addEventListener("click", stopPlayback);
+voiceOutputToggle.addEventListener("click", () => {
+  setVoiceOutputPreference(!voiceOutputEnabled);
+});
 
 function setMicActive(active) {
   micButton.classList.toggle("active", active);
   micButton.setAttribute("aria-pressed", active ? "true" : "false");
 }
 
+const VOICE_TRANSITIONS = Object.freeze({
+  idle: ["requesting_permission"],
+  requesting_permission: ["connecting", "error", "idle"],
+  connecting: ["listening", "error", "idle"],
+  listening: ["stopping", "error", "idle"],
+  stopping: ["transcribing", "error", "idle"],
+  transcribing: ["routing", "error", "idle"],
+  routing: ["error", "idle"],
+  error: ["idle"],
+});
+
+function voiceIsCurrent(turn) {
+  return Boolean(voiceSession) && voiceTurn === turn && isCurrentTurn(turn);
+}
+
+function clearVoiceStateTimer() {
+  if (voiceStateTimer) window.clearTimeout(voiceStateTimer);
+  voiceStateTimer = 0;
+}
+
+function showVoiceProgress(text) {
+  partial.hidden = false;
+  partial.textContent = text;
+}
+
+function transitionVoice(next, turn, label = null) {
+  if (next !== VOICE_STATE.IDLE && next !== VOICE_STATE.ERROR && !voiceIsCurrent(turn)) return false;
+  const allowed = VOICE_TRANSITIONS[voiceState] || [];
+  if (next !== voiceState && !allowed.includes(next)) return false;
+  clearVoiceStateTimer();
+  voiceState = next;
+  const listening = next === VOICE_STATE.LISTENING;
+  setMicActive(listening);
+  micButton.setAttribute("aria-label", listening ? "Stop recording" : next === VOICE_STATE.ERROR ? "Try voice input again" : "Start recording");
+  micButton.title = listening ? "Tap to stop" : "Tap to record";
+
+  const views = {
+    requesting_permission: ["Requesting microphone", "listening"],
+    connecting: ["Starting voice", "processing"],
+    listening: ["Listening", "listening"],
+    stopping: ["Stopping recording", "processing"],
+    transcribing: ["Transcribing", "processing"],
+    routing: ["Processing response", "processing"],
+    idle: ["Ready", "idle"],
+    error: [label || "Voice error", "error"],
+  };
+  const view = views[next];
+  if (view) setState(view[0], view[1]);
+  if (next === VOICE_STATE.LISTENING) showVoiceProgress("Listening…");
+  if (next === VOICE_STATE.TRANSCRIBING) showVoiceProgress("Transcribing…");
+
+  const timeout = VOICE_TIMEOUT_MS[next];
+  if (timeout) {
+    voiceStateTimer = window.setTimeout(() => {
+      if (!voiceIsCurrent(turn) || voiceState !== next) return;
+      if (next === VOICE_STATE.LISTENING) {
+        stopVoice(null, turn, "maximum_duration");
+      } else {
+        const messages = {
+          requesting_permission: "Microphone permission timed out.",
+          connecting: "Voice startup timed out.",
+          stopping: "Recording could not stop cleanly.",
+          transcribing: "Transcription timed out. Please try again.",
+          routing: "The voice response timed out. It will still appear after reload if the server completes it.",
+        };
+        failVoice(turn, messages[next] || "Voice processing timed out.");
+      }
+    }, timeout);
+  }
+  return true;
+}
+
 async function beginVoice(event) {
-  event.preventDefault();
-  if (holding || !csrf) return;
-  cleanupVoice();
-  holding = true;
+  if (event) event.preventDefault();
+  if (!csrf || voiceState !== VOICE_STATE.IDLE) return;
   const turn = beginTurn();
   voiceTurn = turn;
+  voiceSession = {
+    turn,
+    requestedAt: performance.now(),
+    permissionMs: 0,
+    connectedAt: 0,
+    captureStartedAt: 0,
+    finalShown: false,
+    terminal: false,
+  };
   stopPlayback();
-  setMicActive(true);
-  setState("Requesting microphone", "listening");
+  transitionVoice(VOICE_STATE.REQUESTING_PERMISSION, turn);
   try {
-    const requestedStream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}, video: false});
-    if (!holding || !isCurrentTurn(turn) || voiceTurn !== turn) {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getUserMedia !== "function") {
+      throw new Error("microphone capture is unavailable");
+    }
+    // Construct and unlock Web Audio inside the original tap.  In particular,
+    // do not wait until Safari's permission sheet has consumed that gesture.
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (!AudioContextClass) throw new Error("audio processing is unavailable");
+    audioContext = new AudioContextClass();
+    await audioContext.resume();
+    if (!voiceIsCurrent(turn)) return;
+
+    const permissionStarted = performance.now();
+    const requestedStream = await navigator.mediaDevices.getUserMedia({
+      audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true},
+      video: false,
+    });
+    if (!voiceIsCurrent(turn) || voiceState !== VOICE_STATE.REQUESTING_PERMISSION) {
       requestedStream.getTracks().forEach(track => track.stop());
       return;
     }
+    voiceSession.permissionMs = performance.now() - permissionStarted;
     mediaStream = requestedStream;
-    const requestedContext = new (window.AudioContext || window.webkitAudioContext)();
-    audioContext = requestedContext;
-    await requestedContext.resume();
-    if (!holding || !isCurrentTurn(turn) || voiceTurn !== turn) {
-      requestedStream.getTracks().forEach(track => track.stop());
-      requestedContext.close().catch(() => {});
-      return;
-    }
+    // The permission sheet may suspend the already-authorized context. Resume
+    // it again before wiring capture; this does not require a second mic tap.
+    await audioContext.resume();
+    if (!voiceIsCurrent(turn)) return;
+
+    transitionVoice(VOICE_STATE.CONNECTING, turn);
     const scheme = location.protocol === "https:" ? "wss" : "ws";
     socket = new WebSocket(`${scheme}://${location.host}/ws/voice`);
     socket.binaryType = "arraybuffer";
     socket.onmessage = message => handleVoiceEvent(message, turn);
-    socket.onerror = () => {
-      if (isCurrentTurn(turn) && voiceTurn === turn) {
-        setState("Voice connection error", "error");
+    socket.onclose = () => {
+      if (voiceIsCurrent(turn) && !voiceSession.terminal) {
+        failVoice(turn, "Voice connection closed before the response.");
       }
     };
     await new Promise((resolve, reject) => {
-      socket.onopen = resolve;
-      socket.onerror = reject;
+      socket.addEventListener("open", resolve, {once: true});
+      socket.addEventListener("error", () => reject(new Error("voice connection failed")), {once: true});
+      socket.addEventListener("close", () => reject(new Error("voice connection closed")), {once: true});
     });
+    if (!voiceIsCurrent(turn) || voiceState !== VOICE_STATE.CONNECTING) return;
+    voiceSession.connectedAt = performance.now();
     const ready = new Promise((resolve, reject) => {
       voiceReadyResolve = resolve;
-      window.setTimeout(() => reject(new Error("STT startup timed out")), 15000);
+      voiceReadyReject = reject;
     });
-    socket.send(JSON.stringify({type: "start", csrf_token: csrf, sample_rate: audioContext.sampleRate, channels: 1, encoding: "pcm_s16le"}));
+    socket.send(JSON.stringify({
+      type: "start",
+      csrf_token: csrf,
+      sample_rate: audioContext.sampleRate,
+      channels: 1,
+      encoding: "pcm_s16le",
+      client_permission_ms: Math.round(voiceSession.permissionMs),
+      client_setup_ms: Math.round(performance.now() - voiceSession.requestedAt),
+    }));
     await ready;
-    voiceReadyResolve = null;
-    if (!holding || !isCurrentTurn(turn) || voiceTurn !== turn) {
-      cleanupVoice(turn);
-      return;
-    }
+    voiceReadyResolve = voiceReadyReject = null;
+    if (!voiceIsCurrent(turn) || voiceState !== VOICE_STATE.CONNECTING) return;
+
     sourceNode = audioContext.createMediaStreamSource(mediaStream);
     processor = audioContext.createScriptProcessor(4096, 1, 1);
     processor.onaudioprocess = audioEvent => {
-      if (!socket || socket.readyState !== WebSocket.OPEN || !holding) return;
+      if (!voiceIsCurrent(turn) || voiceState !== VOICE_STATE.LISTENING || !socket || socket.readyState !== WebSocket.OPEN) return;
       const samples = audioEvent.inputBuffer.getChannelData(0);
       const pcm = new Int16Array(samples.length);
       for (let index = 0; index < samples.length; index += 1) {
@@ -337,103 +494,143 @@ async function beginVoice(event) {
     };
     sourceNode.connect(processor);
     processor.connect(audioContext.destination);
-    setState("Listening", "listening");
-  } catch (_) {
-    if (isCurrentTurn(turn) && voiceTurn === turn) {
-      setState("Microphone unavailable", "error");
-    }
-    cleanupVoice(turn);
+    voiceSession.captureStartedAt = performance.now();
+    transitionVoice(VOICE_STATE.LISTENING, turn);
+  } catch (error) {
+    if (!voiceIsCurrent(turn)) return;
+    const denied = error && (error.name === "NotAllowedError" || error.name === "SecurityError");
+    failVoice(
+      turn,
+      denied ? "Microphone permission was denied." : "Microphone or voice connection is unavailable.",
+      denied ? "Microphone permission denied" : "Microphone unavailable",
+    );
   }
 }
 
-async function endVoice(event) {
-  // The holding check comes first because this also runs for every pointer
-  // release on the page: cancelling the default action of an unrelated tap
-  // suppresses the activation and focus behaviour of ordinary controls.
-  if (!holding) return;
-  if (event) event.preventDefault();
-  holding = false;
-  setMicActive(false);
+function stopCaptureResources() {
   if (processor) processor.onaudioprocess = null;
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    socket.send(JSON.stringify({type: "stop"}));
-    setState("Transcribing", "processing");
-  }
   if (mediaStream) mediaStream.getTracks().forEach(track => track.stop());
-  if (sourceNode) sourceNode.disconnect();
-  if (processor) processor.disconnect();
-}
-
-function handleVoiceEvent(event, turn) {
-  if (!isCurrentTurn(turn) || voiceTurn !== turn) return;
-  let data;
-  try {
-    data = JSON.parse(event.data);
-  } catch (_) {
-    setState("Voice error", "error");
-    cleanupVoice(turn);
-    return;
-  }
-  if (data.type === "listening" && voiceReadyResolve) voiceReadyResolve();
-  if (data.type === "speech_start") setState("Listening", "listening");
-  if (data.type === "partial") {
-    partial.hidden = false;
-    partial.textContent = data.text;
-  }
-  if (data.type === "final") {
-    partial.hidden = true;
-    if (data.raw_text) addMessage("user", data.raw_text);
-    setState("Processing", "processing");
-  }
-  if (data.type === "assistant") {
-    addMessage("assistant", data.response_text || "");
-    playResponse(turn, typeof data.trace_id === "string" ? data.trace_id : null);
-  }
-  if (data.type === "error") {
-    partial.hidden = true;
-    addMessage("assistant", data.message || "Voice request failed safely.");
-    setState("Voice error", "error");
-  }
-  if (["assistant", "error", "cancelled"].includes(data.type)) cleanupVoice(turn);
-}
-
-function cleanupVoice(expectedTurn = null) {
-  if (expectedTurn !== null && voiceTurn !== expectedTurn) return;
-  if (processor) {
-    processor.onaudioprocess = null;
-    try {
-      processor.disconnect();
-    } catch (_) {
-      // Repeated cleanup is expected when a new turn supersedes voice input.
-    }
-  }
   if (sourceNode) {
-    try {
-      sourceNode.disconnect();
-    } catch (_) {
-      // The source may already have been disconnected by pointer release.
-    }
+    try { sourceNode.disconnect(); } catch (_) { /* already disconnected */ }
   }
-  if (mediaStream) {
-    mediaStream.getTracks().forEach(track => {
-      try {
-        track.stop();
-      } catch (_) {
-        // A stopped track is already in the desired terminal state.
-      }
-    });
+  if (processor) {
+    try { processor.disconnect(); } catch (_) { /* already disconnected */ }
   }
   if (audioContext) {
     try {
       const closing = audioContext.close();
       if (closing && typeof closing.catch === "function") closing.catch(() => {});
     } catch (_) {
-      // Cleanup must not make a subsequent text submission fail.
+      // The input stream has already stopped; cleanup remains idempotent.
     }
   }
+  mediaStream = audioContext = processor = sourceNode = null;
+}
+
+function stopVoice(event, expectedTurn = voiceTurn, reason = "tap") {
+  if (event) event.preventDefault();
+  if (!voiceIsCurrent(expectedTurn) || voiceState !== VOICE_STATE.LISTENING) return;
+  transitionVoice(VOICE_STATE.STOPPING, expectedTurn);
+  const captureMs = voiceSession.captureStartedAt
+    ? performance.now() - voiceSession.captureStartedAt
+    : 0;
+  stopCaptureResources();
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    failVoice(expectedTurn, "Voice connection was lost before transcription.");
+    return;
+  }
+  socket.send(JSON.stringify({
+    type: "stop",
+    endpoint_reason: reason,
+    client_capture_ms: Math.round(captureMs),
+  }));
+  transitionVoice(VOICE_STATE.TRANSCRIBING, expectedTurn);
+}
+
+function cancelVoice(turn = voiceTurn, message = "Voice request cancelled.") {
+  if (!voiceIsCurrent(turn)) return;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    try { socket.send(JSON.stringify({type: "cancel"})); } catch (_) { /* cleanup closes it */ }
+  }
+  if (message) addMessage("assistant", message);
+  cleanupVoice(turn);
+}
+
+function failVoice(turn, message, label = "Voice error") {
+  if (!voiceIsCurrent(turn)) return;
+  if (message) addMessage("assistant", message);
+  transitionVoice(VOICE_STATE.ERROR, turn, label);
+  cleanupVoice(turn, true);
+}
+
+function handleVoiceEvent(event, turn) {
+  if (!voiceIsCurrent(turn)) return;
+  let data;
+  try {
+    data = JSON.parse(event.data);
+    if (!data || typeof data !== "object" || Array.isArray(data)) throw new Error();
+  } catch (_) {
+    failVoice(turn, "The voice service returned an invalid response.");
+    return;
+  }
+  if (data.type === "listening" && voiceReadyResolve) {
+    voiceReadyResolve();
+    return;
+  }
+  if (data.type === "speech_start" && voiceState === VOICE_STATE.LISTENING) {
+    setState("Listening", "listening");
+  }
+  if (data.type === "partial") {
+    if (typeof data.text === "string" && data.text.trim()) {
+      showVoiceProgress(`Heard so far: ${data.text}`);
+    }
+  }
+  if (data.type === "final") {
+    partial.hidden = true;
+    const finalText = typeof data.raw_text === "string" && data.raw_text.trim()
+      ? data.raw_text.trim()
+      : typeof data.normalized_text === "string" ? data.normalized_text.trim() : "";
+    if (finalText && !voiceSession.finalShown) {
+      addMessage("user", finalText);
+      voiceSession.finalShown = true;
+    }
+    transitionVoice(VOICE_STATE.ROUTING, turn);
+  }
+  if (data.type === "assistant") {
+    if (typeof data.response_text !== "string" || !data.response_text.trim()) {
+      failVoice(turn, "The voice service returned an invalid response.");
+      return;
+    }
+    // Text is committed to the visible conversation before optional TTS.
+    addMessage("assistant", data.response_text);
+    voiceSession.terminal = true;
+    const traceId = typeof data.trace_id === "string" ? data.trace_id : null;
+    cleanupVoice(turn);
+    playResponse(turn, traceId);
+    return;
+  }
+  if (data.type === "error") {
+    failVoice(
+      turn,
+      typeof data.message === "string" && data.message.trim()
+        ? data.message
+        : "Voice request failed safely.",
+    );
+    return;
+  }
+  if (data.type === "cancelled") cleanupVoice(turn);
+}
+
+function cleanupVoice(expectedTurn = null, preserveError = false) {
+  if (expectedTurn !== null && voiceTurn !== expectedTurn) return;
+  clearVoiceStateTimer();
+  stopCaptureResources();
+  const rejectReady = voiceReadyReject;
+  voiceReadyResolve = voiceReadyReject = null;
+  if (voiceSession) voiceSession.terminal = true;
   if (socket) {
     socket.onmessage = null;
-    socket.onopen = null;
+    socket.onclose = null;
     socket.onerror = null;
     if ([WebSocket.CONNECTING, WebSocket.OPEN].includes(socket.readyState)) {
       try {
@@ -443,21 +640,47 @@ function cleanupVoice(expectedTurn = null) {
       }
     }
   }
-  socket = mediaStream = audioContext = processor = sourceNode = null;
-  voiceReadyResolve = null;
+  socket = null;
   voiceTurn = 0;
-  holding = false;
+  voiceSession = null;
+  if (rejectReady) rejectReady(new Error("voice session ended"));
   setMicActive(false);
+  partial.hidden = true;
+  partial.textContent = "";
+  if (!preserveError) {
+    voiceState = VOICE_STATE.IDLE;
+    micButton.setAttribute("aria-label", "Start recording");
+    micButton.title = "Tap to record";
+    setState("Ready", "idle");
+  }
 }
 
-micButton.addEventListener("pointerdown", beginVoice);
-window.addEventListener("pointerup", endVoice);
-// A cancelled pointer never produces pointerup, so without this the hold would
-// stay armed after a scroll or a system gesture interrupts the press.
-window.addEventListener("pointercancel", endVoice);
-micButton.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key)) beginVoice(event); });
-micButton.addEventListener("keyup", event => { if (["Enter", " "].includes(event.key)) endVoice(event); });
+function toggleVoice(event) {
+  if (voiceState === VOICE_STATE.ERROR) {
+    voiceState = VOICE_STATE.IDLE;
+    beginVoice(event);
+  } else if (voiceState === VOICE_STATE.IDLE) {
+    beginVoice(event);
+  } else if (voiceState === VOICE_STATE.LISTENING) {
+    stopVoice(event);
+  } else {
+    if (event) event.preventDefault();
+    cancelVoice();
+  }
+}
+
+function handleVoicePointerCancel(event) {
+  if (voiceState === VOICE_STATE.LISTENING) {
+    stopVoice(event, voiceTurn, "pointer_cancel");
+  } else if (![VOICE_STATE.IDLE, VOICE_STATE.ERROR].includes(voiceState)) {
+    cancelVoice(voiceTurn, "Voice start cancelled.");
+  }
+}
+
+micButton.addEventListener("click", toggleVoice);
+micButton.addEventListener("pointercancel", handleVoicePointerCancel);
 window.addEventListener("beforeunload", () => cleanupVoice());
 setPending(false);
 setMicActive(false);
+loadVoiceOutputPreference();
 initialize();

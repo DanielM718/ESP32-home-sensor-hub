@@ -15,7 +15,10 @@
         <h1>Butters</h1>
         <p id="assistant-state" class="assistant-state" data-state="connecting">Connecting</p>
       </div>
-      <button id="clear-button" class="quiet-button" type="button" aria-label="Clear conversation">Clear</button>
+      <div class="chat-header-actions">
+        <button id="voice-output-toggle" class="voice-output-toggle" type="button" role="switch" aria-checked="true" aria-label="Voice output on">Voice: On</button>
+        <button id="clear-button" class="quiet-button" type="button" aria-label="Clear conversation">Clear</button>
+      </div>
     </header>
 
     <section id="conversation" class="conversation" aria-live="polite" aria-label="Conversation">
@@ -24,11 +27,11 @@
       </article>
     </section>
 
-    <div id="partial" class="partial" hidden></div>
+    <div id="partial" class="partial" role="status" aria-live="polite" aria-label="Voice transcript" hidden></div>
     <form id="chat-form" class="composer">
       <label class="visually-hidden" for="message-input">Message Butters</label>
       <input id="message-input" name="message" maxlength="4000" autocomplete="off" placeholder="Ask Butters…" required>
-      <button id="mic-button" class="mic-button" type="button" aria-label="Hold to speak" title="Hold to speak" aria-pressed="false">
+      <button id="mic-button" class="mic-button" type="button" aria-label="Start recording" title="Tap to record" aria-pressed="false">
         <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="9" y="2" width="6" height="11" rx="3"></rect>
           <path d="M5 11v1a7 7 0 0 0 14 0v-1"></path>

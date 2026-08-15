@@ -27,7 +27,7 @@ class BrowserAudioEvent:
 
 
 class BrowserAudioStream:
-    """One push-to-talk PCM stream with hard byte/time/frame limits."""
+    """One tap-to-record PCM stream with hard byte/time/frame limits."""
 
     INTERNAL_FRAME_BYTES = 640  # 20 ms, 16 kHz, mono, S16_LE
 
@@ -53,6 +53,8 @@ class BrowserAudioStream:
         self._last_chunk_at = 0.0
         self._partials: list[str] = []
         self._processing_seconds = 0.0
+        self._preprocessing_seconds = 0.0
+        self._inference_seconds = 0.0
         self._speech_started = False
         self._active = False
 
@@ -96,6 +98,8 @@ class BrowserAudioStream:
         self._sequence = 0
         self._partials.clear()
         self._processing_seconds = 0.0
+        self._preprocessing_seconds = 0.0
+        self._inference_seconds = 0.0
         self._speech_started = False
         self._started_at = self.clock()
         self._last_chunk_at = self._started_at
@@ -124,10 +128,12 @@ class BrowserAudioStream:
             raise BrowserAudioError("utterance_too_long", "utterance exceeded its duration limit")
         self._input_bytes = next_bytes
         self._last_chunk_at = now
+        preprocessing_started = time.perf_counter()
         try:
             converted = self._converter.convert(chunk)
         except ValueError as exc:
             raise BrowserAudioError("malformed_frame", "audio conversion rejected the frame") from exc
+        self._preprocessing_seconds += time.perf_counter() - preprocessing_started
         if len(self._buffer) + len(converted) > self.settings.max_buffered_bytes:
             raise BrowserAudioError("buffer_limit", "audio buffer limit exceeded")
         self._buffer.extend(converted)
@@ -138,10 +144,12 @@ class BrowserAudioStream:
             events.extend(self._feed_frame(pcm))
         return tuple(events)
 
-    def finish(self, *, endpoint_reason: str = "push_to_talk_release") -> BrowserAudioEvent:
+    def finish(self, *, endpoint_reason: str = "client_stop") -> BrowserAudioEvent:
         if not self._active or self._converter is None:
             raise BrowserAudioError("not_started", "audio stream has not started")
+        preprocessing_started = time.perf_counter()
         converted = self._converter.finish()
+        self._preprocessing_seconds += time.perf_counter() - preprocessing_started
         if len(self._buffer) + len(converted) > self.settings.max_buffered_bytes:
             self.abort()
             raise BrowserAudioError("buffer_limit", "audio buffer limit exceeded")
@@ -163,17 +171,22 @@ class BrowserAudioStream:
             raise BrowserAudioError("stt_error", "speech recognition failed safely") from exc
         finalization = time.perf_counter() - started
         self._processing_seconds += finalization
+        self._inference_seconds += finalization
         normalized = normalize_transcript(raw, self.vocabulary)
         result = UtteranceResult(
             raw=raw,
             normalized=normalized,
             partials=tuple(self._partials),
             audio_seconds=self.audio_seconds,
-            processing_seconds=self._processing_seconds,
+            processing_seconds=(
+                self._preprocessing_seconds + self._inference_seconds
+            ),
             finalization_latency_seconds=finalization,
             speech_end_to_final_seconds=finalization,
             endpoint_reason=endpoint_reason,
             effective_text=normalized,
+            preprocessing_seconds=self._preprocessing_seconds,
+            inference_seconds=self._inference_seconds,
         )
         self._active = False
         self._converter = None
@@ -188,10 +201,11 @@ class BrowserAudioStream:
             self._converter = None
             self._buffer.clear()
 
-    def close(self) -> None:
+    def close(self, close_engine: bool = True) -> None:
         if self._active:
             self.abort()
-        self.engine.close()
+        if close_engine:
+            self.engine.close()
 
     def _feed_frame(self, pcm: bytes) -> list[BrowserAudioEvent]:
         self._sequence += 1
@@ -205,7 +219,9 @@ class BrowserAudioStream:
             partial = self.engine.accept_audio(frame)
         except Exception as exc:  # noqa: BLE001 - recognizer boundary
             raise BrowserAudioError("stt_error", "speech recognition failed safely") from exc
-        self._processing_seconds += time.perf_counter() - started
+        elapsed = time.perf_counter() - started
+        self._processing_seconds += elapsed
+        self._inference_seconds += elapsed
         if partial and (not self._partials or partial != self._partials[-1]):
             self._partials.append(partial)
             events.append(BrowserAudioEvent("partial", partial))

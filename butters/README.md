@@ -11,7 +11,8 @@ Butters Beta 1 adds a persistent, loopback-only Starlette/Uvicorn web service,
 a clean mobile conversation page, a separately authorized engineering console,
 bounded PCM/WebSocket browser voice, in-memory expiring conversations and live
 traces, provider-neutral general cloud reasoning, persistent SQLite usage and
-budgets, independent paid text/STT/TTS switches, named voice presets, and a
+budgets, independent paid text/STT/TTS switches, a persistent browser voice
+output preference, named voice presets, and a
 review-gated local Codex skill-authoring workflow. The existing physical
 wake/ALSA/STT/TTS and CLI paths remain independent and unchanged.
 
@@ -39,16 +40,20 @@ The implementation now provides:
 - a 110 ms asynchronous local acknowledgement chime;
 - a state machine for wake, listen, stream STT, finalize, normalize, and reset;
 - a replaceable `StreamingSTTEngine` and accurate 2023-06-21 INT8 Zipformer;
+- one bounded, prewarmed browser STT engine instead of a model load per turn;
 - 1.0-second router-aware provisional and 2.0-second hard endpointing;
-- bounded targeted clarification/continuation state with no blind concatenation;
+- session-scoped structured clarification state with expiry and no text concatenation;
 - no-speech, empty-result, STT-error, audio-error, and timeout recovery;
 - concept-based intent routing with explicit clarification/unsupported paths;
+- exact-first, bounded fuzzy aliases and capability-driven aggregate readings;
 - a typed, default-deny registry containing eighteen read-only skills;
 - explicit entity/metric allow-lists and strict argument validation;
 - bounded read-only current-data access through the deployed dashboard API;
 - a fixed-command, fixed-service server-health adapter with no shell skill;
 - structured skill results and separate concise response formatting;
 - direct text, streaming-WAV, and asynchronous live-transcript entry paths;
+- tap-to-record browser voice with real partials, final transcript chat bubbles,
+  text-first responses, bounded recovery timers, and optional automatic TTS;
 - an engine-neutral, optional local-LLM proposal interface behind unresolved
   deterministic routes only;
 - strict JSON and official LFM2 tool-call parsing with no `eval`/`exec`;
@@ -94,6 +99,7 @@ physical speaker validation. See [ARCHITECTURE.md](ARCHITECTURE.md),
 [benchmarks/stt.md](benchmarks/stt.md), and
 [benchmarks/live-voice.md](benchmarks/live-voice.md),
 [benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md),
+[benchmarks/beta1-conversational-voice-stt.md](benchmarks/beta1-conversational-voice-stt.md),
 [benchmarks/skills-tts.md](benchmarks/skills-tts.md), and
 [benchmarks/llm.md](benchmarks/llm.md), and
 [benchmarks/diagnostics-cloud.md](benchmarks/diagnostics-cloud.md).
@@ -107,7 +113,8 @@ butters/
   BETA1.md
   SKILL_DEVELOPMENT.md
   benchmarks/{baseline,stt,live-voice,skills-tts,llm,diagnostics-cloud}.md
-  benchmarks/{llm-corpus,diagnostics-corpus}.json
+  benchmarks/beta1-conversational-voice-stt.md
+  benchmarks/{llm-corpus,diagnostics-corpus,beta1-stt-command-corpus}.json
   config/{audio.example,assistant,domain_vocabulary}.toml
   config/wakewords.txt
   requirements-{stt,web}.txt
@@ -262,6 +269,15 @@ The WAV is still streamed in approximately 20 ms chunks. Output includes VAD
 start, changed partials, final raw/normalized text, endpoint reason, RTF, CPU,
 finalization/speech-end latency, RSS, and source counters.
 
+For controlled model comparisons, `benchmark-stt` additionally records cold
+initialization, audio preprocessing/control, streaming inference, total RTF,
+hardware/backend/model metadata, and optional expected-transcript WER:
+
+```bash
+./butters/scripts/benchmark-stt --threads 1 --repeats 1 \
+  --expected command.wav="What is the humidity in box three?" command.wav
+```
+
 ## Deterministic read-only assistant
 
 Text mode is the preferred Milestone 4 development path while the webcam is
@@ -280,12 +296,20 @@ normalize -> deterministic router -> typed skill registry -> default-deny policy
           -> narrow integration adapter -> structured result -> response template
 ```
 
-The router varies words and aliases rather than matching whole sentences. For
+The router varies words and aliases rather than matching whole sentences. Exact
+registered aliases win. A small deterministic edit-distance matcher may repair
+only a configured entity or metric alias, with length-sensitive thresholds and
+a required margin over the runner-up; numeric and very short aliases remain
+exact-only. It does not autocorrect arbitrary request language. For
 example, “what's box 3 humidity,” “how humid is filament box three,” and
 “humidity for container 3” all select `filament_box_3`/`humidity`. “What's the
-co two level” is conservatively normalized to `CO2`. An unqualified humidity
-question asks which sensor; multiple boxes ask for clarification; controls and
-unknown complex requests are explicitly unsupported.
+co two level” is conservatively normalized to `CO2`; `printed room`, `prnter
+room`, `tempature`, and `humidty` resolve through the bounded registered
+vocabulary. Aggregate words such as readings or measurements expand through
+the selected entity's configured metric capabilities in stable order and use
+one current-data snapshot. An unqualified humidity question asks which sensor;
+multiple or near-tied matches ask for clarification; controls and unknown
+complex requests are explicitly unsupported.
 
 The original thirteen skills remain registered and classified `READ_ONLY`:
 
@@ -639,12 +663,17 @@ The ignored local audio config already selects the native A4Tech device.
 
 ## Measured resource summary
 
-Current selected larger-model measurements are 6-7.7 seconds initialization,
-roughly 240-293 MiB process RSS, RTF 0.45-0.52, and STT CPU-per-audio 45-52%
-with one thread. Wake-only human testing averaged about 19.8% process CPU and
-uses approximately 5.2 MiB active KWS files. These remain below real time with
-ample measured host memory, but Butters stays secondary to the monitoring
-stack. The older figures below are retained as historical 20M-model baselines.
+Current selected larger-model measurements include 8.5-14.1 seconds cold
+initialization under the later Beta 1 development load, roughly 240-295 MiB
+process RSS, and warm transcription RTF 0.49-0.52 with one thread. Browser STT
+now prewarms one bounded recognizer and reuses it, so that cold cost is no
+longer paid once per voice turn. The faster 20M model was rejected again: it
+had zero successful routes in the eight-command A/B corpus and failed the real
+human CO2 command. Wake-only human testing averaged about 19.8% process CPU and
+uses approximately 5.2 MiB active KWS files. Butters remains secondary to the
+monitoring stack. See the Beta 1 voice/STT benchmark for current stage timing,
+accuracy, thermal/swap caveats, and the unsupported Pi GPU path. The older
+figures below are retained as historical 20M-model baselines.
 
 The original Milestone 1 baseline had 2.205-2.219 GiB RAM available, about 1.5
 GiB used, 25.5 MiB of 2 GiB zram occupied with no paging, 93-97% CPU idle,
@@ -727,6 +756,11 @@ The separate 17-case diagnostic corpus is run by `benchmark-diagnostics`.
 The current milestone adds semantic endpoint, incomplete-route, continuation,
 expiry, filler, duplicate-prevention, default-model, wake-metric, and Sherpa
 non-preemption coverage.
+The Beta 1 robustness milestone adds bounded fuzzy and adversarial routing,
+aggregate capability expansion, structured web/live clarification and session
+isolation, tap-to-record state contracts, transcript/text/TTS convergence,
+warm recognizer lifecycle and failure recovery, and stable admin trace
+selection while updates continue.
 
 ## Known limitations
 
@@ -737,11 +771,13 @@ non-preemption coverage.
   required before always-on use.
 - Energy VAD is a level gate, not a trained speech/noise classifier; another
   room/microphone needs new calibration.
-- Domain STT hotword biasing is not enabled because the selected STT
-  archive lacks the required SentencePiece artifacts. Raw and normalized text
-  remain separate; aliases only cover unambiguous whole phrases.
-- Only one fixed real-user command has been measured on the larger STT model;
-  broader vocabulary and distance/noise accuracy remain unknown.
+- Domain STT hotword biasing is not enabled because the selected STT archive
+  lacks the required SentencePiece artifacts. Raw and normalized text remain
+  separate; fuzzy recovery is deliberately confined to registered aliases.
+- One fixed real-user command and seven synthetic command fixtures have been
+  measured on the larger STT model. Broader human voices, vocabulary,
+  distance/noise accuracy, and the revised tap-to-record flow still require
+  real iPhone acceptance.
 - `api/latest` is deliberately reused for correctness, but a cold query takes
   about 1.35 seconds on this deployment. Persistent caching limits load; a
   future narrowly scoped latest-state IPC/API can improve latency if the

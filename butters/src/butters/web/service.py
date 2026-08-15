@@ -26,6 +26,7 @@ from butters.diagnostics.model import DiagnosticRequest, RequestDepth
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.sanitizer import sanitize_value
 from butters.routing.model import RoutedIntent
+from butters.routing.conversation import route_conversation_turn
 from butters.remediation.skill_builder import CodexSkillBuilder
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 from butters.web.sessions import BrowserSession, SessionManager
@@ -167,6 +168,35 @@ class BetaAssistantService:
         administrator: bool = False,
         trace: ExecutionTrace | None = None,
     ) -> ServiceResponse:
+        # One browser conversation has one ordered turn stream.  This makes the
+        # read/update/clear of pending clarification state atomic even when a
+        # client accidentally submits overlapping HTTP and voice turns.
+        with session.turn_lock:
+            return self._handle_text_locked(
+                session,
+                raw_text,
+                source=source,
+                override=override,
+                forced_model=forced_model,
+                reasoning_effort=reasoning_effort,
+                max_output_tokens=max_output_tokens,
+                administrator=administrator,
+                trace=trace,
+            )
+
+    def _handle_text_locked(
+        self,
+        session: BrowserSession,
+        raw_text: str,
+        *,
+        source: str,
+        override: RouteOverride,
+        forced_model: str | None,
+        reasoning_effort: str,
+        max_output_tokens: int | None,
+        administrator: bool,
+        trace: ExecutionTrace | None,
+    ) -> ServiceResponse:
         started = time.perf_counter()
         text = " ".join(raw_text.replace("\x00", "").split())
         if not text or len(text) > 4000:
@@ -199,7 +229,25 @@ class BetaAssistantService:
             fields={"normalized_text": normalized, "changed": normalized != text.casefold()},
         )
 
-        route = self.assistant.router.route(normalized)
+        clarification_disposition = "standalone"
+        if administrator or override is not RouteOverride.AUTO:
+            route = self.assistant.router.route(normalized)
+        else:
+            conversational = route_conversation_turn(
+                self.assistant.router,
+                normalized,
+                session.pending_clarification,
+                now=time.monotonic(),
+                ttl_seconds=self.settings.web.clarification_timeout_seconds,
+            )
+            route = conversational.route
+            session.pending_clarification = conversational.pending
+            clarification_disposition = conversational.disposition
+        deterministic_reason = (
+            "clarification_resolved"
+            if clarification_disposition == "resolved" and route.matched
+            else "deterministic_skill_match"
+        )
         if (
             route.matched
             and route.skill is not None
@@ -216,7 +264,9 @@ class BetaAssistantService:
                 fields={"skill": route.skill, "audience": "administrator"},
             )
             denied_route = RoutedIntent(
-                "unsupported", normalized, message="That request is not supported."
+                "unsupported",
+                normalized,
+                message="I can't answer that request from the normal chat.",
             )
             result = self._unsupported_response(
                 text, normalized, denied_route, "administrator_required"
@@ -238,13 +288,16 @@ class BetaAssistantService:
         current_trace.emit(
             TraceStage.ROUTING,
             route.status,
-            reason_code="deterministic_skill_match" if route.matched else "missing_required_argument" if route.incomplete else "unsupported_intent",
+            reason_code=deterministic_reason if route.matched else "missing_required_argument" if route.incomplete else "unsupported_intent",
             fields={
                 "candidate": route.skill,
                 "arguments": route.arguments,
                 "missing_arguments": list(route.missing_arguments),
                 "confidence": route.confidence if route.matched else None,
                 "diagnostic_domain": diagnostic_request.domain.value if diagnostic_request else None,
+                "clarification_disposition": clarification_disposition,
+                "aggregate": route.aggregate,
+                "ambiguity_candidates": list(route.ambiguity_candidates),
             },
         )
         current_trace.emit(TraceStage.COMPLEXITY, "classified", fields=features)
@@ -293,12 +346,12 @@ class BetaAssistantService:
                 result,
                 response_text=(
                     result.response_text
-                    + " Cloud reasoning is disabled, so I can't safely infer the open-ended cause."
+                    + " I can report the local reading, but I can't safely infer the cause with the local skills currently enabled."
                 ),
             )
             decision = RouteDecision(
                 "deterministic",
-                ("deterministic_skill_match", "open_ended_reasoning_required", "cloud_disabled"),
+                (deterministic_reason, "open_ended_reasoning_required", "cloud_disabled"),
                 features,
                 None,
                 True,
@@ -311,7 +364,7 @@ class BetaAssistantService:
             result = self._execute_skill(text, normalized, route, current_trace, administrator)
             decision = RouteDecision(
                 "deterministic",
-                ("deterministic_skill_match",),
+                (deterministic_reason,),
                 features,
                 override.value if administrator else None,
                 True,
@@ -524,8 +577,9 @@ class BetaAssistantService:
     def clear_conversation(self, session: BrowserSession) -> None:
         """Clear a conversation and the detailed traces that quote it."""
 
-        self.sessions.clear(session)
-        self.traces.drop_sessions((session.session_id,))
+        with session.turn_lock:
+            self.sessions.clear(session)
+            self.traces.drop_sessions((session.session_id,))
 
     def credential_status(self) -> dict[str, object]:
         return {
@@ -563,7 +617,11 @@ class BetaAssistantService:
             return self._unsupported_response(
                 raw,
                 normalized,
-                RoutedIntent("unsupported", normalized, message="That request is not supported."),
+                RoutedIntent(
+                    "unsupported",
+                    normalized,
+                    message="I can't answer that request from the normal chat.",
+                ),
                 "administrator_required",
             )
         execution = self.assistant.skills.execute(
@@ -884,7 +942,7 @@ class BetaAssistantService:
         trace.emit(TraceStage.MODEL, "failed", reason_code=code)
         local_text = route.message or "I couldn't safely complete the open-ended request."
         if code in {"cloud_disabled", "missing_api_key"}:
-            local_text = "Cloud reasoning is disabled, and no supported local answer is available."
+            local_text = "I can't answer that type of question with the local skills currently enabled."
         elif code == "budget_denied":
             local_text = "The cloud request was blocked by the configured budget guardrail."
         return ServiceResponse(
@@ -1006,7 +1064,11 @@ class BetaAssistantService:
             "missing_required_arguments": list(route.missing_arguments),
             "single_operation": len([word for word in (" and ", " also ", " then ") if word in text]) == 0,
             "historical_data_required": any(word in text for word in ("history", "trend", "yesterday", "baseline")),
-            "comparison_or_aggregation": any(word in text for word in ("compare", "most", "highest", "average", "mean")),
+            "comparison_or_aggregation": route.aggregate
+            or any(
+                word in text
+                for word in ("compare", "most", "highest", "average", "mean")
+            ),
             "diagnostic_domain_recognized": diagnostic is not None,
             "open_ended_causal_request": "why" in text or "might" in text,
             "external_general_knowledge_required": diagnostic is None and not route.matched and len(text.split()) > 4,
@@ -1147,9 +1209,9 @@ class BetaAssistantService:
     @staticmethod
     def _unsupported_response(raw: str, normalized: str, route: RoutedIntent, code: str) -> AssistantResponse:
         message = route.message or (
-            "Cloud reasoning is disabled, and that request has no supported local route."
+            "I can't answer that type of question with the local skills currently enabled."
             if code == "cloud_disabled"
-            else "That request is not supported."
+            else "I can't answer that request with the local skills currently enabled."
         )
         return AssistantResponse(raw, normalized, route, message, 0.0, routing_path="unsupported", policy_status=code)
 

@@ -44,6 +44,7 @@ max_queued_requests = 12
 trace_capacity = 256
 # Traces quote conversation text, so they expire by time as well as by count.
 trace_ttl_seconds = 900.0
+clarification_timeout_seconds = 30.0
 
 [browser_audio]
 max_utterance_seconds = 30.0
@@ -51,7 +52,8 @@ max_chunk_bytes = 32768
 max_buffered_bytes = 1048576
 idle_timeout_seconds = 10.0
 session_timeout_seconds = 60.0
-max_concurrent_sessions = 2
+# The accurate Zipformer is large; keep one recognizer warm and queue briefly.
+max_concurrent_sessions = 1
 max_queue_depth = 2
 allowed_sample_rates = [16000, 44100, 48000]
 

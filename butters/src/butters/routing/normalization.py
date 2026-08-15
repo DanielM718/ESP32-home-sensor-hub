@@ -31,6 +31,10 @@ def normalize_request(text: str) -> str:
     value = re.sub(r"\bhow['’]?s\b", "how is", value)
     value = re.sub(r"\bwhich['’]?s\b", "which is", value)
     value = re.sub(r"[^a-z0-9.%]+", " ", value)
+    # A period is meaningful only inside a numeric metric token such as PM2.5.
+    # Sentence punctuation must not attach to aliases or number words.
+    value = re.sub(r"(?<!\d)\.|\.(?!\d)", " ", value)
+    value = value.replace("%", " ")
     words = [
         NUMBER_WORDS.get(word, word)
         for word in value.split()
@@ -39,6 +43,7 @@ def normalize_request(text: str) -> str:
     value = " ".join(words)
     value = re.sub(r"\bp\s*m\s*2\s*(?:point|dot)\s*5\b", "pm2.5", value)
     value = re.sub(r"\bp\s*m\s*2[.]5\b", "pm2.5", value)
+    value = re.sub(r"\bp\s*m\s*25\b", "pm2.5", value)
     value = re.sub(r"\bc\s*o\s*2\b", "co2", value)
     return value
 

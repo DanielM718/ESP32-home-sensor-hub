@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -176,11 +177,15 @@ def test_administrator_reserve_is_not_consumable_by_anonymous_callers() -> None:
 def test_voice_slot_is_released_when_recognizer_close_fails(tmp_path: Path) -> None:
     """H-2: a failing teardown must not permanently retire a voice slot."""
 
-    async def scenario() -> None:
-        engines: list[TranscribingEngine] = []
+    class ResetAndCloseFailEngine(TranscribingEngine):
+        def reset(self) -> None:
+            raise RuntimeError("native recognizer reset failed")
 
-        def factory() -> TranscribingEngine:
-            engine = TranscribingEngine(fail_close=True)
+    async def scenario() -> None:
+        engines: list[ResetAndCloseFailEngine] = []
+
+        def factory() -> ResetAndCloseFailEngine:
+            engine = ResetAndCloseFailEngine(fail_close=True)
             engines.append(engine)
             return engine
 
@@ -233,6 +238,9 @@ def test_voice_slot_is_released_when_the_worker_queue_rejects_teardown(tmp_path:
     from butters.web.security import SecurityError
 
     class QueueFullEngine(TranscribingEngine):
+        def reset(self) -> None:
+            raise SecurityError("queue_full", "assistant worker queue is full", 503)
+
         def close(self) -> None:
             self.closed = True
             raise SecurityError("queue_full", "assistant worker queue is full", 503)
@@ -373,3 +381,56 @@ def test_usage_summary_matches_between_memory_and_sqlite_backends(tmp_path: Path
                 "model_distribution", "provider_distribution",
                 "deterministic_or_model_avoided"):
         assert left[key] == right[key], key
+
+
+def test_clearing_a_conversation_never_blocks_the_event_loop(tmp_path: Path) -> None:
+    """Clearing waits on the per-session turn lock, so it must not run inline.
+
+    A conversation clear issued while that session already has a turn in flight
+    must not stall unrelated requests: the whole service shares one event loop.
+    """
+
+    async def scenario() -> None:
+        app, service, _settings = build_app(tmp_path)
+        holding = threading.Event()
+        finish_turn = threading.Event()
+
+        async with client(app) as http:
+            started = await http.get("/api/session")
+            token = started.json()["csrf_token"]
+            session = service.sessions.require(
+                started.cookies.get("butters_session")
+            )
+
+            def hold_one_turn() -> None:
+                with session.turn_lock:
+                    holding.set()
+                    finish_turn.wait(10.0)
+
+            worker = threading.Thread(target=hold_one_turn, daemon=True)
+            worker.start()
+            try:
+                assert holding.wait(5.0)
+                clearing = asyncio.create_task(
+                    http.delete(
+                        "/api/session/conversation",
+                        headers={
+                            "origin": "http://testserver",
+                            "x-butters-csrf": token,
+                        },
+                    )
+                )
+                await asyncio.sleep(0.05)
+                assert not clearing.done()
+                health = await asyncio.wait_for(http.get("/healthz"), timeout=2.0)
+                assert health.status_code == 200
+
+                finish_turn.set()
+                cleared = await asyncio.wait_for(clearing, timeout=5.0)
+                assert cleared.status_code == 200
+            finally:
+                finish_turn.set()
+                worker.join(5.0)
+                await app.state.shutdown_workers()
+
+    asyncio.run(scenario())

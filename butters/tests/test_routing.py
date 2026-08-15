@@ -246,8 +246,13 @@ def test_multiple_measurements_preserve_entity_ambiguity(
     route = router.route("temperature and humidity in box 1 and box 2")
 
     assert route.status == "clarification"
-    assert route.skill is None
+    assert route.skill == "get_sensor_values"
+    assert route.arguments == {"metrics": ["temperature", "humidity"]}
     assert route.missing_arguments == ("entity",)
+    assert route.ambiguity_candidates == (
+        "filament_box_1",
+        "filament_box_2",
+    )
     assert "Filament box one" in (route.message or "")
     assert "Filament box two" in (route.message or "")
 

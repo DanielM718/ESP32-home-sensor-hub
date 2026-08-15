@@ -23,9 +23,14 @@ or UNIX-socket binding is the next hardening step.
 ## Interfaces
 
 `/` is the mobile-first normal page: conversation, one text field, Send,
-hold-to-talk microphone, state indicator, clear, and stop speech. Text and the
-final STT transcript enter the same `BetaAssistantService.handle_text` path.
-It never shows models, tokens, tool calls, costs, credentials, or internals.
+tap-to-record microphone, state indicator/live recognizer partial, clear, stop
+speech, and an always-visible `Voice: On/Off` output switch. The first tap
+requests permission and continues directly into recording; the second tap
+stops. Text and the final STT transcript enter the same
+`BetaAssistantService.handle_text` path. The final transcript is inserted as a
+user message, and assistant text is persisted before optional TTS. Disabling
+voice output never disables the microphone or removes text. The page never
+shows models, tokens, tool calls, costs, credentials, or internals.
 
 `/admin` is server-authorized and provides overview, live structured traces,
 bounded sessions, one-request route/model overrides, model/STT/TTS status,
@@ -49,6 +54,15 @@ Frames, utterance duration, buffer, idle/session time, concurrency, and queues
 are hard-bounded. Disconnect, cancel, recognizer failure, and worker saturation
 all release the voice slot: teardown runs on a dedicated path that never waits
 on the admission gate it is freeing. Audio is not persisted.
+
+Browser voice uses explicit bounded states: idle, requesting permission,
+connecting, listening, stopping, transcribing, routing, and recoverable error.
+Permission, connection/listen, stop, transcription, and routing each have a
+bounded client timer; cancellation and page unload tear down their owned
+stream/socket/audio graph. Sherpa supplies real changed partial hypotheses, so
+the normal page displays them while listening. It never fabricates partials.
+The local recognizer is prewarmed once, leased exclusively from a bounded pool,
+reset after a healthy turn, and discarded after a recognizer failure.
 
 ## Sessions and admission control
 
@@ -252,9 +266,14 @@ Do not delete `/var/lib/butters` if usage/budget history and presets are needed.
 - [ ] `BUTTERS_ALLOWED_ORIGINS` is set and `/readyz` reports ready.
 - [ ] Normal page fits iPhone Safari and exposes no debug controls.
 - [ ] iPhone Safari session startup succeeds (it must send `Sec-Fetch-Site`).
-- [ ] Microphone permission succeeds.
-- [ ] Hold/tap to speak works and debug mode shows changed partials.
+- [ ] First-tap microphone permission continues directly into recording.
+- [ ] Second tap stops recording; Listening/Transcribing and real changed
+  partials are visible on the normal page.
 - [ ] Final transcript enters the same assistant path as text.
+- [ ] Final transcript and assistant text remain visible after playback,
+  navigation away/back, playback failure, and page focus changes.
+- [ ] Voice output Off suppresses automatic TTS without disabling microphone
+  input; the preference survives a reload.
 - [ ] A box-three humidity query is deterministic and model-free.
 - [ ] Local spoken response plays; Stop immediately halts browser playback.
 - [ ] Network disconnect/reconnect obtains/reuses a bounded session safely.
@@ -292,11 +311,14 @@ on `journalctl`, the tailscaled socket, or ICMP have not been exercised under
 the real unit; they are designed to degrade to a typed unavailable result and
 that degradation is what must be confirmed on the Pi.
 
-Known Beta 1 limitations: push-to-talk uses the broadly supported legacy Web
-Audio `ScriptProcessor` path for iPhone compatibility, and the browser's native
-sample rate must be allow-listed (16/44.1/48 kHz) because there is no
-client-side resampling fallback; cloud STT is a bounded provider adapter/status
-surface but browser streaming defaults to the existing local engine; skill
-enable/disable is process-local; no transcript long-term memory; Home Assistant
-is health-only because no narrow state credential is available to Butters; no
-automatic production deployment; and no control/action skills.
+Known Beta 1 limitations: tap-to-record still uses the broadly supported legacy
+Web Audio `ScriptProcessor` path for iPhone compatibility, and the browser's
+native sample rate must be allow-listed (16/44.1/48 kHz) because there is no
+client-side resampling fallback. Repository state/contract tests do not replace
+real Safari permission, interruption, autoplay, or navigation acceptance.
+Cloud STT is a bounded provider adapter/status surface but browser streaming
+defaults to the existing local engine; skill enable/disable is process-local;
+conversation history is in-memory/session-expiring rather than long-term
+memory; Home Assistant is health-only because no narrow state credential is
+available to Butters; there is no automatic production deployment and no
+control/action skill.

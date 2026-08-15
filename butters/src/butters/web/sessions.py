@@ -8,6 +8,8 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from butters.routing.model import PendingClarification
+
 
 ANONYMOUS_PEER = "peer:unknown"
 
@@ -29,6 +31,8 @@ class BrowserSession:
     messages: list[ConversationMessage] = field(default_factory=list)
     peer_key: str = ANONYMOUS_PEER
     administrator: bool = False
+    pending_clarification: PendingClarification | None = None
+    turn_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
 class SessionError(ValueError):
@@ -159,6 +163,7 @@ class SessionManager:
     def clear(self, session: BrowserSession) -> None:
         with self._lock:
             session.messages.clear()
+            session.pending_clarification = None
             session.csrf_token = secrets.token_urlsafe(24)
             session.last_active_monotonic = self.clock()
 

@@ -19,9 +19,8 @@ from typing import Any
 from starlette.applications import Starlette
 from starlette.datastructures import Headers
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse, Response
-from starlette.routing import Mount, Route, WebSocketRoute
-from starlette.staticfiles import StaticFiles
+from starlette.responses import JSONResponse, Response
+from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from butters.assistant_config import AssistantSettings, load_assistant_settings
@@ -34,6 +33,7 @@ from butters.web.security import AuthPolicy, RateLimiter, SecurityError
 from butters.web.service import BetaAssistantService, RouteOverride
 from butters.web.sessions import BrowserSession, SessionError
 from butters.web.speech import SpeechProviderError, VoicePreset
+from butters.web.stt_pool import STTEngineLease, STTEnginePool, STTEnginePoolError
 from butters.web.trace import TraceStage
 
 
@@ -125,6 +125,32 @@ def create_app(
     teardown_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="butters-teardown")
     started = time.monotonic()
     make_stt_engine = stt_engine_factory or _new_stt_engine
+    # These four small immutable files are loaded once. Starlette's FileResponse
+    # and StaticFiles delegate stat/open to AnyIO threads; on this Python
+    # 3.13/aarch64 host that path can hit the same executor wake-up failure that
+    # run_blocking() already polls around. An explicit allow-list also preserves
+    # the invariant that admin/index HTML is never public under /assets.
+    index_document = (STATIC_ROOT / "index.html").read_bytes()
+    admin_document = (STATIC_ROOT / "admin.html").read_bytes()
+    public_assets = {
+        "styles.css": (
+            (ASSET_ROOT / "styles.css").read_bytes(),
+            "text/css",
+        ),
+        "app.js": (
+            (ASSET_ROOT / "app.js").read_bytes(),
+            "text/javascript",
+        ),
+        "admin.js": (
+            (ASSET_ROOT / "admin.js").read_bytes(),
+            "text/javascript",
+        ),
+    }
+    stt_pool = STTEnginePool(
+        make_stt_engine,
+        max_size=configured.browser_audio.max_concurrent_sessions,
+        acquire_timeout_seconds=configured.browser_audio.idle_timeout_seconds,
+    )
 
     async def _await_future(future: Any, timeout: float | None = None) -> Any:
         # Polling avoids a Python 3.13/aarch64 executor wake-up failure seen
@@ -165,11 +191,18 @@ def create_app(
             LOGGER.warning("voice stream teardown failed", exc_info=True)
 
     async def index(_request: Request) -> Response:
-        return FileResponse(STATIC_ROOT / "index.html")
+        return Response(index_document, media_type="text/html")
 
     async def admin_page(request: Request) -> Response:
         _admin(request, auth)
-        return FileResponse(STATIC_ROOT / "admin.html")
+        return Response(admin_document, media_type="text/html")
+
+    async def public_asset(request: Request) -> Response:
+        asset = public_assets.get(request.path_params["asset_name"])
+        if asset is None:
+            return Response(status_code=404)
+        content, media_type = asset
+        return Response(content, media_type=media_type)
 
     async def health(_request: Request) -> Response:
         return JSONResponse({"status": "ok", "service": "butters", "version": "beta1"})
@@ -182,6 +215,13 @@ def create_app(
             "deterministic_router": "ready",
             "cloud_optional": "ready" if runtime.general_reasoner.available else "disabled",
             "production_origin": "ready" if origin_ready else "unconfigured",
+            "local_stt": (
+                "ready"
+                if stt_pool.stats()["available"]
+                else "unavailable"
+                if stt_pool.stats()["last_error"]
+                else "warming"
+            ),
         }
         healthy = checks["state_directory"] == "ready" and origin_ready
         status = 200 if healthy else 503
@@ -228,7 +268,9 @@ def create_app(
     async def clear_session(request: Request) -> Response:
         try:
             session = _mutation_session(request, runtime, auth)
-            runtime.clear_conversation(session)
+            # Clearing now waits on the per-session turn lock, so it must not run
+            # on the event loop: an in-flight turn would stall the whole service.
+            await run_blocking(runtime.clear_conversation, session)
             return JSONResponse({"status": "cleared", "csrf_token": session.csrf_token})
         except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
@@ -354,6 +396,7 @@ def create_app(
                         "providers": ["local", "openai"],
                         "cloud_model": configured.providers.cloud_stt_model,
                         "allow_paid": configured.providers.allow_paid_stt,
+                        "local_pool": stt_pool.stats(),
                     },
                     "tts": {
                         "default": configured.providers.tts_default,
@@ -684,6 +727,8 @@ def create_app(
     async def voice_socket(websocket: WebSocket) -> None:
         session: BrowserSession | None = None
         stream: BrowserAudioStream | None = None
+        engine_lease: STTEngineLease | None = None
+        engine_reusable = True
         acquired = False
         capacity_acquired = False
         trace = None
@@ -723,10 +768,46 @@ def create_app(
                     "channels": start_message.get("channels"),
                     "encoding": start_message.get("encoding"),
                     "provider": "local",
+                    "client_permission_ms": _bounded_client_ms(
+                        start_message.get("client_permission_ms")
+                    ),
+                    "client_setup_ms": _bounded_client_ms(
+                        start_message.get("client_setup_ms")
+                    ),
                 },
             )
-            engine = await run_blocking(make_stt_engine)
-            stream = BrowserAudioStream(engine, domain_vocabulary, configured.browser_audio)
+            engine_lease = await run_blocking(stt_pool.acquire)
+            trace.emit(
+                TraceStage.STT,
+                "model_ready",
+                fields={
+                    "provider": "local",
+                    "backend": "sherpa-onnx",
+                    "accelerator": "cpu",
+                    "reused": engine_lease.reused,
+                    "engine_acquire_latency_ms": round(
+                        engine_lease.acquire_seconds * 1000, 3
+                    ),
+                    "model_initialization_ms": round(
+                        (
+                            0.0
+                            if engine_lease.reused
+                            else engine_lease.initialization_seconds
+                        )
+                        * 1000,
+                        3,
+                    ),
+                    "cold_model_initialization_ms": round(
+                        engine_lease.initialization_seconds * 1000, 3
+                    ),
+                    "pool": stt_pool.stats(),
+                },
+            )
+            stream = BrowserAudioStream(
+                engine_lease.engine,
+                domain_vocabulary,
+                configured.browser_audio,
+            )
             events = await run_blocking(
                 stream.start,
                 sample_rate=start_message.get("sample_rate"),
@@ -762,7 +843,28 @@ def create_app(
                     break
                 if control.get("type") != "stop":
                     raise BrowserAudioError("protocol_error", "unknown control frame")
-                final = await run_blocking(stream.finish)
+                endpoint_reason = control.get("endpoint_reason", "tap")
+                if endpoint_reason not in {"tap", "maximum_duration", "pointer_cancel"}:
+                    endpoint_reason = "tap"
+                trace.emit(
+                    TraceStage.AUDIO,
+                    "capture_complete",
+                    fields={
+                        "endpoint_reason": endpoint_reason,
+                        "client_capture_ms": _bounded_client_ms(
+                            control.get("client_capture_ms")
+                        ),
+                        "received_audio_seconds": round(stream.audio_seconds, 3),
+                    },
+                )
+                server_final_started = time.perf_counter()
+                final = await run_blocking(
+                    stream.finish,
+                    endpoint_reason="tap_to_record_" + endpoint_reason,
+                )
+                server_stop_to_final_ms = (
+                    time.perf_counter() - server_final_started
+                ) * 1000
                 assert final.result is not None
                 semantic = runtime.assistant.preview_route(final.result.normalized)
                 semantic_status = "complete" if semantic.matched else "incomplete" if semantic.incomplete else "unrecognized"
@@ -775,7 +877,22 @@ def create_app(
                         "normalized_text": utterance.normalized,
                         "endpoint_reason": utterance.endpoint_reason,
                         "processing_latency_ms": round(utterance.processing_seconds * 1000, 3),
+                        "audio_preprocessing_ms": round(
+                            utterance.preprocessing_seconds * 1000, 3
+                        ),
+                        "streaming_inference_ms": round(
+                            utterance.inference_seconds * 1000, 3
+                        ),
                         "finalization_latency_ms": round(utterance.finalization_latency_seconds * 1000, 3),
+                        "server_stop_to_final_ms": round(
+                            server_stop_to_final_ms, 3
+                        ),
+                        "audio_seconds": round(utterance.audio_seconds, 3),
+                        "real_time_factor": round(
+                            utterance.inference_seconds
+                            / max(utterance.audio_seconds, 1e-9),
+                            4,
+                        ),
                         "semantic_status": semantic_status,
                         "provider": "local",
                     },
@@ -807,8 +924,16 @@ def create_app(
             if trace is not None:
                 trace.emit(TraceStage.ERROR, "timeout", reason_code="audio_idle_timeout")
             await _safe_ws_error(websocket, "audio_idle_timeout", "Voice session timed out.")
-        except (SecurityError, SessionError, BrowserAudioError, ValueError) as exc:
+        except (
+            SecurityError,
+            SessionError,
+            BrowserAudioError,
+            STTEnginePoolError,
+            ValueError,
+        ) as exc:
             code = getattr(exc, "code", "invalid_request")
+            if code == "stt_error":
+                engine_reusable = False
             if trace is not None:
                 trace.emit(TraceStage.ERROR, "failed", reason_code=code)
             await _safe_ws_error(websocket, code, str(exc))
@@ -816,6 +941,7 @@ def create_app(
             if trace is not None:
                 trace.emit(TraceStage.AUDIO, "disconnected", reason_code="browser_disconnect")
         except Exception:  # noqa: BLE001 - safe WebSocket boundary
+            engine_reusable = False
             LOGGER.exception("voice WebSocket failed")
             if trace is not None:
                 trace.emit(TraceStage.ERROR, "failed", reason_code="internal_error")
@@ -826,7 +952,13 @@ def create_app(
             # error would retire a voice slot for the life of the process.
             try:
                 if stream is not None:
-                    await run_teardown(stream.close)
+                    await run_teardown(stream.close, False)
+                if engine_lease is not None:
+                    await run_teardown(
+                        stt_pool.release,
+                        engine_lease.engine,
+                        engine_reusable,
+                    )
             finally:
                 if acquired:
                     voice_slots.release()
@@ -885,16 +1017,26 @@ def create_app(
         Route("/api/admin/codex/jobs/{job_id}/decision", decide_skill_job, methods=["POST"]),
         WebSocketRoute("/ws/voice", voice_socket),
         WebSocketRoute("/ws/admin/traces", trace_socket),
-        Mount("/assets", app=StaticFiles(directory=ASSET_ROOT), name="assets"),
+        Route("/assets/{asset_name:str}", public_asset),
     ]
     async def shutdown_workers() -> None:
         worker_pool.shutdown(wait=True, cancel_futures=True)
+        stt_pool.close()
         teardown_pool.shutdown(wait=True, cancel_futures=True)
         runtime.local_tts.close()
 
     @asynccontextmanager
     async def lifespan(_app: Starlette):
         try:
+            try:
+                lease = await run_blocking(stt_pool.warm)
+                LOGGER.info(
+                    "local STT ready (cold=%s initialization_ms=%.1f)",
+                    not lease.reused,
+                    lease.initialization_seconds * 1000,
+                )
+            except Exception:  # Text service remains available after prewarm failure.
+                LOGGER.exception("local STT prewarm failed; voice will retry lazily")
             yield
         finally:
             await shutdown_workers()
@@ -914,6 +1056,7 @@ def create_app(
     app.state.service = runtime
     app.state.settings = configured
     app.state.worker_pool = worker_pool
+    app.state.stt_pool = stt_pool
     app.state.shutdown_workers = shutdown_workers
     app.add_middleware(SecurityHeadersMiddleware)
     return app
@@ -993,6 +1136,14 @@ async def _json_body(request: Request, maximum: int) -> dict[str, object]:
 
 def _reject_constant(name: str) -> float:
     raise ValueError(f"request JSON must not contain {name}")
+
+
+def _bounded_client_ms(value: object) -> int | None:
+    """Retain optional untrusted browser timing only inside a harmless bound."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return round(value) if 0 <= value <= 300_000 else None
 
 
 async def _bounded_body(request: Request, maximum: int) -> bytes:

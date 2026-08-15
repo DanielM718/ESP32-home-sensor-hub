@@ -14,6 +14,7 @@ from butters.integrations.model import (
 )
 from butters.live.conversation import BoundedVoiceConversation
 from butters.live.semantic import SemanticEndpointEvaluator
+from butters.routing.conversation import pending_from_route
 from butters.routing.entities import EntityRegistry, MetricRegistry
 from butters.routing.router import IntentRouter
 from butters.stt.normalization import load_domain_vocabulary
@@ -45,19 +46,27 @@ def test_semantic_evaluator_distinguishes_complete_incomplete_and_corrupt() -> N
 
 
 def test_semantic_evaluator_merges_only_when_a_pending_request_exists() -> None:
-    evaluator = SemanticEndpointEvaluator(_router().route)
+    router = _router()
+    evaluator = SemanticEndpointEvaluator(router.route)
+    pending = pending_from_route(
+        router.route("what is the humidity"),
+        "what is the humidity",
+        now=0.0,
+        ttl_seconds=12.0,
+    )
+    assert pending is not None
 
     without_pending = evaluator.assess("filament box two")
-    continued = evaluator.assess(
-        "filament box two", pending_text="what is the humidity"
-    )
-    unrelated = evaluator.assess(
-        "what is the server status", pending_text="what is the humidity"
-    )
+    continued = evaluator.assess("filament box two", pending=pending)
+    unrelated = evaluator.assess("what is the server status", pending=pending)
 
     assert without_pending.status == "unrecognized"
     assert continued.status == "complete" and continued.continued
-    assert continued.effective_text == "what is the humidity filament box two"
+    assert continued.effective_text == "filament box two"
+    assert continued.route.arguments == {
+        "entity": "filament_box_2",
+        "metric": "humidity",
+    }
     assert unrelated.status == "complete" and not unrelated.continued
     assert unrelated.effective_text == "what is the server status"
 
@@ -163,9 +172,16 @@ def test_home_assistant_health_preview_replaces_pending_fragment() -> None:
         server_adapter=_Health(),  # type: ignore[arg-type]
     )
     evaluator = SemanticEndpointEvaluator(assistant.preview_route)
+    pending = pending_from_route(
+        assistant.preview_route("what is the humidity"),
+        "what is the humidity",
+        now=0.0,
+        ttl_seconds=12.0,
+    )
+    assert pending is not None
 
     assessment = evaluator.assess(
-        "is Home Assistant healthy", pending_text="what is the humidity"
+        "is Home Assistant healthy", pending=pending
     )
 
     assert assessment.status == "complete"
@@ -184,7 +200,7 @@ def test_corrupt_fragment_and_expired_continuation_never_execute() -> None:
     expired = conversation.handle_text("filament box two")
 
     assert corrupt.route.status == "unsupported"
-    assert "repeat" in corrupt.response_text.lower()
+    assert "sensor reading or status" in corrupt.response_text.lower()
     assert incomplete.route.incomplete
     assert expired.route.status == "unsupported"
     assert sensors.calls == 0 and health.calls == 0
@@ -195,12 +211,18 @@ def test_corrupt_followup_does_not_extend_or_duplicate_pending_request() -> None
     conversation, sensors, health = _conversation()
 
     conversation.handle_text("what is the humidity")
+    original = conversation.pending
+    assert original is not None
     response = conversation.handle_text("y level")
 
     assert response.raw_text == "y level"
-    assert response.route.status == "unsupported"
-    assert "repeat" in response.response_text.lower()
-    assert conversation.pending is None
+    assert response.route.status == "clarification"
+    assert "Which sensor" in response.response_text
+    retried = conversation.pending
+    assert retried is not None
+    assert retried.arguments == {"metric": "humidity"}
+    assert retried.created_monotonic == original.created_monotonic
+    assert retried.expires_monotonic == original.expires_monotonic
     assert sensors.calls == 0 and health.calls == 0
 
 

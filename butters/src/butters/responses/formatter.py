@@ -408,7 +408,7 @@ class ResponseFormatter:
         if code in {"timeout", "unavailable", "upstream_status"}:
             return "Current home-sensor data is temporarily unavailable."
         if code in {"unknown_skill", "policy_denied", "invalid_arguments"}:
-            return "That request is not permitted by the read-only skill policy."
+            return "I can't safely complete that request."
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
         return "The read-only request could not be completed."

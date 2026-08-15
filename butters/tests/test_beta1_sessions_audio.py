@@ -58,6 +58,9 @@ def test_browser_audio_converts_48khz_and_emits_bounded_final() -> None:
     assert final.result.raw == "what is the humidity in box three"
     assert 1500 <= engine.samples <= 1700
     assert 0.09 <= final.result.audio_seconds <= 0.11
+    assert final.result.processing_seconds == pytest.approx(
+        final.result.preprocessing_seconds + final.result.inference_seconds
+    )
 
 
 def test_browser_audio_rejects_malformed_oversized_and_overlong_frames() -> None:

@@ -192,14 +192,16 @@ required missing arguments or an unrecognized fragment remains open until the
 disabled by production configuration so it cannot preempt this policy.
 
 At a hard endpoint, a recognized incomplete route carries its intended skill,
-resolved arguments, and `missing_arguments`. It emits the targeted router
-question and enters `AWAITING_CONTINUATION` for at most 12 seconds. Speech that
-arrives before the hard endpoint stays in the same recognizer stream. A later
-clarification turn is merged only while this explicit pending request exists;
-a complete standalone route is evaluated first and cancels stale context.
-Unrecognized text gains no pending authority. A successful logical request
-emits one executable handoff, then all recognizer and conversational state is
-cleared while both models remain resident.
+resolved arguments, aggregate flag, missing slot, optional ambiguity
+candidates, and creation/expiry time. It emits the targeted router question and
+enters `AWAITING_CONTINUATION` for at most 12 seconds. Speech that arrives
+before the hard endpoint stays in the same recognizer stream. A later
+clarification turn is parsed as a value for that structured slot only while the
+pending request exists; raw request strings are never concatenated. A complete
+standalone route is evaluated first and cancels stale context. Unrecognized
+text gains no pending authority. A successful logical request emits one
+executable handoff, then all recognizer and conversational state is cleared
+while both models remain resident.
 
 `StreamingSTTEngine` owns the lifecycle operations (`start_utterance`,
 `accept_audio`, partial lookup, endpoint detection, `finalize`, `reset`, and
@@ -211,11 +213,16 @@ transcripts leave the Pi.
 The STT default remains one inference thread, but production selection is now
 `sherpa-onnx-streaming-zipformer-en-2023-06-21`. It exactly decoded the fixed
 real-user carbon-dioxide query that the old 20M model repeatedly truncated.
-Measured larger-model initialization is 6-7.7 seconds, RSS 240-293 MiB, RTF
-0.45-0.52, and CPU-per-audio 45-52%. Accuracy is preferred over the old
-107 MiB process footprint while still comfortably below real time and leaving
+Measured larger-model cold initialization is 8.5-14.1 seconds under the current
+Beta 1 development load, RSS 240-295 MiB, and warm transcription RTF 0.49-0.52.
+The web service therefore owns one bounded prewarmed recognizer instead of
+constructing one per WebSocket: a lease is exclusive, a healthy stream is reset
+and returned, and a failed stream is discarded. Accuracy is preferred over the
+old 107 MiB process footprint while still below real time and leaving
 monitoring services priority. See
-[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md).
+[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md)
+and
+[benchmarks/beta1-conversational-voice-stt.md](benchmarks/beta1-conversational-voice-stt.md).
 
 The current energy VAD remains deterministic RMS hysteresis, not a trained
 speech/noise classifier. Actual room noise calibrated this host's local gate to
@@ -260,6 +267,12 @@ the three filament boxes, with unambiguous aliases. This explicit mapping is
 intentional: deployed-but-unreviewed sources do not become voice entities by
 accident. Metrics form a separate compatibility allow-list. Ambiguous
 questions request clarification rather than selecting the first candidate.
+Exact registered aliases have priority. Fuzzy recovery is a deterministic,
+length-sensitive edit-distance comparison only against registered entity and
+metric aliases, with a conservative threshold and runner-up margin; numeric
+and short aliases receive stricter treatment. Aggregate reading language
+expands the matched entity's configured metric capabilities in stable order,
+then uses the existing multi-value skill and one dashboard snapshot.
 
 Current sensor data comes from the established local dashboard `/api/latest`
 representation through `DashboardSensorAdapter`. That interface was selected

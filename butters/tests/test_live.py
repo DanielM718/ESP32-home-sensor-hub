@@ -441,9 +441,8 @@ def test_hard_endpoint_prompts_for_targeted_bounded_continuation() -> None:
     finals = [event for event in events if event.kind == "final"]
     assert len(finals) == 2
     assert finals[-1].result is not None
-    assert finals[-1].result.effective_text == (
-        "what is the humidity filament box two"
-    )
+    assert finals[-1].result.effective_text == "filament box two"
+    assert finals[-1].result.semantic_status == "complete"
     assert finals[-1].completes_cycle
     assert controller.state is LiveState.WAITING_FOR_WAKE
 
@@ -494,8 +493,11 @@ def test_unrecognized_hard_endpoint_and_continuation_timeout_are_safe() -> None:
     events.extend(_feed(controller, sequence, 0, 102))
     finals = [event for event in events if event.kind == "final"]
     assert finals[-1].result is not None
-    assert finals[-1].result.semantic_status == "unrecognized"
+    assert finals[-1].result.semantic_status == "incomplete"
     assert finals[-1].result.effective_text == "y level"
+    assert controller.state is LiveState.AWAITING_CONTINUATION
+    events.extend(_feed(controller, sequence, 0, 601))
+    assert [event.kind for event in events].count("continuation_timeout") == 1
     assert controller.state is LiveState.WAITING_FOR_WAKE
 
     controller, _ = _semantic_controller("what is the humidity")

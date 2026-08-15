@@ -231,19 +231,24 @@ def test_stale_turns_cannot_start_playback_and_voice_invalidates_old_audio() -> 
 
     assert play.index("if (!isCurrentTurn(turn)) return;") < play.index("await speak")
     assert send.index("cleanupVoice();") < send.index("beginTurn();")
-    assert voice.index("beginTurn();") < voice.index("setState")
-    assert voice.index("stopPlayback();") < voice.index("setState")
+    assert voice.index("beginTurn();") < voice.index("transitionVoice")
+    assert voice.index("stopPlayback();") < voice.index("transitionVoice")
 
 
 def test_stale_voice_events_cannot_overwrite_a_newer_text_or_voice_turn() -> None:
     voice = _block(APP_JS, "async function beginVoice")
     handler = _block(APP_JS, "function handleVoiceEvent(event, turn)")
-    cleanup = _block(APP_JS, "function cleanupVoice(expectedTurn = null)")
+    current = _block(APP_JS, "function voiceIsCurrent(turn)")
+    cleanup = _block(
+        APP_JS,
+        "function cleanupVoice(expectedTurn = null, preserveError = false)",
+    )
 
     assert "voiceTurn = turn" in voice
     assert "handleVoiceEvent(message, turn)" in voice
-    assert handler.index("!isCurrentTurn(turn)") < handler.index("JSON.parse")
-    assert "voiceTurn !== turn" in handler
+    assert handler.index("!voiceIsCurrent(turn)") < handler.index("JSON.parse")
+    assert "voiceTurn === turn" in current
+    assert "isCurrentTurn(turn)" in current
     assert "playResponse(turn," in handler
     assert "playResponse(beginTurn()" not in handler
     assert "socket.onmessage = null" in cleanup
@@ -266,11 +271,17 @@ def test_focus_is_only_restored_inside_the_submit_gesture() -> None:
     assert "document.activeElement === input" in body
 
 
-def test_releasing_a_pointer_elsewhere_does_not_cancel_ordinary_taps() -> None:
-    body = _block(APP_JS, "async function endVoice")
+def test_microphone_uses_tap_to_record_and_handles_pointer_cancellation() -> None:
+    toggle = _block(APP_JS, "function toggleVoice")
+    cancellation = _block(APP_JS, "function handleVoicePointerCancel")
 
-    assert body.index("if (!holding) return;") < body.index("preventDefault")
-    assert 'window.addEventListener("pointercancel", endVoice)' in APP_JS
+    assert 'micButton.addEventListener("click", toggleVoice)' in APP_JS
+    assert "VOICE_STATE.IDLE" in toggle and "beginVoice(event)" in toggle
+    assert "VOICE_STATE.LISTENING" in toggle and "stopVoice(event)" in toggle
+    assert "pointer_cancel" in cancellation
+    assert 'micButton.addEventListener("pointercancel", handleVoicePointerCancel)' in APP_JS
+    assert 'window.addEventListener("pointerup"' not in APP_JS
+    assert 'micButton.addEventListener("pointerdown"' not in APP_JS
 
 
 def test_a_malformed_body_still_reaches_the_error_path() -> None:

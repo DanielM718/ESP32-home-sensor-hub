@@ -204,5 +204,7 @@ def test_policy_failure_does_not_echo_sensitive_details() -> None:
 
     response = ResponseFormatter().format_execution(execution)
 
-    assert response == "That request is not permitted by the read-only skill policy."
+    assert response == "I can't safely complete that request."
     assert "secret" not in response
+    # Normal chat must not name internal machinery such as the skill policy.
+    assert "skill policy" not in response

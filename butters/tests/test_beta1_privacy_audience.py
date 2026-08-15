@@ -177,7 +177,9 @@ def test_normal_conversation_never_returns_repository_or_network_internals(
                 payload = response.json()
                 assert payload["route"] == "unsupported", (text, payload)
                 assert payload["reason_codes"] == ["administrator_required"]
-                assert payload["response_text"] == "That request is not supported."
+                assert payload["response_text"] == (
+                    "I can't answer that request from the normal chat."
+                )
                 assert payload["skill"] is None
                 assert payload["model"] is None
                 # The sensitive adapter was never invoked, so nothing to leak.

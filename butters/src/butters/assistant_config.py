@@ -81,6 +81,7 @@ class WebSettings:
     max_queued_requests: int = 12
     trace_capacity: int = 256
     trace_ttl_seconds: float = 900.0
+    clarification_timeout_seconds: float = 30.0
 
     def validated(self) -> WebSettings:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
@@ -113,6 +114,10 @@ class WebSettings:
             raise ConfigError("web.trace_capacity must be 32 to 4096")
         if not 60 <= self.trace_ttl_seconds <= 86400:
             raise ConfigError("web.trace_ttl_seconds must be 60 to 86400")
+        if not 5 <= self.clarification_timeout_seconds <= 300:
+            raise ConfigError(
+                "web.clarification_timeout_seconds must be 5 to 300"
+            )
         return self
 
     @property
@@ -129,7 +134,10 @@ class BrowserAudioSettings:
     max_buffered_bytes: int = 1024 * 1024
     idle_timeout_seconds: float = 10.0
     session_timeout_seconds: float = 60.0
-    max_concurrent_sessions: int = 2
+    # The selected accurate model uses roughly 240-293 MiB per recognizer on
+    # the Pi 4. One warm engine is intentionally serialized; extra callers use
+    # the bounded queue instead of multiplying resident models.
+    max_concurrent_sessions: int = 1
     max_queue_depth: int = 2
     allowed_sample_rates: tuple[int, ...] = (16000, 44100, 48000)
 
@@ -435,6 +443,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_queued_requests=int(web_table.get("max_queued_requests", 12)),
         trace_capacity=int(web_table.get("trace_capacity", 256)),
         trace_ttl_seconds=float(web_table.get("trace_ttl_seconds", 900.0)),
+        clarification_timeout_seconds=float(
+            web_table.get("clarification_timeout_seconds", 30.0)
+        ),
     ).validated()
 
     audio_table = _table(data, "browser_audio")
@@ -447,7 +458,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         max_buffered_bytes=int(audio_table.get("max_buffered_bytes", 1024 * 1024)),
         idle_timeout_seconds=float(audio_table.get("idle_timeout_seconds", 10.0)),
         session_timeout_seconds=float(audio_table.get("session_timeout_seconds", 60.0)),
-        max_concurrent_sessions=int(audio_table.get("max_concurrent_sessions", 2)),
+        max_concurrent_sessions=int(audio_table.get("max_concurrent_sessions", 1)),
         max_queue_depth=int(audio_table.get("max_queue_depth", 2)),
         allowed_sample_rates=tuple(raw_rates),
     ).validated()

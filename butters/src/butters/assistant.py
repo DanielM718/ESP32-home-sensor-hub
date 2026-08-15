@@ -135,25 +135,51 @@ class DeterministicAssistant:
                     diagnostic=diagnostic,
                 )
         route = self.router.route(normalized)
+        return self.handle_routed_text(
+            raw_text,
+            route,
+            normalized=normalized,
+            started=started,
+        )
+
+    def handle_routed_text(
+        self,
+        raw_text: str,
+        route: RoutedIntent,
+        *,
+        normalized: str | None = None,
+        started: float | None = None,
+    ) -> AssistantResponse:
+        """Execute a router-produced structured route without rebuilding text."""
+
+        began = time.perf_counter() if started is None else started
+        normalized_text = (
+            normalize_transcript(raw_text.strip(), self.vocabulary)
+            if normalized is None
+            else normalized
+        )
         if not route.matched or route.skill is None:
             if route.allow_fallback and self.language_model is not None:
-                return self._handle_fallback(raw_text, normalized, route, started)
+                return self._handle_fallback(
+                    raw_text, normalized_text, route, began
+                )
             path = "clarification" if route.status == "clarification" else "unsupported"
             return AssistantResponse(
                 raw_text,
-                normalized,
+                normalized_text,
                 route,
-                route.message or "That request is not supported.",
-                time.perf_counter() - started,
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
+                time.perf_counter() - began,
                 routing_path=path,
             )
         execution = self.skills.execute(route.skill, route.arguments)
         return AssistantResponse(
             raw_text,
-            normalized,
+            normalized_text,
             route,
             self.formatter.format_execution(execution),
-            time.perf_counter() - started,
+            time.perf_counter() - began,
             execution,
             routing_path="deterministic",
             policy_status="allowed" if execution.ok else "denied",
@@ -198,13 +224,16 @@ class DeterministicAssistant:
             )
         if proposal.kind is ProposalKind.UNSUPPORTED:
             route = RoutedIntent(
-                "unsupported", normalized, message="That request is not supported."
+                "unsupported",
+                normalized,
+                message="I can't answer that request with the local skills currently enabled.",
             )
             return AssistantResponse(
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 routing_path="llm_fallback",
                 llm_result=result,
@@ -220,7 +249,8 @@ class DeterministicAssistant:
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 routing_path="llm_fallback",
                 llm_result=result,
@@ -232,13 +262,14 @@ class DeterministicAssistant:
             route = RoutedIntent(
                 "unsupported",
                 normalized,
-                message="That proposed request was denied by the skill policy.",
+                message="I can't safely complete that request.",
             )
             return AssistantResponse(
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 execution,
                 routing_path="llm_fallback",

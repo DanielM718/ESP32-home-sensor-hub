@@ -75,7 +75,8 @@ def test_the_control_keeps_an_accessible_label_and_a_pressed_state() -> None:
     button = _mic_button()
     icon = _mic_icon()
 
-    assert 'aria-label="Hold to speak"' in button
+    assert 'aria-label="Start recording"' in button
+    assert 'title="Tap to record"' in button
     assert 'aria-pressed="false"' in button
     assert icon.get("aria-hidden") == "true"
     assert icon.get("focusable") == "false"
