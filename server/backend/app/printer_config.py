@@ -158,6 +158,10 @@ class PrinterObserverSettings:
     cloud_history_refresh_seconds: int = 3600
     cloud_history_timeout_seconds: float = 15.0
     cloud_history_max_records: int = 1000
+    manufacturer_maintenance_enabled: bool = True
+    maintenance_evaluation_seconds: int = 300
+    maintenance_rolling_window_days: int = 30
+    maintenance_minimum_history_days: int = 7
 
     def validated(self) -> PrinterObserverSettings:
         if not re.fullmatch(r"[a-z0-9_-]{1,64}", self.printer_id):
@@ -234,6 +238,22 @@ class PrinterObserverSettings:
             raise ConfigError("cloud history timeout must be between 1 and 30")
         if not 1 <= self.cloud_history_max_records <= 5000:
             raise ConfigError("cloud history max records must be between 1 and 5000")
+        if not 30 <= self.maintenance_evaluation_seconds <= 3600:
+            raise ConfigError(
+                "maintenance evaluation seconds must be between 30 and 3600"
+            )
+        if not 1 <= self.maintenance_rolling_window_days <= 365:
+            raise ConfigError(
+                "maintenance rolling window days must be between 1 and 365"
+            )
+        if not 0 <= self.maintenance_minimum_history_days <= 365:
+            raise ConfigError(
+                "maintenance minimum history days must be between 0 and 365"
+            )
+        if self.maintenance_minimum_history_days > self.maintenance_rolling_window_days:
+            raise ConfigError(
+                "maintenance minimum history days cannot exceed the rolling window"
+            )
         return self
 
 
@@ -252,6 +272,7 @@ def load_printer_settings(path: Path) -> PrinterObserverSettings:
     analysis = _table(data, "analysis")
     automatic_monitoring = _table(data, "automatic_monitoring")
     cloud_history = _table(data, "cloud_history")
+    maintenance_engine = _table(data, "maintenance_engine")
     entities = _table(data, "entities")
     if not all(
         isinstance(key, str) and isinstance(value, str)
@@ -300,6 +321,18 @@ def load_printer_settings(path: Path) -> PrinterObserverSettings:
         cloud_history_refresh_seconds=int(cloud_history.get("refresh_seconds", 3600)),
         cloud_history_timeout_seconds=float(cloud_history.get("timeout_seconds", 15)),
         cloud_history_max_records=int(cloud_history.get("max_records", 1000)),
+        manufacturer_maintenance_enabled=bool(
+            maintenance_engine.get("manufacturer_tasks_enabled", True)
+        ),
+        maintenance_evaluation_seconds=int(
+            maintenance_engine.get("evaluation_seconds", 300)
+        ),
+        maintenance_rolling_window_days=int(
+            maintenance_engine.get("rolling_window_days", 30)
+        ),
+        maintenance_minimum_history_days=int(
+            maintenance_engine.get("minimum_history_days", 7)
+        ),
     ).validated()
 
 

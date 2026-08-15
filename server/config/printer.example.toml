@@ -34,6 +34,18 @@ refresh_seconds = 3600
 timeout_seconds = 15
 max_records = 1000
 
+[maintenance_engine]
+# Seed the Bambu Lab X2D published maintenance catalog (wiki periodic
+# maintenance page). Set to false to run with locally configured tasks only.
+manufacturer_tasks_enabled = true
+# How often the observer re-evaluates maintenance state and appends durable
+# transition events. Events are edge-triggered, so this does not resend.
+evaluation_seconds = 300
+# Local policy, not a Bambu Lab value: the averaging window used to place the
+# printer in Bambu Lab's usage tiers (>= 5 h/day, 1-5 h/day, < 1 h/day).
+rolling_window_days = 30
+minimum_history_days = 7
+
 # Required mappings. The remaining mappings are optional and omitted when HA
 # does not expose them. These syntactically valid IDs are deliberately non-real.
 [entities]
@@ -110,8 +122,10 @@ tray_entities = ["sensor.replace_with_discovered_x2d_slug_externalspool2_externa
 [ams.entities]
 active = "binary_sensor.replace_with_discovered_x2d_slug_externalspool2_active"
 
-# No Bambu numeric interval is asserted here. Add only user-chosen or sourced
-# recommendations; completion writes only to the local SQLite audit log.
+# Bambu Lab X2D published intervals ship in code (see printer_maintenance.py)
+# and do not need to be repeated here. Add only extra user-chosen or separately
+# sourced reminders; completion writes only to the local SQLite audit log.
+# Reusing a manufacturer task id here overrides that catalog entry.
 # [[maintenance]]
 # id = "example_inspection"
 # name = "Example user-defined inspection"

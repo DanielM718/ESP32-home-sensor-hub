@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -19,13 +20,52 @@ from urllib.request import Request, urlopen
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from app.printer_config import MaintenanceTaskSettings
+from app.printer_maintenance import (
+    DEFAULT_ROLLING_WINDOW_DAYS,
+    EVENT_HEAVY_USE_ENTERED,
+    EVENT_HEAVY_USE_EXITED,
+    EVENT_RETURNED_TO_OK,
+    LOCAL_POLICY_SOURCE,
+    MANUFACTURER_SOURCE,
+    MANUFACTURER_SOURCE_RETRIEVED,
+    MANUFACTURER_SOURCE_REVISION,
+    MANUFACTURER_SOURCE_URL,
+    MINIMUM_MODE_HISTORY_DAYS,
+    MODE_HEAVY_USE,
+    PROBLEM_STATES,
+    STATE_OK,
+    TASK_STATE_EVENTS,
+    TRIGGER_KINDS,
+    TRIGGER_THRESHOLD,
+    X2D_MAINTENANCE_TASKS,
+    ManufacturerMaintenanceTask,
+    maintenance_mode,
+    maintenance_summary,
+    task_status,
+)
+
+LOGGER = logging.getLogger("home_sensor.printer.intelligence")
 
 CLOUD_TASKS_URL = "https://api.bambulab.com/v1/user-service/my/tasks"
 CLOUD_SOURCE = "bambu_cloud_history"
+CLOUD_RECONCILED_SOURCE = "bambu_cloud_history_reconciled"
+LOCAL_SOURCE = "locally_observed"
 LOCAL_SOURCES = frozenset({"locally_observed", "home_assistant"})
 COUNTED_USAGE_RESULTS = frozenset({"completed", "failed", "cancelled"})
+FAILED_OR_CANCELLED_RESULTS = frozenset(
+    {"failed", "cancelled", "aborted_or_failed", "aborted"}
+)
 MAX_CLOUD_RESPONSE_BYTES = 16 * 1024 * 1024
 TASK_ID_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
+
+# Tracked print time can never be proven complete: Bambu Cloud history has an
+# unknown account/API retention boundary and local observation only begins when
+# the observer is deployed.
+TRACKED_COMPLETENESS_REASONS = (
+    "bambu_cloud_history_retention_boundary_unknown",
+    "local_observation_starts_at_observer_deployment",
+    "no_authoritative_printer_lifetime_counter_available",
+)
 
 
 class PrinterIntelligenceError(RuntimeError):
@@ -147,8 +187,16 @@ class BambuCloudHistoryAdapter:
 
 
 class PrinterIntelligenceStore:
-    def __init__(self, database_path: Path) -> None:
+    def __init__(
+        self,
+        database_path: Path,
+        *,
+        rolling_window_days: int = DEFAULT_ROLLING_WINDOW_DAYS,
+        minimum_mode_history_days: int = MINIMUM_MODE_HISTORY_DAYS,
+    ) -> None:
         self.database_path = Path(database_path)
+        self.rolling_window_days = max(1, int(rolling_window_days))
+        self.minimum_mode_history_days = max(0, int(minimum_mode_history_days))
 
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
@@ -237,12 +285,74 @@ class PrinterIntelligenceStore:
                     truncated INTEGER NOT NULL DEFAULT 0,
                     last_error TEXT
                 );
+
+                -- Durable, append-only maintenance lifecycle events. Delivery
+                -- is recorded here so a restart never resends an old state.
+                CREATE TABLE IF NOT EXISTS maintenance_notification_events (
+                    event_id TEXT PRIMARY KEY,
+                    printer_id TEXT,
+                    subject_key TEXT NOT NULL,
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    event_type TEXT NOT NULL,
+                    previous_state TEXT,
+                    new_state TEXT NOT NULL,
+                    created_at_utc TEXT NOT NULL,
+                    payload_json TEXT NOT NULL DEFAULT '{}',
+                    delivery_status TEXT NOT NULL DEFAULT 'pending',
+                    delivered_at_utc TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_maintenance_notification_events_created
+                    ON maintenance_notification_events(created_at_utc DESC, event_id DESC);
+                CREATE INDEX IF NOT EXISTS idx_maintenance_notification_events_pending
+                    ON maintenance_notification_events(delivery_status, created_at_utc);
+
+                -- Edge-trigger memory: one row per notifiable subject.
+                CREATE TABLE IF NOT EXISTS maintenance_notification_state (
+                    subject_key TEXT PRIMARY KEY,
+                    subject_type TEXT NOT NULL,
+                    subject_id TEXT NOT NULL,
+                    last_state TEXT NOT NULL,
+                    last_event_id TEXT,
+                    updated_at_utc TEXT NOT NULL
+                );
                 """
             )
+            self._migrate_maintenance_task_columns(connection)
         try:
             self.database_path.chmod(0o600)
         except OSError:
             pass
+
+    @staticmethod
+    def _migrate_maintenance_task_columns(connection: sqlite3.Connection) -> None:
+        """Add trigger/provenance columns to an existing maintenance table.
+
+        Idempotent and additive: existing rows keep their generic threshold
+        behaviour because every new column has a compatible default.
+        """
+
+        existing = {
+            str(row["name"])
+            for row in connection.execute("PRAGMA table_info(maintenance_tasks)")
+        }
+        additions = (
+            ("trigger_kind", f"TEXT NOT NULL DEFAULT '{TRIGGER_THRESHOLD}'"),
+            ("interval_months", "INTEGER"),
+            ("interval_months_low_use", "INTEGER"),
+            ("interval_months_normal_use", "INTEGER"),
+            ("interval_months_heavy_use", "INTEGER"),
+            ("prerequisite_task_ids", "TEXT NOT NULL DEFAULT '[]'"),
+            ("cadence", "TEXT NOT NULL DEFAULT ''"),
+            ("source_url", "TEXT NOT NULL DEFAULT ''"),
+            ("source_revision", "TEXT NOT NULL DEFAULT ''"),
+            ("warning_source", f"TEXT NOT NULL DEFAULT '{LOCAL_POLICY_SOURCE}'"),
+        )
+        for column, definition in additions:
+            if column not in existing:
+                connection.execute(
+                    f"ALTER TABLE maintenance_tasks ADD COLUMN {column} {definition}"
+                )
 
     def import_cloud_records(
         self,
@@ -451,7 +561,143 @@ class PrinterIntelligenceStore:
                 ),
             )
 
-    def usage_summary(self, printer_id: str | None = None) -> dict[str, Any]:
+    def tracked_runtime(
+        self, printer_id: str | None = None, *, now: datetime | None = None
+    ) -> dict[str, Any]:
+        """Canonical cumulative print time from known, deduplicated intervals."""
+
+        with self._connect() as connection:
+            return self._tracked_runtime(connection, printer_id, now=now)
+
+    def _tracked_runtime(
+        self,
+        connection: sqlite3.Connection,
+        printer_id: str | None,
+        *,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        now = now or datetime.now(timezone.utc)
+        local_rows = connection.execute(
+            f"""SELECT session_id, started_at_utc, ended_at_utc, result
+                FROM print_sessions
+                WHERE source IN ({",".join("?" * len(LOCAL_SOURCES))})
+                  AND (? IS NULL OR printer_id = ?)""",
+            (*sorted(LOCAL_SOURCES), printer_id, printer_id),
+        ).fetchall()
+        cloud_rows = connection.execute(
+            """SELECT history_id, started_at_utc, ended_at_utc, result,
+                      reconciled_session_id
+               FROM cloud_print_history WHERE (? IS NULL OR printer_id = ?)""",
+            (printer_id, printer_id),
+        ).fetchall()
+
+        cloud_by_session = {
+            str(row["reconciled_session_id"]): row
+            for row in cloud_rows
+            if row["reconciled_session_id"]
+        }
+        intervals: list[dict[str, Any]] = []
+        unknown_interval_jobs = 0
+        # A reconciled cloud task and its local session are the same physical
+        # print. It contributes exactly one interval: the local one when it is
+        # known, otherwise the cloud fallback.
+        for row in local_rows:
+            interval = _valid_interval(row["started_at_utc"], row["ended_at_utc"])
+            source = LOCAL_SOURCE
+            result = row["result"]
+            cloud = cloud_by_session.get(str(row["session_id"]))
+            if interval is None and cloud is not None:
+                interval = _valid_interval(
+                    cloud["started_at_utc"], cloud["ended_at_utc"]
+                )
+                source = CLOUD_RECONCILED_SOURCE
+                result = result or cloud["result"]
+            if interval is None:
+                unknown_interval_jobs += 1
+                continue
+            intervals.append({**interval, "source": source, "result": result})
+        for row in cloud_rows:
+            if row["reconciled_session_id"]:
+                continue
+            interval = _valid_interval(row["started_at_utc"], row["ended_at_utc"])
+            if interval is None:
+                unknown_interval_jobs += 1
+                continue
+            intervals.append(
+                {**interval, "source": CLOUD_SOURCE, "result": row["result"]}
+            )
+
+        total_seconds = sum(int(item["seconds"]) for item in intervals)
+        completed = sum(1 for item in intervals if item["result"] == "completed")
+        failed_or_cancelled = sum(
+            1
+            for item in intervals
+            if str(item["result"] or "") in FAILED_OR_CANCELLED_RESULTS
+        )
+        unknown_result = len(intervals) - completed - failed_or_cancelled
+        first_start = min((item["start"] for item in intervals), default=None)
+        last_end = max((item["end"] for item in intervals), default=None)
+        sources = sorted({str(item["source"]) for item in intervals})
+
+        window_start = now - timedelta(days=self.rolling_window_days)
+        rolling_seconds = sum(
+            _overlap_seconds(item["start"], item["end"], window_start, now)
+            for item in intervals
+        )
+        history_days: float | None = None
+        hours_per_day: float | None = None
+        if first_start is not None:
+            observed_days = max(0.0, (now - first_start).total_seconds() / 86400)
+            history_days = min(float(self.rolling_window_days), observed_days)
+            if history_days > 0:
+                hours_per_day = (rolling_seconds / 3600) / history_days
+        mode, mode_reason = maintenance_mode(
+            hours_per_day,
+            history_days=history_days,
+            minimum_history_days=self.minimum_mode_history_days,
+        )
+        return {
+            "tracked_print_seconds": total_seconds,
+            "tracked_print_hours": round(total_seconds / 3600, 4),
+            "tracked_job_count": len(intervals),
+            "tracked_completed_count": completed,
+            "tracked_failed_or_cancelled_count": failed_or_cancelled,
+            "tracked_unknown_result_count": unknown_result,
+            "tracked_unknown_interval_job_count": unknown_interval_jobs,
+            "tracked_first_print_at": _iso(first_start),
+            "tracked_last_print_at": _iso(last_end),
+            "tracked_history_complete": False,
+            "tracked_history_completeness_reasons": list(TRACKED_COMPLETENESS_REASONS),
+            "tracked_history_provenance": sources,
+            "tracked_semantics": (
+                "sum of known actual print-history intervals (ended_at minus "
+                "started_at) across locally observed sessions and imported Bambu "
+                "Cloud tasks, deduplicated by canonical reconciliation; slicer "
+                "estimates and remaining-time predictions are never used"
+            ),
+            "rolling_window_days": self.rolling_window_days,
+            "rolling_window_source": LOCAL_POLICY_SOURCE,
+            "rolling_tracked_print_hours": round(rolling_seconds / 3600, 4),
+            "rolling_tracked_history_days": (
+                None if history_days is None else round(history_days, 4)
+            ),
+            "rolling_tracked_print_hours_per_day": (
+                None if hours_per_day is None else round(hours_per_day, 4)
+            ),
+            "maintenance_mode": mode,
+            "maintenance_mode_reason": mode_reason,
+            "maintenance_mode_source": MANUFACTURER_SOURCE,
+            "maintenance_mode_thresholds": {
+                "heavy_use_hours_per_day_at_least": 5.0,
+                "low_use_hours_per_day_below": 1.0,
+                "minimum_history_days": self.minimum_mode_history_days,
+                "minimum_history_days_source": LOCAL_POLICY_SOURCE,
+            },
+        }
+
+    def usage_summary(
+        self, printer_id: str | None = None, *, now: datetime | None = None
+    ) -> dict[str, Any]:
         with self._connect() as connection:
             if printer_id is None:
                 baseline = connection.execute(
@@ -469,6 +715,7 @@ class PrinterIntelligenceStore:
                    FROM cloud_print_history WHERE (? IS NULL OR printer_id=?)""",
                 (printer_id, printer_id),
             ).fetchone()
+            tracked = self._tracked_runtime(connection, printer_id, now=now)
         local_hours = stats["usage_seconds"] / 3600
         effective = local_hours
         effective_provenance = "locally_observed"
@@ -497,6 +744,8 @@ class PrinterIntelligenceStore:
                     "ha_bambulab_estimate_high_water_plus_local_delta"
                 )
         return {
+            **tracked,
+            "printer_id": printer_id,
             "printer_reported_lifetime_hours": printer_latest,
             "printer_reported_lifetime_hours_available": printer_latest is not None,
             "ha_bambulab_estimated_usage_hours": ha_latest,
@@ -513,13 +762,31 @@ class PrinterIntelligenceStore:
                 "local_hours": "completed, failed, and cancelled locally observed session intervals; unknown outcomes excluded",
                 "completed_print_count": "locally observed sessions whose confirmed result is completed",
                 "cloud_hours": "sum of known cloud start/end intervals; not a lifetime counter and not added to local hours",
+                "tracked_print_hours": (
+                    "canonical deduplicated print time across local and cloud "
+                    "history; counts any known interval regardless of outcome and "
+                    "is not the printer's lifetime counter"
+                ),
             },
         }
 
     def sync_maintenance_tasks(
-        self, tasks: Sequence[MaintenanceTaskSettings], *, now: datetime
+        self,
+        tasks: Sequence[MaintenanceTaskSettings],
+        *,
+        now: datetime,
+        manufacturer_tasks: Sequence[ManufacturerMaintenanceTask] | None = None,
     ) -> None:
+        """Seed the manufacturer catalog, then apply local configuration.
+
+        Configured tasks are written last so an operator can override or
+        disable a manufacturer entry by reusing its task id.
+        """
+
         now_text = _iso(now)
+        catalog = (
+            X2D_MAINTENANCE_TASKS if manufacturer_tasks is None else manufacturer_tasks
+        )
         with self._transaction() as connection:
             # Configuration is authoritative for whether a task remains active.
             # Audit events are retained even when a task is removed or disabled.
@@ -527,75 +794,150 @@ class PrinterIntelligenceStore:
                 "UPDATE maintenance_tasks SET enabled=0, updated_at_utc=?",
                 (now_text,),
             )
-            for task in tasks:
-                values = asdict(task)
-                connection.execute(
-                    """
-                    INSERT INTO maintenance_tasks (
-                        task_id, name, description, interval_hours, warning_hours,
-                        interval_prints, warning_prints, interval_days, warning_days,
-                        due_when, notes, source, enabled, created_at_utc, updated_at_utc
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    ON CONFLICT(task_id) DO UPDATE SET
-                        name=excluded.name, description=excluded.description,
-                        interval_hours=excluded.interval_hours,
-                        warning_hours=excluded.warning_hours,
-                        interval_prints=excluded.interval_prints,
-                        warning_prints=excluded.warning_prints,
-                        interval_days=excluded.interval_days,
-                        warning_days=excluded.warning_days,
-                        due_when=excluded.due_when, notes=excluded.notes,
-                        source=excluded.source, enabled=excluded.enabled,
-                        updated_at_utc=excluded.updated_at_utc
-                    """,
-                    (
-                        values["task_id"],
-                        values["name"],
-                        values["description"],
-                        values["interval_hours"],
-                        values["warning_hours"],
-                        values["interval_prints"],
-                        values["warning_prints"],
-                        values["interval_days"],
-                        values["warning_days"],
-                        values["due_when"],
-                        values["notes"],
-                        values["source"],
-                        int(values["enabled"]),
-                        now_text,
-                        now_text,
-                    ),
+            for manufacturer_task in catalog:
+                self._upsert_task(
+                    connection,
+                    _manufacturer_task_values(manufacturer_task),
+                    now_text=now_text,
                 )
+            for task in tasks:
+                self._upsert_task(
+                    connection, _configured_task_values(task), now_text=now_text
+                )
+
+    @staticmethod
+    def _upsert_task(
+        connection: sqlite3.Connection,
+        values: Mapping[str, Any],
+        *,
+        now_text: str,
+    ) -> None:
+        connection.execute(
+            """
+            INSERT INTO maintenance_tasks (
+                task_id, name, description, interval_hours, warning_hours,
+                interval_prints, warning_prints, interval_days, warning_days,
+                due_when, notes, source, enabled, created_at_utc, updated_at_utc,
+                trigger_kind, interval_months, interval_months_low_use,
+                interval_months_normal_use, interval_months_heavy_use,
+                prerequisite_task_ids, cadence, source_url, source_revision,
+                warning_source
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                      ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id) DO UPDATE SET
+                name=excluded.name, description=excluded.description,
+                interval_hours=excluded.interval_hours,
+                warning_hours=excluded.warning_hours,
+                interval_prints=excluded.interval_prints,
+                warning_prints=excluded.warning_prints,
+                interval_days=excluded.interval_days,
+                warning_days=excluded.warning_days,
+                due_when=excluded.due_when, notes=excluded.notes,
+                source=excluded.source, enabled=excluded.enabled,
+                updated_at_utc=excluded.updated_at_utc,
+                trigger_kind=excluded.trigger_kind,
+                interval_months=excluded.interval_months,
+                interval_months_low_use=excluded.interval_months_low_use,
+                interval_months_normal_use=excluded.interval_months_normal_use,
+                interval_months_heavy_use=excluded.interval_months_heavy_use,
+                prerequisite_task_ids=excluded.prerequisite_task_ids,
+                cadence=excluded.cadence, source_url=excluded.source_url,
+                source_revision=excluded.source_revision,
+                warning_source=excluded.warning_source
+            """,
+            (
+                values["task_id"],
+                values["name"],
+                values["description"],
+                values["interval_hours"],
+                values["warning_hours"],
+                values["interval_prints"],
+                values["warning_prints"],
+                values["interval_days"],
+                values["warning_days"],
+                values["due_when"],
+                values["notes"],
+                values["source"],
+                int(values["enabled"]),
+                now_text,
+                now_text,
+                values["trigger_kind"],
+                values["interval_months"],
+                values["interval_months_low_use"],
+                values["interval_months_normal_use"],
+                values["interval_months_heavy_use"],
+                values["prerequisite_task_ids"],
+                values["cadence"],
+                values["source_url"],
+                values["source_revision"],
+                values["warning_source"],
+            ),
+        )
 
     def maintenance(
         self, printer_id: str | None = None, *, now: datetime | None = None
     ) -> dict[str, Any]:
         now = now or datetime.now(timezone.utc)
-        usage = self.usage_summary(printer_id)
+        usage = self.usage_summary(printer_id, now=now)
         with self._connect() as connection:
-            tasks = connection.execute(
-                "SELECT * FROM maintenance_tasks ORDER BY enabled DESC, name"
+            statuses, events = self._task_statuses(connection, usage, now=now)
+            alerts = connection.execute(
+                """SELECT * FROM maintenance_notification_events
+                   ORDER BY created_at_utc DESC, event_id DESC LIMIT 50"""
             ).fetchall()
-            events = connection.execute(
-                """SELECT * FROM maintenance_completion_events
-                   ORDER BY completed_at_utc DESC, event_id DESC LIMIT 200"""
-            ).fetchall()
-        events_by_task: dict[str, list[sqlite3.Row]] = {}
-        for event in events:
-            events_by_task.setdefault(str(event["task_id"]), []).append(event)
         return {
             "available": True,
             "usage": usage,
-            "tasks": [
-                _maintenance_task_status(
-                    task, events_by_task.get(str(task["task_id"]), []), usage, now
-                )
-                for task in tasks
-            ],
+            "summary": maintenance_summary(statuses, usage=usage),
+            "tasks": statuses,
             "completion_history": [_maintenance_event_dict(event) for event in events],
+            "recent_notifications": [
+                _notification_event_dict(event) for event in alerts
+            ],
+            "manufacturer_source": {
+                "source": MANUFACTURER_SOURCE,
+                "url": MANUFACTURER_SOURCE_URL,
+                "revision": MANUFACTURER_SOURCE_REVISION,
+                "retrieved_at": MANUFACTURER_SOURCE_RETRIEVED,
+            },
             "local_record_only": True,
             "printer_control": False,
         }
+
+    def _task_statuses(
+        self,
+        connection: sqlite3.Connection,
+        usage: Mapping[str, Any],
+        *,
+        now: datetime,
+    ) -> tuple[list[dict[str, Any]], list[sqlite3.Row]]:
+        tasks = connection.execute(
+            "SELECT * FROM maintenance_tasks ORDER BY enabled DESC, name"
+        ).fetchall()
+        events = connection.execute(
+            """SELECT * FROM maintenance_completion_events
+               ORDER BY completed_at_utc DESC, event_id DESC LIMIT 200"""
+        ).fetchall()
+        events_by_task: dict[str, list[sqlite3.Row]] = {}
+        for event in events:
+            events_by_task.setdefault(str(event["task_id"]), []).append(event)
+        last_completion_by_task = {
+            task_id: _datetime(rows[0]["completed_at_utc"])
+            for task_id, rows in events_by_task.items()
+            if _datetime(rows[0]["completed_at_utc"]) is not None
+        }
+        statuses = [
+            task_status(
+                task,
+                events_by_task.get(str(task["task_id"]), []),
+                usage,
+                now=now,
+                mode=str(usage.get("maintenance_mode") or "normal"),
+                last_completion_by_task=last_completion_by_task,
+            )
+            for task in tasks
+        ]
+        return statuses, events
 
     def complete_maintenance(
         self,
@@ -604,41 +946,282 @@ class PrinterIntelligenceStore:
         notes: str,
         completed_at: datetime,
         printer_id: str | None = None,
+        recorded_by: str = "dashboard_user",
     ) -> dict[str, Any]:
         if not TASK_ID_RE.fullmatch(task_id):
             raise PrinterIntelligenceError("invalid maintenance task id")
-        if len(notes) > 2000:
-            raise PrinterIntelligenceError("maintenance notes exceed 2000 characters")
-        usage = self.usage_summary(printer_id)
-        event_id = str(uuid4())
-        with self._transaction() as connection:
-            task = connection.execute(
-                "SELECT * FROM maintenance_tasks WHERE task_id=? AND enabled=1",
-                (task_id,),
-            ).fetchone()
-            if task is None:
-                raise PrinterIntelligenceError("unknown or disabled maintenance task")
-            connection.execute(
-                """INSERT INTO maintenance_completion_events (
-                       event_id, task_id, completed_at_utc,
-                       effective_usage_hours, completed_print_count, notes
-                   ) VALUES (?, ?, ?, ?, ?, ?)""",
-                (
-                    event_id,
-                    task_id,
-                    _iso(completed_at),
-                    usage["maintenance_effective_lifetime_hours"],
-                    usage["locally_observed_completed_print_count"],
-                    notes.strip(),
-                ),
-            )
+        result = self._complete(
+            [task_id],
+            notes=notes,
+            completed_at=completed_at,
+            printer_id=printer_id,
+            recorded_by=recorded_by,
+        )
+        completion = result["completions"][0]
         return {
-            "event_id": event_id,
+            "event_id": completion["event_id"],
             "task_id": task_id,
-            "completed_at": _iso(completed_at),
+            "completed_at": completion["completed_at"],
+            "notification_events": result["notification_events"],
             "local_record_only": True,
             "printer_control": False,
         }
+
+    def complete_all_maintenance(
+        self,
+        *,
+        notes: str,
+        completed_at: datetime,
+        printer_id: str | None = None,
+        recorded_by: str = "dashboard_user",
+    ) -> dict[str, Any]:
+        """Record one local completion per enabled task (baseline helper)."""
+
+        with self._connect() as connection:
+            task_ids = [
+                str(row["task_id"])
+                for row in connection.execute(
+                    "SELECT task_id FROM maintenance_tasks WHERE enabled=1 ORDER BY task_id"
+                )
+            ]
+        if not task_ids:
+            raise PrinterIntelligenceError("no enabled maintenance tasks exist")
+        result = self._complete(
+            task_ids,
+            notes=notes,
+            completed_at=completed_at,
+            printer_id=printer_id,
+            recorded_by=recorded_by,
+        )
+        return {
+            "completed_task_count": len(result["completions"]),
+            "completions": result["completions"],
+            "notification_events": result["notification_events"],
+            "local_record_only": True,
+            "printer_control": False,
+        }
+
+    def _complete(
+        self,
+        task_ids: Sequence[str],
+        *,
+        notes: str,
+        completed_at: datetime,
+        printer_id: str | None,
+        recorded_by: str,
+    ) -> dict[str, Any]:
+        if len(notes) > 2000:
+            raise PrinterIntelligenceError("maintenance notes exceed 2000 characters")
+        safe_recorded_by = str(recorded_by).strip()[:64] or "dashboard_user"
+        usage = self.usage_summary(printer_id, now=completed_at)
+        completions: list[dict[str, Any]] = []
+        with self._transaction() as connection:
+            for task_id in task_ids:
+                task = connection.execute(
+                    "SELECT * FROM maintenance_tasks WHERE task_id=? AND enabled=1",
+                    (task_id,),
+                ).fetchone()
+                if task is None:
+                    raise PrinterIntelligenceError(
+                        "unknown or disabled maintenance task"
+                    )
+                event_id = str(uuid4())
+                connection.execute(
+                    """INSERT INTO maintenance_completion_events (
+                           event_id, task_id, completed_at_utc,
+                           effective_usage_hours, completed_print_count, notes,
+                           recorded_by
+                       ) VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                    (
+                        event_id,
+                        task_id,
+                        _iso(completed_at),
+                        usage["maintenance_effective_lifetime_hours"],
+                        usage["locally_observed_completed_print_count"],
+                        notes.strip(),
+                        safe_recorded_by,
+                    ),
+                )
+                completions.append(
+                    {
+                        "event_id": event_id,
+                        "task_id": task_id,
+                        "completed_at": _iso(completed_at),
+                    }
+                )
+        # Completion resets the lifecycle, so re-evaluating here keeps the
+        # durable event log and the dashboard consistent immediately.
+        events = self.evaluate_maintenance_events(printer_id, now=completed_at)
+        return {"completions": completions, "notification_events": events}
+
+    def evaluate_maintenance_events(
+        self, printer_id: str | None = None, *, now: datetime | None = None
+    ) -> list[dict[str, Any]]:
+        """Append one durable event per genuine state transition.
+
+        Edge-triggered: repeated evaluation of an unchanged state, including
+        across a service restart, never appends a second event.
+        """
+
+        now = now or datetime.now(timezone.utc)
+        usage = self.usage_summary(printer_id, now=now)
+        created: list[dict[str, Any]] = []
+        with self._transaction() as connection:
+            statuses, _ = self._task_statuses(connection, usage, now=now)
+            observations = [
+                (
+                    f"maintenance_task:{status['maintenance_task_id']}",
+                    "maintenance_task",
+                    str(status["maintenance_task_id"]),
+                    str(status["state"]),
+                    {
+                        "name": status["name"],
+                        "cadence": status["cadence"],
+                        "next_due_at": status["next_due_at"],
+                        "remaining_days": status["remaining_days"],
+                        "trigger_kind": status["trigger_kind"],
+                        "manufacturer_source": status["manufacturer_source"],
+                    },
+                )
+                for status in statuses
+                if status["enabled"]
+            ]
+            resolved_printer_id = str(
+                usage.get("printer_id") or printer_id or "printer"
+            )
+            observations.append(
+                (
+                    f"maintenance_mode:{resolved_printer_id}",
+                    "printer",
+                    resolved_printer_id,
+                    str(usage.get("maintenance_mode") or "normal"),
+                    {
+                        "maintenance_mode_reason": usage.get("maintenance_mode_reason"),
+                        "rolling_tracked_print_hours_per_day": usage.get(
+                            "rolling_tracked_print_hours_per_day"
+                        ),
+                        "rolling_window_days": usage.get("rolling_window_days"),
+                    },
+                )
+            )
+            for subject_key, subject_type, subject_id, state, payload in observations:
+                row = connection.execute(
+                    "SELECT last_state FROM maintenance_notification_state WHERE subject_key=?",
+                    (subject_key,),
+                ).fetchone()
+                previous = None if row is None else str(row["last_state"])
+                if previous == state:
+                    continue
+                event_type = (
+                    _mode_event_type(previous, state)
+                    if subject_type == "printer"
+                    else _task_event_type(previous, state)
+                )
+                event_id = str(uuid4()) if event_type else None
+                if event_type and event_id:
+                    connection.execute(
+                        """INSERT INTO maintenance_notification_events (
+                               event_id, printer_id, subject_key, subject_type,
+                               subject_id, event_type, previous_state, new_state,
+                               created_at_utc, payload_json
+                           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                        (
+                            event_id,
+                            resolved_printer_id,
+                            subject_key,
+                            subject_type,
+                            subject_id,
+                            event_type,
+                            previous,
+                            state,
+                            _iso(now),
+                            json.dumps(payload, sort_keys=True, default=str),
+                        ),
+                    )
+                    created.append(
+                        {
+                            "event_id": event_id,
+                            "printer_id": resolved_printer_id,
+                            "subject_type": subject_type,
+                            "subject_id": subject_id,
+                            "event_type": event_type,
+                            "previous_state": previous,
+                            "new_state": state,
+                            "created_at": _iso(now),
+                            "payload": payload,
+                            "delivery_status": "pending",
+                        }
+                    )
+                connection.execute(
+                    """INSERT INTO maintenance_notification_state (
+                           subject_key, subject_type, subject_id, last_state,
+                           last_event_id, updated_at_utc
+                       ) VALUES (?, ?, ?, ?, ?, ?)
+                       ON CONFLICT(subject_key) DO UPDATE SET
+                           last_state=excluded.last_state,
+                           last_event_id=COALESCE(excluded.last_event_id, maintenance_notification_state.last_event_id),
+                           updated_at_utc=excluded.updated_at_utc""",
+                    (
+                        subject_key,
+                        subject_type,
+                        subject_id,
+                        state,
+                        event_id,
+                        _iso(now),
+                    ),
+                )
+        return created
+
+    def notification_events(
+        self,
+        *,
+        limit: int = 100,
+        pending_only: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = "SELECT * FROM maintenance_notification_events"
+        if pending_only:
+            query += " WHERE delivery_status = 'pending'"
+        query += " ORDER BY created_at_utc DESC, event_id DESC LIMIT ?"
+        with self._connect() as connection:
+            rows = connection.execute(query, (max(1, min(limit, 500)),)).fetchall()
+        return [_notification_event_dict(row) for row in rows]
+
+    def mark_notification_delivered(
+        self, event_id: str, *, delivered_at: datetime, status: str = "delivered"
+    ) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                """UPDATE maintenance_notification_events
+                   SET delivery_status=?, delivered_at_utc=? WHERE event_id=?""",
+                (str(status)[:32], _iso(delivered_at), event_id),
+            )
+
+    def dispatch_notifications(
+        self,
+        notifier: Any,
+        *,
+        now: datetime | None = None,
+        limit: int = 50,
+    ) -> int:
+        """Hand pending events to a notifier without losing undelivered state."""
+
+        now = now or datetime.now(timezone.utc)
+        delivered = 0
+        for event in reversed(self.notification_events(limit=limit, pending_only=True)):
+            try:
+                status = str(notifier.deliver(event) or "delivered")
+            except Exception:
+                # A broken transport must not abort the loop or lose the
+                # event; it stays pending and is retried next cycle.
+                LOGGER.exception(
+                    "maintenance notification delivery failed: %s", event["event_id"]
+                )
+                continue
+            self.mark_notification_delivered(
+                str(event["event_id"]), delivered_at=now, status=status
+            )
+            delivered += 1
+        return delivered
 
     def _reconcile(self, connection: sqlite3.Connection, printer_id: str) -> int:
         cloud_rows = connection.execute(
@@ -965,105 +1548,128 @@ def _cloud_metadata(row: sqlite3.Row) -> dict[str, Any]:
     }
 
 
-def _maintenance_task_status(
-    task: sqlite3.Row,
-    events: Sequence[sqlite3.Row],
-    usage: Mapping[str, Any],
-    now: datetime,
+def _manufacturer_task_values(
+    task: ManufacturerMaintenanceTask,
 ) -> dict[str, Any]:
-    last = events[0] if events else None
-    base_hours = float(last["effective_usage_hours"]) if last else 0.0
-    base_prints = int(last["completed_print_count"]) if last else 0
-    base_date = _datetime(last["completed_at_utc"] if last else task["created_at_utc"])
-    current_hours = max(
-        0.0, float(usage["maintenance_effective_lifetime_hours"]) - base_hours
-    )
-    current_prints = max(
-        0, int(usage["locally_observed_completed_print_count"]) - base_prints
-    )
-    current_days = (
-        max(0, int((now - base_date).total_seconds() // 86400)) if base_date else 0
-    )
-    metrics = []
-    for kind, current, interval, warning in (
-        (
-            "operating_hours",
-            current_hours,
-            task["interval_hours"],
-            task["warning_hours"],
-        ),
-        (
-            "completed_prints",
-            current_prints,
-            task["interval_prints"],
-            task["warning_prints"],
-        ),
-        ("calendar_days", current_days, task["interval_days"], task["warning_days"]),
-    ):
-        if interval is None:
-            continue
-        remaining = float(interval) - float(current)
-        next_due_at = None
-        if kind == "calendar_days" and base_date is not None:
-            next_due_at = _iso(base_date + timedelta(days=float(interval)))
-        metrics.append(
-            {
-                "trigger_type": kind,
-                "interval": interval,
-                "warning_threshold": warning,
-                "current_accumulated_value": round(current, 4),
-                "remaining": round(remaining, 4),
-                "next_due_value": round(
-                    (
-                        base_hours
-                        if kind == "operating_hours"
-                        else base_prints
-                        if kind == "completed_prints"
-                        else 0
-                    )
-                    + float(interval),
-                    4,
-                ),
-                "due": remaining <= 0,
-                "overdue": remaining < 0,
-                "warning": remaining > 0 and remaining <= float(warning),
-                "next_due_at": next_due_at,
-            }
-        )
-    due_flags = [bool(metric["due"]) for metric in metrics]
-    due = all(due_flags) if task["due_when"] == "all" else any(due_flags)
-    overdue_flags = [bool(metric["overdue"]) for metric in metrics]
-    overdue = all(overdue_flags) if task["due_when"] == "all" else any(overdue_flags)
-    warning = not due and any(
-        bool(metric["warning"] or metric["due"]) for metric in metrics
-    )
+    if task.trigger_kind not in TRIGGER_KINDS:
+        raise PrinterIntelligenceError("unknown maintenance trigger kind")
+    intervals = dict(task.interval_months_by_mode)
     return {
-        "maintenance_task_id": task["task_id"],
-        "name": task["name"],
-        "description": task["description"],
-        "enabled": bool(task["enabled"]),
-        "due_when": task["due_when"],
-        "state": "overdue"
-        if overdue
-        else "due"
-        if due
-        else "warning"
-        if warning
-        else "ok",
-        "due": due,
-        "overdue": overdue,
-        "warning": warning,
-        "triggers": metrics,
-        "last_completed_at": last["completed_at_utc"] if last else None,
-        "usage_hours_at_last_completion": last["effective_usage_hours"]
-        if last
-        else None,
-        "print_count_at_last_completion": last["completed_print_count"]
-        if last
-        else None,
-        "notes": task["notes"],
-        "provenance": task["source"],
-        "completion_count": len(events),
+        "task_id": task.task_id,
+        "name": task.name,
+        "description": task.description,
+        "interval_hours": None,
+        "warning_hours": 0.0,
+        "interval_prints": None,
+        "warning_prints": 0,
+        "interval_days": None,
+        "warning_days": task.warning_days,
+        "due_when": "any",
+        "notes": task.notes,
+        "source": task.source,
+        "enabled": True,
+        "trigger_kind": task.trigger_kind,
+        "interval_months": task.interval_months,
+        "interval_months_low_use": intervals.get("low_use"),
+        "interval_months_normal_use": intervals.get("normal"),
+        "interval_months_heavy_use": intervals.get("heavy_use"),
+        "prerequisite_task_ids": json.dumps(list(task.prerequisite_task_ids)),
+        "cadence": task.cadence,
+        "source_url": task.source_url,
+        "source_revision": task.source_revision,
+        # Warning lead time is a dashboard courtesy, never a Bambu Lab value.
+        "warning_source": LOCAL_POLICY_SOURCE,
+    }
+
+
+def _configured_task_values(task: MaintenanceTaskSettings) -> dict[str, Any]:
+    values = asdict(task)
+    return {
+        **values,
+        "trigger_kind": TRIGGER_THRESHOLD,
+        "interval_months": None,
+        "interval_months_low_use": None,
+        "interval_months_normal_use": None,
+        "interval_months_heavy_use": None,
+        "prerequisite_task_ids": "[]",
+        "cadence": _configured_cadence(task),
+        "source_url": "",
+        "source_revision": "",
+        "warning_source": LOCAL_POLICY_SOURCE,
+    }
+
+
+def _configured_cadence(task: MaintenanceTaskSettings) -> str:
+    parts = [
+        f"{value:g} {unit}"
+        for value, unit in (
+            (task.interval_hours, "operating hours"),
+            (task.interval_prints, "completed prints"),
+            (task.interval_days, "days"),
+        )
+        if value is not None
+    ]
+    joiner = " and " if task.due_when == "all" else " or "
+    return f"Every {joiner.join(parts)}" if parts else ""
+
+
+def _valid_interval(start: Any, end: Any) -> dict[str, Any] | None:
+    """Return a known machine-operating interval, or None when unknowable."""
+
+    start_time = _datetime(start)
+    end_time = _datetime(end)
+    if start_time is None or end_time is None or end_time < start_time:
+        return None
+    return {
+        "start": start_time,
+        "end": end_time,
+        "seconds": max(0, round((end_time - start_time).total_seconds())),
+    }
+
+
+def _overlap_seconds(
+    start: datetime, end: datetime, window_start: datetime, window_end: datetime
+) -> int:
+    first = max(start, window_start)
+    last = min(end, window_end)
+    if last <= first:
+        return 0
+    return max(0, round((last - first).total_seconds()))
+
+
+def _task_event_type(previous: str | None, state: str) -> str | None:
+    if state in TASK_STATE_EVENTS:
+        return TASK_STATE_EVENTS[state]
+    if state == STATE_OK and previous in PROBLEM_STATES:
+        return EVENT_RETURNED_TO_OK
+    return None
+
+
+def _mode_event_type(previous: str | None, state: str) -> str | None:
+    if state == MODE_HEAVY_USE:
+        return EVENT_HEAVY_USE_ENTERED
+    if previous == MODE_HEAVY_USE:
+        return EVENT_HEAVY_USE_EXITED
+    return None
+
+
+def _notification_event_dict(row: sqlite3.Row) -> dict[str, Any]:
+    try:
+        payload = json.loads(row["payload_json"])
+    except (TypeError, json.JSONDecodeError):
+        payload = {}
+    return {
+        "event_id": row["event_id"],
+        "printer_id": row["printer_id"],
+        "subject_type": row["subject_type"],
+        "subject_id": row["subject_id"],
+        "event_type": row["event_type"],
+        "previous_state": row["previous_state"],
+        "new_state": row["new_state"],
+        "created_at": row["created_at_utc"],
+        "payload": payload if isinstance(payload, dict) else {},
+        "delivery_status": row["delivery_status"],
+        "delivered_at": row["delivered_at_utc"],
     }
 
 

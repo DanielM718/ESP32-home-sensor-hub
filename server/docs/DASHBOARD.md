@@ -10,10 +10,9 @@ The top-level navigation is hash-backed and does not reload the page:
 
 - `#monitoring` contains current readings, source/range filters, a reusable
   measurement selector, and one historical chart.
-- `#bambu-printer` is a failure-isolated, read-only X2D view with current print,
-  dual toolheads, connectivity/usage provenance, AMS inventory, local
-  maintenance records, canonical print history, and selected-session SEN66
-  association.
+- `#bambu-printer` is a failure-isolated, read-only X2D view ordered Current
+  Print, Printer Usage, Maintenance, Printer/AMS details, Print History, and
+  Environmental Association.
 - `#active-monitoring` contains timed sessions, running/recent session state,
   and persistent Historical Data Export jobs.
 - `#status` contains the fixed allow-list systemd status view, node status and
@@ -67,6 +66,26 @@ Active session means are calculated from retained raw readings. Numeric sensor
 fields use arithmetic mean; battery voltage averages only battery-valid
 samples, and status flags are never averaged. A session shorter than its mean
 window produces one partial-window mean when it has data.
+
+## Printer Usage and Maintenance
+
+Printer Usage leads with **Tracked Print Time** as a single large value
+(`209 h 8 m` style) plus tracked/completed/failed counts, first and last tracked
+print, the rolling average printing hours per day, the current maintenance
+mode, and the contributing history sources. The qualifier is always shown: the
+figure is the sum of known actual print-history intervals and Bambu Cloud
+history may not represent the printer's complete lifetime. It is never labelled
+lifetime hours.
+
+Maintenance opens with an overall state, the next task and its due date, and
+counts of due-soon, due, overdue, baseline-required, and advisory tasks, plus
+the usage tier and why it applies. Each task card shows the manufacturer
+cadence verbatim, the current state, last completion, next due date, remaining
+time, source provenance with a link to the Bambu Lab wiki, and a local-only
+completion button. Tasks with no local completion history read
+`Needs a baseline` instead of appearing overdue, and condition-based tasks read
+`advisory` with no invented due date. `Mark all maintenance completed today`
+requires a confirmation dialog and only writes local audit records.
 
 ## CSV formats
 

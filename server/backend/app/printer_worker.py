@@ -24,6 +24,10 @@ from app.printer_intelligence import (
     PrinterIntelligenceError,
     PrinterIntelligenceStore,
 )
+from app.printer_maintenance import (
+    X2D_MAINTENANCE_TASKS,
+    LoggingMaintenanceNotifier,
+)
 from app.printer_model import print_session_point, printer_state_point
 from app.printer_monitoring import PrinterMonitoringCoordinator
 from app.printer_persistence import PrinterStore
@@ -46,10 +50,22 @@ def run() -> int:
         terminal_confirmations=settings.terminal_confirmations,
     )
     store.initialize()
-    intelligence = PrinterIntelligenceStore(settings.database_path)
+    intelligence = PrinterIntelligenceStore(
+        settings.database_path,
+        rolling_window_days=settings.maintenance_rolling_window_days,
+        minimum_mode_history_days=settings.maintenance_minimum_history_days,
+    )
     intelligence.initialize()
     intelligence.sync_maintenance_tasks(
-        settings.maintenance_tasks, now=datetime.now(timezone.utc)
+        settings.maintenance_tasks,
+        now=datetime.now(timezone.utc),
+        manufacturer_tasks=(
+            X2D_MAINTENANCE_TASKS if settings.manufacturer_maintenance_enabled else ()
+        ),
+    )
+    maintenance_notifier = LoggingMaintenanceNotifier()
+    last_maintenance_evaluation = (
+        time.monotonic() - settings.maintenance_evaluation_seconds
     )
     monitoring_coordinator = None
     if settings.automatic_monitoring:
@@ -144,6 +160,26 @@ def run() -> int:
                         settings.printer_id, str(exc), attempted_at=attempted_at
                     )
                     LOGGER.warning("Bambu Cloud history read unavailable: %s", exc)
+            if (
+                time.monotonic() - last_maintenance_evaluation
+                >= settings.maintenance_evaluation_seconds
+            ):
+                last_maintenance_evaluation = time.monotonic()
+                try:
+                    # Edge-triggered: unchanged states append nothing, so a
+                    # restart or a fast poll cannot repeat a notification.
+                    events = intelligence.evaluate_maintenance_events(
+                        settings.printer_id, now=state.observed_at
+                    )
+                    if events:
+                        LOGGER.info(
+                            "printer maintenance transitions recorded: %d", len(events)
+                        )
+                    intelligence.dispatch_notifications(
+                        maintenance_notifier, now=state.observed_at
+                    )
+                except Exception:
+                    LOGGER.exception("printer maintenance evaluation failed")
             try:
                 writer.write_point_data(
                     printer_state_point(state, measurement="printer_state"),

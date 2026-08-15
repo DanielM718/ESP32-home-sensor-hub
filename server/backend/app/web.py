@@ -77,6 +77,12 @@ def create_app(
         baseline_minutes=int(os.environ.get("PRINTER_BASELINE_MINUTES", "30")),
         recovery_minutes=int(os.environ.get("PRINTER_RECOVERY_MINUTES", "120")),
         raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
+        rolling_window_days=int(
+            os.environ.get("PRINTER_MAINTENANCE_ROLLING_WINDOW_DAYS", "30")
+        ),
+        minimum_mode_history_days=int(
+            os.environ.get("PRINTER_MAINTENANCE_MINIMUM_HISTORY_DAYS", "7")
+        ),
     )
     app.config["NODE_STALE_AFTER_SECONDS"] = settings.node_stale_after_seconds
     app.config["AIR_QUALITY_STALE_AFTER_SECONDS"] = (
@@ -233,9 +239,47 @@ def register_routes(app: Flask) -> None:
             raise QueryValidationError("limit must be between 1 and 500")
         return jsonify(current_app.config["PRINTER_REPOSITORY"].history(limit=limit))
 
+    @app.get("/api/printer/usage")
+    def printer_usage() -> Any:
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].usage())
+
     @app.get("/api/printer/maintenance")
     def printer_maintenance() -> Any:
         return jsonify(current_app.config["PRINTER_REPOSITORY"].maintenance())
+
+    @app.get("/api/printer/maintenance/events")
+    def printer_maintenance_events() -> Any:
+        raw_limit = request.args.get("limit", "100")
+        try:
+            limit = int(raw_limit)
+        except ValueError as exc:
+            raise QueryValidationError("limit must be an integer") from exc
+        if not 1 <= limit <= 500:
+            raise QueryValidationError("limit must be between 1 and 500")
+        pending = request.args.get("pending", "false").lower()
+        if pending not in {"true", "false"}:
+            raise QueryValidationError("pending must be true or false")
+        return jsonify(
+            current_app.config["PRINTER_REPOSITORY"].maintenance_events(
+                limit=limit, pending_only=pending == "true"
+            )
+        )
+
+    @app.post("/api/printer/maintenance/complete-all")
+    def complete_all_printer_maintenance() -> Any:
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict) or payload.get("confirm") is not True:
+            raise QueryValidationError(
+                "confirm=true is required; this records local maintenance only"
+            )
+        notes = payload.get("notes", "")
+        if not isinstance(notes, str):
+            raise QueryValidationError("notes must be a string")
+        result = current_app.config["PRINTER_REPOSITORY"].complete_all_maintenance(
+            notes=notes,
+            completed_at=datetime.now(timezone.utc),
+        )
+        return jsonify(result), 201
 
     @app.post("/api/printer/maintenance/<task_id>/complete")
     def complete_printer_maintenance(task_id: str) -> Any:
