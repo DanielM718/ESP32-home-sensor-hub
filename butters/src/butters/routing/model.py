@@ -18,6 +18,7 @@ class RoutedIntent:
     missing_arguments: tuple[str, ...] = ()
     aggregate: bool = False
     ambiguity_candidates: tuple[str, ...] = ()
+    action_plan: tuple[tuple[str, dict[str, object]], ...] = ()
 
     @property
     def matched(self) -> bool:

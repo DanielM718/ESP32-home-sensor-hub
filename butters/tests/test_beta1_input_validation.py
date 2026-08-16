@@ -61,7 +61,7 @@ def test_voice_preview_endpoint_validates_before_loading_an_engine(
         service.local_tts.engine_factory = exploding_engine
         try:
             async with client(app) as http:
-                session = await http.get("/api/session")
+                session = await http.get("/api/session", headers=admin_headers())
                 token = session.json()["csrf_token"]
                 # A raw body so the non-standard NaN/Infinity literals, which
                 # Python's json module accepts, actually reach the server.

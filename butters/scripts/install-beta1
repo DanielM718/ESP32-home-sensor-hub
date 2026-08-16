@@ -12,6 +12,7 @@ previous_dir="/opt/butters.previous"
 state_dir="/var/lib/butters"
 config_dir="/etc/butters"
 unit_name="butters-web.service"
+listener_unit_name="butters-live.service"
 enable_service=0
 start_service=0
 
@@ -41,8 +42,73 @@ normalize_application_tree() {
   find "${root}" -type f ! -perm /111 -exec chmod 0640 {} +
 }
 
+# Build the production virtualenv from the reviewed pinned requirements instead
+# of copying the developer checkout's .venv. A copied venv carries whatever the
+# developer happened to install (pytest, ruff, ad-hoc packages) into production,
+# and silently omits anything they never installed -- which is how webauthn, a
+# declared runtime dependency of the passkey ceremonies, could reach a
+# deployment missing entirely and fail closed only when someone tried to elevate.
+build_runtime_venv() {
+  local root="$1"
+  /usr/bin/python3 -m venv "${root}/.venv" \
+    || { echo "Could not create the production virtualenv." >&2; return 3; }
+  "${root}/.venv/bin/python" -m pip install \
+      --no-input --disable-pip-version-check --quiet -r "${root}/requirements.txt" \
+    || { echo "Declared runtime dependencies failed to install." >&2; return 3; }
+}
+
+# Every pinned requirement must be present at exactly its pinned version. This
+# is a post-condition on the built tree, so a partial or substituted install is
+# refused before anything is published.
+verify_runtime_dependencies() {
+  local python="$1" requirements="$2"
+  "${python}" - "${requirements}" <<'PYTHON'
+import pathlib
+import sys
+from importlib.metadata import PackageNotFoundError, version
+
+
+def pinned(path, seen):
+    """Collect name==version pins, following -r includes relative to the file."""
+
+    resolved = pathlib.Path(path).resolve()
+    if resolved in seen:
+        return {}
+    seen.add(resolved)
+    found = {}
+    for raw in resolved.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("-r "):
+            found.update(pinned(resolved.parent / line[3:].strip(), seen))
+        elif "==" in line:
+            name, _, wanted = line.partition("==")
+            found[name.strip()] = wanted.strip()
+    return found
+
+
+expected = pinned(sys.argv[1], set())
+if not expected:
+    sys.exit(f"no pinned requirements were parsed from {sys.argv[1]}")
+problems = []
+for name, wanted in sorted(expected.items()):
+    try:
+        installed = version(name)
+    except PackageNotFoundError:
+        problems.append(f"{name}=={wanted} is not installed")
+        continue
+    if installed != wanted:
+        problems.append(f"{name} is {installed}, expected {wanted}")
+if problems:
+    sys.exit("runtime dependency verification failed: " + "; ".join(problems))
+print(f"verified {len(expected)} pinned runtime dependencies")
+PYTHON
+}
+
 # Sourcing this file defines the helpers without performing an installation, so
-# the regression tests can exercise normalize_application_tree() directly.
+# the regression tests can exercise normalize_application_tree(),
+# build_runtime_venv(), and verify_runtime_dependencies() directly.
 (return 0 2>/dev/null) && return 0
 
 trap cleanup EXIT
@@ -62,7 +128,12 @@ if [[ "${EUID}" -ne 0 ]]; then
   exit 2
 fi
 command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
-[[ -x "${butters_dir}/.venv/bin/python" ]] || { echo "Butters .venv is missing" >&2; exit 2; }
+# The production interpreter is the system one, never the developer checkout's.
+[[ -x /usr/bin/python3 ]] || { echo "/usr/bin/python3 is required" >&2; exit 2; }
+/usr/bin/python3 -c 'import venv, ensurepip' 2>/dev/null \
+  || { echo "python3 venv/ensurepip are required (apt install python3-venv)" >&2; exit 2; }
+[[ -f "${butters_dir}/requirements.txt" ]] \
+  || { echo "Butters requirements.txt is missing" >&2; exit 2; }
 [[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
 
 # A production install must never ship the development authorization bypass.
@@ -91,6 +162,7 @@ rsync -a --delete \
   --exclude models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17 \
   --exclude __pycache__ \
   --exclude '*.pyc' \
+  --exclude .venv \
   "${butters_dir}/" "${staging_dir}/"
 # Freeze the snapshot before root executes anything out of it. Running as root,
 # rsync -a preserves the *source* owner, so without this the staged tree would
@@ -98,7 +170,17 @@ rsync -a --delete \
 # -h retargets the copied symlinks themselves, never their referents.
 chown -h -R root:butters "${staging_dir}"
 
-# 2. Verify the staged tree before it can ever be executed. Byte-compiling
+# 2a. Build the production virtualenv into the frozen snapshot, using the system
+#     interpreter. Root never executes an interpreter the unprivileged checkout
+#     owner could have swapped, and the resulting closure is reproducible from
+#     the reviewed pinned requirements rather than from developer state.
+build_runtime_venv "${staging_dir}" \
+  || { echo "Dependency installation failed; nothing was replaced." >&2; exit 3; }
+verify_runtime_dependencies \
+    "${staging_dir}/.venv/bin/python" "${staging_dir}/requirements.txt" \
+  || { echo "Dependency verification failed; nothing was replaced." >&2; exit 3; }
+
+# 2b. Verify the staged tree before it can ever be executed. Byte-compiling
 #    writes __pycache__ into the staging tree, so it has to finish before the
 #    tree is sealed in step 3.
 "${staging_dir}/.venv/bin/python" -m compileall -q "${staging_dir}/src" >/dev/null \
@@ -148,6 +230,13 @@ CONF
 fi
 
 install -m 0644 -o root -g root "${butters_dir}/systemd/${unit_name}" "/etc/systemd/system/${unit_name}"
+# The physical wake-word listener is installed but never enabled or started
+# here. It takes exclusive ownership of the ALSA capture device, so bringing it
+# up is a deliberate step in controlled deployment, not a side effect of
+# installing the web assistant. --enable/--start above apply to ${unit_name}
+# only.
+install -m 0644 -o root -g root "${butters_dir}/systemd/${listener_unit_name}" \
+  "/etc/systemd/system/${listener_unit_name}"
 
 systemctl daemon-reload
 if [[ "${enable_service}" == "1" ]]; then
@@ -163,3 +252,14 @@ echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then resta
 echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
 echo "Deployment values: ${config_dir}/butters.conf (set BUTTERS_ALLOWED_ORIGINS)."
 echo "State: ${state_dir} (butters:butters 0700)."
+echo "Runtime venv: ${install_dir}/.venv built from ${install_dir}/requirements.txt."
+echo
+echo "Physical wake-word listener: ${listener_unit_name} installed but NOT enabled."
+echo "It claims the ALSA capture device exclusively, so enable it deliberately:"
+echo "  sudo systemctl enable --now ${listener_unit_name}"
+echo "Microphone acceptance check (first ~30s of output):"
+echo "  journalctl -u ${listener_unit_name} -f"
+echo "  expect: 'live source=alsa input=hw:CARD=Camera,DEV=0' then '[READY] Waiting for wake word',"
+echo "  then say the wake phrase and expect '[WAKE] phrase=...' followed by [PARTIAL]/[FINAL RAW]."
+echo "  Confirm the reported rss=... MiB stays under the unit's MemoryMax."
+echo "Stop any interactive ./butters/scripts/butters-live first; only one process may own the capture device."

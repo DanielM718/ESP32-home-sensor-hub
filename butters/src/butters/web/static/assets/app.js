@@ -10,6 +10,14 @@ const partial = document.querySelector("#partial");
 const clearButton = document.querySelector("#clear-button");
 const stopAudio = document.querySelector("#stop-audio");
 const voiceOutputToggle = document.querySelector("#voice-output-toggle");
+const authButton = document.querySelector("#auth-button");
+const lockButton = document.querySelector("#lock-button");
+const actionCard = document.querySelector("#action-card");
+const actionTitle = document.querySelector("#action-title");
+const actionSummary = document.querySelector("#action-summary");
+const actionProgress = document.querySelector("#action-progress");
+const actionAuthenticate = document.querySelector("#action-authenticate");
+const actionCancel = document.querySelector("#action-cancel");
 // This is a backstop against a lost HTTP response, so it must never fire on a
 // request the service will still answer. cloud.max_wall_seconds (90s) only
 // gates entry to a tool round, so the last round starts under that budget and
@@ -54,6 +62,9 @@ let voiceSession = null;
 let voiceOutputEnabled = true;
 let pending = false;
 let currentTurn = 0;
+let pendingAction = null;
+let activeJob = null;
+let authExpiry = 0;
 
 function setState(label, key = "idle") {
   stateLabel.textContent = label;
@@ -128,6 +139,16 @@ async function readJson(response) {
   }
 }
 
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (options.method && options.method !== "GET") headers.set("X-Butters-CSRF", csrf);
+  const response = await fetch(path, {...options, headers, credentials: "same-origin"});
+  const data = await readJson(response);
+  if (!response.ok) throw new Error(data.message || "Request failed");
+  return data;
+}
+
 async function initialize() {
   try {
     const response = await fetch("/api/session", {credentials: "same-origin"});
@@ -142,6 +163,7 @@ async function initialize() {
       for (const message of data.messages) addMessage(message.role, message.text);
     }
     setState("Ready", "idle");
+    await refreshAuthStatus();
   } catch (error) {
     setState("Connection error", "error");
   }
@@ -173,6 +195,11 @@ async function sendText(text) {
     }
     addMessage("assistant", data.response_text);
     traceId = typeof data.trace_id === "string" ? data.trace_id : null;
+    if (data.pending_action && typeof data.pending_action === "object") {
+      showPendingAction(data.pending_action);
+    } else if (Array.isArray(data.jobs) && data.jobs.length) {
+      showJob(data.jobs[0]);
+    }
   } catch (error) {
     const message = error && error.name === "AbortError"
       ? "The request timed out. Please try again."
@@ -188,6 +215,170 @@ async function sendText(text) {
   }
   await playResponse(turn, traceId);
 }
+
+function decodeBase64url(value) {
+  const base64 = value.replaceAll("-", "+").replaceAll("_", "/") + "=".repeat((4 - value.length % 4) % 4);
+  const binary = atob(base64);
+  return Uint8Array.from(binary, character => character.charCodeAt(0));
+}
+
+function encodeBase64url(value) {
+  const bytes = new Uint8Array(value);
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replaceAll("=", "");
+}
+
+function authenticationOptions(value) {
+  const options = {...value, challenge: decodeBase64url(value.challenge)};
+  if (Array.isArray(value.allowCredentials)) {
+    options.allowCredentials = value.allowCredentials.map(item => ({...item, id: decodeBase64url(item.id)}));
+  }
+  return options;
+}
+
+function credentialJson(credential) {
+  return {
+    id: credential.id,
+    rawId: encodeBase64url(credential.rawId),
+    type: credential.type,
+    authenticatorAttachment: credential.authenticatorAttachment || null,
+    clientExtensionResults: credential.getClientExtensionResults(),
+    response: {
+      authenticatorData: encodeBase64url(credential.response.authenticatorData),
+      clientDataJSON: encodeBase64url(credential.response.clientDataJSON),
+      signature: encodeBase64url(credential.response.signature),
+      userHandle: credential.response.userHandle ? encodeBase64url(credential.response.userHandle) : null,
+    },
+  };
+}
+
+async function usePasskey(purpose = "elevation", pendingActionId = null, subject = null) {
+  if (!window.PublicKeyCredential || !navigator.credentials) throw new Error("Passkeys are unavailable in this browser");
+  const body = {purpose};
+  if (pendingActionId) body.pending_action_id = pendingActionId;
+  if (subject) body.subject = subject;
+  const begin = await api("/api/auth/authenticate/options", {method: "POST", body: JSON.stringify(body)});
+  const assertion = await navigator.credentials.get({publicKey: authenticationOptions(begin.publicKey)});
+  if (!assertion) throw new Error("Passkey authentication was cancelled");
+  return api("/api/auth/authenticate/verify", {
+    method: "POST",
+    body: JSON.stringify({ceremony_id: begin.ceremony_id, credential: credentialJson(assertion)}),
+  });
+}
+
+function renderAuthStatus(status) {
+  const elevated = Boolean(status && status.elevated && Number(status.remaining_seconds) > 0);
+  authExpiry = elevated ? Date.now() + Number(status.remaining_seconds) * 1000 : 0;
+  authButton.hidden = elevated;
+  lockButton.hidden = !elevated;
+  authButton.textContent = "Admin: Locked · Authenticate";
+  if (elevated) lockButton.textContent = `Admin: Elevated · ${formatRemaining(status.remaining_seconds)} · Lock Now`;
+}
+
+function formatRemaining(seconds) {
+  const remaining = Math.max(0, Math.ceil(Number(seconds) || 0));
+  return `${String(Math.floor(remaining / 60)).padStart(2, "0")}:${String(remaining % 60).padStart(2, "0")}`;
+}
+
+async function refreshAuthStatus() {
+  try {
+    renderAuthStatus(await api("/api/auth/status"));
+  } catch (_) {
+    renderAuthStatus(null);
+  }
+}
+
+function showPendingAction(plan) {
+  pendingAction = plan;
+  activeJob = null;
+  actionCard.hidden = false;
+  actionTitle.textContent = "Authentication required";
+  actionSummary.textContent = typeof plan.summary === "string" ? plan.summary : "Sensitive action";
+  actionProgress.textContent = `Requires ${String(plan.authentication || "passkey").toUpperCase()} authentication.`;
+  actionAuthenticate.hidden = false;
+  actionCancel.hidden = false;
+}
+
+function showJob(job) {
+  pendingAction = null;
+  activeJob = job;
+  actionCard.hidden = false;
+  actionAuthenticate.hidden = true;
+  actionCancel.hidden = !["queued", "running", "waiting"].includes(job.state);
+  actionTitle.textContent = "Action in progress";
+  actionSummary.textContent = job.summary || job.skill || "Sensitive action";
+  actionProgress.textContent = `${job.state} · ${job.stage || "queued"}`;
+  pollJob(job.job_id);
+}
+
+async function pollJob(jobId) {
+  if (!activeJob || activeJob.job_id !== jobId) return;
+  try {
+    const job = await api(`/api/actions/jobs/${encodeURIComponent(jobId)}`);
+    if (!activeJob || activeJob.job_id !== jobId) return;
+    activeJob = job;
+    actionProgress.textContent = `${job.state} · ${job.stage || ""}`;
+    actionCancel.hidden = !["queued", "running", "waiting"].includes(job.state);
+    if (["completed", "failed", "cancelled", "expired"].includes(job.state)) {
+      actionTitle.textContent = job.state === "completed" ? "Action completed" : "Action did not complete";
+      if (job.failure_reason) actionProgress.textContent += ` · ${job.failure_reason}`;
+      return;
+    }
+    window.setTimeout(() => pollJob(jobId), 1000);
+  } catch (error) {
+    actionTitle.textContent = "Action status unavailable";
+    actionProgress.textContent = error.message;
+  }
+}
+
+authButton.addEventListener("click", async () => {
+  authButton.disabled = true;
+  try {
+    const result = await usePasskey();
+    renderAuthStatus(result.status);
+  } catch (error) {
+    addMessage("assistant", error.message || "Passkey authentication failed safely.");
+  } finally {
+    authButton.disabled = false;
+  }
+});
+
+lockButton.addEventListener("click", async () => {
+  try {
+    renderAuthStatus(await api("/api/auth/lock", {method: "POST"}));
+  } catch (error) {
+    addMessage("assistant", error.message || "Could not lock the elevated session.");
+  }
+});
+
+actionAuthenticate.addEventListener("click", async () => {
+  if (!pendingAction) return;
+  actionAuthenticate.disabled = true;
+  try {
+    const result = await usePasskey("pending_action", pendingAction.pending_action_id);
+    renderAuthStatus(result.status);
+    if (Array.isArray(result.jobs) && result.jobs.length) showJob(result.jobs[0]);
+  } catch (error) {
+    actionProgress.textContent = error.message || "Authentication failed safely.";
+  } finally {
+    actionAuthenticate.disabled = false;
+  }
+});
+
+actionCancel.addEventListener("click", async () => {
+  try {
+    if (pendingAction) {
+      await api(`/api/actions/pending/${encodeURIComponent(pendingAction.pending_action_id)}/cancel`, {method: "POST"});
+    } else if (activeJob) {
+      await api(`/api/actions/jobs/${encodeURIComponent(activeJob.job_id)}/cancel`, {method: "POST"});
+    }
+    pendingAction = activeJob = null;
+    actionCard.hidden = true;
+  } catch (error) {
+    actionProgress.textContent = error.message || "Cancellation is unavailable.";
+  }
+});
 
 async function playResponse(turn, traceId) {
   if (!isCurrentTurn(turn)) return;
@@ -684,3 +875,10 @@ setPending(false);
 setMicActive(false);
 loadVoiceOutputPreference();
 initialize();
+window.setInterval(() => {
+  if (!authExpiry || lockButton.hidden) return;
+  const remaining = Math.max(0, Math.ceil((authExpiry - Date.now()) / 1000));
+  lockButton.textContent = `Admin: Elevated · ${formatRemaining(remaining)} · Lock Now`;
+  if (remaining === 0) renderAuthStatus(null);
+}, 1000);
+window.setInterval(refreshAuthStatus, 30000);

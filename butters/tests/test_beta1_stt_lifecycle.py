@@ -176,7 +176,9 @@ def test_repeated_websocket_turns_reuse_model_and_persist_text(tmp_path: Path) -
                 types = [item.get("type") for item in events]
                 assert "partial" in types
                 assert types.index("final") < types.index("assistant")
-                answer = next(item for item in events if item.get("type") == "assistant")
+                answer = next(
+                    item for item in events if item.get("type") == "assistant"
+                )
                 assert "42" in str(answer["response_text"])
 
             voice_traces = [
@@ -213,6 +215,7 @@ def test_repeated_websocket_turns_reuse_model_and_persist_text(tmp_path: Path) -
                     "/api/session",
                     headers={
                         "cookie": f"butters_session={session.session_id}",
+                        "tailscale-user-login": "voice@example.com",
                     },
                 )
             assert restored.status_code == 200
@@ -286,7 +289,9 @@ def test_stt_failure_discards_native_engine_and_next_turn_recovers(
             stt_engine_factory=factory,
         )
         first_session = service.sessions.create(peer_key="identity:failure@example.com")
-        second_session = service.sessions.create(peer_key="identity:recovery@example.com")
+        second_session = service.sessions.create(
+            peer_key="identity:recovery@example.com"
+        )
         try:
             failed = await _voice_turn(
                 app,

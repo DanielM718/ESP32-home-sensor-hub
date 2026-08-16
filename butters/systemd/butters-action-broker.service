@@ -1,0 +1,24 @@
+[Unit]
+Description=Butters privileged enumerated action broker
+After=network-online.target
+Requires=butters-action-broker.socket
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/butters
+Environment=PYTHONPATH=/opt/butters/src
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/butters/.venv/bin/python -m butters.actions.broker_main --config /etc/butters/action-broker.toml
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+UMask=0077

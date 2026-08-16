@@ -1,0 +1,13 @@
+[Unit]
+Description=Butters privileged action broker socket
+
+[Socket]
+ListenStream=/run/butters-action-broker/broker.sock
+SocketUser=butters
+SocketGroup=butters
+SocketMode=0600
+DirectoryMode=0700
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

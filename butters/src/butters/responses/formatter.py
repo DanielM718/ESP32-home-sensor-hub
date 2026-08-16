@@ -10,6 +10,7 @@ from butters.skills.model import (
     CurrentPrintResult,
     LastPrintResult,
     PrintEnvironmentResult,
+    PrinterMaintenanceEventsResult,
     PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
@@ -21,6 +22,7 @@ from butters.skills.model import (
     SensorValuesResult,
     ServerHealthResult,
     SkillExecution,
+    StructuredSkillResult,
 )
 
 
@@ -55,10 +57,14 @@ class ResponseFormatter:
             return self._printer_usage(result)
         if isinstance(result, PrinterMaintenanceResult):
             return self._printer_maintenance(result)
+        if isinstance(result, PrinterMaintenanceEventsResult):
+            return self._printer_maintenance_events(result)
         if isinstance(result, LastPrintResult):
             return self._last_print(result)
         if isinstance(result, ReadOnlyObservationResult):
             return self._observation(result)
+        if isinstance(result, StructuredSkillResult):
+            return self._structured(result)
         return "The read-only skill returned no usable result."
 
     @staticmethod
@@ -317,20 +323,18 @@ class ResponseFormatter:
     @staticmethod
     def _printer_usage(result: PrinterUsageResult) -> str:
         usage = result.intelligence.usage
-        local_hours = _number(usage.get("locally_observed_print_hours")) or 0.0
-        completed = _integer(usage.get("locally_observed_completed_print_count")) or 0
-        effective = _number(usage.get("maintenance_effective_lifetime_hours"))
+        tracked_hours = _number(usage.get("tracked_print_hours")) or 0.0
+        tracked_jobs = _integer(usage.get("tracked_job_count")) or 0
         text = (
-            f"The printer has {local_hours:.1f} locally observed print hours and "
-            f"{completed} locally observed completed prints."
+            f"Tracked Print Time is {tracked_hours:.1f} hours across "
+            f"{tracked_jobs} prints with known actual intervals."
         )
-        reported = _number(usage.get("printer_reported_lifetime_hours"))
-        if reported is None:
-            text += " The X2D integration does not expose a printer-reported lifetime counter."
-        else:
-            text += f" The printer-reported lifetime value is {reported:.1f} hours."
-        if effective is not None:
-            text += f" The local maintenance position is {effective:.1f} hours."
+        if usage.get("tracked_history_complete") is False:
+            text += " The tracked history is incomplete, so this is not lifetime usage."
+        daily = _number(usage.get("rolling_tracked_print_hours_per_day"))
+        mode = _text(usage.get("maintenance_mode"))
+        if daily is not None and mode is not None:
+            text += f" Recent use averages {daily:.1f} hours per day ({mode.replace('_', ' ')})."
         return text
 
     @staticmethod
@@ -340,27 +344,52 @@ class ResponseFormatter:
             for task in result.intelligence.maintenance_tasks
             if task.get("enabled") is True
         ]
-        overdue = [
-            str(task.get("name")) for task in enabled if task.get("overdue") is True
+        names = lambda state: [
+            str(task.get("name")) for task in enabled if task.get("state") == state
         ]
-        warning = [
-            str(task.get("name")) for task in enabled if task.get("warning") is True
-        ]
+        overdue = names("overdue")
+        due = names("due")
+        due_soon = names("due_soon")
+        baseline = names("baseline_required")
+        advisory = names("advisory")
         if overdue:
             text = f"Overdue printer maintenance: {', '.join(overdue)}."
-        elif warning:
+        elif due:
+            text = f"Printer maintenance is due: {', '.join(due)}."
+        elif due_soon:
+            text = f"Printer maintenance is coming due soon: {', '.join(due_soon)}."
+        elif baseline:
             text = (
-                f"Printer maintenance approaching its reminder: {', '.join(warning)}."
+                "Maintenance baseline has not been recorded yet for "
+                f"{', '.join(baseline)}. These items are not due or overdue."
             )
+        elif advisory:
+            text = f"Manufacturer inspection advisories: {', '.join(advisory)}."
         elif enabled:
-            text = f"All {len(enabled)} configured printer maintenance tasks are currently within their local intervals."
+            text = f"All {len(enabled)} printer maintenance tasks are currently OK."
         else:
             text = "No printer maintenance tasks are configured."
+        if baseline and not text.startswith("Maintenance baseline"):
+            text += (
+                " Maintenance baseline has not been recorded yet for "
+                f"{', '.join(baseline)}; those items are not due or overdue."
+            )
         completions = result.intelligence.completion_history
         if completions:
             latest = completions[0]
             text += f" The last recorded service was {latest.get('completed_at', 'at an unknown time')}."
         return text
+
+    @staticmethod
+    def _printer_maintenance_events(
+        result: PrinterMaintenanceEventsResult,
+    ) -> str:
+        if not result.events:
+            return "No recent printer maintenance events are recorded."
+        latest = result.events[0]
+        event_type = str(latest.get("event_type") or "unknown").replace("_", " ")
+        created = str(latest.get("created_at") or "an unknown time")
+        return f"Latest printer maintenance event: {event_type}, recorded {created}."
 
     @staticmethod
     def _last_print(result: LastPrintResult) -> str:
@@ -385,7 +414,9 @@ class ResponseFormatter:
     @staticmethod
     def _observation(result: ReadOnlyObservationResult) -> str:
         if result.error_code:
-            return f"{result.name.replace('_', ' ')} is unavailable: {result.error_code}."
+            return (
+                f"{result.name.replace('_', ' ')} is unavailable: {result.error_code}."
+            )
         summaries = result.values.get("metric_summaries")
         if isinstance(summaries, dict) and summaries:
             field, raw = next(iter(summaries.items()))
@@ -395,10 +426,14 @@ class ResponseFormatter:
                     f"ranged from {raw.get('minimum')} to {raw.get('maximum')}, "
                     f"with mean {raw.get('mean')} and a {raw.get('trend', 'unknown')} trend."
                 )
-        if result.name == "project_status" and isinstance(result.values.get("output"), str):
+        if result.name == "project_status" and isinstance(
+            result.values.get("output"), str
+        ):
             output = str(result.values["output"])
             return f"Project {result.values.get('view', 'status')}: {output[:500]}"
-        text = json.dumps(result.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        text = json.dumps(
+            result.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
         if len(text) > 500:
             text = text[:497] + "..."
         return f"{result.name.replace('_', ' ')} status is {result.status}: {text}."
@@ -412,6 +447,37 @@ class ResponseFormatter:
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
         return "The read-only request could not be completed."
+
+    @staticmethod
+    def _structured(result: StructuredSkillResult) -> str:
+        data = result.data
+        if result.kind == "desktop_status":
+            if not data.get("network_reachable"):
+                return "The desktop is not reachable on the network."
+            if not data.get("ssh_ready"):
+                return (
+                    "The desktop is reachable, but remote management is not ready yet."
+                )
+            if data.get("parsec_ready") is True:
+                return "The desktop is reachable, remote management is ready, and Parsec is ready."
+            return "The desktop and remote management are ready. Parsec readiness is not independently observable."
+        if result.kind == "desktop_remote_session":
+            if data.get("failed_stage"):
+                return f"The desktop remote-session workflow stopped at {str(data['failed_stage']).replace('_', ' ')}."
+            if data.get("parsec_ready") is True:
+                return "The desktop is on and the fixed Parsec remote-session workflow is ready."
+            return "The fixed desktop remote-mode workflow was requested, but Parsec readiness is not independently observable."
+        if result.kind in {
+            "print_environment_analysis",
+            "print_environment_comparison",
+        }:
+            if not data.get("available", True):
+                unknown = data.get("unknown", ["required evidence"])
+                return f"I couldn't complete the print analysis because {', '.join(str(item) for item in unknown)} is unavailable."
+            return "I gathered and calculated the bounded print-environment evidence. Cloud reasoning is needed for a qualified interpretation."
+        if result.kind == "sensor_window_summary":
+            return f"I calculated local statistics from {data.get('sample_count', 0)} bounded sensor samples."
+        return f"The {result.kind.replace('_', ' ')} skill completed with bounded structured data."
 
 
 def _joined(parts: list[str]) -> str:

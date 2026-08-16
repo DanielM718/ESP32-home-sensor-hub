@@ -56,6 +56,53 @@ class IntentRouter:
         normalized = normalize_request(text)
         if not normalized:
             return self._unsupported(normalized, "I didn't hear a request.")
+        environment_action = self._environment_action(normalized)
+        if self._desktop_remote_action(normalized) and environment_action is not None:
+            environment_skill, environment_arguments = environment_action
+            return RoutedIntent(
+                "matched",
+                normalized,
+                "start_remote_desktop_session",
+                {"machine": "desktop"},
+                confidence=1.0,
+                action_plan=(
+                    ("start_remote_desktop_session", {"machine": "desktop"}),
+                    (environment_skill, environment_arguments),
+                ),
+            )
+        if self._desktop_remote_action(normalized):
+            return self._matched(
+                normalized,
+                "start_remote_desktop_session",
+                {"machine": "desktop"},
+                1.0,
+            )
+        desktop_action = self._desktop_action(normalized)
+        if desktop_action is not None:
+            return self._matched(
+                normalized,
+                desktop_action,
+                {"machine": "desktop"},
+                1.0,
+            )
+        if self._desktop_status_request(normalized):
+            return self._matched(
+                normalized, "get_desktop_status", {"machine": "desktop"}, 0.99
+            )
+        if environment_action is not None:
+            skill, arguments = environment_action
+            return self._matched(normalized, skill, arguments, 1.0)
+        fixed_action = self._fixed_action(normalized)
+        if fixed_action is not None:
+            return self._matched(normalized, fixed_action, {}, 1.0)
+        status_skill = self._capability_status_request(normalized)
+        if status_skill is not None:
+            return self._matched(normalized, status_skill, {}, 0.99)
+        print_analysis = self._print_analysis_request(normalized)
+        if print_analysis is not None:
+            return self._matched(
+                normalized, "analyze_print_environment", print_analysis, 0.98
+            )
         control = self._control_rejection(normalized)
         if control is not None:
             return control
@@ -121,6 +168,26 @@ class IntentRouter:
             resolution.candidates if len(resolution.candidates) > 1 else ()
         )
 
+        # "Baseline" is also a sensor-history term, so preserve the explicit
+        # maintenance phrase before evaluating history windows.
+        if "maintenance" in normalized.split() and contains_phrase(
+            normalized, "baseline required"
+        ):
+            printer_or_result = self._require_printer(
+                normalized,
+                entity,
+                skill="get_printer_maintenance",
+                candidates=entity_candidates,
+            )
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_printer_maintenance",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
         history_range = self._history_range(normalized)
         if history_range is not None:
             entity_or_result = self._require_entity(
@@ -185,6 +252,22 @@ class IntentRouter:
             return self._matched(
                 normalized,
                 "get_print_environment_summary",
+                {"entity": printer_or_result.entity_id},
+                0.98,
+            )
+
+        if self._printer_maintenance_events_request(normalized):
+            printer_or_result = self._require_printer(
+                normalized,
+                entity,
+                skill="get_printer_maintenance_events",
+                candidates=entity_candidates,
+            )
+            if isinstance(printer_or_result, RoutedIntent):
+                return printer_or_result
+            return self._matched(
+                normalized,
+                "get_printer_maintenance_events",
                 {"entity": printer_or_result.entity_id},
                 0.98,
             )
@@ -402,9 +485,7 @@ class IntentRouter:
             if entity.sensor_type not in metric.sensor_types
         )
         if unsupported:
-            names = _joined_names(
-                tuple(metric.display_name for metric in unsupported)
-            )
+            names = _joined_names(tuple(metric.display_name for metric in unsupported))
             return self._unsupported(
                 normalized,
                 f"{entity.display_name} does not provide {names}.",
@@ -443,9 +524,7 @@ class IntentRouter:
                     arguments=dict(pending.arguments),
                     missing_arguments=("entity",),
                     aggregate=pending.aggregate,
-                    ambiguity_candidates=tuple(
-                        item.entity_id for item in candidates
-                    )
+                    ambiguity_candidates=tuple(item.entity_id for item in candidates)
                     or pending.ambiguity_candidates,
                 )
             if (
@@ -528,8 +607,7 @@ class IntentRouter:
                     ambiguity_candidates=pending.ambiguity_candidates,
                 )
             if pending.ambiguity_candidates and any(
-                item.metric_id not in pending.ambiguity_candidates
-                for item in requested
+                item.metric_id not in pending.ambiguity_candidates for item in requested
             ):
                 candidates = tuple(
                     self.metrics.require(metric_id)
@@ -544,12 +622,16 @@ class IntentRouter:
                     ambiguity_candidates=pending.ambiguity_candidates,
                 )
             entity_id = pending.arguments.get("entity")
-            entity = self.entities.get(entity_id) if isinstance(entity_id, str) else None
+            entity = (
+                self.entities.get(entity_id) if isinstance(entity_id, str) else None
+            )
             if entity is None:
                 return self._clarification(
                     normalized,
                     "Which sensor did you mean?",
-                    skill="get_sensor_values" if len(requested) > 1 else "get_sensor_value",
+                    skill="get_sensor_values"
+                    if len(requested) > 1
+                    else "get_sensor_value",
                     arguments=(
                         {"metrics": [item.metric_id for item in requested]}
                         if len(requested) > 1
@@ -606,10 +688,16 @@ class IntentRouter:
         mappings = (
             ("uptime", ("uptime", "how long has the pi", "how long has the server")),
             ("load", ("load average", "server load", "pi load", "cpu load")),
-            ("memory", ("memory usage", "available memory", "server memory", "pi memory")),
+            (
+                "memory",
+                ("memory usage", "available memory", "server memory", "pi memory"),
+            ),
             ("swap", ("swap usage", "swap status", "zram")),
             ("disk", ("disk usage", "disk space", "free disk", "root filesystem")),
-            ("temperature", ("cpu temperature", "pi temperature", "server temperature")),
+            (
+                "temperature",
+                ("cpu temperature", "pi temperature", "server temperature"),
+            ),
             ("throttle", ("throttle status", "throttled", "undervoltage")),
             ("failed_units", ("failed units", "failed services", "services failed")),
         )
@@ -624,7 +712,15 @@ class IntentRouter:
         # standing in for the health question word "up".
         if not any(
             contains_phrase(text, word)
-            for word in ("health", "healthy", "status", "running", "reachable", "working", "up")
+            for word in (
+                "health",
+                "healthy",
+                "status",
+                "running",
+                "reachable",
+                "working",
+                "up",
+            )
         ):
             return None
         mappings = (
@@ -656,11 +752,22 @@ class IntentRouter:
 
     @staticmethod
     def _project_observation(text: str) -> str | None:
-        if any(phrase in text for phrase in ("repo dirty", "repository dirty", "git status", "repo status")):
+        if any(
+            phrase in text
+            for phrase in (
+                "repo dirty",
+                "repository dirty",
+                "git status",
+                "repo status",
+            )
+        ):
             return "status"
         if any(phrase in text for phrase in ("current branch", "git branch")):
             return "branch"
-        if any(phrase in text for phrase in ("base commit", "current commit", "git commit are we on")):
+        if any(
+            phrase in text
+            for phrase in ("base commit", "current commit", "git commit are we on")
+        ):
             return "base_commit"
         if any(phrase in text for phrase in ("recent commits", "git history")):
             return "recent_commits"
@@ -687,9 +794,15 @@ class IntentRouter:
         )
         if not historical:
             return None
-        if any(phrase in text for phrase in ("7 day", "seven day", "past week", "last week")):
+        if any(
+            phrase in text
+            for phrase in ("7 day", "seven day", "past week", "last week")
+        ):
             return "7d"
-        if any(phrase in text for phrase in ("1 hour", "one hour", "past hour", "last hour")):
+        if any(
+            phrase in text
+            for phrase in ("1 hour", "one hour", "past hour", "last hour")
+        ):
             return "1h"
         return "24h"
 
@@ -711,8 +824,10 @@ class IntentRouter:
             return False
         words = set(text.split())
         aggregate = bool(words & {"reading", "readings"})
-        aggregate = aggregate or contains_phrase(text, "sensor data") or contains_phrase(
-            text, "sensor values"
+        aggregate = (
+            aggregate
+            or contains_phrase(text, "sensor data")
+            or contains_phrase(text, "sensor values")
         )
         if words & {"everything"} and words & {
             "measuring",
@@ -849,6 +964,213 @@ class IntentRouter:
         )
         return print_context and environment
 
+    def _print_analysis_request(self, text: str) -> dict[str, object] | None:
+        print_context = any(
+            phrase in text
+            for phrase in (
+                "this print",
+                "current print",
+                "print started",
+                "during the print",
+                "printer caused",
+                "printer affected",
+                "printer room air quality changed",
+                "environmental impact",
+            )
+        )
+        analytical = any(
+            phrase in text
+            for phrase in (
+                "changed",
+                "change",
+                "compare",
+                "affected",
+                "impact",
+                "causing",
+                "caused",
+                "increase",
+                "most",
+                "since",
+                "heat",
+                "heated",
+                "warmer",
+            )
+        )
+        if not (print_context and analytical):
+            return None
+        requested = tuple(
+            metric.metric_id
+            for metric in self.metrics.resolve(text)
+            if metric.metric_id
+            in {
+                "temperature",
+                "humidity",
+                "co2",
+                "pm1",
+                "pm25",
+                "pm4",
+                "pm10",
+                "voc_index",
+                "nox_index",
+            }
+        )
+        if not requested or any(
+            phrase in text
+            for phrase in ("air quality", "environmental impact", "which measurement")
+        ):
+            requested = (
+                "temperature",
+                "humidity",
+                "co2",
+                "pm1",
+                "pm25",
+                "pm4",
+                "pm10",
+                "voc_index",
+                "nox_index",
+            )
+        if any(word in text for word in ("heat", "heated", "warmer")):
+            requested = ("temperature",)
+        selector = (
+            "current_vs_previous"
+            if "previous print" in text
+            and any(word in text for word in ("compare", "larger", "impact"))
+            else "previous"
+            if "previous print" in text or "last print" in text
+            else "current"
+        )
+        return {
+            "printer": "x2d",
+            "environment": "printer_room",
+            "metrics": list(requested),
+            "print_selector": selector,
+            "baseline_minutes": 60 if "hour before" in text else None,
+        }
+
+    @staticmethod
+    def _desktop_remote_action(text: str) -> bool:
+        if "prepare my computer" in text:
+            return True
+        wake = any(
+            phrase in text
+            for phrase in (
+                "turn on my computer",
+                "wake my computer",
+                "wake the desktop",
+            )
+        )
+        return wake and any(word in text for word in ("parsec", "remote"))
+
+    @staticmethod
+    def _desktop_status_request(text: str) -> bool:
+        return any(word in text for word in ("computer", "desktop")) and any(
+            phrase in text
+            for phrase in (
+                "ready for parsec",
+                "parsec ready",
+                "computer status",
+                "desktop status",
+                "computer online",
+                "desktop online",
+            )
+        )
+
+    @staticmethod
+    def _desktop_action(text: str) -> str | None:
+        mappings = (
+            (
+                ("wake my desktop", "wake the desktop", "turn on my computer"),
+                "wake_desktop",
+            ),
+            (
+                ("restore local desktop", "restore local display", "exit remote mode"),
+                "restore_local_desktop_session",
+            ),
+            (("lock my desktop", "lock the desktop"), "lock_desktop"),
+            (("sleep my desktop", "sleep the desktop"), "sleep_desktop"),
+            (("restart my desktop", "restart the desktop"), "restart_desktop"),
+            (
+                (
+                    "shut down my desktop",
+                    "shutdown my desktop",
+                    "shut down the desktop",
+                ),
+                "shutdown_desktop",
+            ),
+        )
+        for phrases, skill in mappings:
+            if any(phrase in text for phrase in phrases):
+                return skill
+        return None
+
+    @staticmethod
+    def _environment_action(text: str) -> tuple[str, dict[str, object]] | None:
+        device = next(
+            (
+                name
+                for name in ("heater", "dehumidifier", "ventilation")
+                if name in text
+            ),
+            None,
+        )
+        if device is None:
+            return None
+        if not any(
+            phrase in text
+            for phrase in ("turn on", "switch on", "turn off", "switch off")
+        ):
+            return None
+        state = (
+            "off"
+            if any(phrase in text for phrase in ("turn off", "switch off"))
+            else "on"
+        )
+        match = re.search(r"\bfor\s+(\d{1,4})\s+(?:minute|minutes|min)\b", text)
+        duration = int(match.group(1)) if match else None
+        return f"set_{device}", {"state": state, "duration_minutes": duration}
+
+    @staticmethod
+    def _fixed_action(text: str) -> str | None:
+        mappings = (
+            (("wake my nas", "wake the nas", "turn on my nas"), "wake_nas"),
+            (("restart butters", "restart butters service"), "restart_butters_service"),
+            (("reboot butters host", "reboot the pi"), "reboot_butters_host"),
+            (
+                ("shut down butters host", "shutdown butters host", "shut down the pi"),
+                "shutdown_butters_host",
+            ),
+        )
+        for phrases, skill in mappings:
+            if any(phrase in text for phrase in phrases):
+                return skill
+        return None
+
+    @staticmethod
+    def _capability_status_request(text: str) -> str | None:
+        if "environment control" in text or any(
+            phrase in text
+            for phrase in ("heater status", "dehumidifier status", "ventilation status")
+        ):
+            return "get_environment_control_status"
+        if any(phrase in text for phrase in ("nas status", "is my nas online")):
+            return "get_nas_status"
+        if "action broker" in text:
+            return "get_action_broker_status"
+        if any(
+            phrase in text
+            for phrase in ("butters service status", "is butters running")
+        ):
+            return "get_butters_service_status"
+        if any(phrase in text for phrase in ("storage status", "disk space")):
+            return "get_storage_status"
+        if any(
+            phrase in text for phrase in ("dependency health", "network service health")
+        ):
+            return "get_network_service_health"
+        if any(phrase in text for phrase in ("butters host status", "pi status")):
+            return "get_butters_host_status"
+        return None
+
     @staticmethod
     def _printer_temperature_request(text: str) -> bool:
         component = any(
@@ -873,9 +1195,23 @@ class IntentRouter:
                 "printer run",
                 "how many prints",
                 "print count",
+                "how much has my printer printed",
+                "how heavily have i been using the printer",
+                "printer usage",
             )
         )
         return printer_context and usage
+
+    @staticmethod
+    def _printer_maintenance_events_request(text: str) -> bool:
+        return any(
+            contains_phrase(text, phrase)
+            for phrase in (
+                "maintenance events",
+                "maintenance notifications",
+                "maintenance alerts",
+            )
+        )
 
     @staticmethod
     def _printer_maintenance_request(text: str) -> bool:
@@ -996,9 +1332,7 @@ class IntentRouter:
             ),
         )
 
-    def _entity_question(
-        self, normalized: str, candidates: tuple[Entity, ...]
-    ) -> str:
+    def _entity_question(self, normalized: str, candidates: tuple[Entity, ...]) -> str:
         if candidates:
             names = _joined_names(tuple(item.display_name for item in candidates))
             return f"Which sensor did you mean: {names}?"
@@ -1012,32 +1346,43 @@ class IntentRouter:
         skill: str | None,
         arguments: dict[str, object],
     ) -> str | None:
-        if skill in {
-            "get_sensor_value",
-            "get_sensor_values",
-            "get_sensor_history_summary",
-            "get_sensor_last_seen",
-            "get_sensor_status",
-        } and entity.sensor_type == "printer":
+        if (
+            skill
+            in {
+                "get_sensor_value",
+                "get_sensor_values",
+                "get_sensor_history_summary",
+                "get_sensor_last_seen",
+                "get_sensor_status",
+            }
+            and entity.sensor_type == "printer"
+        ):
             return f"{entity.display_name} needs a printer-specific question."
         if skill == "get_room_air_quality" and entity.sensor_type != "air_quality":
             return f"{entity.display_name} is not an air-quality station."
-        if skill in {
-            "get_printer_status",
-            "get_printer_temperatures",
-            "get_printer_usage",
-            "get_printer_maintenance",
-            "get_current_print",
-            "get_last_print",
-            "get_print_environment_summary",
-        } and entity.sensor_type != "printer":
+        if (
+            skill
+            in {
+                "get_printer_status",
+                "get_printer_temperatures",
+                "get_printer_usage",
+                "get_printer_maintenance",
+                "get_printer_maintenance_events",
+                "get_current_print",
+                "get_last_print",
+                "get_print_environment_summary",
+            }
+            and entity.sensor_type != "printer"
+        ):
             return f"{entity.display_name} is not a printer."
         metric_ids: tuple[str, ...] = ()
         metric = arguments.get("metric")
         metrics = arguments.get("metrics")
         if isinstance(metric, str):
             metric_ids = (metric,)
-        elif isinstance(metrics, list) and all(isinstance(item, str) for item in metrics):
+        elif isinstance(metrics, list) and all(
+            isinstance(item, str) for item in metrics
+        ):
             metric_ids = tuple(metrics)
         unsupported = tuple(
             self.metrics.require(metric_id)

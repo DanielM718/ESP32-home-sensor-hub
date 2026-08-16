@@ -283,9 +283,7 @@ def test_metric_without_location_is_explicitly_incomplete(router: IntentRouter) 
 
 
 def test_benign_fillers_do_not_change_router_meaning(router: IntentRouter) -> None:
-    route = router.route(
-        "what is the uh carbon dioxide level in the printer room"
-    )
+    route = router.route("what is the uh carbon dioxide level in the printer room")
 
     assert route.matched
     assert route.arguments == {"entity": "printer_room", "metric": "co2"}
@@ -297,7 +295,6 @@ def test_benign_fillers_do_not_change_router_meaning(router: IntentRouter) -> No
     [
         "turn on the printer exhaust",
         "restart influxdb",
-        "wake my desktop",
         "set the humidity to twenty",
     ],
 )
@@ -308,6 +305,16 @@ def test_control_requests_are_explicitly_unsupported(
 
     assert route.status == "unsupported"
     assert "read-only" in (route.message or "")
+
+
+def test_wake_desktop_routes_to_the_registered_bounded_action(
+    router: IntentRouter,
+) -> None:
+    route = router.route("wake my desktop")
+
+    assert route.matched
+    assert route.skill == "wake_desktop"
+    assert route.arguments == {"machine": "desktop"}
 
 
 def test_unknown_complex_request_remains_unresolved(router: IntentRouter) -> None:

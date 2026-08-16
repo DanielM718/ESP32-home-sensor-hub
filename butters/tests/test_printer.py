@@ -23,6 +23,7 @@ from butters.skills.model import (
     CurrentPrintResult,
     LastPrintResult,
     PrintEnvironmentResult,
+    PrinterMaintenanceEventsResult,
     PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
@@ -87,13 +88,23 @@ class Printers:
     def intelligence(self) -> PrinterIntelligenceSnapshot:
         return PrinterIntelligenceSnapshot(
             usage={
-                "locally_observed_print_hours": 12.5,
-                "locally_observed_completed_print_count": 8,
-                "printer_reported_lifetime_hours": None,
-                "maintenance_effective_lifetime_hours": 12.5,
+                "tracked_print_seconds": 45_000,
+                "tracked_print_hours": 12.5,
+                "tracked_job_count": 8,
+                "tracked_history_complete": False,
+                "rolling_tracked_print_hours_per_day": 2.5,
+                "maintenance_mode": "normal",
+                "maintenance_mode_reason": "tracked_average_between_thresholds",
             },
             maintenance_tasks=(
-                {"name": "User inspection", "enabled": True, "overdue": True},
+                {
+                    "maintenance_task_id": "x2d_xy_axis_clean_lubricate",
+                    "name": "XY axis cleaning",
+                    "enabled": True,
+                    "state": "overdue",
+                    "overdue": True,
+                    "warning": False,
+                },
             ),
             completion_history=({"completed_at": "2026-08-01T12:00:00Z"},),
             print_history=(
@@ -104,7 +115,23 @@ class Printers:
                     "source": "locally_observed",
                 },
             ),
+            maintenance_summary={"overdue_count": 1},
+            maintenance_notifications=(
+                {
+                    "event_type": "maintenance_overdue",
+                    "created_at": "2026-08-15T12:00:00Z",
+                },
+            ),
         )
+
+    def usage(self) -> dict[str, object]:
+        return self.intelligence().usage
+
+    def maintenance(self) -> PrinterIntelligenceSnapshot:
+        return self.intelligence()
+
+    def maintenance_events(self, limit: int):
+        return self.intelligence().maintenance_notifications[:limit]
 
 
 class Sensors:
@@ -151,8 +178,17 @@ def _registry(printer: Printers | None = None):
         ),
         ("how many hours has the printer run", "get_printer_usage"),
         ("how many prints has the X2D done", "get_printer_usage"),
+        ("how much has my printer printed", "get_printer_usage"),
+        ("how heavily have I been using the printer", "get_printer_usage"),
         ("what printer maintenance is overdue", "get_printer_maintenance"),
+        ("what maintenance is coming up", "get_printer_maintenance"),
+        ("does my printer need maintenance", "get_printer_maintenance"),
+        (
+            "why does this maintenance item say baseline required",
+            "get_printer_maintenance",
+        ),
         ("when was the printer last serviced", "get_printer_maintenance"),
+        ("show printer maintenance events", "get_printer_maintenance_events"),
         ("how long was the last print", "get_last_print"),
     ),
 )
@@ -202,12 +238,17 @@ def test_printer_skills_return_typed_results() -> None:
         "get_print_environment_summary": PrintEnvironmentResult,
         "get_printer_usage": PrinterUsageResult,
         "get_printer_maintenance": PrinterMaintenanceResult,
+        "get_printer_maintenance_events": PrinterMaintenanceEventsResult,
         "get_last_print": LastPrintResult,
     }
     for name, result_type in expected.items():
         execution = registry.execute(name, {"entity": "x2d"})
         assert execution.ok
         assert isinstance(execution.result, result_type)
+        if isinstance(execution.result, PrinterUsageResult):
+            assert execution.result.intelligence.print_history == ()
+        if isinstance(execution.result, PrinterMaintenanceEventsResult):
+            assert len(execution.result.events) <= 20
 
 
 def test_unknown_printer_and_generic_sensor_skill_are_default_denied() -> None:
@@ -228,6 +269,7 @@ def test_no_printer_control_skill_is_registered() -> None:
         "get_print_environment_summary",
         "get_printer_usage",
         "get_printer_maintenance",
+        "get_printer_maintenance_events",
         "get_last_print",
     }
     assert names.isdisjoint(
@@ -295,9 +337,44 @@ def test_dashboard_printer_adapter_parses_current_and_environment_payloads() -> 
             "voc_recovery_seconds": 300,
         },
         "/api/printer/maintenance": {
-            "usage": {"locally_observed_print_hours": 12.5},
-            "tasks": [],
+            "usage": {"tracked_print_hours": 12.5},
+            "summary": {"baseline_required_count": 1},
+            "tasks": [
+                {
+                    "maintenance_task_id": "camera",
+                    "name": "Camera cleaning",
+                    "state": "baseline_required",
+                    "baseline_required": True,
+                    "warning": False,
+                }
+            ],
             "completion_history": [],
+            "recent_notifications": [],
+            "manufacturer_source": {"source": "bambu_lab_x2d_wiki"},
+        },
+        "/api/printer/usage": {
+            "usage": {
+                "tracked_print_seconds": 45_000,
+                "tracked_print_hours": 12.5,
+                "tracked_job_count": 8,
+                "tracked_history_complete": False,
+            }
+        },
+        "/api/printer/maintenance/events?limit=20&pending=false": {
+            "events": [
+                {
+                    "event_type": event_type,
+                    "created_at": "2026-08-15T12:00:00Z",
+                }
+                for event_type in (
+                    "maintenance_due_soon",
+                    "maintenance_due",
+                    "maintenance_overdue",
+                    "maintenance_returned_to_ok",
+                    "heavy_use_mode_entered",
+                    "heavy_use_mode_exited",
+                )
+            ]
         },
         "/api/printer/history?limit=100": {
             "history": [{"job_name": "cube", "duration_seconds": 60}],
@@ -311,7 +388,19 @@ def test_dashboard_printer_adapter_parses_current_and_environment_payloads() -> 
     adapter = DashboardPrinterAdapter(IntegrationSettings(), opener=opener)
     assert adapter.current().normalized_state == "idle"
     assert adapter.environment_summary().metrics["pm25"]["print_peak"] == 4.2
-    assert adapter.intelligence().usage["locally_observed_print_hours"] == 12.5
+    assert adapter.usage()["tracked_print_seconds"] == 45_000
+    maintenance = adapter.maintenance()
+    assert maintenance.maintenance_tasks[0]["state"] == "baseline_required"
+    assert maintenance.manufacturer_source["source"] == "bambu_lab_x2d_wiki"
+    assert [item["event_type"] for item in adapter.maintenance_events()] == [
+        "maintenance_due_soon",
+        "maintenance_due",
+        "maintenance_overdue",
+        "maintenance_returned_to_ok",
+        "heavy_use_mode_entered",
+        "heavy_use_mode_exited",
+    ]
+    assert adapter.intelligence().usage["tracked_print_hours"] == 12.5
 
 
 def test_printer_intelligence_responses_remain_read_only_and_provenance_clear() -> None:
@@ -341,7 +430,52 @@ def test_printer_intelligence_responses_remain_read_only_and_provenance_clear() 
             LastPrintResult(intelligence),
         )
     )
-    assert "12.5 locally observed print hours" in usage
-    assert "does not expose a printer-reported lifetime counter" in usage
+    assert "Tracked Print Time is 12.5 hours" in usage
+    assert "not lifetime usage" in usage
     assert "Overdue printer maintenance" in maintenance
     assert "dragon.3mf" in last and "1 hour 30 minutes" in last
+
+
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    (
+        (
+            "baseline_required",
+            "Maintenance baseline has not been recorded yet",
+        ),
+        ("due_soon", "coming due soon"),
+        ("due", "maintenance is due"),
+        ("overdue", "Overdue printer maintenance"),
+        ("advisory", "Manufacturer inspection advisories"),
+        ("ok", "currently OK"),
+    ),
+)
+def test_maintenance_state_wording_preserves_semantics(
+    state: str, expected: str
+) -> None:
+    intelligence = PrinterIntelligenceSnapshot(
+        usage={},
+        maintenance_tasks=(
+            {
+                "name": "Test task",
+                "enabled": True,
+                "state": state,
+                "baseline_required": state == "baseline_required",
+                "warning": state == "due_soon",
+                "next_due_at": None,
+            },
+        ),
+        completion_history=(),
+        print_history=(),
+    )
+    text = ResponseFormatter().format_execution(
+        SkillExecution(
+            "get_printer_maintenance",
+            ActionClass.READ_ONLY,
+            0.01,
+            PrinterMaintenanceResult(intelligence),
+        )
+    )
+    assert expected in text
+    if state == "baseline_required":
+        assert "not due or overdue" in text

@@ -146,9 +146,7 @@ class EntityRegistry:
         if not ranked:
             return EntityResolution(None)
         top = ranked[0]
-        close = tuple(
-            item for item in ranked if top.score - item.score < FUZZY_MARGIN
-        )
+        close = tuple(item for item in ranked if top.score - item.score < FUZZY_MARGIN)
         if len(close) > 1:
             ambiguous = tuple(self._by_id[item.key] for item in close)
             return EntityResolution(
@@ -170,6 +168,7 @@ class Metric:
     sensor_types: frozenset[str]
     aliases: tuple[str, ...]
     scale: float = 1.0
+    aggregate: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -202,7 +201,9 @@ class MetricRegistry:
         """Return capability metadata in stable registry order."""
 
         return tuple(
-            metric for metric in self._metrics if sensor_type in metric.sensor_types
+            metric
+            for metric in self._metrics
+            if sensor_type in metric.sensor_types and metric.aggregate
         )
 
     def resolve(self, normalized_text: str) -> tuple[Metric, ...]:
@@ -255,7 +256,11 @@ class MetricRegistry:
             if not ranked:
                 continue
             if len(ranked) > 1 and ranked[0].score - ranked[1].score < FUZZY_MARGIN:
-                ambiguous_ids.update(item.key for item in ranked if ranked[0].score - item.score < FUZZY_MARGIN)
+                ambiguous_ids.update(
+                    item.key
+                    for item in ranked
+                    if ranked[0].score - item.score < FUZZY_MARGIN
+                )
                 continue
             accepted.append(ranked[0])
 
@@ -270,17 +275,20 @@ class MetricRegistry:
                 earliest[item.key] = item
         fuzzy_metrics = tuple(
             self._by_id[item.key]
-            for item in sorted(earliest.values(), key=lambda value: (value.start, value.order))
+            for item in sorted(
+                earliest.values(), key=lambda value: (value.start, value.order)
+            )
         )
         combined = tuple(dict.fromkeys((*exact_metrics, *fuzzy_metrics)))
         # Preserve phrase order across exact and fuzzy matches.
         positions: dict[str, tuple[int, int]] = {
-            metric.metric_id: (position, order)
-            for position, order, metric in matched
+            metric.metric_id: (position, order) for position, order, metric in matched
         }
         for item in earliest.values():
             positions[item.key] = (item.start, item.order)
-        combined = tuple(sorted(combined, key=lambda metric: positions[metric.metric_id]))
+        combined = tuple(
+            sorted(combined, key=lambda metric: positions[metric.metric_id])
+        )
         candidates = tuple(
             metric for metric in self._metrics if metric.metric_id in ambiguous_ids
         )
@@ -328,12 +336,30 @@ DEFAULT_METRICS = (
         ("co2", "carbon dioxide", "carbon dioxide reading"),
     ),
     Metric(
+        "pm1",
+        "PM1",
+        "pm1",
+        "µg/m³",
+        frozenset({"air_quality"}),
+        ("pm1", "pm 1"),
+        aggregate=False,
+    ),
+    Metric(
         "pm25",
         "PM2.5",
         "pm25",
         "µg/m³",
         frozenset({"air_quality"}),
         ("pm2.5", "pm 2.5", "fine particles", "fine particulate"),
+    ),
+    Metric(
+        "pm4",
+        "PM4",
+        "pm4",
+        "µg/m³",
+        frozenset({"air_quality"}),
+        ("pm4", "pm 4"),
+        aggregate=False,
     ),
     Metric(
         "pm10",

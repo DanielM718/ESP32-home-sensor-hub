@@ -55,6 +55,22 @@ class PrinterSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class PrinterSession:
+    printer: str
+    print_id: str
+    job_id: str | None
+    filename: str | None
+    started_at: str | None
+    ended_at: str | None
+    duration_seconds: int | None
+    progress_percent: float | None
+    material: str | None
+    status: str
+    temperatures: dict[str, float]
+    source: str
+
+
+@dataclass(frozen=True, slots=True)
 class PrintEnvironmentSnapshot:
     available: bool
     reason: str | None
@@ -70,6 +86,9 @@ class PrinterIntelligenceSnapshot:
     maintenance_tasks: tuple[dict[str, object], ...]
     completion_history: tuple[dict[str, object], ...]
     print_history: tuple[dict[str, object], ...]
+    maintenance_summary: dict[str, object] = field(default_factory=dict)
+    maintenance_notifications: tuple[dict[str, object], ...] = ()
+    manufacturer_source: dict[str, object] = field(default_factory=dict)
 
 
 class PrinterSnapshotProvider(Protocol):
@@ -78,6 +97,18 @@ class PrinterSnapshotProvider(Protocol):
     def environment_summary(self) -> PrintEnvironmentSnapshot: ...
 
     def intelligence(self) -> PrinterIntelligenceSnapshot: ...
+
+    def usage(self) -> dict[str, object]: ...
+
+    def maintenance(self) -> PrinterIntelligenceSnapshot: ...
+
+    def maintenance_events(self, limit: int) -> tuple[dict[str, object], ...]: ...
+
+    def current_session(self) -> PrinterSession | None: ...
+
+    def recent_sessions(self, limit: int) -> tuple[PrinterSession, ...]: ...
+
+    def session(self, print_id: str) -> PrinterSession | None: ...
 
 
 @dataclass(frozen=True, slots=True)

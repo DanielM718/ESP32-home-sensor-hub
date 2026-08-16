@@ -307,4 +307,4 @@ def test_the_browser_client_still_sends_its_session_and_csrf_proof() -> None:
     for endpoint in ("/api/chat", "/api/speech", "/api/session/conversation"):
         body = _block(APP_JS, f'fetch("{endpoint}"')
         assert '"X-Butters-CSRF": csrf' in body
-    assert APP_JS.count('credentials: "same-origin"') == 4
+    assert APP_JS.count('credentials: "same-origin"') >= 4

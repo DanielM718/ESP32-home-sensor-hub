@@ -23,6 +23,9 @@
       <button data-panel="system">System</button>
       <button data-panel="logs">Logs</button>
       <button data-panel="security">Security</button>
+      <button data-panel="passkeys">Passkeys / Auth</button>
+      <button data-panel="actions">Actions / Broker</button>
+      <button data-panel="capabilities">Capabilities</button>
       <button data-panel="codex">Codex Jobs</button>
     </nav>
     <a href="/" class="back-link">← Normal mode</a>
@@ -77,6 +80,14 @@
     <section id="panel-system" class="admin-panel"><div id="system-view" class="data-list"></div></section>
     <section id="panel-logs" class="admin-panel"><pre id="logs-view" class="code-output"></pre></section>
     <section id="panel-security" class="admin-panel"><div id="security-view" class="data-list"></div></section>
+
+    <section id="panel-passkeys" class="admin-panel">
+      <div class="panel-head"><p id="auth-admin-status">Loading authentication state…</p><div class="button-row"><button id="admin-authenticate" class="primary-button" type="button">Authenticate</button><button id="admin-lock" class="secondary-button" type="button">Lock Now</button><button id="add-passkey" class="secondary-button" type="button">Add Passkey</button></div></div>
+      <div id="passkey-list" class="data-list"></div>
+    </section>
+
+    <section id="panel-actions" class="admin-panel"><div id="action-admin-view" class="data-list"></div></section>
+    <section id="panel-capabilities" class="admin-panel"><div id="capability-list" class="data-list"></div></section>
 
     <section id="panel-codex" class="admin-panel">
       <div class="warning-card">Codex jobs are read-only-skill authoring jobs. Completion never deploys or restarts Butters. Applying a tested patch requires a separate explicit approval.</div>

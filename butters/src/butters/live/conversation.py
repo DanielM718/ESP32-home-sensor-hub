@@ -6,6 +6,7 @@ import time
 from collections.abc import Callable
 
 from butters.assistant import AssistantResponse, DeterministicAssistant
+from butters.live.authorization import LocalVoiceAuthorization
 from butters.routing.conversation import route_conversation_turn
 from butters.routing.model import PendingClarification
 
@@ -19,12 +20,14 @@ class BoundedVoiceConversation:
         *,
         continuation_timeout_seconds: float = 12.0,
         clock: Callable[[], float] = time.monotonic,
+        local_authorization: LocalVoiceAuthorization | None = None,
     ) -> None:
         if continuation_timeout_seconds <= 0:
             raise ValueError("continuation_timeout_seconds must be positive")
         self.assistant = assistant
         self.continuation_timeout_seconds = continuation_timeout_seconds
         self.clock = clock
+        self.local_authorization = local_authorization
         self._pending: PendingClarification | None = None
 
     @property
@@ -38,7 +41,26 @@ class BoundedVoiceConversation:
     def clear(self) -> None:
         self._pending = None
 
+    def note_physical_wake(self) -> None:
+        if self.local_authorization is not None:
+            self.local_authorization.note_physical_wake()
+
+    def handle_local_action(self, raw_text: str) -> AssistantResponse | None:
+        if self.local_authorization is None:
+            return None
+        response = self.local_authorization.handle_text(raw_text)
+        if response is not None:
+            self._pending = None
+        return response
+
+    def cancel_local_confirmation(self) -> None:
+        if self.local_authorization is not None:
+            self.local_authorization.cancel_pending_confirmation()
+
     def handle_text(self, raw_text: str) -> AssistantResponse:
+        response = self.handle_local_action(raw_text)
+        if response is not None:
+            return response
         now = self.clock()
         outcome = route_conversation_turn(
             self.assistant.router,

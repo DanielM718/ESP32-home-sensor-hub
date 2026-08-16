@@ -7,6 +7,94 @@ timeout_seconds = 4.0
 cache_seconds = 5.0
 max_response_bytes = 2097152
 
+# One fixed Windows desktop. Values here never become model arguments. The
+# broker operations preserve the fixed behavior inventoried from the existing
+# scripts without granting the web service access to mutable user files.
+[desktop]
+enabled = true
+machine = "desktop"
+host = "169.254.227.84"
+ssh_port = 22
+network_timeout_seconds = 45.0
+ssh_timeout_seconds = 90.0
+total_timeout_seconds = 150.0
+poll_interval_seconds = 2.0
+wake_enabled = true
+remote_enabled = true
+restore_enabled = true
+lock_enabled = false
+sleep_enabled = false
+restart_enabled = false
+shutdown_enabled = false
+
+# Passkey trust values are server-known constants, never derived from proxy
+# headers. Authentication is a step-up inside the private tailnet boundary.
+[authentication]
+enabled = true
+rp_id = "sensor-pi.tail9644cc.ts.net"
+origin = "https://sensor-pi.tail9644cc.ts.net"
+rp_name = "Butters"
+elevation_seconds = 600.0
+challenge_seconds = 120.0
+pending_action_seconds = 300.0
+local_console_seconds = 45.0
+bootstrap_seconds = 600.0
+max_credentials = 16
+max_challenges = 64
+
+# Installed later as a separately reviewed, privileged service. The web daemon
+# speaks only the enumerated v1 protocol over this fixed Unix socket.
+[broker]
+enabled = false
+socket_path = "/run/butters-action-broker/broker.sock"
+protocol_version = 1
+connect_timeout_seconds = 2.0
+request_timeout_seconds = 30.0
+max_message_bytes = 8192
+
+[actions]
+audit_capacity = 1000
+job_capacity = 256
+host_restart_butters_enabled = false
+host_reboot_enabled = false
+host_shutdown_enabled = false
+
+[actions.nas]
+enabled = false
+configured = false
+maximum_duration_minutes = 1
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.heater]
+enabled = false
+configured = false
+maximum_duration_minutes = 120
+local_console_allowed = false
+require_fresh_sensor = true
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.dehumidifier]
+enabled = false
+configured = false
+maximum_duration_minutes = 240
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.ventilation]
+enabled = false
+configured = false
+maximum_duration_minutes = 240
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
 [tts]
 model_dir = "../models/vits-piper-en_US-kathleen-low"
 num_threads = 2

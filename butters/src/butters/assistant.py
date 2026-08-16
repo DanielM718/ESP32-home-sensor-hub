@@ -9,12 +9,22 @@ from queue import Full, Queue
 from threading import Thread
 from typing import Protocol
 
+from butters.actions.broker import BrokerClient
+from butters.actions.store import ActionStateStore
 from butters.assistant_config import AssistantSettings
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticAnswer
 from butters.diagnostics.planner import DiagnosticPlanner
 from butters.diagnostics.tools import build_diagnostic_registry
+from butters.integrations.actions import (
+    EnvironmentControlAdapter,
+    FixedActionAdapter,
+    HostStatusAdapter,
+    NasAdapter,
+)
 from butters.integrations.dashboard import DashboardSensorAdapter
+from butters.integrations.desktop import DesktopWorkflow
+from butters.integrations.history import DashboardHistoryAdapter
 from butters.integrations.model import PrinterSnapshotProvider
 from butters.integrations.printer import DashboardPrinterAdapter
 from butters.integrations.project import ProjectInspectionAdapter
@@ -35,10 +45,13 @@ from butters.responses.formatter import ResponseFormatter
 from butters.routing.entities import EntityRegistry, MetricRegistry
 from butters.routing.model import RoutedIntent
 from butters.routing.router import IntentRouter
+from butters.skills.actions_v2 import register_action_skills
 from butters.skills.implementations import build_read_only_registry
-from butters.skills.model import SkillExecution
-from butters.skills.registry import SkillRegistry
+from butters.skills.model import ActionAuthorization, ActionClass, SkillExecution
+from butters.skills.policy import PolicyValidator
 from butters.skills.promoted import register_promoted_skills
+from butters.skills.registry import SkillRegistry
+from butters.skills.v2 import register_v2_skills
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 
 
@@ -74,6 +87,7 @@ class DeterministicAssistant:
         diagnostic_planner: DiagnosticPlanner | None = None,
         diagnostic_engine: DiagnosticEngine | None = None,
         project_adapter: ProjectInspectionAdapter | None = None,
+        environment_adapter: EnvironmentControlAdapter | None = None,
     ) -> None:
         self.router = router
         self.skills = skills
@@ -85,6 +99,7 @@ class DeterministicAssistant:
         self.diagnostic_planner = diagnostic_planner
         self.diagnostic_engine = diagnostic_engine
         self.project_adapter = project_adapter
+        self.environment_adapter = environment_adapter
 
     def preview_route(self, raw_text: str) -> RoutedIntent:
         """Classify locally without executing a skill or invoking a model."""
@@ -160,9 +175,7 @@ class DeterministicAssistant:
         )
         if not route.matched or route.skill is None:
             if route.allow_fallback and self.language_model is not None:
-                return self._handle_fallback(
-                    raw_text, normalized_text, route, began
-                )
+                return self._handle_fallback(raw_text, normalized_text, route, began)
             path = "clarification" if route.status == "clarification" else "unsupported"
             return AssistantResponse(
                 raw_text,
@@ -173,7 +186,20 @@ class DeterministicAssistant:
                 time.perf_counter() - began,
                 routing_path=path,
             )
-        execution = self.skills.execute(route.skill, route.arguments)
+        authorization = None
+        spec = self.skills.get(route.skill)
+        if (
+            spec is not None
+            and spec.action_class is ActionClass.ACTION
+            and route.skill == "start_remote_desktop_session"
+            and _direct_desktop_action(normalized_text)
+        ):
+            authorization = ActionAuthorization(
+                frozenset({route.skill}), "direct_user_request", True
+            )
+        execution = self.skills.execute(
+            route.skill, route.arguments, action_authorization=authorization
+        )
         return AssistantResponse(
             raw_text,
             normalized_text,
@@ -369,6 +395,7 @@ def create_assistant(
     server_adapter: LocalServerHealthAdapter | None = None,
     printer_adapter: PrinterSnapshotProvider | None = None,
     language_model: LanguageModel | None = None,
+    action_state: ActionStateStore | None = None,
 ) -> DeterministicAssistant:
     entities = EntityRegistry(settings.entities)
     metrics = MetricRegistry()
@@ -377,9 +404,48 @@ def create_assistant(
     printer_provider = printer_adapter or DashboardPrinterAdapter(settings.integration)
     diagnostic_tools = build_diagnostic_registry(settings)
     skills = build_read_only_registry(
-        sensor_provider, server_provider, entities, metrics, printer_provider
+        sensor_provider,
+        server_provider,
+        entities,
+        metrics,
+        printer_provider,
+        policy=PolicyValidator(
+            allowed_actions=frozenset(
+                {ActionClass.READ_ONLY, ActionClass.ANALYTICAL, ActionClass.ACTION}
+            )
+        ),
     )
-    project_adapter = ProjectInspectionAdapter(settings.remediation.project_inspection_root)
+    register_v2_skills(
+        skills,
+        entities,
+        metrics,
+        DashboardHistoryAdapter(settings.integration, entities, metrics),
+        printer_provider,
+        DesktopWorkflow(settings.desktop, broker_settings=settings.broker),
+    )
+    environment_actions = None
+    if action_state is not None:
+        broker_client = BrokerClient(settings.broker)
+        fixed_actions = FixedActionAdapter(broker_client)
+        environment_actions = EnvironmentControlAdapter(
+            settings.actions,
+            fixed_actions,
+            action_state,
+            sensor_provider,
+        )
+        register_action_skills(
+            skills,
+            desktop=settings.desktop,
+            broker=settings.broker,
+            actions=settings.actions,
+            host=HostStatusAdapter(settings.broker),
+            action_adapter=fixed_actions,
+            nas=NasAdapter(settings.actions.nas, fixed_actions),
+            environment=environment_actions,
+        )
+    project_adapter = ProjectInspectionAdapter(
+        settings.remediation.project_inspection_root
+    )
     register_promoted_skills(skills, diagnostic_tools, project_adapter)
     diagnostic_planner = DiagnosticPlanner(entities)
     diagnostic_engine = None
@@ -411,7 +477,18 @@ def create_assistant(
             *(f"entity {item}" for item in entity_alias_summary(entities)),
             *(f"metric {item}" for item in metric_alias_summary(metrics)),
         ),
-        diagnostic_planner=diagnostic_planner if diagnostic_engine is not None else None,
+        diagnostic_planner=diagnostic_planner
+        if diagnostic_engine is not None
+        else None,
         diagnostic_engine=diagnostic_engine,
         project_adapter=project_adapter,
+        environment_adapter=environment_actions,
     )
+
+
+def _direct_desktop_action(text: str) -> bool:
+    text = text.casefold()
+    return any(
+        phrase in text
+        for phrase in ("turn on my computer", "wake my computer", "wake the desktop")
+    ) and any(word in text for word in ("parsec", "remote"))

@@ -16,8 +16,49 @@ from butters.integrations.model import (
 
 class ActionClass(str, Enum):
     READ_ONLY = "read_only"
+    ANALYTICAL = "analytical"
+    ACTION = "action"
+    # Retained for compatibility with older persisted metadata.  Neither class
+    # is enabled by the v2 conversational registry.
     CONTROL = "control"
     DISRUPTIVE = "disruptive"
+
+
+class AuthenticationLevel(str, Enum):
+    """Authentication strength required independently of user intent."""
+
+    NONE = "none"
+    LOCAL_CONSOLE = "local_console"
+    ELEVATED = "elevated"
+    FRESH = "fresh"
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticationContext:
+    level: AuthenticationLevel
+    session_id: str
+    identity: str
+    expires_at: float
+    method: str
+    action_digest: str | None = None
+
+    def valid_for(
+        self,
+        *,
+        session_id: str,
+        identity: str,
+        now: float,
+        action_digest: str | None = None,
+    ) -> bool:
+        return (
+            self.session_id == session_id
+            and self.identity == identity
+            and now < self.expires_at
+            and (
+                self.level is not AuthenticationLevel.FRESH
+                or (action_digest is not None and self.action_digest == action_digest)
+            )
+        )
 
 
 class SkillAudience(str, Enum):
@@ -111,6 +152,92 @@ class ProjectStatusArgs:
     view: str
 
 
+@dataclass(frozen=True, slots=True)
+class DesktopArgs:
+    machine: str
+
+
+@dataclass(frozen=True, slots=True)
+class EnvironmentActionArgs:
+    state: str
+    duration_minutes: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class NoArguments:
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class SensorHistoryArgs:
+    entity: str
+    metrics: tuple[str, ...]
+    start: str | None
+    end: str | None
+    lookback: str | None
+    bucket: str
+    max_points: int
+
+
+@dataclass(frozen=True, slots=True)
+class SensorWindowArgs:
+    entity: str
+    metrics: tuple[str, ...]
+    start: str | None
+    end: str | None
+    lookback: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompareWindowsArgs:
+    entity: str
+    metrics: tuple[str, ...]
+    first_start: str
+    first_end: str
+    second_start: str
+    second_end: str
+
+
+@dataclass(frozen=True, slots=True)
+class SpikeArgs:
+    entity: str
+    metric: str
+    start: str | None
+    end: str | None
+    lookback: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class CorrelationArgs:
+    entity: str
+    metric_x: str
+    metric_y: str
+    start: str | None
+    end: str | None
+    lookback: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class RecentPrintsArgs:
+    entity: str
+    limit: int
+
+
+@dataclass(frozen=True, slots=True)
+class PrintDetailsArgs:
+    entity: str
+    print_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class PrintEnvironmentAnalysisArgs:
+    printer: str
+    environment: str
+    metrics: tuple[str, ...]
+    print_selector: str
+    baseline_minutes: int | None
+
+
 SkillArguments: TypeAlias = (
     SensorValueArgs
     | SensorValuesArgs
@@ -125,6 +252,17 @@ SkillArguments: TypeAlias = (
     | NetworkObservationArgs
     | SensorHistorySummaryArgs
     | ProjectStatusArgs
+    | DesktopArgs
+    | EnvironmentActionArgs
+    | NoArguments
+    | SensorHistoryArgs
+    | SensorWindowArgs
+    | CompareWindowsArgs
+    | SpikeArgs
+    | CorrelationArgs
+    | RecentPrintsArgs
+    | PrintDetailsArgs
+    | PrintEnvironmentAnalysisArgs
 )
 
 
@@ -255,6 +393,11 @@ class PrinterMaintenanceResult:
 
 
 @dataclass(frozen=True, slots=True)
+class PrinterMaintenanceEventsResult:
+    events: tuple[dict[str, object], ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LastPrintResult:
     intelligence: PrinterIntelligenceSnapshot
 
@@ -267,6 +410,15 @@ class ReadOnlyObservationResult:
     text_excerpt: str | None = None
     error_code: str | None = None
     truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class StructuredSkillResult:
+    """Bounded semantic result used by v2 read, analytical, and action skills."""
+
+    kind: str
+    data: dict[str, object]
+    evidence: dict[str, object] = field(default_factory=dict)
 
 
 SkillResult: TypeAlias = (
@@ -283,9 +435,23 @@ SkillResult: TypeAlias = (
     | PrintEnvironmentResult
     | PrinterUsageResult
     | PrinterMaintenanceResult
+    | PrinterMaintenanceEventsResult
     | LastPrintResult
     | ReadOnlyObservationResult
+    | StructuredSkillResult
 )
+
+
+@dataclass(frozen=True, slots=True)
+class ActionAuthorization:
+    """Authority derived from the current user turn, never from a model call."""
+
+    allowed_skills: frozenset[str] = frozenset()
+    source: str = "none"
+    confirmed: bool = False
+
+    def permits(self, skill_name: str) -> bool:
+        return skill_name in self.allowed_skills
 
 
 @dataclass(frozen=True, slots=True)

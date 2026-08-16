@@ -6,6 +6,7 @@
   <meta name="theme-color" content="#101713">
   <title>Butters</title>
   <link rel="stylesheet" href="/assets/styles.css">
+  <link rel="stylesheet" href="/assets/auth.css">
 </head>
 <body class="chat-body">
   <main class="chat-shell" aria-label="Butters conversation">
@@ -16,6 +17,8 @@
         <p id="assistant-state" class="assistant-state" data-state="connecting">Connecting</p>
       </div>
       <div class="chat-header-actions">
+        <button id="auth-button" class="quiet-button auth-button" type="button">Admin: Locked · Authenticate</button>
+        <button id="lock-button" class="quiet-button" type="button" hidden>Lock Now</button>
         <button id="voice-output-toggle" class="voice-output-toggle" type="button" role="switch" aria-checked="true" aria-label="Voice output on">Voice: On</button>
         <button id="clear-button" class="quiet-button" type="button" aria-label="Clear conversation">Clear</button>
       </div>
@@ -25,6 +28,16 @@
       <article class="message assistant-message">
         <p>Hi. Ask me about the sensors or the home-sensor stack.</p>
       </article>
+    </section>
+
+    <section id="action-card" class="action-card" aria-live="polite" hidden>
+      <strong id="action-title">Authentication required</strong>
+      <p id="action-summary"></p>
+      <p id="action-progress" class="assistant-state"></p>
+      <div class="button-row">
+        <button id="action-authenticate" class="primary-button" type="button">Use Passkey</button>
+        <button id="action-cancel" class="secondary-button" type="button">Cancel</button>
+      </div>
     </section>
 
     <div id="partial" class="partial" role="status" aria-live="polite" aria-label="Voice transcript" hidden></div>

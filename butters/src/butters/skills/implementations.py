@@ -8,6 +8,7 @@ from typing import cast
 from butters.integrations.model import (
     IntegrationError,
     PrintEnvironmentSnapshot,
+    PrinterIntelligenceSnapshot,
     PrinterSnapshotProvider,
     SensorRecord,
     SensorSnapshot,
@@ -27,6 +28,7 @@ from butters.skills.model import (
     LastPrintResult,
     PrintEnvironmentResult,
     PrinterArgs,
+    PrinterMaintenanceEventsResult,
     PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
@@ -45,7 +47,7 @@ from butters.skills.model import (
     SkillError,
     SkillResult,
 )
-from butters.skills.policy import allow_arguments
+from butters.skills.policy import PolicyValidator, allow_arguments
 from butters.skills.registry import (
     SkillRegistry,
     SkillSpec,
@@ -55,11 +57,13 @@ from butters.skills.registry import (
     strict_arguments,
 )
 
-
 _SKILL_METADATA: dict[str, dict[str, object]] = {
     "get_sensor_value": {
         "category": "sensors",
-        "input_schema": {"entity": "allow-listed entity ID", "metric": "allow-listed metric ID"},
+        "input_schema": {
+            "entity": "allow-listed entity ID",
+            "metric": "allow-listed metric ID",
+        },
         "result_description": "Current value, unit, reporting state, timestamp, and age.",
         "permission_summary": ("dashboard_api_read", "configured_entities_only"),
         "positive_examples": ("what is the humidity in box three", "printer room CO2"),
@@ -94,7 +98,11 @@ _SKILL_METADATA: dict[str, dict[str, object]] = {
     },
     "compare_sensor_metric": {
         "category": "sensors",
-        "input_schema": {"group": "filament_boxes", "metric": "humidity", "operation": "max"},
+        "input_schema": {
+            "group": "filament_boxes",
+            "metric": "humidity",
+            "operation": "max",
+        },
         "result_description": "Deterministically calculated maximum and missing observations.",
         "permission_summary": ("dashboard_api_read", "local_computation"),
         "positive_examples": ("which filament box is most humid",),
@@ -112,7 +120,11 @@ _SKILL_METADATA: dict[str, dict[str, object]] = {
         "category": "system",
         "input_schema": {},
         "result_description": "Host resources and fixed allow-listed service states.",
-        "permission_summary": ("procfs_read", "fixed_system_commands", "allowlisted_services"),
+        "permission_summary": (
+            "procfs_read",
+            "fixed_system_commands",
+            "allowlisted_services",
+        ),
         "positive_examples": ("what is the server status",),
         "negative_examples": ("run a command", "restart the server"),
     },
@@ -435,11 +447,27 @@ class ReadOnlySkillImplementations:
 
     def get_printer_usage(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "usage", None)
+        if callable(method):
+            usage = method()
+            return PrinterUsageResult(PrinterIntelligenceSnapshot(usage, (), (), ()))
         return PrinterUsageResult(self.printer_provider.intelligence())
 
     def get_printer_maintenance(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "maintenance", None)
+        if callable(method):
+            return PrinterMaintenanceResult(method())
         return PrinterMaintenanceResult(self.printer_provider.intelligence())
+
+    def get_printer_maintenance_events(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "maintenance_events", None)
+        if callable(method):
+            return PrinterMaintenanceEventsResult(method(20))
+        return PrinterMaintenanceEventsResult(
+            self.printer_provider.intelligence().maintenance_notifications
+        )
 
     def get_last_print(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
@@ -499,12 +527,13 @@ def build_read_only_registry(
     entities: EntityRegistry,
     metrics: MetricRegistry,
     printer_provider: PrinterSnapshotProvider | None = None,
+    policy: PolicyValidator | None = None,
 ) -> SkillRegistry:
     printer_provider = printer_provider or _UnavailablePrinterProvider()
     implementation = ReadOnlySkillImplementations(
         sensor_provider, server_provider, entities, metrics, printer_provider
     )
-    registry = SkillRegistry()
+    registry = SkillRegistry(policy)
     registry.register(
         _skill(
             "get_sensor_value",
@@ -612,6 +641,11 @@ def build_read_only_registry(
             "get_printer_maintenance",
             "Return read-only local printer maintenance due state and completion history.",
             implementation.get_printer_maintenance,
+        ),
+        (
+            "get_printer_maintenance_events",
+            "Return up to twenty recent printer maintenance transition events.",
+            implementation.get_printer_maintenance_events,
         ),
         (
             "get_last_print",

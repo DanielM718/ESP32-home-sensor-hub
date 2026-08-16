@@ -200,7 +200,7 @@ def test_administrator_routing_test_can_still_reach_sensitive_skills(tmp_path: P
         app, _service, _settings = build_app(tmp_path)
         try:
             async with client(app) as http:
-                session = await http.get("/api/session")
+                session = await http.get("/api/session", headers=admin_headers())
                 token = session.json()["csrf_token"]
                 response = await http.post(
                     "/api/admin/routing/test",

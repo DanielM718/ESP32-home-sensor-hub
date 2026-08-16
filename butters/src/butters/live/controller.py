@@ -112,6 +112,7 @@ class LiveVoiceController:
         self._last_semantic_check: tuple[str | None, str] | None = None
         self._pending_clarification: PendingClarification | None = None
         self._continuation_started = 0.0
+        self._local_confirmation_active = False
 
     def start(self) -> tuple[LiveEvent, ...]:
         self.wake_detector.reset()
@@ -137,6 +138,22 @@ class LiveVoiceController:
     def _clear_pending(self) -> None:
         self._pending_clarification = None
         self._continuation_started = 0.0
+        self._local_confirmation_active = False
+
+    def await_local_confirmation(self) -> None:
+        """Listen for one bounded confirmation without another wake word."""
+
+        if self.state is not LiveState.WAITING_FOR_WAKE:
+            raise RuntimeError("local confirmation can start only from idle")
+        self.stt_engine.reset()
+        self.command_vad.reset()
+        self.command_preroll.clear()
+        self._clear_utterance()
+        self._pending_clarification = None
+        self._continuation_started = self._audio_position
+        self._listening_started = self._audio_position
+        self._local_confirmation_active = True
+        self.state = LiveState.AWAITING_CONTINUATION
 
     def _seed_post_keyword_audio(self, detection: WakeDetection) -> None:
         """Keep only audio estimated to follow the wake phrase.
@@ -324,11 +341,16 @@ class LiveVoiceController:
                     self._audio_position - self._continuation_started
                     >= self.continuation_timeout_seconds
                 ):
+                    message = (
+                        "Local action confirmation expired."
+                        if self._local_confirmation_active
+                        else "Incomplete request expired."
+                    )
                     events = [
                         LiveEvent(
                             "continuation_timeout",
                             self.state,
-                            text="Incomplete request expired.",
+                            text=message,
                             completes_cycle=True,
                         )
                     ]
@@ -368,6 +390,7 @@ class LiveVoiceController:
             if not self._in_utterance:
                 if (
                     self._pending_clarification is None
+                    and not self._local_confirmation_active
                     and elapsed >= self.no_speech_timeout_seconds
                 ):
                     events.append(
