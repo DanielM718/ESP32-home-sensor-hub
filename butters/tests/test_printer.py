@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import asdict, fields
 
 import pytest
 from butters.assistant import create_assistant
@@ -17,7 +18,10 @@ from butters.integrations.printer import DashboardPrinterAdapter
 from butters.responses.formatter import ResponseFormatter
 from butters.routing.entities import EntityRegistry, MetricRegistry
 from butters.routing.router import IntentRouter
-from butters.skills.implementations import build_read_only_registry
+from butters.skills.implementations import (
+    MAINTENANCE_MAX_RESULT_BYTES,
+    build_read_only_registry,
+)
 from butters.skills.model import (
     ActionClass,
     CurrentPrintResult,
@@ -30,6 +34,7 @@ from butters.skills.model import (
     PrinterUsageResult,
     SkillExecution,
 )
+from butters.skills.registry import SkillSpec
 from butters.stt.normalization import load_domain_vocabulary
 
 from butters.config import default_vocabulary_path
@@ -479,3 +484,198 @@ def test_maintenance_state_wording_preserves_semantics(
     assert expected in text
     if state == "baseline_required":
         assert "not due or overdue" in text
+
+
+CADENCE = (
+    "Every month at >= 5 printing hours/day, every 2 months at 1-5 printing "
+    "hours/day, every 3 months below 1 printing hour/day"
+)
+
+
+def _maintenance_task(index: int, state: str) -> dict[str, object]:
+    """One task shaped like DashboardPrinterAdapter.MAINTENANCE_TASK_FIELDS."""
+
+    return {
+        "maintenance_task_id": f"x2d_manufacturer_maintenance_task_{index:02d}",
+        "name": f"Clean and lubricate manufacturer catalog item {index:02d}",
+        "enabled": True,
+        "state": state,
+        "baseline_required": state == "baseline_required",
+        "warning": False,
+        "due": False,
+        "overdue": False,
+        "trigger_kind": "usage_tiered_months",
+        "cadence": CADENCE,
+        "next_due_at": "2026-11-15T12:00:00+00:00",
+        "remaining_days": 92,
+        "manufacturer_source": "Bambu Lab X2D maintenance wiki",
+        "manufacturer_source_url": "https://wiki.bambulab.com/en/x2d/maintenance",
+        "manufacturer_source_revision": "2026-05-01",
+        "warning_source": "dashboard_policy",
+        "last_completed_at": "2026-08-01T12:00:00+00:00",
+        "completion_count": 3,
+        "applied_interval_months": 2,
+        "maintenance_mode_applied": "normal",
+    }
+
+
+def _catalog_maintenance(
+    task_count: int = 11, baseline_count: int = 3
+) -> PrinterIntelligenceSnapshot:
+    """Rebuild the production-shaped maintenance payload the skill must return."""
+
+    tasks = tuple(
+        _maintenance_task(
+            index, "baseline_required" if index < baseline_count else "ok"
+        )
+        for index in range(task_count)
+    )
+    return PrinterIntelligenceSnapshot(
+        usage={
+            "tracked_print_seconds": 45_000,
+            "tracked_print_hours": 12.5,
+            "tracked_job_count": 8,
+            "tracked_history_complete": False,
+            "tracked_history_completeness_reasons": [
+                "tracked_history_started_after_first_print"
+            ],
+            "tracked_history_provenance": "locally_observed",
+            "rolling_tracked_print_hours_per_day": 2.5,
+            "maintenance_mode": "normal",
+            "maintenance_mode_reason": "tracked_average_between_1_and_5_print_hours_per_day",
+        },
+        maintenance_tasks=tasks,
+        completion_history=tuple(
+            {
+                "maintenance_task_id": f"x2d_manufacturer_maintenance_task_{index:02d}",
+                "completed_at": "2026-08-01T12:00:00+00:00",
+                "effective_usage_hours": 12.5,
+                "completed_print_count": 8,
+                "source": "dashboard_ui",
+            }
+            for index in range(20)
+        ),
+        print_history=(),
+        maintenance_summary={
+            "baseline_required_count": baseline_count,
+            "due_count": 0,
+            "overdue_count": 0,
+            "due_soon_count": 0,
+            "advisory_count": 0,
+        },
+        maintenance_notifications=tuple(
+            {
+                "event_id": f"maintenance-event-{index:04d}",
+                "subject_type": "maintenance_task",
+                "subject_id": f"x2d_manufacturer_maintenance_task_{index:02d}",
+                "event_type": "maintenance_baseline_required",
+                "previous_state": "ok",
+                "new_state": "baseline_required",
+                "created_at": "2026-08-15T12:00:00+00:00",
+                "delivery_status": "delivered",
+                "delivered_at": "2026-08-15T12:00:01+00:00",
+            }
+            for index in range(20)
+        ),
+        manufacturer_source={
+            "source": "Bambu Lab X2D maintenance wiki",
+            "source_url": "https://wiki.bambulab.com/en/x2d/maintenance",
+            "source_revision": "2026-05-01",
+        },
+    )
+
+
+class CatalogPrinters(Printers):
+    """Printer provider whose maintenance payload matches the seeded catalog."""
+
+    def __init__(self, task_count: int = 11, baseline_count: int = 3) -> None:
+        super().__init__()
+        self._maintenance = _catalog_maintenance(task_count, baseline_count)
+
+    def maintenance(self) -> PrinterIntelligenceSnapshot:
+        return self._maintenance
+
+
+def _default_result_budget() -> int:
+    """SkillSpec uses slots, so read the declared default from its field."""
+
+    field = next(item for item in fields(SkillSpec) if item.name == "max_result_bytes")
+    return int(field.default)
+
+
+def _encoded_result_bytes(result: object) -> int:
+    """Encode exactly the way SkillRegistry.execute enforces its budget."""
+
+    return len(
+        json.dumps(
+            asdict(result),
+            default=str,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+    )
+
+
+def test_maintenance_skill_budget_admits_the_full_seeded_catalog() -> None:
+    registry = _registry(CatalogPrinters())
+    execution = registry.execute("get_printer_maintenance", {"entity": "x2d"})
+    assert execution.failure is None
+    assert execution.ok
+    result = execution.result
+    assert isinstance(result, PrinterMaintenanceResult)
+    encoded = _encoded_result_bytes(result)
+    # The production failure was measured at roughly 9663 bytes against the
+    # 8192-byte SkillSpec default.
+    assert encoded >= 9663
+    assert encoded <= MAINTENANCE_MAX_RESULT_BYTES
+    assert len(result.intelligence.maintenance_tasks) == 11
+    summary = result.intelligence.maintenance_summary
+    assert summary["baseline_required_count"] == 3
+    assert summary["due_count"] == 0
+    assert summary["overdue_count"] == 0
+
+
+def test_catalog_maintenance_result_would_fail_under_the_default_budget() -> None:
+    result = PrinterMaintenanceResult(_catalog_maintenance())
+    assert _encoded_result_bytes(result) > _default_result_budget()
+
+
+def test_baseline_required_catalog_answer_still_says_not_due_or_overdue() -> None:
+    registry = _registry(CatalogPrinters())
+    execution = registry.execute("get_printer_maintenance", {"entity": "x2d"})
+    text = ResponseFormatter().format_execution(execution)
+    assert "Maintenance baseline has not been recorded yet" in text
+    assert "not due or overdue" in text
+    assert "Overdue printer maintenance" not in text
+    assert "maintenance is due" not in text
+
+
+def test_maintenance_skill_still_rejects_results_beyond_its_own_bound() -> None:
+    registry = _registry(CatalogPrinters(task_count=200, baseline_count=3))
+    execution = registry.execute("get_printer_maintenance", {"entity": "x2d"})
+    assert execution.failure is not None
+    assert execution.failure.code == "result_too_large"
+    text = ResponseFormatter().format_execution(execution)
+    assert "safe response limit" in text
+    assert "The read-only request could not be completed." not in text
+
+
+def test_only_the_maintenance_skill_raises_its_result_budget() -> None:
+    registry = _registry(CatalogPrinters())
+    budgets = {spec.name: spec.max_result_bytes for spec in registry.skills}
+    assert budgets.pop("get_printer_maintenance") == MAINTENANCE_MAX_RESULT_BYTES
+    assert set(budgets.values()) == {_default_result_budget()}
+    assert _default_result_budget() == 8192
+    # The raised budget stays a bounded schema-derived cap, not an open limit.
+    assert MAINTENANCE_MAX_RESULT_BYTES < 64 * 1024
+
+
+def test_sibling_printer_skills_still_succeed_under_the_default_budget() -> None:
+    registry = _registry(CatalogPrinters())
+    for name, result_type in (
+        ("get_printer_usage", PrinterUsageResult),
+        ("get_printer_maintenance_events", PrinterMaintenanceEventsResult),
+    ):
+        execution = registry.execute(name, {"entity": "x2d"})
+        assert execution.ok, name
+        assert isinstance(execution.result, result_type)

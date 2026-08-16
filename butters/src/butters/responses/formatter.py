@@ -444,6 +444,11 @@ class ResponseFormatter:
             return "Current home-sensor data is temporarily unavailable."
         if code in {"unknown_skill", "policy_denied", "invalid_arguments"}:
             return "I can't safely complete that request."
+        if code == "result_too_large":
+            return (
+                "That answer was larger than the safe response limit for this "
+                "skill, so I stopped instead of reading back a partial result."
+            )
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
         return "The read-only request could not be completed."

@@ -208,3 +208,32 @@ def test_policy_failure_does_not_echo_sensitive_details() -> None:
     assert "secret" not in response
     # Normal chat must not name internal machinery such as the skill policy.
     assert "skill policy" not in response
+
+
+def test_result_too_large_gets_an_explicit_non_generic_diagnostic() -> None:
+    text = ResponseFormatter().format_execution(
+        SkillExecution(
+            "get_printer_maintenance",
+            ActionClass.READ_ONLY,
+            0.01,
+            failure=SkillFailure("result_too_large", "skill result exceeded its limit"),
+        )
+    )
+    assert "safe response limit" in text
+    assert text != "The read-only request could not be completed."
+    # The diagnostic must not leak internal limits, paths, or payload content.
+    assert "8192" not in text and "byte" not in text
+
+
+def test_unmapped_failure_codes_keep_the_generic_fallback() -> None:
+    text = ResponseFormatter().format_execution(
+        SkillExecution(
+            "get_printer_maintenance",
+            ActionClass.READ_ONLY,
+            0.01,
+            failure=SkillFailure(
+                "internal_error", "the read-only skill could not complete"
+            ),
+        )
+    )
+    assert text == "The read-only request could not be completed."

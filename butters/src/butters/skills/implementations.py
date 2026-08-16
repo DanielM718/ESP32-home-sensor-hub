@@ -131,6 +131,47 @@ _SKILL_METADATA: dict[str, dict[str, object]] = {
 }
 
 
+# get_printer_maintenance returns the whole bounded maintenance catalog, so it is
+# structurally larger than any other read-only result and does not fit the 8192-byte
+# SkillSpec default. The cap below is derived from the limits the maintenance
+# adapter actually enforces, not from today's payload:
+#
+#   tasks               DashboardPrinterAdapter.maintenance keeps only
+#                       MAINTENANCE_TASK_FIELDS (20 fields) per task, and tasks come
+#                       solely from the fixed manufacturer catalog
+#                       (server X2D_MAINTENANCE_TASKS: 11 entries, largest entry
+#                       encodes to 825 bytes). Bounded here at 24 entries of 1024
+#                       bytes, i.e. more than double the catalog with per-entry
+#                       headroom.
+#   completion_history  bounded by the adapter to completions[:20].
+#   notifications       bounded by the adapter to recent_notifications[:20]; a
+#                       MAINTENANCE_EVENT_FIELDS entry encodes to 551 bytes even
+#                       when every field is a long identifier.
+#   envelope            usage (USAGE_FIELDS encodes to 1559 bytes with long values),
+#                       maintenance_summary, manufacturer_source, and dataclass keys.
+#
+# print_history is always empty on this path. The result therefore stays bounded and
+# far below the 2 MiB integration response ceiling.
+_MAINTENANCE_MAX_TASKS = 24
+_MAINTENANCE_TASK_BYTES = 1024
+_MAINTENANCE_HISTORY_ENTRIES = 20
+_MAINTENANCE_HISTORY_ENTRY_BYTES = 512
+_MAINTENANCE_EVENT_ENTRIES = 20
+_MAINTENANCE_EVENT_ENTRY_BYTES = 640
+_MAINTENANCE_ENVELOPE_BYTES = 4096
+MAINTENANCE_MAX_RESULT_BYTES = (
+    _MAINTENANCE_MAX_TASKS * _MAINTENANCE_TASK_BYTES
+    + _MAINTENANCE_HISTORY_ENTRIES * _MAINTENANCE_HISTORY_ENTRY_BYTES
+    + _MAINTENANCE_EVENT_ENTRIES * _MAINTENANCE_EVENT_ENTRY_BYTES
+    + _MAINTENANCE_ENVELOPE_BYTES
+)
+
+# Explicit per-skill result budgets. Everything absent keeps the SkillSpec default.
+_SKILL_RESULT_BYTES: dict[str, int] = {
+    "get_printer_maintenance": MAINTENANCE_MAX_RESULT_BYTES,
+}
+
+
 def _skill(
     name: str,
     description: str,
@@ -154,6 +195,8 @@ def _skill(
             "positive_examples": (description.removeprefix("Return ").rstrip("."),),
             "negative_examples": ("control the printer", "start or stop a print"),
         }
+    if name in _SKILL_RESULT_BYTES:
+        metadata["max_result_bytes"] = _SKILL_RESULT_BYTES[name]
     return SkillSpec(
         name,
         description,
