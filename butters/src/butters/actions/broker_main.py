@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import pwd
 import socket
@@ -91,6 +92,14 @@ def main(argv: list[str] | None = None) -> int:
         default=Path("/etc/butters/action-broker.toml"),
     )
     args = parser.parse_args(argv)
+    # The unit has no log file of its own; stderr is what journald captures, and
+    # the broker's audit line is deliberately the only record it emits per
+    # connection. Timestamps and unit identity come from journald.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
     try:
         expected_uid, configuration = _configuration(args.config)
         server = BrokerServer(

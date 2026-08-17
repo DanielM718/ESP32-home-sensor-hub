@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+import logging
+import re
 import secrets
 import socket
 import struct
 import subprocess
 import threading
+import time
 from collections import OrderedDict
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +20,17 @@ from pathlib import Path
 from typing import Any
 
 from butters.assistant_config import BrokerSettings
+
+LOGGER = logging.getLogger(__name__)
+
+# The broker answers connections serially, so peer I/O has to be bounded. The
+# client spends at most 2s connecting and waits 30s for a reply, and a request
+# is a single small write issued immediately after connect(); 5s is generous for
+# a healthy peer while keeping a stalled one from holding the boundary open.
+DEFAULT_PEER_TIMEOUT_SECONDS = 5.0
+
+# Only broker-local literals are ever logged, never peer-supplied text.
+_CODE_PATTERN = re.compile(r"\A[a-z][a-z_]{0,47}\Z")
 
 
 class BrokerOperation(str, Enum):
@@ -134,12 +149,14 @@ class BrokerServer:
         protocol_version: int = 1,
         max_message_bytes: int = 8192,
         dedupe_capacity: int = 1024,
+        peer_timeout_seconds: float = DEFAULT_PEER_TIMEOUT_SECONDS,
     ) -> None:
         self.operations = dict(operations)
         self.expected_uid = expected_uid
         self.protocol_version = protocol_version
         self.max_message_bytes = max_message_bytes
         self.dedupe_capacity = dedupe_capacity
+        self.peer_timeout_seconds = peer_timeout_seconds
         # Ordered so eviction drops the oldest request ID. A plain set evicts an
         # arbitrary member, which can retire a just-seen ID and reopen its replay
         # window while much older IDs are retained.
@@ -148,9 +165,22 @@ class BrokerServer:
 
     def handle(self, connection: socket.socket) -> None:
         request_id = "invalid"
+        operation_value = ""
+        peer_pid = -1
+        peer_uid = -1
         try:
-            self._require_peer(connection)
-            raw = _read_line(connection, self.max_message_bytes)
+            # Bound every byte of peer I/O before reading anything. Connections
+            # are served serially, so a peer that connects and then stalls would
+            # otherwise hold the privileged boundary open indefinitely; the
+            # client-side timeout protects the client, not the broker.
+            connection.settimeout(self.peer_timeout_seconds)
+            deadline = time.monotonic() + self.peer_timeout_seconds
+            peer_pid, peer_uid = _peer_credentials(connection)
+            # SO_PEERCRED remains the in-process gate behind the socket's own
+            # ownership and mode, and it runs before any parsing.
+            if peer_uid != self.expected_uid:
+                raise BrokerError("peer_denied", "broker peer is not authorized")
+            raw = _read_line(connection, self.max_message_bytes, deadline=deadline)
             request = _parse_request(raw, self.protocol_version)
             request_id = str(request["request_id"])
             with self._lock:
@@ -162,6 +192,7 @@ class BrokerServer:
                     self._seen.popitem(last=False)
                 self._seen[request_id] = None
             operation = BrokerOperation(str(request["operation"]))
+            operation_value = operation.value
             handler = self.operations.get(operation)
             if handler is None:
                 raise BrokerError(
@@ -171,6 +202,10 @@ class BrokerServer:
             if not isinstance(status, dict):
                 raise BrokerError("malformed_result", "operation result is invalid")
             response = _response(self.protocol_version, request_id, True, status, None)
+        except TimeoutError:
+            response = _response(
+                self.protocol_version, request_id, False, {}, "request_timeout"
+            )
         except (BrokerError, ValueError) as exc:
             code = exc.code if isinstance(exc, BrokerError) else "unknown_operation"
             response = _response(self.protocol_version, request_id, False, {}, code)
@@ -178,32 +213,67 @@ class BrokerServer:
             response = _response(
                 self.protocol_version, request_id, False, {}, "operation_failed"
             )
-        encoded = json.dumps(response, separators=(",", ":")).encode() + b"\n"
+        encoded = _encoded(response)
         if len(encoded) > self.max_message_bytes:
-            encoded = (
-                json.dumps(
-                    _response(
-                        self.protocol_version,
-                        request_id,
-                        False,
-                        {},
-                        "result_too_large",
-                    ),
-                    separators=(",", ":"),
-                ).encode()
-                + b"\n"
+            response = _response(
+                self.protocol_version, request_id, False, {}, "result_too_large"
             )
-        connection.sendall(encoded)
+            encoded = _encoded(response)
+        self._audit(
+            peer_uid=peer_uid,
+            peer_pid=peer_pid,
+            request_id=request_id,
+            operation=operation_value,
+            response=response,
+        )
+        try:
+            # Re-armed so the reply is not charged the receive deadline that has
+            # already elapsed, while staying bounded rather than blocking on a
+            # peer that never reads.
+            connection.settimeout(self.peer_timeout_seconds)
+            connection.sendall(encoded)
+        except OSError:
+            # The outcome is already decided and audited. A peer that vanishes or
+            # stops reading must not take the serial broker down with it.
+            LOGGER.warning("butters.broker response was not delivered to the peer")
 
-    def _require_peer(self, connection: socket.socket) -> None:
-        if not hasattr(socket, "SO_PEERCRED"):
-            raise BrokerError(
-                "peer_credentials_unavailable", "peer credentials are unavailable"
+    def _audit(
+        self,
+        *,
+        peer_uid: int,
+        peer_pid: int,
+        request_id: str,
+        operation: str,
+        response: dict[str, object],
+    ) -> None:
+        """Record one sanitized event per connection at the privilege boundary.
+
+        The web layer audits its own side, but the root broker is a separate
+        trust boundary and has to be able to show, from the journal alone, which
+        peer asked for which enumerated operation and how it was resolved.
+
+        Every field is an integer from SO_PEERCRED, an enumerated operation, a
+        validated request ID, or a fixed result code. Nothing derived from the
+        peer's payload, no operation status, and no exception text is logged,
+        and a logging failure never turns a rejection into a permission.
+        """
+
+        ok = bool(response["ok"])
+        code = response["error_code"]
+        # A journal failure has nowhere else to be reported and must not become a
+        # reason to permit, refuse, or retry the operation decided above.
+        with contextlib.suppress(Exception):
+            LOGGER.log(
+                logging.INFO if ok else logging.WARNING,
+                "butters.broker request outcome=%s result=%s operation=%s "
+                "request_id=%s peer_uid=%d peer_pid=%d",
+                "accepted" if ok else "rejected",
+                _fixed_code("ok" if code is None else str(code)),
+                _enumerated_operation(operation),
+                _identifier_tag(request_id),
+                peer_uid,
+                peer_pid,
             )
-        raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
-        _pid, uid, _gid = struct.unpack("3i", raw)
-        if uid != self.expected_uid:
-            raise BrokerError("peer_denied", "broker peer is not authorized")
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +409,12 @@ class FixedBrokerOperations:
                 "ClearAllForwardings=yes",
                 "-o",
                 "StrictHostKeyChecking=yes",
+                # The pin is a root-owned provisioned file, so the client must
+                # never learn or write additional host keys into it. OpenSSH
+                # already implies this when UserKnownHostsFile is overridden;
+                # stating it keeps the pin immune to a default change.
+                "-o",
+                "UpdateHostKeys=no",
                 "-o",
                 f"UserKnownHostsFile={self.config.desktop_known_hosts}",
                 f"{self.config.desktop_user}@{self.config.desktop_host}",
@@ -384,9 +460,30 @@ def _parse_request(raw: bytes, version: int) -> dict[str, object]:
     return value
 
 
-def _read_line(connection: socket.socket, maximum: int) -> bytes:
+def _peer_credentials(connection: socket.socket) -> tuple[int, int]:
+    """Return the connected peer's (pid, uid) from SO_PEERCRED."""
+
+    if not hasattr(socket, "SO_PEERCRED"):
+        raise BrokerError(
+            "peer_credentials_unavailable", "peer credentials are unavailable"
+        )
+    raw = connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    pid, uid, _gid = struct.unpack("3i", raw)
+    return pid, uid
+
+
+def _read_line(
+    connection: socket.socket, maximum: int, *, deadline: float | None = None
+) -> bytes:
     chunks = bytearray()
     while len(chunks) <= maximum:
+        if deadline is not None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise BrokerError("request_timeout", "broker request timed out")
+            # Re-armed per recv against one shared deadline so a peer that drips
+            # a byte at a time cannot extend the bound indefinitely.
+            connection.settimeout(remaining)
         block = connection.recv(min(4096, maximum + 1 - len(chunks)))
         if not block:
             break
@@ -419,7 +516,38 @@ def _response(
     }
 
 
+def _encoded(response: dict[str, object]) -> bytes:
+    return json.dumps(response, separators=(",", ":")).encode() + b"\n"
+
+
 def _identifier(value: str) -> bool:
     return 16 <= len(value) <= 128 and all(
         character.isalnum() or character in "-_" for character in value
     )
+
+
+def _identifier_tag(value: str) -> str:
+    """A request ID reaches the journal only after passing its own validator.
+
+    The ID is a single-use correlation nonce that has already been retired by
+    the replay table when this runs, so recording the bounded, charset-checked
+    value links the broker event to the web-side audit without logging a
+    reusable capability.
+    """
+
+    return value if _identifier(value) else "-"
+
+
+def _enumerated_operation(value: str) -> str:
+    """Only an enumerated operation name is logged, never a peer-supplied string."""
+
+    return value if value in _OPERATION_VALUES else "-"
+
+
+def _fixed_code(value: str) -> str:
+    """Result codes are broker-local literals; recheck the charset regardless."""
+
+    return value if _CODE_PATTERN.match(value) else "unknown"
+
+
+_OPERATION_VALUES = frozenset(item.value for item in BrokerOperation)

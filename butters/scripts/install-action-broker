@@ -51,6 +51,13 @@ install -m 0644 -o root -g root \
 install -m 0644 -o root -g root \
   "${butters_dir}/systemd/butters-action-broker.service" \
   /etc/systemd/system/butters-action-broker.service
+# The socket's parent directory needs root:butters 0710 so the butters service
+# account can traverse to the socket node; systemd would otherwise create it
+# root:root. Creating an empty runtime directory enables no operation.
+install -m 0644 -o root -g root \
+  "${butters_dir}/systemd/butters-action-broker.tmpfiles.conf" \
+  /etc/tmpfiles.d/butters-action-broker.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/butters-action-broker.conf
 
 systemctl daemon-reload
 if [[ "${enable_socket}" == "1" ]]; then

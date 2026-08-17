@@ -23,6 +23,10 @@ class FakeConnection:
         self.payload = bytearray(payload)
         self.uid = uid
         self.output = bytearray()
+        self.timeouts: list[float] = []
+
+    def settimeout(self, timeout: float) -> None:
+        self.timeouts.append(timeout)
 
     def getsockopt(self, _level, _option, _length):
         return struct.pack("3i", 123, self.uid, 123)
@@ -278,6 +282,7 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     assert {"BatchMode=yes", "IdentitiesOnly=yes"} <= options
     assert "PreferredAuthentications=publickey" in options
     assert "ClearAllForwardings=yes" in options
+    assert "UpdateHostKeys=no" in options
     assert "-T" in argv
     assert not any(item.startswith("StrictHostKeyChecking=no") for item in options)
     assert argv[-2:] == ["fixed-user@fixed-desktop", "shutdown.exe /r /t 0"]
