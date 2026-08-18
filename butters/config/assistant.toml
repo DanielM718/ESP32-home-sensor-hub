@@ -20,8 +20,13 @@ ssh_timeout_seconds = 90.0
 total_timeout_seconds = 150.0
 poll_interval_seconds = 2.0
 wake_enabled = true
-remote_enabled = true
-restore_enabled = true
+# Wake-only policy: wake_desktop needs nothing but a fixed Wake-on-LAN packet.
+# The remote/restore workflows and every desktop power action are SSH-backed, and
+# no production forced-command dispatcher exists on the desktop yet, so they stay
+# false. Enabling one here would only make it web-visible; the broker's own gate
+# is the terminal boundary either way.
+remote_enabled = false
+restore_enabled = false
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false
@@ -42,10 +47,12 @@ bootstrap_seconds = 600.0
 max_credentials = 16
 max_challenges = 64
 
-# Installed later as a separately reviewed, privileged service. The web daemon
-# speaks only the enumerated v1 protocol over this fixed Unix socket.
+# Installed as a separately reviewed, privileged service. The web daemon speaks
+# only the enumerated v1 protocol over this fixed Unix socket. Enabling this flag
+# does not grant any operation: each one has a second gate in the root broker's
+# /etc/butters/action-broker.toml, which is the terminal boundary.
 [broker]
-enabled = false
+enabled = true
 socket_path = "/run/butters-action-broker/broker.sock"
 protocol_version = 1
 connect_timeout_seconds = 2.0

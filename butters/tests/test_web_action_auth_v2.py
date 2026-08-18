@@ -70,7 +70,7 @@ def _application(tmp_path):
         base,
         diagnostics=replace(base.diagnostics, enabled=False),
         broker=replace(base.broker, enabled=True),
-        desktop=replace(base.desktop, restart_enabled=True),
+        desktop=replace(base.desktop, restart_enabled=True, remote_enabled=True),
         web=replace(
             base.web,
             state_dir=tmp_path,

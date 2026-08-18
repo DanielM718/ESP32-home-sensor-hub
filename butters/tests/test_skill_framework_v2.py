@@ -86,6 +86,7 @@ def _assistant():
     settings = replace(
         settings,
         broker=replace(settings.broker, enabled=True),
+        desktop=replace(settings.desktop, remote_enabled=True),
     )
     assistant = create_assistant(
         settings,
