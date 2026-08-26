@@ -1,20 +1,28 @@
 from __future__ import annotations
 
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from threading import Event, Lock
+from unittest.mock import Mock, patch
 
+from app.air_quality_policy import interpret_station
 from app.battery_status import (
     STATUS_BATTERY_LOW,
     STATUS_BATTERY_OK,
     STATUS_BATTERY_SHUTDOWN,
 )
+from app.config import InfluxSettings
 from app.queries import (
     AIR_QUALITY_FIELDS,
+    DurableInventoryCache,
+    InfluxReadRepository,
     QueryValidationError,
     air_quality_context_flux,
     air_quality_context_response,
     air_quality_sensor_status,
+    durable_inventory_flux,
     events_flux,
     latest_flux,
     latest_response,
@@ -108,16 +116,16 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn('r._measurement == "air_quality_reading"', air_section)
         self.assertIn("|> group(", air_section)
         self.assertIn("|> last()", air_section)
-        self.assertEqual(flux.count("|> last()"), 4)
+        self.assertEqual(flux.count("|> last()"), 2)
         self.assertLess(flux.rindex("|> last()"), union_start)
 
-    def test_latest_inventory_reconstructs_known_sensors_from_permanent_history(
+    def test_durable_inventory_reconstructs_known_sensors_from_permanent_history(
         self,
     ) -> None:
-        flux = latest_flux("environment", "environment_live")
+        flux = durable_inventory_flux("environment")
 
         environment_inventory = flux[
-            flux.index("environmentInventory =") : flux.index("airQualityLatest =")
+            flux.index("environmentInventory =") : flux.index("airQualityInventory =")
         ]
         air_inventory = flux[
             flux.index("airQualityInventory =") : flux.index("union(tables:")
@@ -127,6 +135,15 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn("|> range(start: 0)", air_inventory)
         self.assertIn('r._measurement == "air_quality_15m"', air_inventory)
         self.assertIn('"co2_mean"', air_inventory)
+
+    def test_latest_query_never_scans_unbounded_history(self) -> None:
+        flux = latest_flux("environment", "environment_live")
+
+        self.assertNotIn("range(start: 0)", flux)
+        self.assertNotIn("environmentInventory", flux)
+        self.assertNotIn("airQualityInventory", flux)
+        self.assertIn("range(start: -7d)", flux)
+        self.assertIn("range(start: -30m)", flux)
 
     def test_latest_live_lookback_is_bounded_and_shorter_than_retention(self) -> None:
         flux = latest_flux("environment", "environment_live")
@@ -334,6 +351,42 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(
             station["available_fields"], ["co2", "temperature_c", "humidity"]
         )
+
+    def test_legacy_empty_identity_does_not_duplicate_or_hide_valid_node_id(
+        self,
+    ) -> None:
+        old = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        legacy = {
+            "location": "office",
+            "node_id": "",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+        }
+        identified = {**legacy, "node_id": "100"}
+        records = [
+            FakeRecord("air_quality_15m", "co2_mean", 700.0, old, identified),
+            FakeRecord(
+                "air_quality_15m",
+                "co2_mean",
+                721.0,
+                old + timedelta(minutes=15),
+                legacy,
+            ),
+            FakeRecord(
+                "environment_reading",
+                "temperature_c",
+                20.0,
+                old,
+                {"node_id": "", "sensor_type": "environment"},
+            ),
+        ]
+
+        response = latest_response(records)
+
+        self.assertEqual(len(response["air_quality"]), 1)
+        self.assertEqual(response["air_quality"][0]["id"], "office")
+        self.assertEqual(response["air_quality"][0]["node_id"], 100)
+        self.assertEqual(response["environment"], [])
 
     def test_latest_response_does_not_reuse_older_raw_diagnostic_ticks(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -862,6 +915,528 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(normal["driving_metric"], "co2")
         self.assertEqual(dangerous["driving_metric"], "co2_occupational")
         self.assertEqual(dangerous["severity"], "hazardous")
+
+
+class DurableInventoryCacheTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.durable = {
+            "generated_at": "2026-01-02T00:00:00Z",
+            "environment": [
+                {
+                    "id": "1",
+                    "node_id": 1,
+                    "sensor_type": "environment",
+                    "topic": "home/sensors/1",
+                    "last_seen": "2025-12-20T00:00:00Z",
+                    "temperature_c": 21.5,
+                    "battery_mv": None,
+                    "battery_measurement_ok": False,
+                    "available_fields": ["temperature_c"],
+                }
+            ],
+            "air_quality": [
+                {
+                    "id": "office",
+                    "node_id": 100,
+                    "location": "office",
+                    "sensor_type": "air_quality",
+                    "topic": "home/air/office",
+                    "last_seen": "2025-12-20T00:00:00Z",
+                    "co2": 721.0,
+                    "available_fields": ["co2"],
+                }
+            ],
+        }
+
+    def test_offline_sen66_survives_live_expiry_and_restart_reconstruction(
+        self,
+    ) -> None:
+        empty_live = {
+            "generated_at": "2026-01-02T00:00:00Z",
+            "environment": [],
+            "air_quality": [],
+        }
+
+        before_restart = DurableInventoryCache(self.durable).observe(empty_live)
+        after_restart = DurableInventoryCache(self.durable).observe(empty_live)
+
+        for snapshot in (before_restart, after_restart):
+            station = snapshot["air_quality"][0]
+            self.assertEqual(station["id"], "office")
+            self.assertEqual(station["node_id"], 100)
+            self.assertEqual(station["last_seen"], "2025-12-20T00:00:00Z")
+            self.assertEqual(station["co2"], 721.0)
+            enriched = latest_with_node_status(
+                snapshot,
+                stale_after_seconds=1800,
+                air_quality_stale_after_seconds=20,
+            )["air_quality"][0]
+            self.assertEqual(enriched["status"], "offline")
+            self.assertFalse(enriched["values_are_current"])
+
+    def test_cached_sensor_freshness_is_recomputed_from_request_time(self) -> None:
+        seen = datetime(2026, 1, 2, 12, 0, tzinfo=timezone.utc)
+        live = {
+            "generated_at": seen.isoformat(),
+            "environment": [],
+            "air_quality": [
+                {
+                    "id": "garage",
+                    "location": "garage",
+                    "sensor_type": "air_quality",
+                    "last_seen": seen.isoformat(),
+                    "co2": 612,
+                    "available_fields": ["co2"],
+                }
+            ],
+        }
+        cache = DurableInventoryCache(
+            {"generated_at": seen.isoformat(), "environment": [], "air_quality": []}
+        )
+        cache.observe(live)
+
+        cases = (
+            (20, "online", True, None),
+            (21, "stale", False, "no_recent_reading"),
+            (81, "offline", False, "no_recent_reading"),
+        )
+        for age_seconds, expected_status, values_are_current, stale_reason in cases:
+            with self.subTest(age_seconds=age_seconds):
+                observed_at = seen + timedelta(seconds=age_seconds)
+                snapshot = cache.observe(
+                    {
+                        "generated_at": observed_at.isoformat(),
+                        "environment": [],
+                        "air_quality": [],
+                    }
+                )
+                station = latest_with_node_status(
+                    snapshot,
+                    stale_after_seconds=1800,
+                    air_quality_stale_after_seconds=20,
+                )["air_quality"][0]
+                self.assertEqual(station["age_seconds"], age_seconds)
+                self.assertEqual(station["status"], expected_status)
+                self.assertIs(station["values_are_current"], values_are_current)
+                self.assertEqual(station["stale_reason"], stale_reason)
+
+        cached_station = cache.snapshot()["air_quality"][0]
+        fresh_interpretation = interpret_station(
+            cached_station,
+            stale_after_seconds=20,
+            now=seen + timedelta(seconds=20),
+        )["co2"]
+        stale_interpretation = interpret_station(
+            cached_station,
+            stale_after_seconds=20,
+            now=seen + timedelta(seconds=21),
+        )["co2"]
+        self.assertFalse(fresh_interpretation["is_stale"])
+        self.assertTrue(stale_interpretation["is_stale"])
+        self.assertEqual(stale_interpretation["severity"], "unavailable")
+
+    def test_observation_during_refresh_is_not_discarded(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        now[0] = 2.0
+        loader_started = Event()
+        release_loader = Event()
+
+        def load_old_snapshot() -> dict[str, object]:
+            loader_started.set()
+            release_loader.wait(timeout=1)
+            return self.durable
+
+        self.assertTrue(cache.refresh_if_due(load_old_snapshot))
+        self.assertTrue(loader_started.wait(timeout=1))
+        cache.observe(
+            {
+                "generated_at": "2026-01-02T00:00:05Z",
+                "environment": [],
+                "air_quality": [
+                    {
+                        "id": "garage",
+                        "location": "garage",
+                        "sensor_type": "air_quality",
+                        "last_seen": "2026-01-02T00:00:05Z",
+                        "co2": 612,
+                        "available_fields": ["co2"],
+                    }
+                ],
+            }
+        )
+        release_loader.set()
+        assert cache._refresh_thread is not None
+        cache._refresh_thread.join(timeout=1)
+
+        snapshot = cache.observe(
+            {
+                "generated_at": "2026-01-02T00:00:06Z",
+                "environment": [],
+                "air_quality": [],
+            }
+        )
+        self.assertIn("garage", {item["id"] for item in snapshot["air_quality"]})
+
+    def test_newer_existing_sensor_observation_survives_refresh(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        now[0] = 2.0
+        loader_started = Event()
+        release_loader = Event()
+
+        def load_old_snapshot() -> dict[str, object]:
+            loader_started.set()
+            release_loader.wait(timeout=1)
+            return self.durable
+
+        self.assertTrue(cache.refresh_if_due(load_old_snapshot))
+        self.assertTrue(loader_started.wait(timeout=1))
+        cache.observe(
+            {
+                "generated_at": "2026-01-02T00:00:05Z",
+                "environment": [],
+                "air_quality": [
+                    {
+                        "id": "office",
+                        "node_id": 100,
+                        "location": "office",
+                        "sensor_type": "air_quality",
+                        "topic": "home/air/office",
+                        "last_seen": "2026-01-02T00:00:05Z",
+                        "co2": 900,
+                        "available_fields": ["co2"],
+                    }
+                ],
+            }
+        )
+        release_loader.set()
+        assert cache._refresh_thread is not None
+        cache._refresh_thread.join(timeout=1)
+
+        station = cache.observe(
+            {
+                "generated_at": "2026-01-02T00:00:06Z",
+                "environment": [],
+                "air_quality": [],
+            }
+        )["air_quality"][0]
+        self.assertEqual(station["last_seen"], "2026-01-02T00:00:05Z")
+        self.assertEqual(station["co2"], 900)
+
+    def test_sparse_environment_merge_matches_old_record_union(self) -> None:
+        old = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        new = old + timedelta(minutes=1)
+        values = {
+            "node_id": "7",
+            "topic": "home/sensors/7",
+            "sensor_type": "environment",
+        }
+        durable_records = [
+            FakeRecord("environment_reading", "temperature_c", 21.0, old, values),
+            FakeRecord("environment_reading", "humidity", 40.0, old, values),
+            FakeRecord("environment_reading", "battery_mv", 4000, old, values),
+            FakeRecord(
+                "environment_reading", "status_flags", STATUS_BATTERY_OK, old, values
+            ),
+        ]
+        observed_records = [
+            FakeRecord("environment_reading", "temperature_c", 22.0, new, values)
+        ]
+
+        expected = latest_response(durable_records + observed_records)["environment"][0]
+        actual = DurableInventoryCache(
+            latest_response(durable_records, include_internal=True)
+        ).observe(latest_response(observed_records, include_internal=True))[
+            "environment"
+        ][0]
+
+        self.assertEqual(actual, expected)
+        self.assertEqual(actual["humidity"], 40.0)
+        self.assertIsNone(actual["battery_mv"])
+        self.assertIsNone(actual["battery_measurement_ok"])
+
+    def test_sparse_air_quality_merge_matches_old_record_union(self) -> None:
+        old = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        new = old + timedelta(seconds=5)
+        values = {
+            "node_id": "100",
+            "location": "office",
+            "topic": "home/air/office",
+            "sensor_type": "air_quality",
+        }
+        durable_records = [
+            FakeRecord("air_quality_reading", "co2", 700, old, values),
+            FakeRecord("air_quality_reading", "pm25", 5.0, old, values),
+        ]
+        observed_records = [FakeRecord("air_quality_reading", "co2", 750, new, values)]
+
+        expected = latest_response(durable_records + observed_records)["air_quality"][0]
+        actual = DurableInventoryCache(
+            latest_response(durable_records, include_internal=True)
+        ).observe(latest_response(observed_records, include_internal=True))[
+            "air_quality"
+        ][0]
+
+        self.assertEqual(actual, expected)
+        self.assertIsNone(actual["pm25"])
+        self.assertEqual(actual["available_fields"], ["co2", "pm25"])
+
+    def test_split_battery_timestamps_match_old_record_union(self) -> None:
+        old = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        new = old + timedelta(seconds=5)
+        values = {
+            "node_id": "7",
+            "topic": "home/sensors/7",
+            "sensor_type": "environment",
+        }
+        cases = (
+            (
+                [FakeRecord("environment_reading", "battery_mv", 4000, old, values)],
+                [
+                    FakeRecord(
+                        "environment_reading",
+                        "status_flags",
+                        STATUS_BATTERY_OK,
+                        new,
+                        values,
+                    )
+                ],
+            ),
+            (
+                [
+                    FakeRecord(
+                        "environment_reading",
+                        "status_flags",
+                        STATUS_BATTERY_OK,
+                        old,
+                        values,
+                    )
+                ],
+                [FakeRecord("environment_reading", "battery_mv", 4000, new, values)],
+            ),
+        )
+
+        for durable_records, observed_records in cases:
+            with self.subTest(observed_field=observed_records[0].field):
+                expected = latest_response(durable_records + observed_records)[
+                    "environment"
+                ][0]
+                actual = DurableInventoryCache(
+                    latest_response(durable_records, include_internal=True)
+                ).observe(latest_response(observed_records, include_internal=True))[
+                    "environment"
+                ][0]
+
+                self.assertEqual(actual, expected)
+                self.assertIsNone(actual["battery_mv"])
+
+    def test_new_sensor_is_discovered_from_bounded_observation(self) -> None:
+        cache = DurableInventoryCache(self.durable)
+        latest = {
+            "generated_at": "2026-01-02T00:00:00Z",
+            "environment": [],
+            "air_quality": [
+                {
+                    "id": "garage",
+                    "node_id": 101,
+                    "location": "garage",
+                    "sensor_type": "air_quality",
+                    "topic": "home/air/garage",
+                    "last_seen": "2026-01-01T23:59:59Z",
+                    "co2": 612,
+                    "available_fields": ["co2"],
+                }
+            ],
+        }
+
+        observed = cache.observe(latest)
+        after_live_expiry = cache.observe(
+            {
+                "generated_at": "2026-01-03T00:00:00Z",
+                "environment": [],
+                "air_quality": [],
+            }
+        )
+
+        self.assertEqual(
+            {station["id"] for station in observed["air_quality"]},
+            {"office", "garage"},
+        )
+        self.assertEqual(
+            {station["id"] for station in after_live_expiry["air_quality"]},
+            {"office", "garage"},
+        )
+
+    def test_multiple_sensor_types_and_null_battery_semantics_are_preserved(
+        self,
+    ) -> None:
+        snapshot = DurableInventoryCache(self.durable).snapshot()
+
+        self.assertEqual(len(snapshot["environment"]), 1)
+        self.assertEqual(len(snapshot["air_quality"]), 1)
+        node = snapshot["environment"][0]
+        self.assertIsNone(node["battery_mv"])
+        self.assertFalse(node["battery_measurement_ok"])
+
+    def test_refresh_failure_retains_known_good_inventory(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        now[0] = 2.0
+
+        def fail() -> dict[str, object]:
+            raise RuntimeError("Influx temporarily unavailable")
+
+        with self.assertLogs("home_sensor.queries", level="ERROR"):
+            self.assertTrue(cache.refresh_if_due(fail))
+            assert cache._refresh_thread is not None
+            cache._refresh_thread.join(timeout=1)
+
+        snapshot = cache.snapshot()
+        self.assertEqual(snapshot["air_quality"][0]["id"], "office")
+        self.assertEqual(snapshot["environment"][0]["id"], "1")
+
+        now[0] = 4.0
+        recovered = {
+            "generated_at": "2026-01-02T00:00:00Z",
+            "environment": self.durable["environment"],
+            "air_quality": [],
+        }
+        self.assertTrue(cache.refresh_if_due(lambda: recovered))
+        assert cache._refresh_thread is not None
+        cache._refresh_thread.join(timeout=1)
+        self.assertEqual(cache.snapshot()["air_quality"], [])
+
+    def test_successful_refresh_reconciles_changed_permanent_inventory(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        now[0] = 2.0
+        cache.observe(
+            {
+                "generated_at": "2026-01-02T00:00:00Z",
+                "environment": [],
+                "air_quality": [
+                    {
+                        "id": "garage",
+                        "location": "garage",
+                        "sensor_type": "air_quality",
+                        "last_seen": "2026-01-01T23:59:59Z",
+                    }
+                ],
+            }
+        )
+        replacement = {
+            "generated_at": "2026-01-02T00:00:00Z",
+            "environment": self.durable["environment"],
+            "air_quality": [],
+        }
+
+        self.assertTrue(cache.refresh_if_due(lambda: replacement))
+        assert cache._refresh_thread is not None
+        cache._refresh_thread.join(timeout=1)
+
+        self.assertEqual(cache.snapshot()["air_quality"], [])
+
+    def test_concurrent_calls_start_only_one_background_refresh(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        now[0] = 2.0
+        release = Event()
+        calls = 0
+        calls_lock = Lock()
+
+        def load() -> dict[str, object]:
+            nonlocal calls
+            with calls_lock:
+                calls += 1
+            release.wait(timeout=1)
+            return self.durable
+
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            started = list(
+                executor.map(lambda _: cache.refresh_if_due(load), range(24))
+            )
+
+        self.assertEqual(sum(started), 1)
+        self.assertEqual(calls, 1)
+        release.set()
+        assert cache._refresh_thread is not None
+        cache._refresh_thread.join(timeout=1)
+
+    def test_closed_cache_cannot_start_another_refresh(self) -> None:
+        now = [0.0]
+        cache = DurableInventoryCache(
+            self.durable,
+            refresh_seconds=1,
+            clock=lambda: now[0],
+        )
+        cache.close()
+        now[0] = 2.0
+
+        self.assertFalse(cache.refresh_if_due(lambda: self.durable))
+
+    def test_repository_latest_executes_only_bounded_flux(self) -> None:
+        repository = object.__new__(InfluxReadRepository)
+        repository._settings = InfluxSettings(
+            url="http://127.0.0.1:8086",
+            org="test",
+            bucket="environment",
+            write_token="unused",
+            read_token="unused",
+            live_bucket="environment_live",
+        )
+        repository._inventory = DurableInventoryCache(self.durable)
+        repository._query = Mock(return_value=[])
+
+        snapshot = repository.latest()
+
+        flux = repository._query.call_args.args[0]
+        self.assertNotIn("range(start: 0)", flux)
+        self.assertEqual(repository._query.call_count, 1)
+        self.assertEqual(snapshot["air_quality"][0]["id"], "office")
+
+    def test_repository_startup_fails_closed_when_reconstruction_fails(self) -> None:
+        client = Mock()
+        client.query_api.return_value.query.side_effect = RuntimeError(
+            "Influx temporarily unavailable"
+        )
+        settings = InfluxSettings(
+            url="http://127.0.0.1:8086",
+            org="test",
+            bucket="environment",
+            write_token="unused",
+            read_token="unused",
+            live_bucket="environment_live",
+        )
+
+        with (
+            patch("influxdb_client.InfluxDBClient", return_value=client),
+            self.assertLogs("home_sensor.queries", level="ERROR"),
+            self.assertRaisesRegex(RuntimeError, "temporarily unavailable"),
+        ):
+            InfluxReadRepository(settings)
+
+        client.close.assert_called_once_with()
 
 
 def _latest_environment_node(

@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
-from collections.abc import Iterable, Mapping, Sequence
+import threading
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Protocol
@@ -82,6 +86,8 @@ AIR_QUALITY_MAX_FIELDS = ("co2", "pm1", "pm25", "pm4", "pm10", "voc_index", "nox
 AIR_QUALITY_P95_FIELDS = ("co2", "pm25", "pm10", "voc_index", "nox_index")
 
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+INVENTORY_REFRESH_SECONDS = 15 * 60
+LOGGER = logging.getLogger("home_sensor.queries")
 
 
 class QueryValidationError(ValueError):
@@ -119,6 +125,7 @@ class InfluxReadRepository:
         *,
         expected_publish_seconds: int = 5,
         minimum_coverage_percent: int = 75,
+        inventory_refresh_seconds: float = INVENTORY_REFRESH_SECONDS,
     ) -> None:
         from influxdb_client import InfluxDBClient
 
@@ -132,12 +139,33 @@ class InfluxReadRepository:
         self._query_api = self._client.query_api()
         self._expected_publish_seconds = expected_publish_seconds
         self._minimum_coverage_percent = minimum_coverage_percent
+        try:
+            inventory = self._load_inventory()
+        except Exception:
+            self._client.close()
+            LOGGER.exception(
+                "Durable sensor inventory reconstruction failed; refusing to "
+                "start with an empty inventory"
+            )
+            raise
+        self._inventory = DurableInventoryCache(
+            inventory,
+            refresh_seconds=inventory_refresh_seconds,
+        )
 
     def latest(self) -> dict[str, Any]:
         records = self._query(
             latest_flux(self._settings.bucket, self._settings.live_bucket)
         )
-        return latest_response(records)
+        latest = self._inventory.observe(
+            latest_response(records, include_internal=True)
+        )
+        self._inventory.refresh_if_due(self._load_inventory)
+        return latest
+
+    def _load_inventory(self) -> dict[str, Any]:
+        records = self._query(durable_inventory_flux(self._settings.bucket))
+        return latest_response(records, include_internal=True)
 
     def readings(self, query: ReadingsQuery) -> dict[str, Any]:
         records = self._query(
@@ -179,11 +207,136 @@ class InfluxReadRepository:
         )
 
     def close(self) -> None:
+        self._inventory.close()
         self._client.close()
 
     def _query(self, flux: str) -> list[RecordLike]:
         tables = self._query_api.query(query=flux, org=self._settings.org)
         return [record for table in tables for record in table.records]
+
+
+class DurableInventoryCache:
+    """Thread-safe permanent inventory plus identities observed by this process."""
+
+    def __init__(
+        self,
+        durable: Mapping[str, Any],
+        *,
+        refresh_seconds: float = INVENTORY_REFRESH_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        if refresh_seconds <= 0:
+            raise ValueError("refresh_seconds must be positive")
+        self._clock = clock
+        self._refresh_seconds = refresh_seconds
+        self._lock = threading.Lock()
+        self._durable = deepcopy(dict(durable))
+        self._observed = _empty_latest_payload()
+        self._refresh_baseline: dict[str, Any] | None = None
+        self._next_refresh = float(clock()) + refresh_seconds
+        self._refreshing = False
+        self._closed = False
+        self._refresh_thread: threading.Thread | None = None
+
+    def observe(self, latest: Mapping[str, Any]) -> dict[str, Any]:
+        """Record bounded observations and return the merged inventory snapshot."""
+
+        with self._lock:
+            self._observed = merge_latest_payloads(
+                self._observed,
+                latest,
+                include_internal=True,
+            )
+            return self._snapshot_locked(
+                generated_at=str(latest.get("generated_at") or _now_iso())
+            )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return known-good state without mutating the cache."""
+
+        with self._lock:
+            return self._snapshot_locked(generated_at=_now_iso())
+
+    def refresh_if_due(self, loader: Callable[[], Mapping[str, Any]]) -> bool:
+        """Start at most one non-blocking durable refresh when its interval expires."""
+
+        with self._lock:
+            if (
+                self._closed
+                or self._refreshing
+                or float(self._clock()) < self._next_refresh
+            ):
+                return False
+            self._refreshing = True
+            self._refresh_baseline = self._observed
+            self._observed = _empty_latest_payload()
+            thread = threading.Thread(
+                target=self._refresh,
+                args=(loader,),
+                name="durable-inventory-refresh",
+                daemon=True,
+            )
+            self._refresh_thread = thread
+        try:
+            thread.start()
+        except Exception:
+            with self._lock:
+                self._restore_refresh_baseline_locked()
+                self._refreshing = False
+                self._next_refresh = float(self._clock()) + self._refresh_seconds
+            raise
+        return True
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            thread = self._refresh_thread
+        if thread is not None and thread.is_alive():
+            thread.join()
+
+    def _refresh(self, loader: Callable[[], Mapping[str, Any]]) -> None:
+        refreshed: dict[str, Any] | None = None
+        try:
+            refreshed = deepcopy(dict(loader()))
+        except Exception:
+            LOGGER.exception(
+                "Durable sensor inventory refresh failed; retaining known-good state"
+            )
+        finally:
+            with self._lock:
+                if refreshed is not None and not self._closed:
+                    self._durable = refreshed
+                    # Only observations made before this refresh began are now
+                    # superseded. Preserve anything observed while it was running.
+                    self._refresh_baseline = None
+                else:
+                    self._restore_refresh_baseline_locked()
+                self._refreshing = False
+                self._next_refresh = float(self._clock()) + self._refresh_seconds
+
+    def _snapshot_locked(self, *, generated_at: str) -> dict[str, Any]:
+        combined = self._durable
+        if self._refresh_baseline is not None:
+            combined = merge_latest_payloads(
+                combined,
+                self._refresh_baseline,
+                include_internal=True,
+            )
+        return merge_latest_payloads(
+            combined,
+            self._observed,
+            generated_at=generated_at,
+        )
+
+    def _restore_refresh_baseline_locked(self) -> None:
+        if self._refresh_baseline is None:
+            return
+        self._observed = merge_latest_payloads(
+            self._refresh_baseline,
+            self._observed,
+            include_internal=True,
+        )
+        self._refresh_baseline = None
 
 
 def readings_query_from_params(params: Mapping[str, str | None]) -> ReadingsQuery:
@@ -229,17 +382,24 @@ def latest_flux(bucket: str, live_bucket: str | None = None) -> str:
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
-environmentInventory = from(bucket: {_flux_string(bucket)})
-  |> range(start: 0)
-  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)})
-  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_LATEST_FIELDS)}))
-  |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
-  |> last()
-
 airQualityLatest = from(bucket: {_flux_string(live_bucket)})
   |> range(start: {AIR_QUALITY_LATEST_LOOKBACK})
   |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
   |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(AIR_QUALITY_LATEST_FIELDS)}))
+  |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
+  |> last()
+
+union(tables: [environmentLatest, airQualityLatest])
+"""
+
+
+def durable_inventory_flux(bucket: str) -> str:
+    """Reconstruct durable identities and last-known values from permanent data."""
+
+    return f"""environmentInventory = from(bucket: {_flux_string(bucket)})
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_LATEST_FIELDS)}))
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
@@ -250,7 +410,7 @@ airQualityInventory = from(bucket: {_flux_string(bucket)})
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
-union(tables: [environmentLatest, environmentInventory, airQualityLatest, airQualityInventory])
+union(tables: [environmentInventory, airQualityInventory])
 """
 
 
@@ -695,7 +855,11 @@ def _number_or_none(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
+def latest_response(
+    records: Iterable[RecordLike],
+    *,
+    include_internal: bool = False,
+) -> dict[str, Any]:
     entities: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records:
         measurement = _measurement(record)
@@ -709,10 +873,11 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
 
         key = (sensor_type, identity)
         item = entities.setdefault(key, _base_entity(record, sensor_type, identity))
+        record_time = _time(record)
+        _update_entity_metadata(item, record, sensor_type, record_time)
         field = _latest_field(record, sensor_type)
         if field is None:
             continue
-        record_time = _time(record)
         field_times = item.setdefault("_field_times", {})
         previous_time = field_times.get(field)
         if (
@@ -723,8 +888,9 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
             field_times[field] = record_time
         item["last_seen"] = _max_iso_time(item.get("last_seen"), record_time)
 
-    for item in entities.values():
-        _finalize_latest_item(item)
+    if not include_internal:
+        for item in entities.values():
+            _finalize_latest_item(item)
 
     return {
         "generated_at": _now_iso(),
@@ -739,6 +905,97 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
             if sensor_type == SENSOR_TYPE_AIR_QUALITY
         ),
     }
+
+
+def merge_latest_payloads(
+    durable: Mapping[str, Any],
+    observed: Mapping[str, Any],
+    *,
+    generated_at: str | None = None,
+    include_internal: bool = False,
+) -> dict[str, Any]:
+    """Merge inventories using per-field time when internal state is available."""
+
+    response: dict[str, Any] = {
+        "generated_at": generated_at
+        or str(
+            observed.get("generated_at") or durable.get("generated_at") or _now_iso()
+        )
+    }
+    for sensor_type in (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY):
+        entities: dict[str, dict[str, Any]] = {}
+        for source in (durable, observed):
+            for original in source.get(sensor_type, []):
+                candidate = deepcopy(dict(original))
+                identity = str(candidate.get("id") or "")
+                if not identity:
+                    continue
+                existing = entities.get(identity)
+                if existing is None:
+                    entities[identity] = candidate
+                else:
+                    entities[identity] = _merge_latest_entities(existing, candidate)
+        if not include_internal:
+            for item in entities.values():
+                if "_field_times" in item:
+                    _finalize_latest_item(item)
+        response[sensor_type] = _sorted_entities(entities.values())
+    return response
+
+
+def _empty_latest_payload() -> dict[str, Any]:
+    return {
+        "generated_at": _now_iso(),
+        "environment": [],
+        "air_quality": [],
+    }
+
+
+def _merge_latest_entities(
+    left: dict[str, Any], right: dict[str, Any]
+) -> dict[str, Any]:
+    if "_field_times" not in left or "_field_times" not in right:
+        return _newest_entity(left, right)
+
+    result = deepcopy(left)
+    result_field_times = result.setdefault("_field_times", {})
+    for field, right_time in right["_field_times"].items():
+        left_time = result_field_times.get(field)
+        if left_time is None or _max_iso_time(left_time, right_time) == right_time:
+            if field in right:
+                result[field] = deepcopy(right[field])
+            else:
+                result.pop(field, None)
+            result_field_times[field] = right_time
+
+    result_metadata_times = result.setdefault("_metadata_times", {})
+    for key, right_time in right.get("_metadata_times", {}).items():
+        left_time = result_metadata_times.get(key)
+        if (
+            left_time is None or _max_iso_time(left_time, right_time) == right_time
+        ) and right.get(key) not in (None, ""):
+            result[key] = deepcopy(right[key])
+            result_metadata_times[key] = right_time
+
+    result["last_seen"] = _max_iso_time(
+        result.get("last_seen"), str(right.get("last_seen") or "")
+    )
+    for key in ("node_id", "location", "topic", "sensor_type", "id"):
+        if result.get(key) in (None, "") and right.get(key) not in (None, ""):
+            result[key] = deepcopy(right[key])
+    return result
+
+
+def _newest_entity(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:
+    left_seen = str(left.get("last_seen") or "")
+    right_seen = str(right.get("last_seen") or "")
+    newest = right if _max_iso_time(left_seen, right_seen) == right_seen else left
+    other = left if newest is right else right
+    result = deepcopy(newest)
+    for key in ("node_id", "location", "topic", "sensor_type", "id"):
+        if result.get(key) in (None, "") and other.get(key) not in (None, ""):
+            result[key] = deepcopy(other[key])
+    return result
 
 
 def readings_response(
@@ -1067,6 +1324,7 @@ def _finalize_latest_item(item: dict[str, Any]) -> None:
     """Add battery semantics without attaching an older flag to a newer packet."""
 
     field_times = item.pop("_field_times", {})
+    item.pop("_metadata_times", None)
     supported_fields = (
         ENVIRONMENT_HISTORY_FIELDS
         if item.get("sensor_type") == SENSOR_TYPE_ENVIRONMENT
@@ -1146,6 +1404,32 @@ def _base_entity(record: RecordLike, sensor_type: str, identity: str) -> dict[st
         if node_id not in (None, ""):
             item["node_id"] = _int_or_string(str(node_id))
     return item
+
+
+def _update_entity_metadata(
+    item: dict[str, Any],
+    record: RecordLike,
+    sensor_type: str,
+    record_time: str,
+) -> None:
+    """Prefer the newest non-empty metadata when legacy series share an identity."""
+
+    values = _values(record)
+    metadata_times = item.setdefault("_metadata_times", {})
+    keys = (
+        ("topic",) if sensor_type == SENSOR_TYPE_ENVIRONMENT else ("topic", "node_id")
+    )
+    for key in keys:
+        value = values.get(key)
+        if value in (None, ""):
+            continue
+        previous_time = metadata_times.get(key)
+        if (
+            previous_time is None
+            or _max_iso_time(previous_time, record_time) == record_time
+        ):
+            item[key] = _int_or_string(str(value)) if key == "node_id" else str(value)
+            metadata_times[key] = record_time
 
 
 def _sensor_type_for_measurement(measurement: str) -> str | None:
