@@ -181,16 +181,15 @@ def printer_state_from_home_assistant(
         for timestamp in (_entity_timestamp(entity),)
         if timestamp is not None
     ]
+    # Retained for provenance and diagnostics only. Entity age must never
+    # override availability: Home Assistant reports printer entities on change,
+    # so a quiet, settled printer legitimately stops updating them for minutes
+    # at a time. The mapped online entity is the authoritative availability
+    # signal, and a genuinely unreachable printer is reported through it (or
+    # through the adapter error path when Home Assistant itself fails).
+    # Deriving OFFLINE from timestamp age produced false offline transitions
+    # while the printer was idle and reachable.
     source_timestamp = max(timestamps) if timestamps else None
-    stale = (
-        online
-        and source_timestamp is not None
-        and (_aware_utc(observed_at) - source_timestamp).total_seconds()
-        > settings.stale_after_seconds
-    )
-    if stale:
-        online = False
-        normalized = NormalizedPrinterState.OFFLINE
 
     provenance: dict[str, ValueProvenance] = {}
     material = _text_entity(mapped.get("active_material"))
@@ -235,13 +234,7 @@ def printer_state_from_home_assistant(
         source="home_assistant",
         source_timestamp=source_timestamp,
         observed_at=_aware_utc(observed_at),
-        unavailable_reason=(
-            None
-            if online
-            else "Home Assistant printer entities are stale"
-            if stale
-            else _offline_reason(online_entity)
-        ),
+        unavailable_reason=(None if online else _offline_reason(online_entity)),
         current_stage=_text_entity(mapped.get("current_stage")),
         job_id=_text_entity(mapped.get("job_id")),
         job_name=_text_entity(mapped.get("job_name")),
