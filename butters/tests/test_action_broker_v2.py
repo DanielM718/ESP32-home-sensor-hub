@@ -5,7 +5,7 @@ import os
 import struct
 import threading
 from pathlib import Path
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 import pytest
 from butters.actions.broker import (
@@ -20,6 +20,26 @@ from butters.actions.broker import (
 from butters.assistant_config import BrokerSettings
 
 BUTTERS_ROOT = Path(__file__).resolve().parents[1]
+
+
+class FakeClock:
+    """Deterministic monotonic/sleep pair for the monitor settling loop.
+
+    Substituting both halves keeps the bounded poll instant: sleeping advances
+    the clock the loop reads, so a 20s deadline costs no wall time and the
+    recorded intervals stay assertable.
+    """
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.slept: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.slept.append(seconds)
+        self.now += seconds
 
 
 class FakeConnection:
@@ -248,8 +268,15 @@ def test_monitor_control_reports_already_partial_auth_and_unavailable_states(
         states["switch.desktop_oled"] = "unavailable"
         return Response([])
 
+    # The unavailable outlet never reaches "off", so the settling loop runs to
+    # its deadline; the fake clock keeps that bounded wait free of wall time.
+    clock = FakeClock()
     operations = FixedBrokerOperations(
-        config, home_assistant_token="token", opener=partial_opener
+        config,
+        home_assistant_token="token",
+        opener=partial_opener,
+        sleeper=clock.sleep,
+        monotonic=clock.monotonic,
     )
     already = operations.desktop_monitors_on()
     partial = operations.desktop_monitors_off()
@@ -454,3 +481,330 @@ def test_broker_dedupe_eviction_drops_the_oldest_request_id() -> None:
     assert replay["ok"] is False and replay["error_code"] == "replayed_request"
     newest = _exchange(server, _request("desktop.wake", "request_id_0000000000000002"))
     assert newest["ok"] is False and newest["error_code"] == "replayed_request"
+
+
+class _MonitorHarness:
+    """Fake Home Assistant whose two outlets settle after a chosen poll count.
+
+    settle_after maps an entity to the number of settling sleeps that must elapse
+    after the service call before it reports the requested state; 0 means it is
+    already there on the first post-call poll, and None means it never settles.
+    Polls are counted per entity, so asynchronous convergence is expressible
+    without any real time passing.
+    """
+
+    def __init__(
+        self,
+        initial: str,
+        settle_after: dict[str, int | None],
+        *,
+        fail_after_reads: int | None = None,
+        failure: Exception | None = None,
+        unavailable_after: dict[str, int] | None = None,
+    ) -> None:
+        self.states = {
+            entity: initial for entity in FixedBrokerOperations.MONITOR_ENTITIES
+        }
+        self.settle_after = settle_after
+        self.unavailable_after = unavailable_after or {}
+        self.fail_after_reads = fail_after_reads
+        self.failure = failure
+        self.desired: str | None = None
+        self.reads: dict[str, int] = dict.fromkeys(self.states, 0)
+        self.polls: dict[str, int] = dict.fromkeys(self.states, 0)
+        self.total_reads = 0
+        self.posts: list[dict[str, object]] = []
+        self.get_paths: list[str] = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload: object) -> None:
+            self.payload = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum: int) -> bytes:
+            return self.payload
+
+    def opener(self, request, **_kwargs):
+        if request.method == "POST":
+            path = request.full_url.split("/api/", 1)[-1]
+            body = json.loads(request.data)
+            self.posts.append({"path": path, "body": body})
+            self.desired = path.rsplit("turn_", 1)[-1]
+            return self.Response([])
+        entity = request.full_url.rsplit("/", 1)[-1]
+        self.get_paths.append(request.full_url.split("/api/", 1)[-1])
+        self.total_reads += 1
+        if (
+            self.fail_after_reads is not None
+            and self.total_reads > self.fail_after_reads
+            and self.failure is not None
+        ):
+            raise self.failure
+        self.reads[entity] = self.reads.get(entity, 0) + 1
+        if self.desired is not None:
+            # Nth post-call poll for this entity (the pre-call read is excluded).
+            self.polls[entity] = self.polls.get(entity, 0) + 1
+            limit = self.unavailable_after.get(entity)
+            if limit is not None and self.polls[entity] > limit:
+                return self.Response({"state": "unavailable"})
+            needed = self.settle_after.get(entity)
+            if needed is not None and self.polls[entity] > needed:
+                self.states[entity] = self.desired
+        return self.Response({"state": self.states[entity]})
+
+
+def _monitor_config(tmp_path) -> FixedBrokerConfig:
+    return FixedBrokerConfig(
+        "192.168.1.209",
+        "Daniel",
+        "34:5A:60:D7:4C:2C",
+        "192.168.1.255",
+        tmp_path / "windows_remote_mode",
+        enabled_operations=frozenset(
+            {
+                BrokerOperation.DESKTOP_MONITORS_ON,
+                BrokerOperation.DESKTOP_MONITORS_OFF,
+            }
+        ),
+    )
+
+
+def _monitor_operations(tmp_path, harness) -> tuple[FixedBrokerOperations, FakeClock]:
+    clock = FakeClock()
+    return (
+        FixedBrokerOperations(
+            _monitor_config(tmp_path),
+            home_assistant_token="token",
+            opener=harness.opener,
+            sleeper=clock.sleep,
+            monotonic=clock.monotonic,
+        ),
+        clock,
+    )
+
+
+def test_monitor_settling_accepts_when_both_outlets_converge_immediately(
+    tmp_path,
+) -> None:
+    harness = _MonitorHarness(
+        "on", dict.fromkeys(FixedBrokerOperations.MONITOR_ENTITIES, 0)
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is True
+    assert result["partial"] is False
+    assert result["already_in_state"] is False
+    assert result["entities"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, "off"
+    )
+    # Converged on the first post-call read, so the loop never slept.
+    assert clock.slept == []
+    assert len(harness.posts) == 1
+
+
+def test_monitor_settling_accepts_when_one_outlet_lags_several_polls(tmp_path) -> None:
+    harness = _MonitorHarness(
+        "on",
+        {
+            "switch.desktop_gigabyte": 4,
+            "switch.desktop_oled": 0,
+        },
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is True
+    assert result["partial"] is False
+    assert result["entities"]["switch.desktop_gigabyte"] == "off"
+    assert result["entities"]["switch.desktop_oled"] == "off"
+    # Polled rather than failing, and every wait used the fixed interval.
+    assert len(clock.slept) == 4
+    assert set(clock.slept) == {0.5}
+    assert len(harness.posts) == 1
+
+
+def test_monitor_settling_handles_asynchronous_convergence(tmp_path) -> None:
+    # Mirrors production: the OLED settles quickly, the Gigabyte lags well behind.
+    harness = _MonitorHarness(
+        "off",
+        {
+            "switch.desktop_gigabyte": 30,
+            "switch.desktop_oled": 2,
+        },
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_on()
+
+    assert result["accepted"] is True
+    assert result["partial"] is False
+    assert result["entities"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, "on"
+    )
+    # ~15s of skew is absorbed inside the 20s deadline.
+    assert clock.now == pytest.approx(15.0)
+    assert clock.now < 20.0
+
+
+def test_monitor_settling_accepts_convergence_just_before_the_deadline(
+    tmp_path,
+) -> None:
+    # 39 settling sleeps of 0.5s puts convergence at t=19.5s, inside the deadline.
+    harness = _MonitorHarness(
+        "on",
+        {
+            "switch.desktop_gigabyte": 39,
+            "switch.desktop_oled": 0,
+        },
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is True
+    assert result["partial"] is False
+    assert clock.now == pytest.approx(19.5)
+    assert clock.now < 20.0
+
+
+def test_monitor_settling_reports_partial_when_one_outlet_never_converges(
+    tmp_path,
+) -> None:
+    harness = _MonitorHarness(
+        "on",
+        {
+            "switch.desktop_gigabyte": None,
+            "switch.desktop_oled": 0,
+        },
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is False
+    assert result["partial"] is True
+    assert result["entities"]["switch.desktop_oled"] == "off"
+    assert result["entities"]["switch.desktop_gigabyte"] == "on"
+    # Bounded: it stopped at the deadline instead of blocking.
+    assert clock.now == pytest.approx(20.0)
+    assert len(harness.posts) == 1
+
+
+def test_monitor_settling_fails_closed_when_neither_outlet_converges(tmp_path) -> None:
+    harness = _MonitorHarness(
+        "on", dict.fromkeys(FixedBrokerOperations.MONITOR_ENTITIES, None)
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is False
+    assert result["partial"] is False
+    assert result["entities"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, "on"
+    )
+    assert clock.now == pytest.approx(20.0)
+
+
+def test_monitor_settling_treats_becoming_unavailable_as_not_converged(
+    tmp_path,
+) -> None:
+    harness = _MonitorHarness(
+        "on",
+        {
+            "switch.desktop_gigabyte": 0,
+            "switch.desktop_oled": 0,
+        },
+        unavailable_after={"switch.desktop_oled": 0},
+    )
+    operations, clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is False
+    assert result["partial"] is True
+    assert result["entities"]["switch.desktop_oled"] == "unavailable"
+    assert result["entities"]["switch.desktop_gigabyte"] == "off"
+    assert clock.now == pytest.approx(20.0)
+
+
+def test_monitor_settling_propagates_read_failures_during_verification(
+    tmp_path,
+) -> None:
+    auth = _MonitorHarness(
+        "on",
+        {"switch.desktop_gigabyte": None, "switch.desktop_oled": 0},
+        fail_after_reads=3,
+        failure=HTTPError("http://127.0.0.1", 401, "denied", {}, None),
+    )
+    operations, _clock = _monitor_operations(tmp_path, auth)
+    with pytest.raises(BrokerError) as denied:
+        operations.desktop_monitors_off()
+    assert denied.value.code == "home_assistant_auth_failed"
+
+    network = _MonitorHarness(
+        "on",
+        {"switch.desktop_gigabyte": None, "switch.desktop_oled": 0},
+        fail_after_reads=3,
+        failure=URLError("unreachable"),
+    )
+    operations, _clock = _monitor_operations(tmp_path, network)
+    with pytest.raises(BrokerError) as unavailable:
+        operations.desktop_monitors_off()
+    assert unavailable.value.code == "home_assistant_unavailable"
+
+
+def test_monitor_settling_never_widens_the_fixed_entity_or_service_surface(
+    tmp_path,
+) -> None:
+    from butters.actions import broker as broker_module
+
+    assert FixedBrokerOperations.MONITOR_ENTITIES == (
+        "switch.desktop_gigabyte",
+        "switch.desktop_oled",
+    )
+    harness = _MonitorHarness(
+        "on",
+        {
+            "switch.desktop_gigabyte": 3,
+            "switch.desktop_oled": 1,
+        },
+    )
+    operations, _clock = _monitor_operations(tmp_path, harness)
+
+    result = operations.desktop_monitors_off()
+    assert result["accepted"] is True
+
+    # Exactly one service call, to the fixed domain/service, naming only the two
+    # approved entities.
+    assert len(harness.posts) == 1
+    assert harness.posts[0]["path"] == "services/switch/turn_off"
+    assert harness.posts[0]["body"] == {
+        "entity_id": [
+            "switch.desktop_gigabyte",
+            "switch.desktop_oled",
+        ]
+    }
+    # Every polled read targeted only the two approved entities.
+    assert set(harness.get_paths) == {
+        "states/switch.desktop_gigabyte",
+        "states/switch.desktop_oled",
+    }
+    # The settling bounds are broker-local constants, not caller or config input.
+    assert broker_module.MONITOR_SETTLE_DEADLINE_SECONDS == 20.0
+    assert broker_module.MONITOR_SETTLE_POLL_SECONDS == 0.5
+    assert broker_module.MONITOR_SETTLE_DEADLINE_SECONDS > 15.0
+    assert (
+        broker_module.MONITOR_SETTLE_DEADLINE_SECONDS
+        < BrokerSettings().request_timeout_seconds
+    )
