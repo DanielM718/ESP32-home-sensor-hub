@@ -115,7 +115,10 @@ schemas, compatibility, and deployment are documented in
 ## REST API
 
 The Flask service reads historical and latest data from InfluxDB only. It does
-not read directly from MQTT.
+not read directly from MQTT. Known sensor identity/capabilities are reconstructed
+from permanent Influx history, while online/stale/offline status is derived
+separately from `last_seen`. Offline sensors therefore remain visible and keep
+historical access across backend restarts.
 
 - `GET /api/latest`
 - `GET /api/readings`

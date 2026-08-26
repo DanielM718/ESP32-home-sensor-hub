@@ -7,6 +7,8 @@ import importlib.metadata
 import json
 import math
 import os
+import platform
+import re
 import resource
 import subprocess
 import time
@@ -103,6 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--repeats", type=int, default=3)
     parser.add_argument("--idle-seconds", type=float, default=5.0)
     parser.add_argument("--model-dir", type=Path, default=default_stt_model_dir())
+    parser.add_argument(
+        "--expected",
+        action="append",
+        default=[],
+        metavar="WAV=TRANSCRIPT",
+        help="optional expected command text used for per-clip word error reporting",
+    )
     parser.add_argument("wav", nargs="+", type=Path)
     return parser
 
@@ -111,6 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.threads < 1 or args.repeats < 1 or args.idle_seconds < 0:
         raise SystemExit("threads/repeats must be positive and idle-seconds nonnegative")
+    expected = _expected_transcripts(args.expected)
 
     before_load = _snapshot()
     engine = SherpaOnnxStreamingSTT(args.model_dir, num_threads=args.threads)
@@ -131,6 +141,8 @@ def main(argv: list[str] | None = None) -> int:
     active_wall_start = time.perf_counter()
     for repeat in range(args.repeats):
         for wav_path in args.wav:
+            recognition_started = time.perf_counter()
+            recognition_cpu_started = time.process_time()
             source = WaveAudioSource(wav_path, frame_ms=20, realtime=False)
             frontend = AudioFrontend(
                 source,
@@ -143,23 +155,60 @@ def main(argv: list[str] | None = None) -> int:
             )
             with source:
                 results = StreamingTranscriber(engine, vocabulary).run(frontend)
+            recognition_wall = time.perf_counter() - recognition_started
+            recognition_cpu = time.process_time() - recognition_cpu_started
             source_audio_seconds = source.stats.bytes_read / 32_000
             total_audio_seconds += source_audio_seconds
             for result in results:
                 finalization_latencies.append(result.finalization_latency_seconds)
                 speech_end_latencies.append(result.speech_end_to_final_seconds)
-            recognition_rows.append(
-                {
-                    "repeat": repeat + 1,
-                    "wav": wav_path.name,
-                    "source_audio_seconds": round(source_audio_seconds, 6),
-                    "utterances": len(results),
-                    "raw": [result.raw for result in results],
-                    "normalized": [result.normalized for result in results],
-                    "partial_counts": [len(result.partials) for result in results],
-                    "endpoint_reasons": [result.endpoint_reason for result in results],
-                }
-            )
+            row: dict[str, object] = {
+                "repeat": repeat + 1,
+                "wav": wav_path.name,
+                "path": str(wav_path),
+                "source_audio_seconds": round(source_audio_seconds, 6),
+                "engine_warm": True,
+                "total_wall_seconds": round(recognition_wall, 6),
+                "total_cpu_seconds": round(recognition_cpu, 6),
+                "audio_preprocessing_and_control_seconds": round(
+                    max(
+                        0.0,
+                        recognition_wall
+                        - sum(item.processing_seconds for item in results),
+                    ),
+                    6,
+                ),
+                "transcription_seconds": round(
+                    sum(item.processing_seconds for item in results), 6
+                ),
+                "total_real_time_factor": round(
+                    recognition_wall / max(source_audio_seconds, 1e-9), 6
+                ),
+                "transcription_real_time_factor": round(
+                    sum(item.processing_seconds for item in results)
+                    / max(source_audio_seconds, 1e-9),
+                    6,
+                ),
+                "utterances": len(results),
+                "raw": [result.raw for result in results],
+                "normalized": [result.normalized for result in results],
+                "partial_counts": [len(result.partials) for result in results],
+                "endpoint_reasons": [result.endpoint_reason for result in results],
+            }
+            expected_text = expected.get(wav_path.name) or expected.get(str(wav_path))
+            if expected_text is not None:
+                recognized = " ".join(
+                    item.raw.strip() for item in results if item.raw.strip()
+                )
+                row["expected"] = expected_text
+                row["recognized_command"] = recognized
+                row["word_error_rate"] = round(
+                    _word_error_rate(expected_text, recognized), 6
+                )
+                row["exact_command_match"] = (
+                    _words(expected_text) == _words(recognized)
+                )
+            recognition_rows.append(row)
     active_wall = time.perf_counter() - active_wall_start
     active_cpu = time.process_time() - active_cpu_start
     after_active = _snapshot()
@@ -169,6 +218,14 @@ def main(argv: list[str] | None = None) -> int:
         "runtime": {
             "python": os.sys.version.split()[0],
             "sherpa_onnx": importlib.metadata.version("sherpa-onnx"),
+        },
+        "hardware": _hardware(),
+        "backend": {
+            "name": "sherpa-onnx OnlineRecognizer",
+            "execution_provider": "cpu",
+            "accelerator": "none",
+            "quantization": "int8",
+            "model_format": "ONNX online transducer",
         },
         "model": args.model_dir.name,
         "model_files_bytes": engine.model_bytes,
@@ -217,9 +274,70 @@ def main(argv: list[str] | None = None) -> int:
         "peak_process_rss_mib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
         / 1024,
         "recognitions": recognition_rows,
+        "accuracy": {
+            "evaluated_rows": sum("word_error_rate" in row for row in recognition_rows),
+            "exact_rows": sum(
+                row.get("exact_command_match") is True for row in recognition_rows
+            ),
+        },
     }
     print(json.dumps(output, indent=2, sort_keys=True))
     return 0
+
+
+def _expected_transcripts(values: list[str]) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    for value in values:
+        name, separator, transcript = value.partition("=")
+        if not separator or not name.strip() or not transcript.strip():
+            raise SystemExit("--expected must use WAV=TRANSCRIPT")
+        expected[name.strip()] = transcript.strip()
+    return expected
+
+
+def _words(text: str) -> tuple[str, ...]:
+    return tuple(re.findall(r"[a-z0-9]+", text.casefold()))
+
+
+def _word_error_rate(expected: str, actual: str) -> float:
+    reference = _words(expected)
+    hypothesis = _words(actual)
+    previous = list(range(len(hypothesis) + 1))
+    for row, reference_word in enumerate(reference, start=1):
+        current = [row]
+        for column, hypothesis_word in enumerate(hypothesis, start=1):
+            current.append(
+                min(
+                    current[-1] + 1,
+                    previous[column] + 1,
+                    previous[column - 1] + (reference_word != hypothesis_word),
+                )
+            )
+        previous = current
+    return previous[-1] / max(len(reference), 1)
+
+
+def _hardware() -> dict[str, object]:
+    model = "unknown"
+    try:
+        model = Path("/proc/device-tree/model").read_bytes().rstrip(b"\0").decode()
+    except (OSError, UnicodeDecodeError):
+        pass
+    flags = ""
+    try:
+        for line in Path("/proc/cpuinfo").read_text().splitlines():
+            if line.casefold().startswith(("features", "flags")):
+                flags = line.split(":", 1)[1].strip()
+                break
+    except (OSError, IndexError):
+        pass
+    return {
+        "model": model,
+        "architecture": platform.machine(),
+        "cpu_count": os.cpu_count(),
+        "cpu_features": flags.split(),
+        "dri_available": Path("/dev/dri").is_dir(),
+    }
 
 
 if __name__ == "__main__":

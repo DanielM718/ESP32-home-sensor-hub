@@ -107,11 +107,15 @@ def build_tool_catalog(
                 ),
                 (
                     "get_printer_usage",
-                    "Read local print hours/counts and clearly separated upstream usage provenance.",
+                    "Read canonical Tracked Print Time, interval completeness, and rolling usage tier.",
                 ),
                 (
                     "get_printer_maintenance",
-                    "Read local maintenance reminders and completion history.",
+                    "Read manufacturer maintenance state, baselines, advisories, and completion history.",
+                ),
+                (
+                    "get_printer_maintenance_events",
+                    "Read up to twenty recent maintenance and usage-tier transition events.",
                 ),
                 (
                     "get_last_print",

@@ -130,6 +130,12 @@ queries use exact half-open UTC ranges and bounded chunks; they do not change
 retention, write points, or silently replace expired raw samples with
 aggregates.
 
+The dashboard separates identity from current state. Its current-value streams
+remain bounded, while permanent `environment_reading` fields and
+`air_quality_15m` mean fields reconstruct known source IDs and capabilities.
+`/api/readings` always queries stable node/location identity directly and never
+requires the source to be present in a live-memory cache.
+
 Printer session UUIDs, cloud task IDs, job names, filenames, materials, and AMS
 inventory are not Influx tags. Session/history/maintenance identity and audit
 records live in the printer SQLite database. Historical environmental

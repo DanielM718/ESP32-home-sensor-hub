@@ -10,10 +10,9 @@ The top-level navigation is hash-backed and does not reload the page:
 
 - `#monitoring` contains current readings, source/range filters, a reusable
   measurement selector, and one historical chart.
-- `#bambu-printer` is a failure-isolated, read-only X2D view with current print,
-  dual toolheads, connectivity/usage provenance, AMS inventory, local
-  maintenance records, canonical print history, and selected-session SEN66
-  association.
+- `#bambu-printer` is a failure-isolated, read-only X2D view ordered Current
+  Print, Printer Usage, Maintenance, Printer/AMS details, Print History, and
+  Environmental Association.
 - `#active-monitoring` contains timed sessions, running/recent session state,
   and persistent Historical Data Export jobs.
 - `#status` contains the fixed allow-list systemd status view, node status and
@@ -30,6 +29,11 @@ Current cards retain temperature, humidity, valid battery voltage and decoded
 flags, all nine SEN66 measurements, stale/invalid/warm-up handling, and the
 source-backed air-quality interpretations.
 
+Cards are identity-driven, not live-cache-driven. Previously known offline
+sources remain selectable and show status plus last-seen time. Stale/offline
+values are explicitly labeled last-known and are never presented as current;
+their historical charts remain queryable for retained/permanent periods.
+
 The historical measurement checklist is derived from fields actually observed
 for the selected source(s). Any combination can share the chart, including
 Temperature + Humidity + CO2. Chart.js creates one Y axis per unit, reuses an
@@ -44,8 +48,8 @@ are not normal chart datasets.
 ## Source capabilities and workflow forms
 
 `/api/latest` and `/api/nodes` expose `available_fields` for each individual
-source. This comes from the fields actually returned by the latest InfluxDB
-query, not a sensor-type template. Selecting sources immediately rebuilds the
+source. This comes from fields actually observed in InfluxDB, including the
+permanent identity inventory, not a sensor-type template. Selecting sources immediately rebuilds the
 Active Monitoring and Historical Export measurement checklists. With multiple
 sources, each choice says whether all or only some selected sources provide it.
 The API repeats this validation when a job is created.
@@ -67,6 +71,26 @@ Active session means are calculated from retained raw readings. Numeric sensor
 fields use arithmetic mean; battery voltage averages only battery-valid
 samples, and status flags are never averaged. A session shorter than its mean
 window produces one partial-window mean when it has data.
+
+## Printer Usage and Maintenance
+
+Printer Usage leads with **Tracked Print Time** as a single large value
+(`209 h 8 m` style) plus tracked/completed/failed counts, first and last tracked
+print, the rolling average printing hours per day, the current maintenance
+mode, and the contributing history sources. The qualifier is always shown: the
+figure is the sum of known actual print-history intervals and Bambu Cloud
+history may not represent the printer's complete lifetime. It is never labelled
+lifetime hours.
+
+Maintenance opens with an overall state, the next task and its due date, and
+counts of due-soon, due, overdue, baseline-required, and advisory tasks, plus
+the usage tier and why it applies. Each task card shows the manufacturer
+cadence verbatim, the current state, last completion, next due date, remaining
+time, source provenance with a link to the Bambu Lab wiki, and a local-only
+completion button. Tasks with no local completion history read
+`Needs a baseline` instead of appearing overdue, and condition-based tasks read
+`advisory` with no invented due date. `Mark all maintenance completed today`
+requires a confirmation dialog and only writes local audit records.
 
 ## CSV formats
 

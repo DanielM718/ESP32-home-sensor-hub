@@ -38,6 +38,8 @@ class PrinterReadRepository:
         recovery_minutes: int = 120,
         raw_retention_seconds: int = 72 * 60 * 60,
         query_api: Any | None = None,
+        rolling_window_days: int = 30,
+        minimum_mode_history_days: int = 7,
     ) -> None:
         self.influx = influx
         self.database_path = Path(database_path)
@@ -47,7 +49,11 @@ class PrinterReadRepository:
         self.raw_retention_seconds = raw_retention_seconds
         self._client = None
         self._query_api = query_api
-        self.intelligence = PrinterIntelligenceStore(self.database_path)
+        self.intelligence = PrinterIntelligenceStore(
+            self.database_path,
+            rolling_window_days=rolling_window_days,
+            minimum_mode_history_days=minimum_mode_history_days,
+        )
 
     def _query(self, flux: str) -> Any:
         if self._query_api is None:
@@ -102,17 +108,49 @@ class PrinterReadRepository:
             return None
         return self.intelligence.history_item(history_id)
 
+    def usage(self) -> dict[str, Any]:
+        """Canonical tracked print time and usage provenance."""
+
+        if not self.database_path.exists():
+            return {
+                "available": False,
+                "status": "not_configured",
+                "usage": {},
+            }
+        return {
+            "available": True,
+            "status": "ok",
+            "usage": self.intelligence.usage_summary(),
+            "history_import": self.intelligence.history_status(),
+        }
+
     def maintenance(self) -> dict[str, Any]:
         if not self.database_path.exists():
             return {
                 "available": False,
                 "usage": {},
+                "summary": {},
                 "tasks": [],
                 "completion_history": [],
+                "recent_notifications": [],
                 "local_record_only": True,
                 "printer_control": False,
             }
         return self.intelligence.maintenance()
+
+    def maintenance_events(
+        self, *, limit: int = 100, pending_only: bool = False
+    ) -> dict[str, Any]:
+        if not self.database_path.exists():
+            return {"available": False, "events": []}
+        return {
+            "available": True,
+            "events": self.intelligence.notification_events(
+                limit=limit, pending_only=pending_only
+            ),
+            "local_record_only": True,
+            "printer_control": False,
+        }
 
     def complete_maintenance(
         self, task_id: str, *, notes: str, completed_at: datetime
@@ -121,6 +159,15 @@ class PrinterReadRepository:
             raise RuntimeError("printer observer is not configured")
         return self.intelligence.complete_maintenance(
             task_id, notes=notes, completed_at=completed_at
+        )
+
+    def complete_all_maintenance(
+        self, *, notes: str, completed_at: datetime
+    ) -> dict[str, Any]:
+        if not self.database_path.exists():
+            raise RuntimeError("printer observer is not configured")
+        return self.intelligence.complete_all_maintenance(
+            notes=notes, completed_at=completed_at
         )
 
     def environment_summary(self, history_id: str | None = None) -> dict[str, Any]:

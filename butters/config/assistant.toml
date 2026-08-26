@@ -7,11 +7,164 @@ timeout_seconds = 4.0
 cache_seconds = 5.0
 max_response_bytes = 2097152
 
+# One fixed Windows desktop. Values here never become model arguments. The
+# broker operations preserve the fixed behavior inventoried from the existing
+# scripts without granting the web service access to mutable user files.
+[desktop]
+enabled = true
+machine = "desktop"
+host = "192.168.1.209"
+ssh_port = 22
+network_timeout_seconds = 45.0
+ssh_timeout_seconds = 90.0
+total_timeout_seconds = 150.0
+poll_interval_seconds = 2.0
+wake_enabled = true
+# Wake-only policy: wake_desktop needs nothing but a fixed Wake-on-LAN packet.
+# Headless/local mode controls only the two fixed Home Assistant monitor
+# switches. The root broker retains a separate, default-off gate for each.
+headless_enabled = true
+monitors_enabled = true
+lock_enabled = false
+sleep_enabled = false
+restart_enabled = false
+shutdown_enabled = false
+
+# Passkey trust values are server-known constants, never derived from proxy
+# headers. Authentication is a step-up inside the private tailnet boundary.
+[authentication]
+enabled = true
+rp_id = "sensor-pi.tail9644cc.ts.net"
+origin = "https://sensor-pi.tail9644cc.ts.net"
+rp_name = "Butters"
+elevation_seconds = 600.0
+challenge_seconds = 120.0
+pending_action_seconds = 300.0
+local_console_seconds = 45.0
+bootstrap_seconds = 600.0
+max_credentials = 16
+max_challenges = 64
+
+# Installed as a separately reviewed, privileged service. The web daemon speaks
+# only the enumerated v1 protocol over this fixed Unix socket. Enabling this flag
+# does not grant any operation: each one has a second gate in the root broker's
+# /etc/butters/action-broker.toml, which is the terminal boundary.
+[broker]
+enabled = true
+socket_path = "/run/butters-action-broker/broker.sock"
+protocol_version = 1
+connect_timeout_seconds = 2.0
+request_timeout_seconds = 30.0
+max_message_bytes = 8192
+
+[actions]
+audit_capacity = 1000
+job_capacity = 256
+host_restart_butters_enabled = false
+host_reboot_enabled = false
+host_shutdown_enabled = false
+
+[actions.nas]
+enabled = false
+configured = false
+maximum_duration_minutes = 1
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.heater]
+enabled = false
+configured = false
+maximum_duration_minutes = 120
+local_console_allowed = false
+require_fresh_sensor = true
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.dehumidifier]
+enabled = false
+configured = false
+maximum_duration_minutes = 240
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+[actions.ventilation]
+enabled = false
+configured = false
+maximum_duration_minutes = 240
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
 [tts]
 model_dir = "../models/vits-piper-en_US-kathleen-low"
 num_threads = 2
 speed = 1.0
 max_text_chars = 500
+
+# The beta web daemon is deliberately loopback-only. Production HTTPS and
+# identity forwarding are supplied by private Tailscale Serve, never Funnel.
+[web]
+host = "127.0.0.1"
+port = 8090
+state_dir = "/var/lib/butters"
+trusted_tailscale_proxy = true
+development_mode = false
+# Populate with exact Tailscale-User-Login values before using admin APIs.
+admin_identities = []
+# Production requires the exact private HTTPS origin. It is normally supplied by
+# BUTTERS_ALLOWED_ORIGINS in /etc/butters/butters.conf because the Tailscale
+# Serve URL is only known after deployment. While it is unset, /readyz reports
+# not_ready and the daemon refuses to issue sessions or accept mutations.
+allowed_origins = []
+max_active_sessions = 32
+# Anonymous callers can never take the last slots: a session flood cannot lock
+# an administrator out of the privileged surface.
+admin_session_reserve = 4
+max_sessions_per_peer = 4
+session_create_rate_per_minute = 12.0
+session_create_burst = 6
+session_ttl_seconds = 1800.0
+max_messages_per_session = 24
+max_context_chars = 12000
+max_request_bytes = 16384
+max_workers = 4
+max_queued_requests = 12
+trace_capacity = 256
+# Traces quote conversation text, so they expire by time as well as by count.
+trace_ttl_seconds = 900.0
+clarification_timeout_seconds = 30.0
+
+[browser_audio]
+max_utterance_seconds = 30.0
+max_chunk_bytes = 32768
+max_buffered_bytes = 1048576
+idle_timeout_seconds = 10.0
+session_timeout_seconds = 60.0
+# The accurate Zipformer is large; keep one recognizer warm and queue briefly.
+max_concurrent_sessions = 1
+max_queue_depth = 2
+allowed_sample_rates = [16000, 44100, 48000]
+
+# Local STT and TTS remain defaults. Text, STT, and TTS paid-call switches are
+# independent. Unknown speech pricing fails closed until an administrator adds
+# a reviewed positive price to the deployment config.
+[providers]
+stt_default = "local"
+tts_default = "local"
+allow_paid_stt = false
+allow_paid_tts = false
+cloud_stt_model = "gpt-4o-mini-transcribe"
+cloud_tts_model = "gpt-4o-mini-tts"
+cloud_tts_voice = "cedar"
+cloud_tts_speed = 1.0
+cloud_tts_instructions = "Warm, concise, calm home assistant."
+# cloud_stt_price_per_minute_usd = <reviewed positive value>
+# cloud_tts_price_per_million_characters_usd = <reviewed positive value>
 
 # Optional semantic fallback. This connects only to a manually started local
 # llama.cpp worker. Deterministic routing remains the default fast path.
@@ -54,6 +207,7 @@ max_cloud_requests_per_diagnostic = 5
 max_estimated_cost_per_request_usd = 0.50
 daily_budget_usd = 2.0
 monthly_budget_usd = 20.0
+max_usage_records = 50000
 pricing_source = "https://developers.openai.com/api/docs/models/compare"
 pricing_date = "2026-08-11"
 
@@ -65,6 +219,14 @@ timeout_seconds = 900.0
 max_output_bytes = 131072
 repository_root = "../.."
 deployment_roots = ["/opt/home-sensor"]
+jobs_dir = "/var/lib/butters/codex-jobs"
+max_patch_bytes = 524288
+max_generated_file_bytes = 262144
+max_retained_jobs = 50
+# Read-only repository inspection is opt-in per deployment. Leave empty unless a
+# repository is deliberately readable by the butters service user; the skill then
+# reports repository_unavailable instead of reaching into a private checkout.
+project_inspection_root = ""
 
 [[entities]]
 id = "printer_room"

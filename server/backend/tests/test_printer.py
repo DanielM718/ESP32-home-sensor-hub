@@ -21,6 +21,7 @@ from app.printer_adapter import (
     unavailable_printer_state,
 )
 from app.printer_config import PrinterObserverSettings
+from app.printer_intelligence import PrinterIntelligenceStore
 from app.printer_model import (
     NormalizedPrinterState,
     PrinterState,
@@ -30,7 +31,11 @@ from app.printer_model import (
     printer_state_point,
 )
 from app.printer_persistence import PrinterStore
-from app.printer_queries import environment_summary_response, printer_environment_flux
+from app.printer_queries import (
+    PrinterReadRepository,
+    environment_summary_response,
+    printer_environment_flux,
+)
 from app.web import create_app
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
@@ -201,19 +206,106 @@ def test_direct_material_entity_is_observed_not_inferred(tmp_path: Path) -> None
     assert state.provenance["active_material"] is ValueProvenance.OBSERVED
 
 
-def test_stale_home_assistant_entities_become_explicitly_offline(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("raw_status", "expected"),
+    (
+        ("idle", NormalizedPrinterState.IDLE),
+        ("failed", NormalizedPrinterState.FAILED),
+        ("running", NormalizedPrinterState.PRINTING),
+    ),
+)
+def test_old_entity_timestamps_do_not_force_offline(
+    tmp_path: Path, raw_status: str, expected: NormalizedPrinterState
 ) -> None:
+    """A quiet printer stops changing mapped entities; that is not offline.
+
+    Home Assistant reports these entities on change, so a settled X2D can
+    legitimately exceed stale_after_seconds while remaining reachable.
+    Availability comes from the mapped online entity, never from entity age.
+    """
+
     settings = _settings(tmp_path)
     old = NOW - timedelta(seconds=settings.stale_after_seconds + 1)
     states = {
         settings.entities["online"]: _ha_entity("on", timestamp=old),
-        settings.entities["print_status"]: _ha_entity("running", timestamp=old),
+        settings.entities["print_status"]: _ha_entity(raw_status, timestamp=old),
     }
+
     state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
-    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+
+    assert state.online
+    assert state.normalized_state is expected
+    assert state.unavailable_reason is None
+    # Provenance is still reported even though the observation is old.
+    assert state.source_timestamp == old
+
+
+def test_old_timestamps_preserve_source_timestamp_provenance(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    older = NOW - timedelta(hours=3)
+    newer = NOW - timedelta(minutes=30)
+    states = {
+        settings.entities["online"]: _ha_entity("on", timestamp=older),
+        settings.entities["print_status"]: _ha_entity("idle", timestamp=newer),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert state.online
+    assert state.normalized_state is NormalizedPrinterState.IDLE
+    assert state.source_timestamp == newer  # newest mapped observation wins
+    assert (
+        state.observed_at - state.source_timestamp
+    ).total_seconds() > settings.stale_after_seconds
+
+
+def test_explicit_offline_online_entity_is_offline(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    states = {
+        settings.entities["online"]: _ha_entity("off", timestamp=NOW),
+        settings.entities["print_status"]: _ha_entity("running", timestamp=NOW),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
     assert not state.online
-    assert state.unavailable_reason == "Home Assistant printer entities are stale"
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert state.unavailable_reason == "Home Assistant reports the printer offline"
+
+
+@pytest.mark.parametrize("raw", ("unavailable", "unknown"))
+def test_unavailable_online_entity_is_offline_with_reason(
+    tmp_path: Path, raw: str
+) -> None:
+    settings = _settings(tmp_path)
+    states = {
+        settings.entities["online"]: _ha_entity(raw, timestamp=NOW),
+        settings.entities["print_status"]: _ha_entity("idle", timestamp=NOW),
+    }
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert not state.online
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert (
+        state.unavailable_reason
+        == "Home Assistant reports printer availability as unknown"
+    )
+
+
+def test_missing_online_entity_is_offline_with_reason(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    states = {settings.entities["print_status"]: _ha_entity("idle", timestamp=NOW)}
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert not state.online
+    assert state.normalized_state is NormalizedPrinterState.OFFLINE
+    assert (
+        state.unavailable_reason == "online entity was not returned by Home Assistant"
+    )
 
 
 @pytest.mark.parametrize(
@@ -572,12 +664,31 @@ class _PrinterRepository:
     def history_item(self, history_id: str):
         return {"history_id": history_id} if history_id == "one" else None
 
+    def usage(self):
+        return {"available": True, "usage": {"tracked_print_hours": 209.14}}
+
     def maintenance(self):
         return {"tasks": [], "local_record_only": True, "printer_control": False}
+
+    def maintenance_events(self, *, limit: int, pending_only: bool):
+        return {
+            "available": True,
+            "events": [],
+            "limit": limit,
+            "pending": pending_only,
+        }
 
     def complete_maintenance(self, task_id: str, *, notes: str, completed_at):
         return {
             "task_id": task_id,
+            "notes": notes,
+            "local_record_only": True,
+            "printer_control": False,
+        }
+
+    def complete_all_maintenance(self, *, notes: str, completed_at):
+        return {
+            "completed_task_count": 2,
             "notes": notes,
             "local_record_only": True,
             "printer_control": False,
@@ -669,6 +780,125 @@ def test_maintenance_completion_is_explicit_and_local_only(tmp_path: Path) -> No
     }
     for forbidden in ("start", "pause", "resume", "cancel", "command"):
         assert client.post(f"/api/printer/{forbidden}").status_code in {404, 405}
+
+
+def test_usage_and_maintenance_event_routes_are_bounded_and_read_only(
+    tmp_path: Path,
+) -> None:
+    client = _client(tmp_path, _PrinterRepository())
+
+    usage = client.get("/api/printer/usage")
+    events = client.get("/api/printer/maintenance/events?limit=25&pending=true")
+
+    assert usage.status_code == 200
+    assert usage.get_json()["usage"]["tracked_print_hours"] == 209.14
+    assert events.get_json() == {
+        "available": True,
+        "events": [],
+        "limit": 25,
+        "pending": True,
+    }
+    assert client.get("/api/printer/maintenance/events?limit=0").status_code == 400
+    assert client.get("/api/printer/maintenance/events?limit=501").status_code == 400
+    assert (
+        client.get("/api/printer/maintenance/events?pending=maybe").status_code == 400
+    )
+    assert client.post("/api/printer/usage").status_code == 405
+
+
+def test_mark_all_maintenance_requires_explicit_confirmation(tmp_path: Path) -> None:
+    client = _client(tmp_path, _PrinterRepository())
+    route = "/api/printer/maintenance/complete-all"
+
+    assert client.post(route, json={}).status_code == 400
+    assert client.post(route, json={"confirm": "yes"}).status_code == 400
+    assert client.post(route, json={"confirm": True, "notes": 5}).status_code == 400
+    response = client.post(route, json={"confirm": True, "notes": "baseline"})
+
+    assert response.status_code == 201
+    assert response.get_json() == {
+        "completed_task_count": 2,
+        "notes": "baseline",
+        "local_record_only": True,
+        "printer_control": False,
+    }
+
+
+def test_printer_api_exposes_tracked_runtime_and_keeps_prior_usage_contract(
+    tmp_path: Path,
+) -> None:
+    database = tmp_path / "printer.sqlite3"
+    local = PrinterStore(database)
+    local.initialize()
+    intelligence = PrinterIntelligenceStore(database)
+    intelligence.initialize()
+    intelligence.sync_maintenance_tasks(
+        (), now=datetime(2026, 8, 15, tzinfo=timezone.utc)
+    )
+    start = datetime(2026, 8, 14, 8, tzinfo=timezone.utc)
+    local.process(
+        _printing_state(start, NormalizedPrinterState.PRINTING, job_id="tracked")
+    )
+    local.process(
+        _printing_state(
+            start + timedelta(hours=3),
+            NormalizedPrinterState.COMPLETED,
+            job_id="tracked",
+        )
+    )
+    local.process(
+        _printing_state(
+            start + timedelta(hours=3, seconds=15),
+            NormalizedPrinterState.COMPLETED,
+            job_id="tracked",
+        )
+    )
+    repository = PrinterReadRepository(
+        InfluxSettings(
+            url="http://127.0.0.1:8086",
+            org="test",
+            bucket="environment",
+            write_token="test",
+            read_token="test",
+        ),
+        database_path=database,
+    )
+    client = _client(tmp_path, repository)
+
+    usage = client.get("/api/printer/usage").get_json()["usage"]
+    maintenance = client.get("/api/printer/maintenance").get_json()
+
+    assert usage["tracked_print_hours"] == 3.0042
+    assert usage["tracked_job_count"] == 1
+    assert usage["tracked_history_complete"] is False
+    assert usage["locally_observed_print_hours"] == 3.0042
+    assert usage["maintenance_effective_provenance"] == "locally_observed"
+    assert maintenance["summary"]["overall_state"] == "baseline_required"
+    assert maintenance["tasks"][0]["printer_control"] is False
+    assert maintenance["local_record_only"] is True
+
+    completion = client.post(
+        "/api/printer/maintenance/x2d_live_view_camera_cleaning/complete",
+        json={"confirm": True, "notes": "cleaned"},
+    )
+    assert completion.status_code == 201
+    assert completion.get_json()["printer_control"] is False
+
+
+def _printing_state(
+    when: datetime, normalized: NormalizedPrinterState, *, job_id: str
+) -> PrinterState:
+    return PrinterState(
+        printer_id="x2d",
+        printer_model="X2D",
+        online=True,
+        normalized_state=normalized,
+        source="home_assistant",
+        source_timestamp=when,
+        observed_at=when,
+        job_id=job_id,
+        job_name="tracked job",
+    )
 
 
 def test_printer_failure_does_not_break_sensor_api(tmp_path: Path) -> None:

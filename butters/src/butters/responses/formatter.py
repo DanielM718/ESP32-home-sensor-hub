@@ -2,21 +2,27 @@
 
 from __future__ import annotations
 
+import json
+
 from butters.skills.model import (
     AirQualityResult,
     ComparisonResult,
     CurrentPrintResult,
     LastPrintResult,
     PrintEnvironmentResult,
+    PrinterMaintenanceEventsResult,
     PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
     PrinterUsageResult,
+    ReadOnlyObservationResult,
     SensorLastSeenResult,
     SensorStatusResult,
     SensorValueResult,
+    SensorValuesResult,
     ServerHealthResult,
     SkillExecution,
+    StructuredSkillResult,
 )
 
 
@@ -27,6 +33,8 @@ class ResponseFormatter:
         result = execution.result
         if isinstance(result, SensorValueResult):
             return self._sensor_value(result)
+        if isinstance(result, SensorValuesResult):
+            return self._sensor_values(result)
         if isinstance(result, SensorStatusResult):
             return self._sensor_status(result)
         if isinstance(result, SensorLastSeenResult):
@@ -49,8 +57,14 @@ class ResponseFormatter:
             return self._printer_usage(result)
         if isinstance(result, PrinterMaintenanceResult):
             return self._printer_maintenance(result)
+        if isinstance(result, PrinterMaintenanceEventsResult):
+            return self._printer_maintenance_events(result)
         if isinstance(result, LastPrintResult):
             return self._last_print(result)
+        if isinstance(result, ReadOnlyObservationResult):
+            return self._observation(result)
+        if isinstance(result, StructuredSkillResult):
+            return self._structured(result)
         return "The read-only skill returned no usable result."
 
     @staticmethod
@@ -64,6 +78,31 @@ class ResponseFormatter:
         unit = _spoken_unit(result.unit)
         suffix = f" {unit}" if unit else ""
         return f"{result.display_name} {result.metric_name} is {value}{suffix}."
+
+    @staticmethod
+    def _sensor_values(result: SensorValuesResult) -> str:
+        """Answer every requested measurement, naming the ones that are missing."""
+
+        available = []
+        missing = []
+        for item in result.measurements:
+            target = available if item.available and item.value is not None else missing
+            target.append(item)
+        sentences = []
+        if available:
+            parts = []
+            for item in available:
+                unit = _spoken_unit(item.unit)
+                suffix = f" {unit}" if unit else ""
+                value = _format_value(item.metric, item.value)
+                parts.append(f"{item.metric_name} is {value}{suffix}")
+            sentences.append(f"{result.display_name} {_joined(parts)}.")
+        for item in missing:
+            reason = item.reason or "the measurement is unavailable"
+            sentences.append(
+                f"{result.display_name} {item.metric_name} is unavailable: {reason}."
+            )
+        return " ".join(sentences)
 
     @staticmethod
     def _sensor_status(result: SensorStatusResult) -> str:
@@ -284,20 +323,18 @@ class ResponseFormatter:
     @staticmethod
     def _printer_usage(result: PrinterUsageResult) -> str:
         usage = result.intelligence.usage
-        local_hours = _number(usage.get("locally_observed_print_hours")) or 0.0
-        completed = _integer(usage.get("locally_observed_completed_print_count")) or 0
-        effective = _number(usage.get("maintenance_effective_lifetime_hours"))
+        tracked_hours = _number(usage.get("tracked_print_hours")) or 0.0
+        tracked_jobs = _integer(usage.get("tracked_job_count")) or 0
         text = (
-            f"The printer has {local_hours:.1f} locally observed print hours and "
-            f"{completed} locally observed completed prints."
+            f"Tracked Print Time is {tracked_hours:.1f} hours across "
+            f"{tracked_jobs} prints with known actual intervals."
         )
-        reported = _number(usage.get("printer_reported_lifetime_hours"))
-        if reported is None:
-            text += " The X2D integration does not expose a printer-reported lifetime counter."
-        else:
-            text += f" The printer-reported lifetime value is {reported:.1f} hours."
-        if effective is not None:
-            text += f" The local maintenance position is {effective:.1f} hours."
+        if usage.get("tracked_history_complete") is False:
+            text += " The tracked history is incomplete, so this is not lifetime usage."
+        daily = _number(usage.get("rolling_tracked_print_hours_per_day"))
+        mode = _text(usage.get("maintenance_mode"))
+        if daily is not None and mode is not None:
+            text += f" Recent use averages {daily:.1f} hours per day ({mode.replace('_', ' ')})."
         return text
 
     @staticmethod
@@ -307,27 +344,52 @@ class ResponseFormatter:
             for task in result.intelligence.maintenance_tasks
             if task.get("enabled") is True
         ]
-        overdue = [
-            str(task.get("name")) for task in enabled if task.get("overdue") is True
+        names = lambda state: [
+            str(task.get("name")) for task in enabled if task.get("state") == state
         ]
-        warning = [
-            str(task.get("name")) for task in enabled if task.get("warning") is True
-        ]
+        overdue = names("overdue")
+        due = names("due")
+        due_soon = names("due_soon")
+        baseline = names("baseline_required")
+        advisory = names("advisory")
         if overdue:
             text = f"Overdue printer maintenance: {', '.join(overdue)}."
-        elif warning:
+        elif due:
+            text = f"Printer maintenance is due: {', '.join(due)}."
+        elif due_soon:
+            text = f"Printer maintenance is coming due soon: {', '.join(due_soon)}."
+        elif baseline:
             text = (
-                f"Printer maintenance approaching its reminder: {', '.join(warning)}."
+                "Maintenance baseline has not been recorded yet for "
+                f"{', '.join(baseline)}. These items are not due or overdue."
             )
+        elif advisory:
+            text = f"Manufacturer inspection advisories: {', '.join(advisory)}."
         elif enabled:
-            text = f"All {len(enabled)} configured printer maintenance tasks are currently within their local intervals."
+            text = f"All {len(enabled)} printer maintenance tasks are currently OK."
         else:
             text = "No printer maintenance tasks are configured."
+        if baseline and not text.startswith("Maintenance baseline"):
+            text += (
+                " Maintenance baseline has not been recorded yet for "
+                f"{', '.join(baseline)}; those items are not due or overdue."
+            )
         completions = result.intelligence.completion_history
         if completions:
             latest = completions[0]
             text += f" The last recorded service was {latest.get('completed_at', 'at an unknown time')}."
         return text
+
+    @staticmethod
+    def _printer_maintenance_events(
+        result: PrinterMaintenanceEventsResult,
+    ) -> str:
+        if not result.events:
+            return "No recent printer maintenance events are recorded."
+        latest = result.events[0]
+        event_type = str(latest.get("event_type") or "unknown").replace("_", " ")
+        created = str(latest.get("created_at") or "an unknown time")
+        return f"Latest printer maintenance event: {event_type}, recorded {created}."
 
     @staticmethod
     def _last_print(result: LastPrintResult) -> str:
@@ -350,14 +412,101 @@ class ResponseFormatter:
         return f"The latest print was {job}; result {outcome}, from {source}.{duration_text}"
 
     @staticmethod
+    def _observation(result: ReadOnlyObservationResult) -> str:
+        if result.error_code:
+            return (
+                f"{result.name.replace('_', ' ')} is unavailable: {result.error_code}."
+            )
+        summaries = result.values.get("metric_summaries")
+        if isinstance(summaries, dict) and summaries:
+            field, raw = next(iter(summaries.items()))
+            if isinstance(raw, dict):
+                return (
+                    f"For {result.values.get('range', 'the selected range')}, {field} "
+                    f"ranged from {raw.get('minimum')} to {raw.get('maximum')}, "
+                    f"with mean {raw.get('mean')} and a {raw.get('trend', 'unknown')} trend."
+                )
+        if result.name == "project_status" and isinstance(
+            result.values.get("output"), str
+        ):
+            output = str(result.values["output"])
+            return f"Project {result.values.get('view', 'status')}: {output[:500]}"
+        text = json.dumps(
+            result.values, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+        )
+        if len(text) > 500:
+            text = text[:497] + "..."
+        return f"{result.name.replace('_', ' ')} status is {result.status}: {text}."
+
+    @staticmethod
     def _failure(code: str, message: str) -> str:
         if code in {"timeout", "unavailable", "upstream_status"}:
             return "Current home-sensor data is temporarily unavailable."
         if code in {"unknown_skill", "policy_denied", "invalid_arguments"}:
-            return "That request is not permitted by the read-only skill policy."
+            return "I can't safely complete that request."
+        if code == "result_too_large":
+            return (
+                "That answer was larger than the safe response limit for this "
+                "skill, so I stopped instead of reading back a partial result."
+            )
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
+        if code in {
+            "home_assistant_unconfigured",
+            "home_assistant_unavailable",
+            "home_assistant_auth_failed",
+            "home_assistant_failed",
+        }:
+            return "I couldn't verify the desktop monitor state through Home Assistant."
         return "The read-only request could not be completed."
+
+    @staticmethod
+    def _structured(result: StructuredSkillResult) -> str:
+        data = result.data
+        if result.kind == "desktop_status":
+            if not data.get("network_reachable"):
+                return "The desktop is not reachable on the network."
+            if not data.get("ssh_ready"):
+                return (
+                    "The desktop is reachable, but remote management is not ready yet."
+                )
+            if data.get("parsec_ready") is True:
+                return "The desktop is reachable, remote management is ready, and Parsec is ready."
+            return "The desktop and remote management are ready. Parsec readiness is not independently observable."
+        if result.kind == "desktop_remote_session":
+            if data.get("failed_stage"):
+                return f"The desktop remote-session workflow stopped at {str(data['failed_stage']).replace('_', ' ')}."
+            if data.get("parsec_ready") is True:
+                return "The desktop is on and the fixed Parsec remote-session workflow is ready."
+            return "The desktop is awake and its physical monitors are off. Parsec readiness is not independently observable."
+        if result.kind == "desktop_monitors":
+            desired = str(data.get("desired_state") or "unknown")
+            if data.get("accepted") is True:
+                if data.get("already_in_state") is True:
+                    return f"Both desktop monitors were already {desired}."
+                return f"Both desktop monitors are {desired}."
+            if data.get("partial") is True:
+                return f"Only one desktop monitor reached {desired}; Home Assistant reported a partial result."
+            return f"The desktop monitors did not reach the requested {desired} state."
+        if result.kind in {
+            "print_environment_analysis",
+            "print_environment_comparison",
+        }:
+            if not data.get("available", True):
+                unknown = data.get("unknown", ["required evidence"])
+                return f"I couldn't complete the print analysis because {', '.join(str(item) for item in unknown)} is unavailable."
+            return "I gathered and calculated the bounded print-environment evidence. Cloud reasoning is needed for a qualified interpretation."
+        if result.kind == "sensor_window_summary":
+            return f"I calculated local statistics from {data.get('sample_count', 0)} bounded sensor samples."
+        return f"The {result.kind.replace('_', ' ')} skill completed with bounded structured data."
+
+
+def _joined(parts: list[str]) -> str:
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return f"{', '.join(parts[:-1])}, and {parts[-1]}"
 
 
 def _format_value(metric: str, value: float) -> str:

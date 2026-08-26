@@ -1,0 +1,73 @@
+#!/usr/bin/env bash
+# Install reviewed broker artifacts without enabling or starting them unless
+# explicitly requested. This script never generates credentials or configures
+# an actuator target.
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_dir="$(dirname "${script_dir}")"
+config_dir="/etc/butters"
+credential_dir="${config_dir}/action-broker"
+enable_socket=0
+start_socket=0
+
+usage() {
+  echo "Usage: sudo ./butters/scripts/install-action-broker [--enable] [--start]"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) enable_socket=1 ;;
+    --start) enable_socket=1; start_socket=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run this installer with sudo." >&2
+  exit 2
+fi
+if ! id butters >/dev/null 2>&1; then
+  echo "Install Butters before installing the broker artifacts." >&2
+  exit 2
+fi
+if [[ ! -d /opt/butters/src/butters ]]; then
+  echo "/opt/butters is not installed." >&2
+  exit 2
+fi
+
+install -d -m 0750 -o root -g butters "${config_dir}"
+install -d -m 0700 -o root -g root "${credential_dir}"
+if [[ ! -e "${config_dir}/action-broker.toml" ]]; then
+  install -m 0600 -o root -g root \
+    "${butters_dir}/config/action-broker.example.toml" \
+    "${config_dir}/action-broker.toml"
+fi
+install -m 0644 -o root -g root \
+  "${butters_dir}/systemd/butters-action-broker.socket" \
+  /etc/systemd/system/butters-action-broker.socket
+install -m 0644 -o root -g root \
+  "${butters_dir}/systemd/butters-action-broker.service" \
+  /etc/systemd/system/butters-action-broker.service
+# The socket's parent directory needs root:butters 0710 so the butters service
+# account can traverse to the socket node; systemd would otherwise create it
+# root:root. Creating an empty runtime directory enables no operation.
+install -m 0644 -o root -g root \
+  "${butters_dir}/systemd/butters-action-broker.tmpfiles.conf" \
+  /etc/tmpfiles.d/butters-action-broker.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/butters-action-broker.conf
+
+systemctl daemon-reload
+if [[ "${enable_socket}" == "1" ]]; then
+  systemctl enable butters-action-broker.socket
+fi
+if [[ "${start_socket}" == "1" ]]; then
+  systemctl start butters-action-broker.socket
+fi
+
+echo "Broker artifacts installed; all operation gates remain as configured."
+echo "Provision the dedicated desktop key and fixed targets before enabling operations."
+echo "SSH operations also require a verified ${credential_dir}/known_hosts (root:root 0600);"
+echo "the broker refuses to start without it rather than trusting an unknown host key."

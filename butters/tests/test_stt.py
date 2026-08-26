@@ -12,6 +12,7 @@ from butters.audio.buffer import PreRollBuffer
 from butters.audio.frontend import AudioFrontend
 from butters.audio.model import AudioFrame, AudioSource, SourceStats
 from butters.audio.sources import WaveAudioSource
+from butters.stt.benchmark import _expected_transcripts, _word_error_rate
 from butters.stt.model import StreamingSTTEngine, STTEngineError
 from butters.stt.normalization import (
     DomainVocabulary,
@@ -140,6 +141,16 @@ def test_configured_domain_vocabulary_contains_required_terms() -> None:
     assert {"Butters", "SEN66", "SHT41", "MQTT", "CO2", "PM2.5"} <= set(
         vocabulary.hotwords
     )
+
+
+def test_benchmark_expectations_and_word_error_rate() -> None:
+    assert _expected_transcripts(["clip.wav=What is the humidity?"]) == {
+        "clip.wav": "What is the humidity?"
+    }
+    assert _word_error_rate("What is the humidity?", "WHAT IS THE HUMIDITY") == 0
+    assert _word_error_rate("humidity in box three", "humidity in box") == 0.25
+    with pytest.raises(SystemExit, match="WAV=TRANSCRIPT"):
+        _expected_transcripts(["missing separator"])
 
 
 def test_vad_endpointing_partials_finals_and_repeated_reset() -> None:

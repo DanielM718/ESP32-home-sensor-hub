@@ -23,7 +23,8 @@
 #include "esp_adc/adc_oneshot.h"
 
 #define NODE_ID 1//4
-#define ESPNOW_CHANNEL 6
+#define ESPNOW_CHANNEL 1
+#define BATTERY_MONITOR_ENABLED 0
 #define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
 //#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing
 #define ESPNOW_SEND_TIMEOUT_MS 500
@@ -426,7 +427,7 @@ static void espnow_init(void)
 
     esp_now_peer_info_t peer = {0};
     memcpy(peer.peer_addr, gateway_mac, ESP_NOW_ETH_ALEN);
-    peer.channel = 0; // Use the current Wi-Fi channel because this gateway is connected to the router.
+    peer.channel = 0; // Use current Wi-Fi channel.
     peer.ifidx = WIFI_IF_STA;
     peer.encrypt = false;
 
@@ -468,11 +469,17 @@ void app_main(void)
     ESP_ERROR_CHECK(err);
 
     uint16_t measured_battery_mv = 0;
-    esp_err_t battery_err = battery_read_mv(&measured_battery_mv);
+    esp_err_t battery_err = ESP_ERR_NOT_SUPPORTED;
+
+#if BATTERY_MONITOR_ENABLED
+    battery_err = battery_read_mv(&measured_battery_mv);
     if (battery_err != ESP_OK) {
         ESP_LOGE(TAG, "Battery measurement failed; reporting unavailable: %s",
                  esp_err_to_name(battery_err));
     }
+#else
+    ESP_LOGI(TAG, "Battery monitoring disabled for this node");
+#endif
 
     wifi_init();
     espnow_init();

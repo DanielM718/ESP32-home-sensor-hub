@@ -153,9 +153,7 @@ class _FakeChime:
         self.closed = True
 
 
-VOCABULARY = DomainVocabulary(
-    hotwords=("CO2",), aliases=(("co two", "CO2"),)
-)
+VOCABULARY = DomainVocabulary(hotwords=("CO2",), aliases=(("co two", "CO2"),))
 
 
 def _controller(
@@ -172,9 +170,7 @@ def _controller(
         wake_detector=wake,
         stt_engine=stt,
         vocabulary=VOCABULARY,
-        command_vad=EnergyVad(
-            threshold_dbfs=-35.0, attack_frames=1, release_frames=2
-        ),
+        command_vad=EnergyVad(threshold_dbfs=-35.0, attack_frames=1, release_frames=2),
         wake_preroll=PreRollBuffer(frame_ms=20, duration_ms=800),
         command_preroll=PreRollBuffer(frame_ms=20, duration_ms=100),
         chime=chime,
@@ -190,7 +186,9 @@ def _controller(
 def _kinds(controller: LiveVoiceController, values: list[int]) -> list[str]:
     kinds = [event.kind for event in controller.start()]
     for sequence, value in enumerate(values):
-        kinds.extend(event.kind for event in controller.process(_frame(value, sequence)))
+        kinds.extend(
+            event.kind for event in controller.process(_frame(value, sequence))
+        )
     return kinds
 
 
@@ -204,9 +202,7 @@ def _semantic_controller(
         wake_detector=_FakeWakeDetector({0}),
         stt_engine=stt,
         vocabulary=VOCABULARY,
-        command_vad=EnergyVad(
-            threshold_dbfs=-35.0, attack_frames=1, release_frames=15
-        ),
+        command_vad=EnergyVad(threshold_dbfs=-35.0, attack_frames=1, release_frames=15),
         wake_preroll=PreRollBuffer(frame_ms=20, duration_ms=800),
         command_preroll=PreRollBuffer(frame_ms=20, duration_ms=100),
         chime=_FakeChime(),
@@ -266,12 +262,33 @@ def test_final_or_empty_transcript_returns_to_idle(final: str) -> None:
     assert len(finals) == 1
     assert finals[0] is not None
     assert finals[0].raw == final
-    assert finals[0].normalized == (
-        "what is the CO2 level" if final else ""
-    )
+    assert finals[0].normalized == ("what is the CO2 level" if final else "")
     assert events[-1].kind == "ready"
     assert controller.state is LiveState.WAITING_FOR_WAKE
     assert not stt.active
+
+
+def test_local_confirmation_listens_without_a_second_wake() -> None:
+    controller, _, _, chime = _controller(
+        triggers={0}, finals=["turn on the heater", "yes"]
+    )
+    events = list(controller.start())
+    sequence = [0]
+    events.extend(_feed(controller, sequence, 0, 1))
+    events.extend(_feed(controller, sequence, 9_000, 2))
+    events.extend(_feed(controller, sequence, 0, 3))
+    assert controller.state is LiveState.WAITING_FOR_WAKE
+
+    controller.await_local_confirmation()
+    assert controller.state is LiveState.AWAITING_CONTINUATION
+    events.extend(_feed(controller, sequence, 9_000, 2))
+    events.extend(_feed(controller, sequence, 0, 3))
+
+    finals = [event.result.raw for event in events if event.result is not None]
+    assert finals == ["turn on the heater", "yes"]
+    assert sum(event.kind == "wake" for event in events) == 1
+    assert chime.plays == 1
+    assert controller.state is LiveState.WAITING_FOR_WAKE
 
 
 def test_stt_error_recovers_safely_to_idle() -> None:
@@ -280,9 +297,7 @@ def test_stt_error_recovers_safely_to_idle() -> None:
             raise STTEngineError("decoder failed")
 
     failing = FailingSTT(["unused"])
-    controller, _, _, _ = _controller(
-        triggers={0}, finals=["unused"], engine=failing
-    )
+    controller, _, _, _ = _controller(triggers={0}, finals=["unused"], engine=failing)
     events = list(controller.start())
     for sequence, value in enumerate([0, 9_000]):
         events.extend(controller.process(_frame(value, sequence)))
@@ -295,9 +310,7 @@ def test_stt_error_recovers_safely_to_idle() -> None:
 
 
 def test_repeated_interactions_have_no_stale_partial_state() -> None:
-    controller, wake, stt, _ = _controller(
-        triggers={0, 6}, finals=["first", "second"]
-    )
+    controller, wake, stt, _ = _controller(triggers={0, 6}, finals=["first", "second"])
     events = list(controller.start())
     values = [0, 8_000, 8_000, 0, 0, 0, 0, 9_000, 9_000, 0, 0]
     for sequence, value in enumerate(values):
@@ -360,9 +373,7 @@ def test_repeated_live_cycles_keep_one_audio_capture_owner() -> None:
 
     values = [0, 8_000, 8_000, 0, 0, 0, 0, 9_000, 9_000, 0, 0]
     source = SequenceSource(values)
-    controller, _, stt, _ = _controller(
-        triggers={0, 6}, finals=["first", "second"]
-    )
+    controller, _, stt, _ = _controller(triggers={0, 6}, finals=["first", "second"])
 
     cycles = run_live_source(source, controller, max_cycles=2)
 
@@ -374,9 +385,7 @@ def test_repeated_live_cycles_keep_one_audio_capture_owner() -> None:
 
 
 def test_complete_command_finalizes_at_provisional_semantic_endpoint() -> None:
-    controller, _ = _semantic_controller(
-        "what is the humidity in filament box two"
-    )
+    controller, _ = _semantic_controller("what is the humidity in filament box two")
     sequence = [0]
     events = list(controller.start())
     events.extend(_feed(controller, sequence, 0, 1))  # wake
@@ -441,9 +450,8 @@ def test_hard_endpoint_prompts_for_targeted_bounded_continuation() -> None:
     finals = [event for event in events if event.kind == "final"]
     assert len(finals) == 2
     assert finals[-1].result is not None
-    assert finals[-1].result.effective_text == (
-        "what is the humidity filament box two"
-    )
+    assert finals[-1].result.effective_text == "filament box two"
+    assert finals[-1].result.semantic_status == "complete"
     assert finals[-1].completes_cycle
     assert controller.state is LiveState.WAITING_FOR_WAKE
 
@@ -494,8 +502,11 @@ def test_unrecognized_hard_endpoint_and_continuation_timeout_are_safe() -> None:
     events.extend(_feed(controller, sequence, 0, 102))
     finals = [event for event in events if event.kind == "final"]
     assert finals[-1].result is not None
-    assert finals[-1].result.semantic_status == "unrecognized"
+    assert finals[-1].result.semantic_status == "incomplete"
     assert finals[-1].result.effective_text == "y level"
+    assert controller.state is LiveState.AWAITING_CONTINUATION
+    events.extend(_feed(controller, sequence, 0, 601))
+    assert [event.kind for event in events].count("continuation_timeout") == 1
     assert controller.state is LiveState.WAITING_FOR_WAKE
 
     controller, _ = _semantic_controller("what is the humidity")

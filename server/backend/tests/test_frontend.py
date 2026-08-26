@@ -40,6 +40,9 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("Stale — status withheld", self.javascript)
         self.assertIn("Latest sensor sample invalid — status withheld", self.javascript)
         self.assertIn("Sensor warming up / adapting", self.javascript)
+        self.assertIn("Last-known values below are not current", self.javascript)
+        self.assertIn("values_are_current", self.javascript)
+        self.assertIn("sensorStatusPillClass", self.javascript)
 
     def test_normal_chart_is_dynamic_and_omits_statistical_datasets(self) -> None:
         self.assertIn('id="chart-metrics"', self.template)
@@ -170,6 +173,59 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("printer-dashboard-grid", self.styles)
         self.assertIn("@media (max-width: 640px)", self.styles)
         self.assertIn("session_id=", self.javascript)
+
+    def test_tracked_print_time_is_a_first_class_qualified_usage_metric(self) -> None:
+        self.assertIn('id="printer-usage"', self.template)
+        self.assertIn("Printer Usage", self.template)
+        self.assertIn("Tracked Print Time", self.javascript)
+        self.assertIn("formatTrackedRuntime", self.javascript)
+        self.assertIn("tracked_print_seconds", self.javascript)
+        self.assertIn("tracked_job_count", self.javascript)
+        self.assertIn("tracked_first_print_at", self.javascript)
+        self.assertIn("tracked_last_print_at", self.javascript)
+        self.assertIn("rolling_tracked_print_hours_per_day", self.javascript)
+        self.assertIn(
+            "may not represent the printer's complete lifetime", self.javascript
+        )
+        self.assertIn("not a printer lifetime counter", self.javascript)
+        self.assertIn("usage-value", self.styles)
+
+    def test_usage_and_maintenance_precede_printer_details_and_history(self) -> None:
+        panel = self.template[self.template.index('id="panel-bambu-printer"') :]
+        order = [
+            panel.index('id="printer-usage"'),
+            panel.index('id="printer-maintenance"'),
+            panel.index('id="printer-details"'),
+            panel.index('id="printer-history"'),
+        ]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("<th>Duration</th>", self.template)
+
+    def test_maintenance_states_and_baseline_actions_are_rendered(self) -> None:
+        self.assertIn('id="maintenance-summary"', self.template)
+        self.assertIn('id="maintenance-complete-all"', self.template)
+        self.assertIn("Mark all maintenance completed today", self.template)
+        self.assertIn("renderMaintenanceSummary", self.javascript)
+        self.assertIn("baseline_required", self.javascript)
+        self.assertIn("Needs a baseline", self.javascript)
+        self.assertIn("Manufacturer cadence:", self.javascript)
+        self.assertIn("Local warning lead time only", self.javascript)
+        self.assertIn("Condition-based guidance", self.javascript)
+        self.assertIn("${API.printerMaintenance}/complete-all", self.javascript)
+        self.assertIn("establishes the maintenance baseline", self.javascript)
+        self.assertIn("does not send any command to the printer", self.javascript)
+        for style in (
+            ".maintenance-due_soon",
+            ".maintenance-baseline_required",
+            ".maintenance-advisory",
+            ".maintenance-summary",
+        ):
+            self.assertIn(style, self.styles)
+
+    def test_usage_and_maintenance_stay_readable_on_narrow_screens(self) -> None:
+        mobile = self.styles[self.styles.index("@media (max-width: 640px)") :]
+        self.assertIn(".usage-facts", mobile)
+        self.assertIn(".maintenance-counts", mobile)
 
     def test_clocks_use_server_timestamp_and_download_requires_ready_state(
         self,

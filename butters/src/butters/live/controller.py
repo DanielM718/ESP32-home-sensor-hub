@@ -14,6 +14,7 @@ from butters.audio.buffer import PreRollBuffer
 from butters.audio.chime import ChimePlayer
 from butters.audio.model import AudioFrame, AudioSource, AudioSourceError
 from butters.live.semantic import SemanticEndpointAssessment, SemanticEndpointEvaluator
+from butters.routing.model import PendingClarification
 from butters.stt.model import StreamingSTTEngine
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 from butters.stt.session import UtteranceResult
@@ -109,8 +110,9 @@ class LiveVoiceController:
         self._processing_seconds = 0.0
         self._processing_cpu_seconds = 0.0
         self._last_semantic_check: tuple[str | None, str] | None = None
-        self._pending_text: str | None = None
+        self._pending_clarification: PendingClarification | None = None
         self._continuation_started = 0.0
+        self._local_confirmation_active = False
 
     def start(self) -> tuple[LiveEvent, ...]:
         self.wake_detector.reset()
@@ -134,8 +136,24 @@ class LiveVoiceController:
         self._last_semantic_check = None
 
     def _clear_pending(self) -> None:
-        self._pending_text = None
+        self._pending_clarification = None
         self._continuation_started = 0.0
+        self._local_confirmation_active = False
+
+    def await_local_confirmation(self) -> None:
+        """Listen for one bounded confirmation without another wake word."""
+
+        if self.state is not LiveState.WAITING_FOR_WAKE:
+            raise RuntimeError("local confirmation can start only from idle")
+        self.stt_engine.reset()
+        self.command_vad.reset()
+        self.command_preroll.clear()
+        self._clear_utterance()
+        self._pending_clarification = None
+        self._continuation_started = self._audio_position
+        self._listening_started = self._audio_position
+        self._local_confirmation_active = True
+        self.state = LiveState.AWAITING_CONTINUATION
 
     def _seed_post_keyword_audio(self, detection: WakeDetection) -> None:
         """Keep only audio estimated to follow the wake phrase.
@@ -222,7 +240,7 @@ class LiveVoiceController:
         if raw.strip() and self.semantic_endpoint is not None:
             assessment = self.semantic_endpoint.assess(
                 raw,
-                pending_text=self._pending_text,
+                pending=self._pending_clarification,
             )
         effective_text = assessment.effective_text if assessment is not None else raw
         semantic_status = (
@@ -263,12 +281,14 @@ class LiveVoiceController:
     def _await_continuation(
         self, assessment: SemanticEndpointAssessment
     ) -> list[LiveEvent]:
+        first_prompt = self._pending_clarification is None
         self.stt_engine.reset()
         self.command_vad.reset()
         self.command_preroll.clear()
         self._clear_utterance()
-        self._pending_text = assessment.effective_text
-        self._continuation_started = self._audio_position
+        self._pending_clarification = assessment.pending
+        if first_prompt:
+            self._continuation_started = self._audio_position
         self._listening_started = self._audio_position
         self.state = LiveState.AWAITING_CONTINUATION
         return [
@@ -321,11 +341,16 @@ class LiveVoiceController:
                     self._audio_position - self._continuation_started
                     >= self.continuation_timeout_seconds
                 ):
+                    message = (
+                        "Local action confirmation expired."
+                        if self._local_confirmation_active
+                        else "Incomplete request expired."
+                    )
                     events = [
                         LiveEvent(
                             "continuation_timeout",
                             self.state,
-                            text="Incomplete request expired.",
+                            text=message,
                             completes_cycle=True,
                         )
                     ]
@@ -337,7 +362,7 @@ class LiveVoiceController:
             self.command_preroll.append(frame)
             elapsed = self._audio_position - self._listening_started
             if (
-                self._pending_text is None
+                self._pending_clarification is None
                 and elapsed < self.acknowledgement_guard_seconds
             ):
                 return ()
@@ -364,7 +389,8 @@ class LiveVoiceController:
 
             if not self._in_utterance:
                 if (
-                    self._pending_text is None
+                    self._pending_clarification is None
+                    and not self._local_confirmation_active
                     and elapsed >= self.no_speech_timeout_seconds
                 ):
                     events.append(
@@ -386,12 +412,17 @@ class LiveVoiceController:
                 and self.semantic_endpoint is not None
             ):
                 partial = self.stt_engine.get_partial_transcript().strip()
-                check_key = (self._pending_text, partial)
+                pending_key = (
+                    None
+                    if self._pending_clarification is None
+                    else self._pending_clarification.normalized_text
+                )
+                check_key = (pending_key, partial)
                 if partial and check_key != self._last_semantic_check:
                     self._last_semantic_check = check_key
                     assessment = self.semantic_endpoint.assess(
                         partial,
-                        pending_text=self._pending_text,
+                        pending=self._pending_clarification,
                     )
                     if assessment.status == "complete":
                         events.extend(self._finalize("semantic_complete"))

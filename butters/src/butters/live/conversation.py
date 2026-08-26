@@ -4,18 +4,11 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
 
 from butters.assistant import AssistantResponse, DeterministicAssistant
-from butters.live.semantic import incomplete_route_progressed
-from butters.routing.model import RoutedIntent
-
-
-@dataclass(frozen=True, slots=True)
-class PendingRequest:
-    raw_text: str
-    route: RoutedIntent
-    expires_at: float
+from butters.live.authorization import LocalVoiceAuthorization
+from butters.routing.conversation import route_conversation_turn
+from butters.routing.model import PendingClarification
 
 
 class BoundedVoiceConversation:
@@ -27,18 +20,20 @@ class BoundedVoiceConversation:
         *,
         continuation_timeout_seconds: float = 12.0,
         clock: Callable[[], float] = time.monotonic,
+        local_authorization: LocalVoiceAuthorization | None = None,
     ) -> None:
         if continuation_timeout_seconds <= 0:
             raise ValueError("continuation_timeout_seconds must be positive")
         self.assistant = assistant
         self.continuation_timeout_seconds = continuation_timeout_seconds
         self.clock = clock
-        self._pending: PendingRequest | None = None
+        self.local_authorization = local_authorization
+        self._pending: PendingClarification | None = None
 
     @property
-    def pending(self) -> PendingRequest | None:
+    def pending(self) -> PendingClarification | None:
         pending = self._pending
-        if pending is not None and self.clock() >= pending.expires_at:
+        if pending is not None and self.clock() >= pending.expires_monotonic:
             self._pending = None
             return None
         return pending
@@ -46,41 +41,38 @@ class BoundedVoiceConversation:
     def clear(self) -> None:
         self._pending = None
 
+    def note_physical_wake(self) -> None:
+        if self.local_authorization is not None:
+            self.local_authorization.note_physical_wake()
+
+    def handle_local_action(self, raw_text: str) -> AssistantResponse | None:
+        if self.local_authorization is None:
+            return None
+        response = self.local_authorization.handle_text(raw_text)
+        if response is not None:
+            self._pending = None
+        return response
+
+    def cancel_local_confirmation(self) -> None:
+        if self.local_authorization is not None:
+            self.local_authorization.cancel_pending_confirmation()
+
     def handle_text(self, raw_text: str) -> AssistantResponse:
+        response = self.handle_local_action(raw_text)
+        if response is not None:
+            return response
         now = self.clock()
-        pending = self.pending
-        standalone = self.assistant.preview_route(raw_text)
-
-        # A complete standalone request always wins over stale context.
-        if pending is not None and standalone.matched:
-            self.clear()
-            return self.assistant.handle_text(raw_text)
-
-        selected_text = raw_text
-        if pending is not None:
-            if standalone.incomplete and standalone.normalized_text.startswith(
-                pending.route.normalized_text
-            ):
-                # The live controller may already have supplied logical text.
-                selected_text = raw_text
-            else:
-                merged = f"{pending.raw_text.strip()} {raw_text.strip()}".strip()
-                merged_route = self.assistant.preview_route(merged)
-                if merged_route.matched or incomplete_route_progressed(
-                    pending.route, merged_route
-                ):
-                    selected_text = merged
-                else:
-                    # No new required information was safely resolved.
-                    self.clear()
-
-        response = self.assistant.handle_text(selected_text)
-        if response.route.incomplete:
-            self._pending = PendingRequest(
-                selected_text,
-                response.route,
-                now + self.continuation_timeout_seconds,
-            )
+        outcome = route_conversation_turn(
+            self.assistant.router,
+            raw_text,
+            self.pending,
+            now=now,
+            ttl_seconds=self.continuation_timeout_seconds,
+            preview_route=self.assistant.preview_route,
+        )
+        self._pending = outcome.pending
+        if outcome.disposition in {"resolved", "retry"}:
+            response = self.assistant.handle_routed_text(raw_text, outcome.route)
         else:
-            self.clear()
+            response = self.assistant.handle_text(raw_text)
         return response

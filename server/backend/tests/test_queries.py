@@ -14,6 +14,7 @@ from app.queries import (
     QueryValidationError,
     air_quality_context_flux,
     air_quality_context_response,
+    air_quality_sensor_status,
     events_flux,
     latest_flux,
     latest_response,
@@ -107,8 +108,25 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn('r._measurement == "air_quality_reading"', air_section)
         self.assertIn("|> group(", air_section)
         self.assertIn("|> last()", air_section)
-        self.assertEqual(flux.count("|> last()"), 2)
+        self.assertEqual(flux.count("|> last()"), 4)
         self.assertLess(flux.rindex("|> last()"), union_start)
+
+    def test_latest_inventory_reconstructs_known_sensors_from_permanent_history(
+        self,
+    ) -> None:
+        flux = latest_flux("environment", "environment_live")
+
+        environment_inventory = flux[
+            flux.index("environmentInventory =") : flux.index("airQualityLatest =")
+        ]
+        air_inventory = flux[
+            flux.index("airQualityInventory =") : flux.index("union(tables:")
+        ]
+        self.assertIn("|> range(start: 0)", environment_inventory)
+        self.assertIn('r._measurement == "environment_reading"', environment_inventory)
+        self.assertIn("|> range(start: 0)", air_inventory)
+        self.assertIn('r._measurement == "air_quality_15m"', air_inventory)
+        self.assertIn('"co2_mean"', air_inventory)
 
     def test_latest_live_lookback_is_bounded_and_shorter_than_retention(self) -> None:
         flux = latest_flux("environment", "environment_live")
@@ -292,6 +310,30 @@ class QueryHelpersTest(unittest.TestCase):
             },
         )
         self.assertEqual(set(station["available_fields"]), set(AIR_QUALITY_FIELDS))
+
+    def test_permanent_air_quality_aggregate_restores_identity_and_capabilities(
+        self,
+    ) -> None:
+        old = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        values = {
+            "location": "printer_room",
+            "topic": "home/air/printer_room",
+            "sensor_type": "air_quality",
+        }
+        station = latest_response(
+            [
+                FakeRecord("air_quality_15m", "co2_mean", 721.0, old, values),
+                FakeRecord("air_quality_15m", "temperature_c_mean", 24.5, old, values),
+                FakeRecord("air_quality_15m", "humidity_mean", 42.3, old, values),
+            ]
+        )["air_quality"][0]
+
+        self.assertEqual(station["id"], "printer_room")
+        self.assertEqual(station["last_seen"], "2026-01-01T12:00:00Z")
+        self.assertEqual(station["co2"], 721.0)
+        self.assertEqual(
+            station["available_fields"], ["co2", "temperature_c", "humidity"]
+        )
 
     def test_latest_response_does_not_reuse_older_raw_diagnostic_ticks(self) -> None:
         now = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -594,7 +636,67 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertTrue(response["nodes"][0]["battery_measurement_ok"])
         self.assertFalse(response["nodes"][0]["battery_low"])
         self.assertFalse(response["nodes"][0]["battery_shutdown"])
+        self.assertEqual(response["environment"][0]["status"], "online")
+        self.assertTrue(response["environment"][0]["values_are_current"])
         self.assertNotIn("nodes", latest)
+
+    def test_offline_sensor_remains_listed_and_values_are_marked_last_known(
+        self,
+    ) -> None:
+        latest = {
+            "generated_at": "2026-01-01T13:00:00Z",
+            "environment": [],
+            "air_quality": [
+                {
+                    "id": "printer_room",
+                    "sensor_type": "air_quality",
+                    "location": "printer_room",
+                    "topic": "home/air/printer_room",
+                    "last_seen": "2026-01-01T12:00:00Z",
+                    "co2": 721.0,
+                    "available_fields": ["co2"],
+                }
+            ],
+        }
+
+        response = latest_with_node_status(
+            latest,
+            stale_after_seconds=1800,
+            air_quality_stale_after_seconds=20,
+        )
+
+        station = response["air_quality"][0]
+        self.assertEqual(station["status"], "offline")
+        self.assertFalse(station["values_are_current"])
+        self.assertEqual(station["co2"], 721.0)
+        self.assertEqual(response["nodes"][0]["last_seen"], station["last_seen"])
+
+    def test_required_sen66_uses_the_same_deterministic_freshness_rule(self) -> None:
+        seen = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        latest = latest_response(_air_quality_records(seen))
+
+        online = air_quality_sensor_status(
+            latest,
+            location="printer_room",
+            stale_after_seconds=20,
+            observed_at=seen + timedelta(seconds=20),
+        )
+        stale = air_quality_sensor_status(
+            latest,
+            location="printer_room",
+            stale_after_seconds=20,
+            observed_at=seen + timedelta(seconds=21),
+        )
+        unknown = air_quality_sensor_status(
+            latest,
+            location="never_seen",
+            stale_after_seconds=20,
+            observed_at=seen,
+        )
+
+        self.assertEqual(online["status"], "online")
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(unknown["status"], "unknown")
 
     def test_context_keeps_simultaneous_event_types_separate(self) -> None:
         now = datetime(2026, 7, 21, 12, 5, tzinfo=timezone.utc)

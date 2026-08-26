@@ -282,10 +282,12 @@ async function refreshPrinter() {
     const printer = await fetchJson(API.printer);
     state.printerCurrent = printer;
     renderPrinter(printer);
+    renderPrinterUsage(printer);
     renderPrinterDetails(printer);
     renderAms(printer.ams_units || []);
   } catch (_error) {
     renderPrinter({ available: false, status: "unavailable", reason: "Printer state is temporarily unavailable" });
+    renderPrinterSectionError("printer-usage", "Tracked print time is temporarily unavailable.");
     renderPrinterSectionError("printer-details", "Printer details are temporarily unavailable.");
     renderPrinterSectionError("printer-ams", "AMS state is temporarily unavailable.");
   } finally {
@@ -323,6 +325,10 @@ function renderPrinter(printer) {
   const expectedFinish = printer.expected_finished_at
     ? formatDateTime(printer.expected_finished_at)
     : "Unknown";
+  const sen66Monitoring = printer.sen66_monitoring || null;
+  const sen66MonitoringText = sen66Monitoring
+    ? `${formatLabel(sen66Monitoring.state)}${sen66Monitoring.reason ? ` — ${sen66Monitoring.reason}` : ""}`
+    : "No automatic SEN66 monitoring decision recorded";
   container.innerHTML = `
     <article class="reading-card printer-card printer-current-card">
       <div class="air-station-heading">
@@ -344,6 +350,7 @@ function renderPrinter(printer) {
         <div><dt>Expected finish</dt><dd>${escapeHtml(expectedFinish)} <span class="subtle">(upstream estimate)</span></dd></div>
         <div><dt>Tool / tray</dt><dd>${escapeHtml([printer.active_tool, printer.ams_slot].filter(Boolean).join(" · ") || "Unknown")}</dd></div>
         <div><dt>Temperatures</dt><dd>${escapeHtml(printerTemperatureSummary(printer))}</dd></div>
+        <div><dt>SEN66 monitoring</dt><dd>${escapeHtml(sen66MonitoringText)}</dd></div>
         <div><dt>Observed</dt><dd>${escapeHtml(relativeTime(printer.observed_at))}</dd></div>
       </dl>
     </article>`;
@@ -365,11 +372,13 @@ async function refreshPrinterDashboard(force = false) {
     if (current.status === "fulfilled") {
       state.printerCurrent = current.value;
       renderPrinter(current.value);
+      renderPrinterUsage(current.value);
       renderPrinterDetails(current.value);
       renderAms(current.value.ams_units || []);
       setLastUpdated(current.value.observed_at);
     } else {
       renderPrinter({ available: false, status: "unavailable", reason: "Printer state is temporarily unavailable" });
+      renderPrinterSectionError("printer-usage", "Tracked print time is temporarily unavailable.");
       renderPrinterSectionError("printer-details", "Printer details are temporarily unavailable.");
       renderPrinterSectionError("printer-ams", "AMS state is temporarily unavailable.");
     }
@@ -426,7 +435,81 @@ function renderAms(units) {
   </article>`).join("");
 }
 
+function renderPrinterUsage(printer) {
+  const container = document.getElementById("printer-usage");
+  if (!container) return;
+  const usage = (printer && printer.usage) || {};
+  if (!Number.isFinite(Number(usage.tracked_print_seconds))) {
+    container.innerHTML = '<p class="empty-state">Tracked print time is unavailable until print history exists.</p>';
+    return;
+  }
+  const jobs = Number(usage.tracked_job_count || 0);
+  const perDay = usage.rolling_tracked_print_hours_per_day;
+  container.innerHTML = `<div class="usage-hero">
+    <div class="usage-headline">
+      <span class="usage-label">Tracked Print Time</span>
+      <strong class="usage-value">${escapeHtml(formatTrackedRuntime(usage.tracked_print_seconds))}</strong>
+      <span class="authority-label">Sum of known actual print-history intervals. Bambu Cloud history may not represent the printer's complete lifetime.</span>
+    </div>
+    <dl class="printer-facts usage-facts">
+      <div><dt>Tracked prints</dt><dd>${jobs}</dd></div>
+      <div><dt>Completed</dt><dd>${Number(usage.tracked_completed_count || 0)}</dd></div>
+      <div><dt>Failed or cancelled</dt><dd>${Number(usage.tracked_failed_or_cancelled_count || 0)}</dd></div>
+      <div><dt>First tracked print</dt><dd>${usage.tracked_first_print_at ? escapeHtml(formatDateTime(usage.tracked_first_print_at)) : "Unknown"}</dd></div>
+      <div><dt>Last tracked print</dt><dd>${usage.tracked_last_print_at ? escapeHtml(formatDateTime(usage.tracked_last_print_at)) : "Unknown"}</dd></div>
+      <div><dt>Recent average</dt><dd>${perDay == null ? "Unknown" : `${formatNumber(perDay, 2, " h/day")}`} <span class="subtle">(${Number(usage.rolling_window_days || 0)}-day window)</span></dd></div>
+      <div><dt>Maintenance mode</dt><dd>${escapeHtml(formatLabel(usage.maintenance_mode || "unknown"))} <span class="subtle">(${escapeHtml(formatLabel(usage.maintenance_mode_reason || "unknown"))})</span></dd></div>
+      <div><dt>History provenance</dt><dd>${escapeHtml((usage.tracked_history_provenance || []).map(formatLabel).join(", ") || "None")}</dd></div>
+    </dl>
+    <p class="subtle">History completeness: ${usage.tracked_history_complete ? "known complete" : "not known to be complete"}${Number(usage.tracked_unknown_interval_job_count || 0) ? ` · ${Number(usage.tracked_unknown_interval_job_count)} job(s) have no usable start/end interval and are excluded` : ""}. This is not a printer lifetime counter.</p>
+  </div>`;
+}
+
+function formatTrackedRuntime(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds < 0) {
+    return "Unavailable";
+  }
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  return `${hours} h ${minutes} m`;
+}
+
+function renderMaintenanceSummary(payload) {
+  const container = document.getElementById("maintenance-summary");
+  if (!container) return;
+  const summary = payload.summary || {};
+  const counts = summary.counts || {};
+  const next = summary.next_task;
+  if (!summary.task_count) {
+    container.innerHTML = "";
+    return;
+  }
+  container.innerHTML = `<div class="maintenance-summary maintenance-${escapeHtml(summary.overall_state || "ok")}">
+    <div class="air-station-heading">
+      <h3>Overall: ${escapeHtml(formatLabel(summary.overall_state || "ok"))}</h3>
+      <span class="status-pill ${maintenancePillClass(summary.overall_state)}">${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} mode</span>
+    </div>
+    <p>${next ? `Next: <strong>${escapeHtml(next.name)}</strong>${next.next_due_at ? ` · due ${escapeHtml(formatDateTime(next.next_due_at))}` : ""}${Number.isFinite(Number(next.remaining_days)) ? ` (${Number(next.remaining_days).toFixed(0)} days)` : ""}` : "No scheduled task is pending."}</p>
+    <ul class="maintenance-counts">
+      <li>Due soon: ${Number(counts.due_soon || 0)}</li>
+      <li>Due: ${Number(counts.due || 0)}</li>
+      <li>Overdue: ${Number(counts.overdue || 0)}</li>
+      <li>Needs baseline: ${Number(counts.baseline_required || 0)}</li>
+      <li>Advisory: ${Number(counts.advisory || 0)}</li>
+    </ul>
+    <p class="subtle">Usage tier ${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} from ${summary.rolling_print_hours_per_day == null ? "unknown" : `${Number(summary.rolling_print_hours_per_day).toFixed(2)} h/day`} tracked printing (${escapeHtml(formatLabel(summary.maintenance_mode_reason || "unknown"))}).</p>
+  </div>`;
+}
+
+function maintenancePillClass(state) {
+  if (state === "overdue" || state === "due") return "status-error";
+  if (state === "due_soon" || state === "baseline_required") return "status-loading";
+  return "status-ok";
+}
+
 function renderMaintenance(payload) {
+  renderMaintenanceSummary(payload);
   const container = document.getElementById("printer-maintenance");
   const tasks = (payload.tasks || []).filter((task) => task.enabled);
   if (!tasks.length) {
@@ -434,12 +517,34 @@ function renderMaintenance(payload) {
     return;
   }
   container.innerHTML = tasks.map((task) => `<article class="maintenance-card maintenance-${escapeHtml(task.state)}">
-    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${task.state === "overdue" || task.state === "due" ? "status-error" : task.state === "warning" ? "status-loading" : "status-ok"}">${escapeHtml(formatLabel(task.state))}</span></div>
+    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${maintenancePillClass(task.state)}">${escapeHtml(formatLabel(task.state))}</span></div>
     <p>${escapeHtml(task.description || "No description")}</p>
-    <ul>${(task.triggers || []).map((trigger) => `<li>${escapeHtml(formatLabel(trigger.trigger_type))}: ${escapeHtml(String(trigger.current_accumulated_value))} / ${escapeHtml(String(trigger.interval))} (${escapeHtml(String(trigger.remaining))} remaining)</li>`).join("")}</ul>
-    <p class="subtle">Last complete: ${task.last_completed_at ? escapeHtml(formatDateTime(task.last_completed_at)) : "Never recorded"} · Source: ${escapeHtml(task.provenance || "unknown")}</p>
-    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">Mark complete locally</button>
+    <p class="maintenance-cadence"><strong>Manufacturer cadence:</strong> ${escapeHtml(task.cadence || "Not published")}</p>
+    ${task.state === "baseline_required" ? '<p class="maintenance-baseline">Needs a baseline: record when this was last physically done before the dashboard can schedule it.</p>' : ""}
+    ${task.state === "advisory" ? '<p class="maintenance-baseline">Condition-based guidance. Bambu Lab publishes no numeric interval, so no due date is invented.</p>' : ""}
+    <ul>${(task.triggers || []).map((trigger) => `<li>${escapeHtml(maintenanceTriggerText(trigger, task))}</li>`).join("")}</ul>
+    <p class="subtle">Last complete: ${task.last_completed_at ? escapeHtml(formatDateTime(task.last_completed_at)) : "Never recorded"}${task.next_due_at ? ` · Next due: ${escapeHtml(formatDateTime(task.next_due_at))}` : ""} · Source: ${escapeHtml(formatLabel(task.provenance || "unknown"))}${task.manufacturer_source_url ? ` (<a href="${escapeHtml(task.manufacturer_source_url)}" rel="noreferrer noopener" target="_blank">Bambu Lab wiki</a>)` : ""}</p>
+    ${(task.triggers || []).some((trigger) => Number(trigger.warning_threshold) > 0) ? '<p class="subtle">Local warning lead time only; the interval above is the manufacturer value.</p>' : ""}
+    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">${task.state === "baseline_required" ? "Mark completed today" : "Mark complete locally"}</button>
   </article>`).join("");
+}
+
+function maintenanceTriggerText(trigger, task) {
+  const kind = String(trigger.trigger_type || "unknown");
+  if (kind === "manual_inspection") {
+    return `Manual check: ${task.cadence || "no published interval"}`;
+  }
+  if (kind === "event_after_task") {
+    return `Event driven: due after ${(trigger.prerequisite_task_ids || []).map(formatLabel).join(" or ") || "a prerequisite task"}`;
+  }
+  if (kind === "calendar_months" || kind === "usage_tiered_calendar_months") {
+    const applied = trigger.interval == null ? "unknown" : `${trigger.interval} month(s)`;
+    const remaining = trigger.remaining == null ? "baseline required" : `${Number(trigger.remaining).toFixed(0)} days remaining`;
+    return `${formatLabel(kind)}: every ${applied}${trigger.maintenance_mode_applied ? ` at ${formatLabel(trigger.maintenance_mode_applied)} usage` : ""} — ${remaining}`;
+  }
+  const current = trigger.current_accumulated_value == null ? "baseline required" : String(trigger.current_accumulated_value);
+  const remaining = trigger.remaining == null ? "-" : String(trigger.remaining);
+  return `${formatLabel(kind)}: ${current} / ${trigger.interval} (${remaining} remaining)`;
 }
 
 function renderPrinterHistory(history) {
@@ -501,6 +606,24 @@ function setupPrinterActions() {
     const inspect = event.target.closest(".inspect-print");
     if (inspect && !inspect.disabled) {
       await inspectPrintEnvironment(inspect.dataset.historyId);
+      return;
+    }
+    const completeAll = event.target.closest("#maintenance-complete-all");
+    if (completeAll) {
+      const confirmedAll = window.confirm("Record EVERY enabled maintenance task as completed today in the local dashboard database? This establishes the maintenance baseline and does not send any command to the printer.");
+      if (!confirmedAll) return;
+      completeAll.disabled = true;
+      try {
+        await fetchJson(`${API.printerMaintenance}/complete-all`, {
+          method: "POST",
+          body: JSON.stringify({ confirm: true, notes: "" }),
+        });
+        renderMaintenance(await fetchJson(API.printerMaintenance));
+      } catch (error) {
+        showError(error.message || "Could not record maintenance completion");
+      } finally {
+        completeAll.disabled = false;
+      }
       return;
     }
     const complete = event.target.closest(".maintenance-complete");
@@ -1614,7 +1737,10 @@ function renderLatest(data) {
   const readings = [
     ...(data.environment || []),
     ...(data.air_quality || []),
-  ];
+  ].sort((left, right) => {
+    const rank = { online: 0, stale: 1, offline: 2, unknown: 3 };
+    return (rank[left.status] ?? 3) - (rank[right.status] ?? 3);
+  });
 
   if (readings.length === 0) {
     grid.innerHTML = '<div class="empty-state">No readings found in InfluxDB.</div>';
@@ -1635,6 +1761,11 @@ function readingCard(reading) {
     ? `Node ${reading.node_id}`
     : formatLabel(reading.location || reading.id);
   const isEnvironment = reading.sensor_type === "environment";
+  const current = reading.values_are_current === true;
+  const sensorStatus = reading.status || "unknown";
+  if (!current) {
+    card.classList.add("reading-card-inactive");
+  }
 
   if (!isEnvironment) {
     card.classList.add("reading-card-air");
@@ -1643,24 +1774,33 @@ function readingCard(reading) {
       <div class="air-station-heading">
         <div>
           <h3>${escapeHtml(title)}</h3>
-          <span class="authority-label">SEN66 · live 5-second feed</span>
+          <span class="authority-label">SEN66 · ${current ? "live 5-second feed" : "last stored measurements"}</span>
         </div>
+        <div class="sensor-card-status">
+          <span class="status-pill ${sensorStatusPillClass(sensorStatus)}">${escapeHtml(formatLabel(sensorStatus))}</span>
+          <span class="metric-small">Last seen ${escapeHtml(relativeTime(reading.last_seen))}</span>
+        </div>
+      </div>
+      ${current ? `
         <span class="interpretation-status severity-${escapeHtml(overall.severity || "unavailable")}">
           Room summary: ${escapeHtml(overall.category || "Unavailable")}
           ${overall.driving_metric ? ` · driven by ${escapeHtml(formatLabel(overall.driving_metric))}` : ""}
-        </span>
-      </div>
+        </span>` : '<span class="reading-warning">Last-known values below are not current.</span>'}
       <div class="air-reading-groups">
         ${AIR_QUALITY_METRIC_GROUPS.map((group) => airMetricGroupHtml(reading, group)).join("")}
       </div>
       ${advancedDiagnosticsHtml(reading)}
-      <div class="metric-small">Station updated ${escapeHtml(relativeTime(reading.last_seen))}</div>
+      <div class="metric-small">Station last seen ${escapeHtml(relativeTime(reading.last_seen))}</div>
     `;
     return card;
   }
 
   card.innerHTML = `
-    <h3>${escapeHtml(title)}</h3>
+    <div class="sensor-card-heading">
+      <h3>${escapeHtml(title)}</h3>
+      <span class="status-pill ${sensorStatusPillClass(sensorStatus)}">${escapeHtml(formatLabel(sensorStatus))}</span>
+    </div>
+    ${current ? "" : '<span class="reading-warning">Last-known values below are not current.</span>'}
     <div class="reading-values">
       ${metricHtml("Temp", formatNumber(reading.temperature_c, 1, " °C"))}
       ${metricHtml("Humidity", formatNumber(reading.humidity, 1, "%"))}
@@ -1668,7 +1808,7 @@ function readingCard(reading) {
       ${statusFlagsMetricHtml(reading)}
     </div>
     ${batteryAlertHtml(reading)}
-    <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
+    <div class="metric-small">Last seen ${escapeHtml(relativeTime(reading.last_seen))}</div>
   `;
   return card;
 }
@@ -2068,6 +2208,12 @@ function nodeStatusClass(node) {
     return "node-low";
   }
   return `node-${node.status || "unknown"}`;
+}
+
+function sensorStatusPillClass(status) {
+  if (status === "online") return "status-ok";
+  if (status === "offline") return "status-error";
+  return "status-loading";
 }
 
 function renderCharts(data) {

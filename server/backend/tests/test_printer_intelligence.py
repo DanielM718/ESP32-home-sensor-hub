@@ -330,40 +330,54 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
     database = tmp_path / "printer.sqlite3"
     local = PrinterStore(database)
     local.initialize()
-    _finish(local, start=NOW, hours=9, job_id="one")
     intelligence = PrinterIntelligenceStore(database)
     intelligence.initialize()
-    intelligence.sync_maintenance_tasks(
-        (
-            MaintenanceTaskSettings(
-                "user_inspection",
-                "User-defined inspection",
-                interval_hours=10,
-                warning_hours=2,
-                interval_prints=2,
-                warning_prints=1,
-                due_when="any",
-                source="user_configured",
-            ),
-            MaintenanceTaskSettings(
-                "job_service",
-                "Job-count service",
-                interval_prints=1,
-                source="user_configured",
-            ),
-            MaintenanceTaskSettings(
-                "calendar_service",
-                "Calendar service",
-                interval_days=1,
-                source="user_configured",
-            ),
+    configured = (
+        MaintenanceTaskSettings(
+            "user_inspection",
+            "User-defined inspection",
+            interval_hours=10,
+            warning_hours=2,
+            interval_prints=2,
+            warning_prints=1,
+            due_when="any",
+            source="user_configured",
         ),
-        now=NOW,
+        MaintenanceTaskSettings(
+            "job_service",
+            "Job-count service",
+            interval_prints=1,
+            source="user_configured",
+        ),
+        MaintenanceTaskSettings(
+            "calendar_service",
+            "Calendar service",
+            interval_days=1,
+            source="user_configured",
+        ),
     )
+    intelligence.sync_maintenance_tasks(configured, now=NOW, manufacturer_tasks=())
+
+    # A configured task without local completion history cannot be evaluated
+    # yet: the dashboard does not know when the work was last performed.
+    pending = {
+        task["maintenance_task_id"]: task
+        for task in intelligence.maintenance("x2d", now=NOW + timedelta(days=2))[
+            "tasks"
+        ]
+    }
+    assert {task["state"] for task in pending.values()} == {"baseline_required"}
+    assert all(task["overdue"] is False for task in pending.values())
+
+    intelligence.complete_all_maintenance(
+        notes="Baseline", completed_at=NOW, printer_id="x2d"
+    )
+    _finish(local, start=NOW, hours=9, job_id="one")
     initial = intelligence.maintenance("x2d", now=NOW + timedelta(days=2))
     tasks = {task["maintenance_task_id"]: task for task in initial["tasks"]}
     task = tasks["user_inspection"]
     assert task["warning"] is True and task["due"] is False
+    assert task["state"] == "due_soon"
     assert tasks["job_service"]["state"] == "due"
     assert tasks["job_service"]["due"] is True
     assert tasks["job_service"]["overdue"] is False
@@ -386,12 +400,14 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
     )
     result = intelligence.maintenance("x2d", now=NOW + timedelta(days=1))
     assert first["printer_control"] is False and second["printer_control"] is False
-    assert len(result["completion_history"]) == 2
+    assert len(result["completion_history"]) == 5
     assert result["completion_history"][0]["notes"] == "Later service"
     updated = {task["maintenance_task_id"]: task for task in result["tasks"]}
     assert updated["user_inspection"]["state"] == "ok"
 
-    intelligence.sync_maintenance_tasks((), now=NOW + timedelta(days=2))
+    intelligence.sync_maintenance_tasks(
+        (), now=NOW + timedelta(days=2), manufacturer_tasks=()
+    )
     disabled = {
         task["maintenance_task_id"]: task
         for task in intelligence.maintenance("x2d", now=NOW + timedelta(days=2))[
@@ -399,7 +415,7 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
         ]
     }
     assert all(task["enabled"] is False for task in disabled.values())
-    assert len(intelligence.maintenance("x2d")["completion_history"]) == 2
+    assert len(intelligence.maintenance("x2d")["completion_history"]) == 5
 
 
 def test_printer_monitoring_is_restart_safe_and_coexists_with_manual_session(
@@ -427,7 +443,13 @@ def test_printer_monitoring_is_restart_safe_and_coexists_with_manual_session(
     printer.initialize()
     active = printer.process(_state(NOW, NormalizedPrinterState.PREPARING))[0]
     coordinator = PrinterMonitoringCoordinator(
-        monitoring, environment_location="office", recovery_minutes=120
+        monitoring,
+        environment_location="office",
+        recovery_minutes=120,
+        sensor_status_provider=lambda _location, _now: {
+            "status": "online",
+            "last_seen": "2026-08-12T12:00:00Z",
+        },
     )
 
     first = coordinator.synchronize(active)
@@ -445,7 +467,13 @@ def test_printer_monitoring_is_restart_safe_and_coexists_with_manual_session(
     )
     restarted_store.initialize()
     restarted = PrinterMonitoringCoordinator(
-        restarted_store, environment_location="office", recovery_minutes=120
+        restarted_store,
+        environment_location="office",
+        recovery_minutes=120,
+        sensor_status_provider=lambda _location, _now: {
+            "status": "online",
+            "last_seen": "2026-08-12T12:00:00Z",
+        },
     ).synchronize(active)
     assert restarted["id"] == printer_monitoring["id"]
 
@@ -459,7 +487,13 @@ def test_post_print_monitoring_closes_only_after_recovery(tmp_path: Path) -> Non
     printer.initialize()
     active = printer.process(_state(NOW, NormalizedPrinterState.PRINTING))[0]
     coordinator = PrinterMonitoringCoordinator(
-        monitoring, environment_location="office", recovery_minutes=120
+        monitoring,
+        environment_location="office",
+        recovery_minutes=120,
+        sensor_status_provider=lambda _location, _now: {
+            "status": "online",
+            "last_seen": "2026-08-12T12:00:00Z",
+        },
     )
     coordinator.synchronize(active)
     printer.process(_state(NOW + timedelta(hours=1), NormalizedPrinterState.COMPLETED))
@@ -474,3 +508,62 @@ def test_post_print_monitoring_closes_only_after_recovery(tmp_path: Path) -> Non
     completed = monitoring.get_session(scheduled["id"])
     assert completed["status"] == "completed"
     assert monitoring.get_export_for_session(scheduled["id"]) is not None
+
+
+def test_offline_sen66_skips_print_monitoring_without_creating_empty_session(
+    tmp_path: Path,
+) -> None:
+    monitoring = MonitoringExportStore(
+        tmp_path / "monitoring.sqlite3", tmp_path / "exports"
+    )
+    monitoring.initialize()
+    printer = PrinterStore(tmp_path / "printer.sqlite3")
+    printer.initialize()
+    active = printer.process(_state(NOW, NormalizedPrinterState.PRINTING))[0]
+    status = {"status": "offline", "last_seen": "2026-08-11T12:00:00Z"}
+    coordinator = PrinterMonitoringCoordinator(
+        monitoring,
+        environment_location="office",
+        recovery_minutes=120,
+        sensor_status_provider=lambda _location, _now: status,
+    )
+
+    skipped = coordinator.synchronize(active, observed_at=NOW)
+    status["status"] = "online"
+    repeated = coordinator.synchronize(active, observed_at=NOW + timedelta(minutes=1))
+
+    assert skipped["state"] == "skipped"
+    assert "offline" in skipped["reason"]
+    assert repeated["state"] == "skipped"
+    assert monitoring.list_sessions() == []
+
+
+def test_running_print_monitoring_degrades_and_recovers_without_a_second_session(
+    tmp_path: Path,
+) -> None:
+    monitoring = MonitoringExportStore(
+        tmp_path / "monitoring.sqlite3", tmp_path / "exports"
+    )
+    monitoring.initialize()
+    printer = PrinterStore(tmp_path / "printer.sqlite3")
+    printer.initialize()
+    active = printer.process(_state(NOW, NormalizedPrinterState.PRINTING))[0]
+    status = {"status": "online", "last_seen": "2026-08-12T12:00:00Z"}
+    coordinator = PrinterMonitoringCoordinator(
+        monitoring,
+        environment_location="office",
+        recovery_minutes=120,
+        sensor_status_provider=lambda _location, _now: status,
+    )
+
+    started = coordinator.synchronize(active, observed_at=NOW)
+    status["status"] = "offline"
+    degraded = coordinator.synchronize(active, observed_at=NOW + timedelta(minutes=1))
+    status["status"] = "online"
+    recovered = coordinator.synchronize(active, observed_at=NOW + timedelta(minutes=2))
+
+    assert started["sensor_monitoring"]["state"] == "running"
+    assert degraded["sensor_monitoring"]["state"] == "degraded"
+    assert recovered["sensor_monitoring"]["state"] == "running"
+    assert len(monitoring.list_sessions()) == 1
+    assert {started["id"], degraded["id"], recovered["id"]} == {started["id"]}

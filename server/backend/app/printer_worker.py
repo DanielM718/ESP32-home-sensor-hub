@@ -24,9 +24,14 @@ from app.printer_intelligence import (
     PrinterIntelligenceError,
     PrinterIntelligenceStore,
 )
+from app.printer_maintenance import (
+    X2D_MAINTENANCE_TASKS,
+    LoggingMaintenanceNotifier,
+)
 from app.printer_model import print_session_point, printer_state_point
 from app.printer_monitoring import PrinterMonitoringCoordinator
 from app.printer_persistence import PrinterStore
+from app.queries import InfluxReadRepository, air_quality_sensor_status
 
 LOGGER = logging.getLogger("home_sensor.printer")
 DEFAULT_CONFIG_PATH = Path("/etc/home-sensor/printer.toml")
@@ -46,10 +51,22 @@ def run() -> int:
         terminal_confirmations=settings.terminal_confirmations,
     )
     store.initialize()
-    intelligence = PrinterIntelligenceStore(settings.database_path)
+    intelligence = PrinterIntelligenceStore(
+        settings.database_path,
+        rolling_window_days=settings.maintenance_rolling_window_days,
+        minimum_mode_history_days=settings.maintenance_minimum_history_days,
+    )
     intelligence.initialize()
     intelligence.sync_maintenance_tasks(
-        settings.maintenance_tasks, now=datetime.now(timezone.utc)
+        settings.maintenance_tasks,
+        now=datetime.now(timezone.utc),
+        manufacturer_tasks=(
+            X2D_MAINTENANCE_TASKS if settings.manufacturer_maintenance_enabled else ()
+        ),
+    )
+    maintenance_notifier = LoggingMaintenanceNotifier()
+    last_maintenance_evaluation = (
+        time.monotonic() - settings.maintenance_evaluation_seconds
     )
     monitoring_coordinator = None
     if settings.automatic_monitoring:
@@ -58,10 +75,38 @@ def run() -> int:
             settings.monitoring_output_dir,
         )
         monitoring_store.initialize()
+        sensor_repository = InfluxReadRepository(
+            app_settings.influx,
+            expected_publish_seconds=app_settings.air_quality.expected_publish_seconds,
+            minimum_coverage_percent=app_settings.air_quality.rolling_minimum_coverage_percent,
+        )
+
+        def required_sensor_status(location: str, observed_at: datetime) -> dict:
+            try:
+                latest = sensor_repository.latest()
+            # Influx client versions expose several transport exception types;
+            # this optional observer boundary converts all of them to UNKNOWN.
+            except Exception:  # noqa: BLE001
+                return {
+                    "id": location,
+                    "location": location,
+                    "sensor_type": "air_quality",
+                    "status": "unknown",
+                    "last_seen": None,
+                    "stale_reason": "availability_check_failed",
+                }
+            return air_quality_sensor_status(
+                latest,
+                location=location,
+                stale_after_seconds=app_settings.air_quality.stale_after_seconds,
+                observed_at=observed_at,
+            )
+
         monitoring_coordinator = PrinterMonitoringCoordinator(
             monitoring_store,
             environment_location=settings.environment_location,
             recovery_minutes=settings.recovery_minutes,
+            sensor_status_provider=required_sensor_status,
         )
     cloud_adapter = None
     cloud_token = os.environ.get("BAMBU_CLOUD_TOKEN", "")
@@ -112,7 +157,8 @@ def run() -> int:
                     # crash window between a session transition and monitoring
                     # metadata update. The store is unique/idempotent by print UUID.
                     monitoring_coordinator.synchronize(
-                        store.latest_session(settings.printer_id)
+                        store.latest_session(settings.printer_id),
+                        observed_at=state.observed_at,
                     )
                 except Exception:
                     LOGGER.exception("printer active-monitoring synchronization failed")
@@ -144,6 +190,26 @@ def run() -> int:
                         settings.printer_id, str(exc), attempted_at=attempted_at
                     )
                     LOGGER.warning("Bambu Cloud history read unavailable: %s", exc)
+            if (
+                time.monotonic() - last_maintenance_evaluation
+                >= settings.maintenance_evaluation_seconds
+            ):
+                last_maintenance_evaluation = time.monotonic()
+                try:
+                    # Edge-triggered: unchanged states append nothing, so a
+                    # restart or a fast poll cannot repeat a notification.
+                    events = intelligence.evaluate_maintenance_events(
+                        settings.printer_id, now=state.observed_at
+                    )
+                    if events:
+                        LOGGER.info(
+                            "printer maintenance transitions recorded: %d", len(events)
+                        )
+                    intelligence.dispatch_notifications(
+                        maintenance_notifier, now=state.observed_at
+                    )
+                except Exception:
+                    LOGGER.exception("printer maintenance evaluation failed")
             try:
                 writer.write_point_data(
                     printer_state_point(state, measurement="printer_state"),

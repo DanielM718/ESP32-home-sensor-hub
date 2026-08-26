@@ -229,6 +229,13 @@ def latest_flux(bucket: str, live_bucket: str | None = None) -> str:
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
+environmentInventory = from(bucket: {_flux_string(bucket)})
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == {_flux_string(ENVIRONMENT_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(ENVIRONMENT_LATEST_FIELDS)}))
+  |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
+  |> last()
+
 airQualityLatest = from(bucket: {_flux_string(live_bucket)})
   |> range(start: {AIR_QUALITY_LATEST_LOOKBACK})
   |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_MEASUREMENT)})
@@ -236,7 +243,14 @@ airQualityLatest = from(bucket: {_flux_string(live_bucket)})
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
-union(tables: [environmentLatest, airQualityLatest])
+airQualityInventory = from(bucket: {_flux_string(bucket)})
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == {_flux_string(AIR_QUALITY_AGGREGATE_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(tuple(f"{field}_mean" for field in AIR_QUALITY_FIELDS))}))
+  |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
+  |> last()
+
+union(tables: [environmentLatest, environmentInventory, airQualityLatest, airQualityInventory])
 """
 
 
@@ -695,10 +709,18 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
 
         key = (sensor_type, identity)
         item = entities.setdefault(key, _base_entity(record, sensor_type, identity))
-        field = _field(record)
+        field = _latest_field(record, sensor_type)
+        if field is None:
+            continue
         record_time = _time(record)
-        item[field] = _json_value(_value(record))
-        item.setdefault("_field_times", {})[field] = record_time
+        field_times = item.setdefault("_field_times", {})
+        previous_time = field_times.get(field)
+        if (
+            previous_time is None
+            or _max_iso_time(previous_time, record_time) == record_time
+        ):
+            item[field] = _json_value(_value(record))
+            field_times[field] = record_time
         item["last_seen"] = _max_iso_time(item.get("last_seen"), record_time)
 
     for item in entities.values():
@@ -830,6 +852,39 @@ def nodes_response(
     }
 
 
+def air_quality_sensor_status(
+    latest: Mapping[str, Any],
+    *,
+    location: str,
+    stale_after_seconds: int,
+    observed_at: datetime,
+) -> dict[str, Any]:
+    """Resolve one required station with the dashboard's canonical freshness rule."""
+
+    snapshot = dict(latest)
+    snapshot["generated_at"] = _iso_time(observed_at)
+    nodes = nodes_response(
+        snapshot,
+        stale_after_seconds=stale_after_seconds,
+        air_quality_stale_after_seconds=stale_after_seconds,
+    )["nodes"]
+    for node in nodes:
+        if (
+            node.get("sensor_type") == SENSOR_TYPE_AIR_QUALITY
+            and str(node.get("location") or node.get("id")) == location
+        ):
+            return node
+    return {
+        "id": location,
+        "location": location,
+        "sensor_type": SENSOR_TYPE_AIR_QUALITY,
+        "status": "unknown",
+        "last_seen": None,
+        "age_seconds": None,
+        "stale_reason": "never_seen",
+    }
+
+
 def latest_with_node_status(
     latest: Mapping[str, Any],
     *,
@@ -849,6 +904,22 @@ def latest_with_node_status(
         "air_quality_stale_after_seconds"
     ]
     response["nodes"] = node_payload["nodes"]
+    status_by_identity = {
+        (str(node.get("sensor_type")), str(node.get("id"))): node
+        for node in node_payload["nodes"]
+    }
+    for sensor_type in (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY):
+        enriched = []
+        for original in response.get(sensor_type, []):
+            item = dict(original)
+            node = status_by_identity.get((sensor_type, str(item.get("id"))))
+            if node is not None:
+                item["status"] = node.get("status")
+                item["age_seconds"] = node.get("age_seconds")
+                item["stale_reason"] = node.get("stale_reason")
+                item["values_are_current"] = node.get("status") == "online"
+            enriched.append(item)
+        response[sensor_type] = enriched
     return response
 
 
@@ -1083,6 +1154,20 @@ def _sensor_type_for_measurement(measurement: str) -> str | None:
     if measurement in {AIR_QUALITY_MEASUREMENT, AIR_QUALITY_AGGREGATE_MEASUREMENT}:
         return SENSOR_TYPE_AIR_QUALITY
     return None
+
+
+def _latest_field(record: RecordLike, sensor_type: str) -> str | None:
+    """Normalize permanent aggregate capabilities to their live field names."""
+
+    field = _field(record)
+    if (
+        sensor_type == SENSOR_TYPE_AIR_QUALITY
+        and _measurement(record) == AIR_QUALITY_AGGREGATE_MEASUREMENT
+        and field.endswith("_mean")
+    ):
+        candidate = field[: -len("_mean")]
+        return candidate if candidate in AIR_QUALITY_FIELDS else None
+    return field
 
 
 def _entity_identity(record: RecordLike, sensor_type: str) -> str | None:

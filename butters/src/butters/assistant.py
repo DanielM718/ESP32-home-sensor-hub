@@ -9,14 +9,25 @@ from queue import Full, Queue
 from threading import Thread
 from typing import Protocol
 
+from butters.actions.broker import BrokerClient
+from butters.actions.store import ActionStateStore
 from butters.assistant_config import AssistantSettings
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticAnswer
 from butters.diagnostics.planner import DiagnosticPlanner
 from butters.diagnostics.tools import build_diagnostic_registry
+from butters.integrations.actions import (
+    EnvironmentControlAdapter,
+    FixedActionAdapter,
+    HostStatusAdapter,
+    NasAdapter,
+)
 from butters.integrations.dashboard import DashboardSensorAdapter
+from butters.integrations.desktop import DesktopWorkflow
+from butters.integrations.history import DashboardHistoryAdapter
 from butters.integrations.model import PrinterSnapshotProvider
 from butters.integrations.printer import DashboardPrinterAdapter
+from butters.integrations.project import ProjectInspectionAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
 from butters.llm.catalog import (
     build_tool_catalog,
@@ -34,9 +45,13 @@ from butters.responses.formatter import ResponseFormatter
 from butters.routing.entities import EntityRegistry, MetricRegistry
 from butters.routing.model import RoutedIntent
 from butters.routing.router import IntentRouter
+from butters.skills.actions_v2 import register_action_skills
 from butters.skills.implementations import build_read_only_registry
-from butters.skills.model import SkillExecution
+from butters.skills.model import ActionAuthorization, ActionClass, SkillExecution
+from butters.skills.policy import PolicyValidator
+from butters.skills.promoted import register_promoted_skills
 from butters.skills.registry import SkillRegistry
+from butters.skills.v2 import register_v2_skills
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 
 
@@ -71,6 +86,8 @@ class DeterministicAssistant:
         llm_context: tuple[str, ...] = (),
         diagnostic_planner: DiagnosticPlanner | None = None,
         diagnostic_engine: DiagnosticEngine | None = None,
+        project_adapter: ProjectInspectionAdapter | None = None,
+        environment_adapter: EnvironmentControlAdapter | None = None,
     ) -> None:
         self.router = router
         self.skills = skills
@@ -81,6 +98,8 @@ class DeterministicAssistant:
         self.llm_context = llm_context
         self.diagnostic_planner = diagnostic_planner
         self.diagnostic_engine = diagnostic_engine
+        self.project_adapter = project_adapter
+        self.environment_adapter = environment_adapter
 
     def preview_route(self, raw_text: str) -> RoutedIntent:
         """Classify locally without executing a skill or invoking a model."""
@@ -131,25 +150,62 @@ class DeterministicAssistant:
                     diagnostic=diagnostic,
                 )
         route = self.router.route(normalized)
+        return self.handle_routed_text(
+            raw_text,
+            route,
+            normalized=normalized,
+            started=started,
+        )
+
+    def handle_routed_text(
+        self,
+        raw_text: str,
+        route: RoutedIntent,
+        *,
+        normalized: str | None = None,
+        started: float | None = None,
+    ) -> AssistantResponse:
+        """Execute a router-produced structured route without rebuilding text."""
+
+        began = time.perf_counter() if started is None else started
+        normalized_text = (
+            normalize_transcript(raw_text.strip(), self.vocabulary)
+            if normalized is None
+            else normalized
+        )
         if not route.matched or route.skill is None:
             if route.allow_fallback and self.language_model is not None:
-                return self._handle_fallback(raw_text, normalized, route, started)
+                return self._handle_fallback(raw_text, normalized_text, route, began)
             path = "clarification" if route.status == "clarification" else "unsupported"
             return AssistantResponse(
                 raw_text,
-                normalized,
+                normalized_text,
                 route,
-                route.message or "That request is not supported.",
-                time.perf_counter() - started,
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
+                time.perf_counter() - began,
                 routing_path=path,
             )
-        execution = self.skills.execute(route.skill, route.arguments)
+        authorization = None
+        spec = self.skills.get(route.skill)
+        if (
+            spec is not None
+            and spec.action_class is ActionClass.ACTION
+            and route.skill == "start_remote_desktop_session"
+            and _direct_desktop_action(normalized_text)
+        ):
+            authorization = ActionAuthorization(
+                frozenset({route.skill}), "direct_user_request", True
+            )
+        execution = self.skills.execute(
+            route.skill, route.arguments, action_authorization=authorization
+        )
         return AssistantResponse(
             raw_text,
-            normalized,
+            normalized_text,
             route,
             self.formatter.format_execution(execution),
-            time.perf_counter() - started,
+            time.perf_counter() - began,
             execution,
             routing_path="deterministic",
             policy_status="allowed" if execution.ok else "denied",
@@ -194,13 +250,16 @@ class DeterministicAssistant:
             )
         if proposal.kind is ProposalKind.UNSUPPORTED:
             route = RoutedIntent(
-                "unsupported", normalized, message="That request is not supported."
+                "unsupported",
+                normalized,
+                message="I can't answer that request with the local skills currently enabled.",
             )
             return AssistantResponse(
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 routing_path="llm_fallback",
                 llm_result=result,
@@ -216,7 +275,8 @@ class DeterministicAssistant:
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 routing_path="llm_fallback",
                 llm_result=result,
@@ -228,13 +288,14 @@ class DeterministicAssistant:
             route = RoutedIntent(
                 "unsupported",
                 normalized,
-                message="That proposed request was denied by the skill policy.",
+                message="I can't safely complete that request.",
             )
             return AssistantResponse(
                 raw_text,
                 normalized,
                 route,
-                route.message or "That request is not supported.",
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
                 time.perf_counter() - started,
                 execution,
                 routing_path="llm_fallback",
@@ -334,21 +395,64 @@ def create_assistant(
     server_adapter: LocalServerHealthAdapter | None = None,
     printer_adapter: PrinterSnapshotProvider | None = None,
     language_model: LanguageModel | None = None,
+    action_state: ActionStateStore | None = None,
 ) -> DeterministicAssistant:
     entities = EntityRegistry(settings.entities)
     metrics = MetricRegistry()
     sensor_provider = sensor_adapter or DashboardSensorAdapter(settings.integration)
     server_provider = server_adapter or LocalServerHealthAdapter()
     printer_provider = printer_adapter or DashboardPrinterAdapter(settings.integration)
+    diagnostic_tools = build_diagnostic_registry(settings)
     skills = build_read_only_registry(
-        sensor_provider, server_provider, entities, metrics, printer_provider
+        sensor_provider,
+        server_provider,
+        entities,
+        metrics,
+        printer_provider,
+        policy=PolicyValidator(
+            allowed_actions=frozenset(
+                {ActionClass.READ_ONLY, ActionClass.ANALYTICAL, ActionClass.ACTION}
+            )
+        ),
     )
+    register_v2_skills(
+        skills,
+        entities,
+        metrics,
+        DashboardHistoryAdapter(settings.integration, entities, metrics),
+        printer_provider,
+        DesktopWorkflow(settings.desktop, broker_settings=settings.broker),
+    )
+    environment_actions = None
+    if action_state is not None:
+        broker_client = BrokerClient(settings.broker)
+        fixed_actions = FixedActionAdapter(broker_client)
+        environment_actions = EnvironmentControlAdapter(
+            settings.actions,
+            fixed_actions,
+            action_state,
+            sensor_provider,
+        )
+        register_action_skills(
+            skills,
+            desktop=settings.desktop,
+            broker=settings.broker,
+            actions=settings.actions,
+            host=HostStatusAdapter(settings.broker),
+            action_adapter=fixed_actions,
+            nas=NasAdapter(settings.actions.nas, fixed_actions),
+            environment=environment_actions,
+        )
+    project_adapter = ProjectInspectionAdapter(
+        settings.remediation.project_inspection_root
+    )
+    register_promoted_skills(skills, diagnostic_tools, project_adapter)
     diagnostic_planner = DiagnosticPlanner(entities)
     diagnostic_engine = None
     if settings.diagnostics.enabled:
         diagnostic_engine = DiagnosticEngine(
             diagnostic_planner,
-            build_diagnostic_registry(settings),
+            diagnostic_tools,
             session_ttl_seconds=settings.diagnostics.session_ttl_seconds,
             max_evidence_bytes=settings.diagnostics.max_evidence_bytes,
         )
@@ -373,6 +477,18 @@ def create_assistant(
             *(f"entity {item}" for item in entity_alias_summary(entities)),
             *(f"metric {item}" for item in metric_alias_summary(metrics)),
         ),
-        diagnostic_planner=diagnostic_planner if diagnostic_engine is not None else None,
+        diagnostic_planner=diagnostic_planner
+        if diagnostic_engine is not None
+        else None,
         diagnostic_engine=diagnostic_engine,
+        project_adapter=project_adapter,
+        environment_adapter=environment_actions,
     )
+
+
+def _direct_desktop_action(text: str) -> bool:
+    text = text.casefold()
+    return any(
+        phrase in text
+        for phrase in ("turn on my computer", "wake my computer", "wake the desktop")
+    ) and any(word in text for word in ("parsec", "remote"))

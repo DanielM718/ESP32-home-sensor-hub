@@ -1,0 +1,45 @@
+{
+  "description": "Beta 1 local STT command-accuracy corpus. Audio is generated or captured into /tmp and is intentionally not committed.",
+  "commands": [
+    {
+      "id": "humidity-box-three",
+      "expected": "What is the humidity in box three?",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "co2-printer-room",
+      "expected": "What is the carbon dioxide level in the printer room?",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "readings-printer-room",
+      "expected": "What are the readings in the printer room?",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "temperature-humidity-box-two",
+      "expected": "Temperature and humidity in box two.",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "pm25",
+      "expected": "Show me P M two point five.",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "filler-humidity",
+      "expected": "Could you tell me, um, the humidity in box three?",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "variant-readings",
+      "expected": "How are the printer room sensors looking?",
+      "source": "local Piper synthetic fixture"
+    },
+    {
+      "id": "human-co2-printer-room",
+      "expected": "What is the carbon dioxide level in the printer room?",
+      "source": "existing untracked real-user fixture /tmp/butters-daniel-stt-test.wav"
+    }
+  ]
+}
