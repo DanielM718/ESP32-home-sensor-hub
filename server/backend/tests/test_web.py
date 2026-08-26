@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from threading import Barrier
 import unittest
+from threading import Barrier
 
 from app.config import (
     AirQualitySettings,
@@ -18,11 +18,42 @@ class ConcurrentRepository:
 
     def latest(self):
         self.barrier.wait()
-        return {"generated_at": "2026-07-22T12:00:00Z", "environment": [], "air_quality": []}
+        return {
+            "generated_at": "2026-07-22T12:00:00Z",
+            "environment": [],
+            "air_quality": [],
+        }
 
     def air_quality_context(self):
         self.barrier.wait()
         return {"locations": {}}
+
+
+class HistoryOnlyRepository:
+    def __init__(self) -> None:
+        self.query = None
+
+    def latest(self):
+        return {
+            "generated_at": "2026-07-22T12:00:00Z",
+            "environment": [],
+            "air_quality": [],
+        }
+
+    def readings(self, query):
+        self.query = query
+        return {
+            "generated_at": "2026-07-22T12:00:00Z",
+            "range": query.range_key,
+            "series": [
+                {
+                    "id": "printer_room",
+                    "sensor_type": "air_quality",
+                    "location": "printer_room",
+                    "points": [{"time": "2026-07-01T12:00:00Z", "co2": 700}],
+                }
+            ],
+        }
 
 
 def settings() -> AppSettings:
@@ -62,6 +93,18 @@ class WebConcurrencyTest(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(repository.barrier.n_waiting, 0)
+
+    def test_historical_endpoint_does_not_require_a_live_sensor_cache(self) -> None:
+        repository = HistoryOnlyRepository()
+        client = create_app(settings(), repository=repository).test_client()
+
+        response = client.get(
+            "/api/readings?range=30d&sensor_type=air_quality&location=printer_room"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json["series"][0]["id"], "printer_room")
+        self.assertEqual(repository.query.location, "printer_room")
 
 
 if __name__ == "__main__":

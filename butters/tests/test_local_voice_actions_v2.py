@@ -59,7 +59,7 @@ class Desktop:
             "wake_sent": False,
             "network_reachable": True,
             "ssh_ready": True,
-            "remote_mode_requested": True,
+            "headless_mode_requested": True,
             "parsec_ready": True,
             "verification_complete": True,
             "elapsed_ms": 1,
@@ -81,7 +81,7 @@ def _voice(tmp_path):
     settings = replace(
         settings,
         broker=replace(settings.broker, enabled=True),
-        desktop=replace(settings.desktop, restart_enabled=True, remote_enabled=True),
+        desktop=replace(settings.desktop, restart_enabled=True, headless_enabled=True),
     )
     state = ActionStateStore(tmp_path / "actions.sqlite3", settings.actions)
     assistant = create_assistant(

@@ -111,6 +111,21 @@ class MonitoringExportStore:
                     ON export_jobs(status, created_at_utc);
                 CREATE INDEX IF NOT EXISTS idx_export_heartbeat
                     ON export_jobs(status, heartbeat_at_utc);
+
+                CREATE TABLE IF NOT EXISTS printer_monitoring_status (
+                    printer_session_id TEXT PRIMARY KEY,
+                    printer_id TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (
+                        state IN ('running', 'degraded', 'skipped', 'completed')
+                    ),
+                    reason TEXT,
+                    sensor_location TEXT NOT NULL,
+                    sensor_status TEXT NOT NULL,
+                    sensor_last_seen_utc TEXT,
+                    updated_at_utc TEXT NOT NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_printer_monitoring_status_latest
+                    ON printer_monitoring_status(printer_id, updated_at_utc DESC);
                 """
                 )
                 monitoring_columns = {
@@ -127,7 +142,7 @@ class MonitoringExportStore:
                        ON monitoring_sessions(printer_session_id)
                        WHERE printer_session_id IS NOT NULL"""
                 )
-                connection.execute("PRAGMA user_version = 3")
+                connection.execute("PRAGMA user_version = 4")
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
         try:
             os.chmod(self.database_path, 0o600)
@@ -338,6 +353,85 @@ class MonitoringExportStore:
             else:
                 session_id = str(existing["id"])
         return self.get_session(session_id)
+
+    def monitoring_for_printer_session(
+        self, printer_session_id: str
+    ) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM monitoring_sessions WHERE printer_session_id=?",
+                (printer_session_id,),
+            ).fetchone()
+        return None if row is None else _session_dict(row)
+
+    def record_printer_monitoring_status(
+        self,
+        *,
+        printer_session_id: str,
+        printer_id: str,
+        state: str,
+        reason: str | None,
+        sensor_location: str,
+        sensor_status: str,
+        sensor_last_seen: str | None,
+        updated_at: datetime,
+    ) -> dict[str, Any]:
+        if state not in {"running", "degraded", "skipped", "completed"}:
+            raise ValueError("invalid printer monitoring state")
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO printer_monitoring_status (
+                    printer_session_id, printer_id, state, reason,
+                    sensor_location, sensor_status, sensor_last_seen_utc,
+                    updated_at_utc
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(printer_session_id) DO UPDATE SET
+                    state=excluded.state,
+                    reason=excluded.reason,
+                    sensor_status=excluded.sensor_status,
+                    sensor_last_seen_utc=excluded.sensor_last_seen_utc,
+                    updated_at_utc=excluded.updated_at_utc
+                """,
+                (
+                    printer_session_id,
+                    printer_id,
+                    state,
+                    reason,
+                    sensor_location,
+                    sensor_status,
+                    sensor_last_seen,
+                    iso_utc(updated_at),
+                ),
+            )
+        result = self.printer_monitoring_status(
+            printer_id=printer_id, printer_session_id=printer_session_id
+        )
+        if result is None:
+            raise RuntimeError("printer monitoring status write failed")
+        return result
+
+    def printer_monitoring_status(
+        self,
+        *,
+        printer_id: str | None = None,
+        printer_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        clauses: list[str] = []
+        values: list[str] = []
+        if printer_id is not None:
+            clauses.append("printer_id=?")
+            values.append(printer_id)
+        if printer_session_id is not None:
+            clauses.append("printer_session_id=?")
+            values.append(printer_session_id)
+        query = "SELECT * FROM printer_monitoring_status"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY updated_at_utc DESC LIMIT 1"
+        with self._connect() as connection:
+            row = connection.execute(query, tuple(values)).fetchone()
+        return None if row is None else dict(row)
 
     def finish_printer_session(
         self,

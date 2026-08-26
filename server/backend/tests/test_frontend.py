@@ -40,6 +40,9 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("Stale — status withheld", self.javascript)
         self.assertIn("Latest sensor sample invalid — status withheld", self.javascript)
         self.assertIn("Sensor warming up / adapting", self.javascript)
+        self.assertIn("Last-known values below are not current", self.javascript)
+        self.assertIn("values_are_current", self.javascript)
+        self.assertIn("sensorStatusPillClass", self.javascript)
 
     def test_normal_chart_is_dynamic_and_omits_statistical_datasets(self) -> None:
         self.assertIn('id="chart-metrics"', self.template)
@@ -188,9 +191,7 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("usage-value", self.styles)
 
     def test_usage_and_maintenance_precede_printer_details_and_history(self) -> None:
-        panel = self.template[
-            self.template.index('id="panel-bambu-printer"') :
-        ]
+        panel = self.template[self.template.index('id="panel-bambu-printer"') :]
         order = [
             panel.index('id="printer-usage"'),
             panel.index('id="printer-maintenance"'),

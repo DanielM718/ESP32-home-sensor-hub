@@ -13,7 +13,7 @@ max_response_bytes = 2097152
 [desktop]
 enabled = true
 machine = "desktop"
-host = "169.254.227.84"
+host = "192.168.1.209"
 ssh_port = 22
 network_timeout_seconds = 45.0
 ssh_timeout_seconds = 90.0
@@ -21,12 +21,10 @@ total_timeout_seconds = 150.0
 poll_interval_seconds = 2.0
 wake_enabled = true
 # Wake-only policy: wake_desktop needs nothing but a fixed Wake-on-LAN packet.
-# The remote/restore workflows and every desktop power action are SSH-backed, and
-# no production forced-command dispatcher exists on the desktop yet, so they stay
-# false. Enabling one here would only make it web-visible; the broker's own gate
-# is the terminal boundary either way.
-remote_enabled = false
-restore_enabled = false
+# Headless/local mode controls only the two fixed Home Assistant monitor
+# switches. The root broker retains a separate, default-off gate for each.
+headless_enabled = true
+monitors_enabled = true
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false

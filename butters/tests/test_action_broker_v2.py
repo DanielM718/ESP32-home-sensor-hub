@@ -4,6 +4,8 @@ import json
 import os
 import struct
 import threading
+from pathlib import Path
+from urllib.error import HTTPError
 
 import pytest
 from butters.actions.broker import (
@@ -16,6 +18,8 @@ from butters.actions.broker import (
     _parse_request,
 )
 from butters.assistant_config import BrokerSettings
+
+BUTTERS_ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeConnection:
@@ -119,34 +123,175 @@ def test_fixed_operations_use_only_server_configuration_and_explicit_argv(
         return Result()
 
     config = FixedBrokerConfig(
-        "fixed-desktop",
-        "fixed-user",
-        "00:11:22:33:44:55",
-        "192.0.2.255",
+        "192.168.1.209",
+        "Daniel",
+        "34:5A:60:D7:4C:2C",
+        "192.168.1.255",
         tmp_path / "fixed-key",
         enabled_operations=frozenset(
-            {BrokerOperation.DESKTOP_WAKE, BrokerOperation.DESKTOP_ENTER_REMOTE}
+            {BrokerOperation.DESKTOP_WAKE, BrokerOperation.DESKTOP_MONITORS_OFF}
         ),
     )
-    handlers = FixedBrokerOperations(config, runner=runner).handlers()
+    states = {
+        "switch.desktop_gigabyte": "on",
+        "switch.desktop_oled": "on",
+    }
+    ha_requests = []
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return self.payload
+
+    def opener(request, **_kwargs):
+        ha_requests.append(request)
+        entity = request.full_url.rsplit("/", 1)[-1]
+        if request.method == "GET":
+            return Response({"entity_id": entity, "state": states[entity]})
+        payload = json.loads(request.data)
+        assert payload == {
+            "entity_id": [
+                "switch.desktop_gigabyte",
+                "switch.desktop_oled",
+            ]
+        }
+        states.update({entity_id: "off" for entity_id in payload["entity_id"]})
+        return Response([])
+
+    handlers = FixedBrokerOperations(
+        config,
+        runner=runner,
+        home_assistant_token="test-token",
+        opener=opener,
+    ).handlers()
     assert set(handlers) == {
         BrokerOperation.DESKTOP_WAKE,
-        BrokerOperation.DESKTOP_ENTER_REMOTE,
+        BrokerOperation.DESKTOP_MONITORS_OFF,
     }
     handlers[BrokerOperation.DESKTOP_WAKE]()
-    handlers[BrokerOperation.DESKTOP_ENTER_REMOTE]()
+    monitor_result = handlers[BrokerOperation.DESKTOP_MONITORS_OFF]()
     assert invocations[0][0] == [
         "/usr/bin/wakeonlan",
         "-i",
-        "192.0.2.255",
-        "00:11:22:33:44:55",
+        "192.168.1.255",
+        "34:5A:60:D7:4C:2C",
     ]
-    assert invocations[1][0][-2:] == [
-        "fixed-user@fixed-desktop",
-        'schtasks.exe /Run /TN "Enter Remote Mode"',
-    ]
+    assert monitor_result["accepted"] is True
+    assert monitor_result["entities"] == {
+        "switch.desktop_gigabyte": "off",
+        "switch.desktop_oled": "off",
+    }
+    assert len([request for request in ha_requests if request.method == "POST"]) == 1
     assert all("shell" not in kwargs for _argv, kwargs in invocations)
     assert all(isinstance(argv, list) for argv, _kwargs in invocations)
+
+
+def test_monitor_control_reports_already_partial_auth_and_unavailable_states(
+    tmp_path,
+) -> None:
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return self.payload
+
+    config = FixedBrokerConfig(
+        "192.168.1.209",
+        "Daniel",
+        "34:5A:60:D7:4C:2C",
+        "192.168.1.255",
+        tmp_path / "windows_remote_mode",
+        enabled_operations=frozenset(
+            {
+                BrokerOperation.DESKTOP_MONITORS_ON,
+                BrokerOperation.DESKTOP_MONITORS_OFF,
+            }
+        ),
+    )
+    assert FixedBrokerOperations.MONITOR_ENTITIES == (
+        "switch.desktop_gigabyte",
+        "switch.desktop_oled",
+    )
+    assert not any(
+        entity.endswith(("_led", "_auto_off_enabled", "_auto_update_enabled"))
+        for entity in FixedBrokerOperations.MONITOR_ENTITIES
+    )
+    states = {
+        "switch.desktop_gigabyte": "on",
+        "switch.desktop_oled": "on",
+    }
+
+    def partial_opener(request, **_kwargs):
+        entity = request.full_url.rsplit("/", 1)[-1]
+        if request.method == "GET":
+            return Response({"state": states[entity]})
+        states["switch.desktop_gigabyte"] = "off"
+        states["switch.desktop_oled"] = "unavailable"
+        return Response([])
+
+    operations = FixedBrokerOperations(
+        config, home_assistant_token="token", opener=partial_opener
+    )
+    already = operations.desktop_monitors_on()
+    partial = operations.desktop_monitors_off()
+    assert already["accepted"] is True and already["already_in_state"] is True
+    assert partial["accepted"] is False and partial["partial"] is True
+    assert set(partial["entities"]) == {
+        "switch.desktop_gigabyte",
+        "switch.desktop_oled",
+    }
+
+    def denied(*_args, **_kwargs):
+        raise HTTPError("http://127.0.0.1", 401, "denied", {}, None)
+
+    with pytest.raises(BrokerError) as auth:
+        FixedBrokerOperations(
+            config, home_assistant_token="token", opener=denied
+        ).desktop_monitors_on()
+    assert auth.value.code == "home_assistant_auth_failed"
+
+    with pytest.raises(BrokerError) as unconfigured:
+        FixedBrokerOperations(config).desktop_monitors_on()
+    assert unconfigured.value.code == "home_assistant_unconfigured"
+
+
+def test_active_desktop_code_and_configuration_have_no_retired_direct_link_path() -> (
+    None
+):
+    retired = (
+        "169.254.255.255",
+        "169.254.227.84",
+        "Enter Remote Mode",
+        "Restore Local Mode",
+        "ssh_begin_remote",
+        "ssh_restore_local",
+    )
+    paths = [
+        *sorted((BUTTERS_ROOT / "src").rglob("*.py")),
+        *sorted((BUTTERS_ROOT / "config").glob("*.toml")),
+    ]
+    active = "\n".join(path.read_text(encoding="utf-8") for path in paths)
+    for obsolete in retired:
+        assert obsolete not in active
 
 
 def test_broker_bounds_malformed_or_excessive_operation_results() -> None:
@@ -262,17 +407,17 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
         returncode = 0
 
     config = FixedBrokerConfig(
-        "fixed-desktop",
-        "fixed-user",
-        "00:11:22:33:44:55",
-        "192.0.2.255",
-        tmp_path / "credentials" / "desktop_ed25519",
+        "192.168.1.209",
+        "Daniel",
+        "34:5A:60:D7:4C:2C",
+        "192.168.1.255",
+        tmp_path / "credentials" / "windows_remote_mode",
         enabled_operations=frozenset({BrokerOperation.DESKTOP_RESTART}),
     )
     assert config.desktop_known_hosts == tmp_path / "credentials" / "known_hosts"
     handlers = FixedBrokerOperations(
         config,
-        runner=lambda argv, **_kwargs: (invocations.append(argv) or Result()),
+        runner=lambda argv, **_kwargs: invocations.append(argv) or Result(),
     ).handlers()
     handlers[BrokerOperation.DESKTOP_RESTART]()
     argv = invocations[0]
@@ -285,7 +430,8 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     assert "UpdateHostKeys=no" in options
     assert "-T" in argv
     assert not any(item.startswith("StrictHostKeyChecking=no") for item in options)
-    assert argv[-2:] == ["fixed-user@fixed-desktop", "shutdown.exe /r /t 0"]
+    assert argv[-2:] == ["Daniel@192.168.1.209", "shutdown.exe /r /t 0"]
+    assert argv[argv.index("-i") + 1].endswith("windows_remote_mode")
 
 
 def test_broker_dedupe_eviction_drops_the_oldest_request_id() -> None:
@@ -296,9 +442,12 @@ def test_broker_dedupe_eviction_drops_the_oldest_request_id() -> None:
     )
     first = "request_identifier_0001"
     for index in range(3):
-        assert _exchange(server, _request("desktop.wake", f"request_id_{index:016d}"))[
-            "ok"
-        ] is True
+        assert (
+            _exchange(server, _request("desktop.wake", f"request_id_{index:016d}"))[
+                "ok"
+            ]
+            is True
+        )
     assert _exchange(server, _request("desktop.wake", first))["ok"] is True
     # The most recent IDs must still be retained rather than arbitrarily evicted.
     replay = _exchange(server, _request("desktop.wake", first))

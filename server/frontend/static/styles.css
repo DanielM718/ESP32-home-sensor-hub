@@ -262,6 +262,23 @@ textarea {
   padding: 14px;
 }
 
+.reading-card-inactive {
+  border-style: dashed;
+}
+
+.sensor-card-heading,
+.sensor-card-status {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.sensor-card-status {
+  flex-direction: column;
+  align-items: flex-end;
+}
+
 .reading-card-air {
   grid-column: 1 / -1;
 }

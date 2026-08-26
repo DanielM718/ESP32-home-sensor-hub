@@ -101,6 +101,7 @@ def create_app(
         settings.monitoring_exports.output_dir,
     )
     store.initialize()
+    app.config["MONITORING_STORE"] = store
     export_queries = export_query_repository or InfluxExportQueryRepository(
         settings.influx
     )
@@ -206,7 +207,16 @@ def register_routes(app: Flask) -> None:
 
     @app.get("/api/printer")
     def printer() -> Any:
-        return jsonify(current_app.config["PRINTER_REPOSITORY"].current())
+        payload = dict(current_app.config["PRINTER_REPOSITORY"].current())
+        printer_id = payload.get("printer_id")
+        payload["sen66_monitoring"] = (
+            current_app.config["MONITORING_STORE"].printer_monitoring_status(
+                printer_id=str(printer_id)
+            )
+            if printer_id
+            else None
+        )
+        return jsonify(payload)
 
     @app.get("/api/printer/sessions")
     def printer_sessions() -> Any:

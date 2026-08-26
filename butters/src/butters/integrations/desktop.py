@@ -1,4 +1,4 @@
-"""Fixed, bounded Windows desktop observation and remote-session workflow."""
+"""Fixed, bounded Windows desktop observation and headless-session workflow."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class DesktopOperations(Protocol):
 
     def send_wake(self) -> bool: ...
 
-    def request_remote_mode(self) -> bool: ...
+    def request_headless_mode(self) -> bool: ...
 
 
 class BrokerDesktopOperations:
@@ -99,8 +99,8 @@ class BrokerDesktopOperations:
     def send_wake(self) -> bool:
         return self._broker(BrokerOperation.DESKTOP_WAKE)
 
-    def request_remote_mode(self) -> bool:
-        return self._broker(BrokerOperation.DESKTOP_ENTER_REMOTE)
+    def request_headless_mode(self) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_MONITORS_OFF)
 
     def _broker(self, operation: BrokerOperation) -> bool:
         try:
@@ -150,7 +150,7 @@ class DesktopWorkflow:
             "wake_sent": False,
             "network_reachable": False,
             "ssh_ready": False,
-            "remote_mode_requested": False,
+            "headless_mode_requested": False,
             "parsec_ready": None,
             "verification_complete": False,
             "elapsed_ms": 0,
@@ -208,17 +208,19 @@ class DesktopWorkflow:
 
         ready = self.operations.parsec_ready()
         result["parsec_ready"] = ready
-        if ready is True:
-            result["verification_complete"] = True
-            return finish()
-
         if event.is_set():
             return finish("cancelled", "workflow cancelled")
         if self.clock() >= deadline:
             return finish("total_timeout", "workflow deadline expired")
-        if not self.operations.request_remote_mode():
-            return finish("remote_mode_requested", "fixed remote-mode operation failed")
-        result["remote_mode_requested"] = True
+        if not self.operations.request_headless_mode():
+            return finish(
+                "headless_mode_requested", "monitor power-off operation failed"
+            )
+        result["headless_mode_requested"] = True
+
+        if ready is True:
+            result["verification_complete"] = True
+            return finish()
 
         if event.is_set():
             return finish("cancelled", "workflow cancelled")
@@ -228,13 +230,13 @@ class DesktopWorkflow:
         result["parsec_ready"] = verified
         if verified is False:
             return finish("verification", "remote workflow verification failed")
-        # None is an explicit UNKNOWN: the existing scripts have no Parsec
-        # process probe. The fixed scheduled task was accepted, but readiness is
-        # not overstated.
+        # None is an explicit UNKNOWN: there is no independent Parsec process
+        # probe. Monitor power was accepted, but application readiness is not
+        # overstated.
         result["verification_complete"] = verified is True
         if verified is None:
             result["verification_note"] = (
-                "fixed remote-mode task accepted; Parsec readiness is not independently observable"
+                "physical monitors were powered off; Parsec readiness is not independently observable"
             )
         return finish()
 

@@ -72,7 +72,7 @@ class Desktop:
             "wake_sent": True,
             "network_reachable": True,
             "ssh_ready": True,
-            "remote_mode_requested": True,
+            "headless_mode_requested": True,
             "parsec_ready": True,
             "verification_complete": True,
             "elapsed_ms": 10,
@@ -86,7 +86,7 @@ def _assistant():
     settings = replace(
         settings,
         broker=replace(settings.broker, enabled=True),
-        desktop=replace(settings.desktop, remote_enabled=True),
+        desktop=replace(settings.desktop, headless_enabled=True),
     )
     assistant = create_assistant(
         settings,

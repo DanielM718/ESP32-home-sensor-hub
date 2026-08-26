@@ -31,6 +31,7 @@ from app.printer_maintenance import (
 from app.printer_model import print_session_point, printer_state_point
 from app.printer_monitoring import PrinterMonitoringCoordinator
 from app.printer_persistence import PrinterStore
+from app.queries import InfluxReadRepository, air_quality_sensor_status
 
 LOGGER = logging.getLogger("home_sensor.printer")
 DEFAULT_CONFIG_PATH = Path("/etc/home-sensor/printer.toml")
@@ -74,10 +75,38 @@ def run() -> int:
             settings.monitoring_output_dir,
         )
         monitoring_store.initialize()
+        sensor_repository = InfluxReadRepository(
+            app_settings.influx,
+            expected_publish_seconds=app_settings.air_quality.expected_publish_seconds,
+            minimum_coverage_percent=app_settings.air_quality.rolling_minimum_coverage_percent,
+        )
+
+        def required_sensor_status(location: str, observed_at: datetime) -> dict:
+            try:
+                latest = sensor_repository.latest()
+            # Influx client versions expose several transport exception types;
+            # this optional observer boundary converts all of them to UNKNOWN.
+            except Exception:  # noqa: BLE001
+                return {
+                    "id": location,
+                    "location": location,
+                    "sensor_type": "air_quality",
+                    "status": "unknown",
+                    "last_seen": None,
+                    "stale_reason": "availability_check_failed",
+                }
+            return air_quality_sensor_status(
+                latest,
+                location=location,
+                stale_after_seconds=app_settings.air_quality.stale_after_seconds,
+                observed_at=observed_at,
+            )
+
         monitoring_coordinator = PrinterMonitoringCoordinator(
             monitoring_store,
             environment_location=settings.environment_location,
             recovery_minutes=settings.recovery_minutes,
+            sensor_status_provider=required_sensor_status,
         )
     cloud_adapter = None
     cloud_token = os.environ.get("BAMBU_CLOUD_TOKEN", "")
@@ -128,7 +157,8 @@ def run() -> int:
                     # crash window between a session transition and monitoring
                     # metadata update. The store is unique/idempotent by print UUID.
                     monitoring_coordinator.synchronize(
-                        store.latest_session(settings.printer_id)
+                        store.latest_session(settings.printer_id),
+                        observed_at=state.observed_at,
                     )
                 except Exception:
                     LOGGER.exception("printer active-monitoring synchronization failed")

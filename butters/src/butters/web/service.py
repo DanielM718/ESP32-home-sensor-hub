@@ -2062,7 +2062,8 @@ def _action_summary(skill: str, arguments: dict[str, object]) -> str:
     labels = {
         "wake_desktop": "Wake the configured desktop",
         "start_remote_desktop_session": "Wake the configured desktop and prepare its remote session",
-        "restore_local_desktop_session": "Restore the configured desktop's local display mode",
+        "monitors_off": "Turn off the configured desktop monitors through Home Assistant",
+        "monitors_on": "Turn on the configured desktop monitors through Home Assistant",
         "lock_desktop": "Lock the configured desktop",
         "sleep_desktop": "Put the configured desktop to sleep",
         "restart_desktop": "Restart the configured desktop",

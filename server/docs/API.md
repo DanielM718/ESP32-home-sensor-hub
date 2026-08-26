@@ -274,12 +274,13 @@ that read `overdue`/`warning` booleans keep working.
 Returns node/station status based on latest readings and
 `NODE_STALE_AFTER_SECONDS`.
 
-Latest discovery is bounded: SHT41 nodes remain discoverable for seven days
-(far longer than their normal 15-minute cadence and 30-minute stale threshold),
-while SEN66 stations remain discoverable for 30 minutes (90 times the configured
-20-second stale threshold and equal to the restart-recovery horizon). This keeps
-recently offline devices visibly stale without scanning the full 72-hour raw
-tier per poll.
+Current values remain bounded to the existing recent windows, but sensor
+identity and capabilities are reconstructed from long-term Influx history.
+Environment identity comes from permanent `environment_reading` points; SEN66
+identity comes from permanent `air_quality_15m` means. A previously known source
+therefore survives backend restart and raw-tier expiry as stale/offline, while a
+never-seen source is never fabricated. Aggregate-derived SEN66 values are marked
+last-known rather than current.
 
 ```json
 {
@@ -322,7 +323,7 @@ stale threshold, `stale` for the next three threshold windows, and `offline`
 after four thresholds; shutdown context remains visible in either late state.
 
 `available_fields` is source-specific. It contains only supported measurement
-fields actually observed for that node/station by the bounded latest query. A
+fields actually observed for that node/station in InfluxDB. A
 node that never published `battery_mv` therefore does not advertise battery,
 even though another environment node may advertise it.
 

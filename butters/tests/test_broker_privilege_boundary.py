@@ -453,7 +453,7 @@ def test_a_disabled_operation_is_refused_before_any_subprocess(tmp_path: Path) -
     assert handlers == {}
     server = _server(handlers, timeout=1.0)
     for index, operation in enumerate(
-        ("desktop.wake", "desktop.enter_remote", "host.reboot")
+        ("desktop.wake", "desktop.monitors_off", "host.reboot")
     ):
         with _peers() as (server_side, client_side):
             client_side.sendall(_request(operation, f"disabled_request_{index:06d}"))

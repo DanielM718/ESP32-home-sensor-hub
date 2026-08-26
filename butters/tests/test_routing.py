@@ -317,6 +317,27 @@ def test_wake_desktop_routes_to_the_registered_bounded_action(
     assert route.arguments == {"machine": "desktop"}
 
 
+@pytest.mark.parametrize(
+    ("phrase", "skill"),
+    (
+        ("turn off my monitors", "monitors_off"),
+        ("headless mode", "monitors_off"),
+        ("remote mode", "monitors_off"),
+        ("turn on my monitors", "monitors_on"),
+        ("local mode", "monitors_on"),
+        ("restore local mode", "monitors_on"),
+    ),
+)
+def test_desktop_monitor_compatibility_phrases_are_deterministic(
+    router: IntentRouter, phrase: str, skill: str
+) -> None:
+    route = router.route(phrase)
+
+    assert route.matched
+    assert route.skill == skill
+    assert route.arguments == {"machine": "desktop"}
+
+
 def test_unknown_complex_request_remains_unresolved(router: IntentRouter) -> None:
     route = router.route("explain why my print failed yesterday")
 
