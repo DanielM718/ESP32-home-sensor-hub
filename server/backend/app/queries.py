@@ -157,13 +157,15 @@ class InfluxReadRepository:
         records = self._query(
             latest_flux(self._settings.bucket, self._settings.live_bucket)
         )
-        latest = self._inventory.observe(latest_response(records))
+        latest = self._inventory.observe(
+            latest_response(records, include_internal=True)
+        )
         self._inventory.refresh_if_due(self._load_inventory)
         return latest
 
     def _load_inventory(self) -> dict[str, Any]:
         records = self._query(durable_inventory_flux(self._settings.bucket))
-        return latest_response(records)
+        return latest_response(records, include_internal=True)
 
     def readings(self, query: ReadingsQuery) -> dict[str, Any]:
         records = self._query(
@@ -230,6 +232,7 @@ class DurableInventoryCache:
         self._lock = threading.Lock()
         self._durable = deepcopy(dict(durable))
         self._observed = _empty_latest_payload()
+        self._refresh_baseline: dict[str, Any] | None = None
         self._next_refresh = float(clock()) + refresh_seconds
         self._refreshing = False
         self._closed = False
@@ -239,22 +242,20 @@ class DurableInventoryCache:
         """Record bounded observations and return the merged inventory snapshot."""
 
         with self._lock:
-            self._observed = merge_latest_payloads(self._observed, latest)
-            return merge_latest_payloads(
-                self._durable,
+            self._observed = merge_latest_payloads(
                 self._observed,
-                generated_at=str(latest.get("generated_at") or _now_iso()),
+                latest,
+                include_internal=True,
+            )
+            return self._snapshot_locked(
+                generated_at=str(latest.get("generated_at") or _now_iso())
             )
 
     def snapshot(self) -> dict[str, Any]:
         """Return known-good state without mutating the cache."""
 
         with self._lock:
-            return merge_latest_payloads(
-                self._durable,
-                self._observed,
-                generated_at=_now_iso(),
-            )
+            return self._snapshot_locked(generated_at=_now_iso())
 
     def refresh_if_due(self, loader: Callable[[], Mapping[str, Any]]) -> bool:
         """Start at most one non-blocking durable refresh when its interval expires."""
@@ -267,6 +268,8 @@ class DurableInventoryCache:
             ):
                 return False
             self._refreshing = True
+            self._refresh_baseline = self._observed
+            self._observed = _empty_latest_payload()
             thread = threading.Thread(
                 target=self._refresh,
                 args=(loader,),
@@ -278,6 +281,7 @@ class DurableInventoryCache:
             thread.start()
         except Exception:
             with self._lock:
+                self._restore_refresh_baseline_locked()
                 self._refreshing = False
                 self._next_refresh = float(self._clock()) + self._refresh_seconds
             raise
@@ -291,23 +295,48 @@ class DurableInventoryCache:
             thread.join()
 
     def _refresh(self, loader: Callable[[], Mapping[str, Any]]) -> None:
+        refreshed: dict[str, Any] | None = None
         try:
             refreshed = deepcopy(dict(loader()))
         except Exception:
             LOGGER.exception(
                 "Durable sensor inventory refresh failed; retaining known-good state"
             )
-        else:
-            with self._lock:
-                if not self._closed:
-                    self._durable = refreshed
-                    # A successful permanent reconstruction is authoritative.
-                    # Active sensors are observed again by the next bounded query.
-                    self._observed = _empty_latest_payload()
         finally:
             with self._lock:
+                if refreshed is not None and not self._closed:
+                    self._durable = refreshed
+                    # Only observations made before this refresh began are now
+                    # superseded. Preserve anything observed while it was running.
+                    self._refresh_baseline = None
+                else:
+                    self._restore_refresh_baseline_locked()
                 self._refreshing = False
                 self._next_refresh = float(self._clock()) + self._refresh_seconds
+
+    def _snapshot_locked(self, *, generated_at: str) -> dict[str, Any]:
+        combined = self._durable
+        if self._refresh_baseline is not None:
+            combined = merge_latest_payloads(
+                combined,
+                self._refresh_baseline,
+                include_internal=True,
+            )
+        return merge_latest_payloads(
+            combined,
+            self._observed,
+            generated_at=generated_at,
+        )
+
+    def _restore_refresh_baseline_locked(self) -> None:
+        if self._refresh_baseline is None:
+            return
+        self._observed = merge_latest_payloads(
+            self._refresh_baseline,
+            self._observed,
+            include_internal=True,
+        )
+        self._refresh_baseline = None
 
 
 def readings_query_from_params(params: Mapping[str, str | None]) -> ReadingsQuery:
@@ -826,7 +855,11 @@ def _number_or_none(value: Any) -> float | None:
     return result if math.isfinite(result) else None
 
 
-def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
+def latest_response(
+    records: Iterable[RecordLike],
+    *,
+    include_internal: bool = False,
+) -> dict[str, Any]:
     entities: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records:
         measurement = _measurement(record)
@@ -855,8 +888,9 @@ def latest_response(records: Iterable[RecordLike]) -> dict[str, Any]:
             field_times[field] = record_time
         item["last_seen"] = _max_iso_time(item.get("last_seen"), record_time)
 
-    for item in entities.values():
-        _finalize_latest_item(item)
+    if not include_internal:
+        for item in entities.values():
+            _finalize_latest_item(item)
 
     return {
         "generated_at": _now_iso(),
@@ -878,8 +912,9 @@ def merge_latest_payloads(
     observed: Mapping[str, Any],
     *,
     generated_at: str | None = None,
+    include_internal: bool = False,
 ) -> dict[str, Any]:
-    """Merge inventories by identity without mixing values from different ticks."""
+    """Merge inventories using per-field time when internal state is available."""
 
     response: dict[str, Any] = {
         "generated_at": generated_at
@@ -899,7 +934,11 @@ def merge_latest_payloads(
                 if existing is None:
                     entities[identity] = candidate
                 else:
-                    entities[identity] = _newest_entity(existing, candidate)
+                    entities[identity] = _merge_latest_entities(existing, candidate)
+        if not include_internal:
+            for item in entities.values():
+                if "_field_times" in item:
+                    _finalize_latest_item(item)
         response[sensor_type] = _sorted_entities(entities.values())
     return response
 
@@ -910,6 +949,41 @@ def _empty_latest_payload() -> dict[str, Any]:
         "environment": [],
         "air_quality": [],
     }
+
+
+def _merge_latest_entities(
+    left: dict[str, Any], right: dict[str, Any]
+) -> dict[str, Any]:
+    if "_field_times" not in left or "_field_times" not in right:
+        return _newest_entity(left, right)
+
+    result = deepcopy(left)
+    result_field_times = result.setdefault("_field_times", {})
+    for field, right_time in right["_field_times"].items():
+        left_time = result_field_times.get(field)
+        if left_time is None or _max_iso_time(left_time, right_time) == right_time:
+            if field in right:
+                result[field] = deepcopy(right[field])
+            else:
+                result.pop(field, None)
+            result_field_times[field] = right_time
+
+    result_metadata_times = result.setdefault("_metadata_times", {})
+    for key, right_time in right.get("_metadata_times", {}).items():
+        left_time = result_metadata_times.get(key)
+        if (
+            left_time is None or _max_iso_time(left_time, right_time) == right_time
+        ) and right.get(key) not in (None, ""):
+            result[key] = deepcopy(right[key])
+            result_metadata_times[key] = right_time
+
+    result["last_seen"] = _max_iso_time(
+        result.get("last_seen"), str(right.get("last_seen") or "")
+    )
+    for key in ("node_id", "location", "topic", "sensor_type", "id"):
+        if result.get(key) in (None, "") and right.get(key) not in (None, ""):
+            result[key] = deepcopy(right[key])
+    return result
 
 
 def _newest_entity(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any]:

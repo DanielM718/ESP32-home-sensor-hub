@@ -10,7 +10,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import statistics
+import threading
 import time
 import urllib.request
 from collections.abc import Callable
@@ -172,14 +174,115 @@ def _measure(
     }
 
 
+def _summarize_samples(name: str, samples: list[float]) -> dict[str, Any]:
+    return {
+        "name": name,
+        "runs": len(samples),
+        "median_s": round(statistics.median(samples), 6),
+        "min_s": round(min(samples), 6),
+        "max_s": round(max(samples), 6),
+        "p95_s": round(_percentile(samples, 0.95), 6),
+        "samples_s": [round(sample, 6) for sample in samples],
+    }
+
+
+def _measure_wsgi_contention(
+    repositories: list[InfluxReadRepository],
+    wsgi_client: Any,
+    *,
+    runs_per_endpoint: int,
+) -> None:
+    def request_seconds(path: str) -> float:
+        started = time.perf_counter()
+        response = wsgi_client.get(path)
+        elapsed = time.perf_counter() - started
+        if response.status_code != 200:
+            raise RuntimeError(f"WSGI request failed with {response.status_code}")
+        return elapsed
+
+    idle: dict[str, list[float]] = {"latest": [], "nodes": []}
+    for _ in range(runs_per_endpoint):
+        for name, samples in idle.items():
+            samples.append(request_seconds(f"/api/{name}"))
+
+    refresh_started = [threading.Event() for _ in repositories]
+    refresh_timings = [0.0 for _ in repositories]
+
+    def loader(index: int) -> Callable[[], dict[str, Any]]:
+        def load_inventory() -> dict[str, Any]:
+            refresh_started[index].set()
+            started = time.perf_counter()
+            try:
+                return repositories[index]._load_inventory()
+            finally:
+                refresh_timings[index] = time.perf_counter() - started
+
+        return load_inventory
+
+    for index, repository in enumerate(repositories):
+        with repository._inventory._lock:
+            repository._inventory._next_refresh = 0.0
+        if not repository._inventory.refresh_if_due(loader(index)):
+            raise RuntimeError(f"unable to start contention refresh {index}")
+    for index, started in enumerate(refresh_started):
+        if not started.wait(timeout=5):
+            raise RuntimeError(f"contention refresh {index} did not start")
+
+    load_before = os.getloadavg()
+    during: dict[str, list[float]] = {"latest": [], "nodes": []}
+    for _ in range(runs_per_endpoint):
+        for name, samples in during.items():
+            if not any(
+                repository._inventory._refresh_thread is not None
+                and repository._inventory._refresh_thread.is_alive()
+                for repository in repositories
+            ):
+                break
+            samples.append(request_seconds(f"/api/{name}"))
+    for repository in repositories:
+        thread = repository._inventory._refresh_thread
+        if thread is not None:
+            thread.join()
+    load_after = os.getloadavg()
+
+    for name, samples in idle.items():
+        print(
+            json.dumps(_summarize_samples(f"idle_wsgi_{name}", samples)),
+            flush=True,
+        )
+    for name, samples in during.items():
+        if not samples:
+            raise RuntimeError(f"refresh ended before any {name} request")
+        print(
+            json.dumps(_summarize_samples(f"refresh_wsgi_{name}", samples)),
+            flush=True,
+        )
+    print(
+        json.dumps(
+            {
+                "name": "contention_refresh",
+                "workers": len(repositories),
+                "refresh_seconds": [round(seconds, 6) for seconds in refresh_timings],
+                "load_average_before": [round(value, 3) for value in load_before],
+                "load_average_after": [round(value, 3) for value in load_after],
+            }
+        ),
+        flush=True,
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("labels", nargs="*")
     parser.add_argument("--runs", type=int, default=7)
     parser.add_argument("--report-startup", action="store_true")
     parser.add_argument("--verify-office", action="store_true")
+    parser.add_argument("--contention-runs", type=int, default=0)
+    parser.add_argument("--contention-workers", type=int, default=1)
     args = parser.parse_args()
     settings = load_settings(env_file=None)
+    if args.contention_workers < 1:
+        parser.error("--contention-workers must be positive")
     startup_started = time.perf_counter()
     repository = InfluxReadRepository(settings.influx)
     startup_seconds = time.perf_counter() - startup_started
@@ -191,9 +294,15 @@ def main() -> None:
             flush=True,
         )
     variants = query_variants(settings.influx.bucket, settings.influx.live_bucket)
-    labels = args.labels or list(variants)
+    labels = args.labels or ([] if args.contention_runs else list(variants))
     wsgi_client = None
-    if any(label.startswith("wsgi_") for label in labels):
+    contention_repositories = [repository]
+    if args.contention_runs:
+        contention_repositories.extend(
+            InfluxReadRepository(settings.influx)
+            for _ in range(args.contention_workers - 1)
+        )
+    if args.contention_runs or any(label.startswith("wsgi_") for label in labels):
         from app.web import create_app
 
         app = create_app(
@@ -207,6 +316,12 @@ def main() -> None:
         app.testing = True
         wsgi_client = app.test_client()
     try:
+        if args.contention_runs:
+            _measure_wsgi_contention(
+                contention_repositories,
+                wsgi_client,
+                runs_per_endpoint=args.contention_runs,
+            )
         for label in labels:
             if label == "current_latest_method":
                 operation = lambda: [repository.latest()]
@@ -265,7 +380,8 @@ def main() -> None:
                 flush=True,
             )
     finally:
-        repository.close()
+        for item in contention_repositories:
+            item.close()
 
 
 if __name__ == "__main__":

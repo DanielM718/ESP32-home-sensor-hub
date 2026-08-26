@@ -78,10 +78,10 @@ The selected design has these properties:
   inventory if the initial Influx reconstruction fails.
 - Refresh failure retains and serves the previous known-good durable snapshot.
   The next scheduled attempt can recover automatically.
-- A successful refresh is authoritative for permanent inventory changes and
-  clears the opportunistic observation layer. Active identities are observed
-  again by the next bounded request. This prevents deletions or corrections in
-  permanent Influx data from leaving the process permanently stale.
+- A successful refresh is authoritative for observations that existed when it
+  began. Observations made while the query is in flight are retained and merged
+  over the refreshed snapshot. This both permits durable reconciliation and
+  prevents a five-second refresh from discarding newer request-path data.
 - Identities observed by the running process appear immediately, even before a
   first permanent aggregate exists. A sensor missed by bounded observation is
   discovered by the next successful durable refresh.
@@ -152,3 +152,65 @@ request query shape, post-start discovery, explicit stale-value semantics,
 legacy empty identities, valid node-ID preservation, multiple sensor types,
 null battery semantics, refresh failure/recovery, authoritative reconciliation,
 concurrent refresh suppression, and fail-closed startup.
+
+## Adversarial pre-merge review
+
+The follow-up review found that freshness did not freeze in the cached payload.
+`age_seconds`, node status, stale reason, `values_are_current`, and air-quality
+interpretation are derived from `last_seen` at response time. Deterministic
+clock-controlled tests cover the transition from online/current through stale
+and offline, including cached data and an already-offline SEN66.
+
+It did confirm and fix two cache defects:
+
+- A successful refresh formerly cleared every opportunistic observation,
+  including a new identity or newer reading observed after the refresh began.
+  The cache now separates the pre-refresh baseline from observations made while
+  the loader is running. Success discards only the baseline; failure restores
+  it. This prevents regression without retaining observations forever.
+- Cached payloads were formerly selected as whole entities. That differed from
+  the previous union path, which chose the newest value independently for each
+  field. Internal field and identity timestamps are now retained until the
+  durable and bounded snapshots are merged, and public battery/air-quality
+  finalization runs only after that per-field merge. Sparse environmental and
+  air-quality records now match the old union semantics, while a battery value
+  cannot be inherited by a newer packet whose battery flag is absent or false.
+
+The final isolated WSGI benchmark, after these fixes, remained within noise of
+the accepted implementation: `/api/latest` was 0.171 seconds median
+(0.152-0.196, 12 runs) and `/api/nodes` was 0.156 seconds median
+(0.148-0.168, 12 runs). Startup reconstruction took 5.839 seconds. The offline
+office/node 100 air-quality identity was still present with its truthful
+`last_seen`, offline status, stale reason, and `values_are_current=false`.
+
+One forced background refresh took 5.949 seconds. During it, 12 requests per
+endpoint measured:
+
+| Endpoint | Idle median | During-refresh median | During min-max |
+| --- | ---: | ---: | ---: |
+| `/api/latest` | 0.193 s | 0.206 s | 0.182-0.258 s |
+| `/api/nodes` | 0.185 s | 0.187 s | 0.163-0.262 s |
+
+The production unit uses two synchronous Gunicorn workers. Each worker owns its
+own repository, durable snapshot, Influx client, and at most one temporary
+daemon refresh thread, so each performs startup reconstruction and periodic
+refresh independently. A two-worker worst-case simulation deliberately
+overlapped both refreshes: 10 requests per endpoint remained below 0.5 seconds
+(`/api/latest` median/max 0.300/0.372 seconds; `/api/nodes` 0.310/0.378 seconds).
+Both refresh queries completed without client errors, in 7.740 and 7.653
+seconds. The process load average moved from 1.43 to 1.90 over the sample.
+
+There is no repository teardown hook in the actual Flask/Gunicorn lifecycle.
+Refresh threads are daemon threads and therefore cannot keep a worker alive;
+systemd gives the Gunicorn master 30 seconds to stop. The explicit cache
+`close()` waits for an active refresh and could wait indefinitely for a hung
+Influx query, but that method is not called by the deployed shutdown path.
+After closure the cache refuses to start another refresh. No production
+lifecycle change was justified by the observed execution model.
+
+Final validation after the adversarial fixes:
+
+- `pytest -q server/backend/tests`: 293 passed.
+- Focused query/web suite: 56 passed.
+- Ruff on all changed Python files: passed.
+- `git diff --check`: passed.
