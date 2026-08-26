@@ -31,6 +31,18 @@ LOGGER = logging.getLogger(__name__)
 # a healthy peer while keeping a stalled one from holding the boundary open.
 DEFAULT_PEER_TIMEOUT_SECONDS = 5.0
 
+# switch.turn_on/turn_off returns as soon as Home Assistant dispatches the call,
+# but the two reviewed outlets settle independently. Production measured ~1.1s of
+# skew powering off and ~15s for switch.desktop_gigabyte powering on, so a single
+# immediate read reported a partial failure for an operation that had in fact
+# fully succeeded. Poll to a fixed deadline instead: 20s clears the observed 15s
+# with margin while leaving the client's 30s request_timeout_seconds (see
+# BrokerSettings) ample room for the two reads and the service call around it.
+# Both values are broker-local constants; no peer or configuration input reaches
+# them.
+MONITOR_SETTLE_DEADLINE_SECONDS = 20.0
+MONITOR_SETTLE_POLL_SECONDS = 0.5
+
 # Only broker-local literals are ever logged, never peer-supplied text.
 _CODE_PATTERN = re.compile(r"\A[a-z][a-z_]{0,47}\Z")
 
@@ -318,11 +330,17 @@ class FixedBrokerOperations:
         runner: Callable[..., Any] = subprocess.run,
         home_assistant_token: str = "",
         opener: Callable[..., Any] = urlopen,
+        sleeper: Callable[[float], None] = time.sleep,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self.runner = runner
         self.home_assistant_token = home_assistant_token.strip()
         self.opener = opener
+        # Seams for the settling tests only, alongside runner/opener. The
+        # deadline and interval themselves stay fixed module constants.
+        self.sleeper = sleeper
+        self.monotonic = monotonic
 
     def handlers(self) -> dict[BrokerOperation, Callable[[], dict[str, object]]]:
         candidates = {
@@ -397,10 +415,7 @@ class FixedBrokerOperations:
             method="POST",
             body={"entity_id": list(self.MONITOR_ENTITIES)},
         )
-        after = self._monitor_states()
-        matching = sum(
-            after.get(entity) == desired_state for entity in self.MONITOR_ENTITIES
-        )
+        after, matching = self._await_monitor_convergence(desired_state)
         return {
             "accepted": matching == len(self.MONITOR_ENTITIES),
             "desired_state": desired_state,
@@ -408,6 +423,35 @@ class FixedBrokerOperations:
             "partial": 0 < matching < len(self.MONITOR_ENTITIES),
             "entities": after,
         }
+
+    def _await_monitor_convergence(
+        self, desired_state: str
+    ) -> tuple[dict[str, str], int]:
+        """Poll the two fixed outlets until both settle, or the deadline expires.
+
+        Returns the last observed states and how many matched, so the caller can
+        still distinguish full success from a partial settle. Read failures are
+        deliberately not swallowed: a Home Assistant auth, availability, or
+        malformed-response error raises out of here so the operation fails closed
+        instead of being reported as a benign timeout. A state the outlet never
+        reaches -- including "unavailable" or a missing entity, which
+        _monitor_states records as "unknown" -- simply never matches, so it ends
+        as a bounded partial/failed result rather than blocking.
+        """
+
+        deadline = self.monotonic() + MONITOR_SETTLE_DEADLINE_SECONDS
+        while True:
+            states = self._monitor_states()
+            matching = sum(
+                states.get(entity) == desired_state for entity in self.MONITOR_ENTITIES
+            )
+            if matching == len(self.MONITOR_ENTITIES):
+                return states, matching
+            remaining = deadline - self.monotonic()
+            if remaining <= 0:
+                return states, matching
+            # Never overshoot the deadline just to complete a whole interval.
+            self.sleeper(min(MONITOR_SETTLE_POLL_SECONDS, remaining))
 
     def _monitor_states(self) -> dict[str, str]:
         states: dict[str, str] = {}

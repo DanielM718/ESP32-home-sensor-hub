@@ -122,6 +122,13 @@ The current fixed network identities are:
 - physical monitor power: Home Assistant only, targeting exactly
   `switch.desktop_gigabyte` and `switch.desktop_oled`
 
+The two monitor outlets settle independently after the service call -- production
+measured ~1.1s of skew powering off and ~15s for `switch.desktop_gigabyte`
+powering on -- so the broker polls both fixed entities every 0.5s for up to 20s
+and reports `accepted` only once both reach the requested state. A partial or
+never-settling result still fails closed at the deadline, and the bounds are
+broker-local constants that no caller or configuration value can change.
+
 The workflow owns sequencing, network and TCP/SSH readiness, separate polling
 deadlines, cancellation, structured stages, error handling, and tracing. Ping
 is never treated as Windows readiness. WOL and monitor power remain independent.
