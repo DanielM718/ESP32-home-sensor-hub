@@ -451,6 +451,13 @@ class ResponseFormatter:
             )
         if code == "sensor_unavailable":
             return message.rstrip(".") + "."
+        if code in {
+            "home_assistant_unconfigured",
+            "home_assistant_unavailable",
+            "home_assistant_auth_failed",
+            "home_assistant_failed",
+        }:
+            return "I couldn't verify the desktop monitor state through Home Assistant."
         return "The read-only request could not be completed."
 
     @staticmethod
@@ -471,7 +478,16 @@ class ResponseFormatter:
                 return f"The desktop remote-session workflow stopped at {str(data['failed_stage']).replace('_', ' ')}."
             if data.get("parsec_ready") is True:
                 return "The desktop is on and the fixed Parsec remote-session workflow is ready."
-            return "The fixed desktop remote-mode workflow was requested, but Parsec readiness is not independently observable."
+            return "The desktop is awake and its physical monitors are off. Parsec readiness is not independently observable."
+        if result.kind == "desktop_monitors":
+            desired = str(data.get("desired_state") or "unknown")
+            if data.get("accepted") is True:
+                if data.get("already_in_state") is True:
+                    return f"Both desktop monitors were already {desired}."
+                return f"Both desktop monitors are {desired}."
+            if data.get("partial") is True:
+                return f"Only one desktop monitor reached {desired}; Home Assistant reported a partial result."
+            return f"The desktop monitors did not reach the requested {desired} state."
         if result.kind in {
             "print_environment_analysis",
             "print_environment_comparison",

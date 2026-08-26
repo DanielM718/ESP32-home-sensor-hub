@@ -106,29 +106,37 @@ stored.
 
 ## Desktop boundary
 
-The inspected operational source is:
+The retired direct-link/display-task inventory was:
 
-- `/home/dmejiame/scripts/wake-desktop.sh`: fixed `wakeonlan` broadcast/MAC.
+- `/home/dmejiame/scripts/wake-desktop.sh`: former fixed WOL helper.
 - `/home/dmejiame/scripts/ssh_begin_remote`: fixed SSH identity, desktop target,
-  and `Enter Remote Mode` scheduled task.
-- `/home/dmejiame/scripts/ssh_restore_local`: fixed inverse scheduled task.
-- `/home/dmejiame/scripts/ssh_desktop`: interactive SSH helper; not used because
-  generic/interactive SSH is forbidden.
+  and the now-removed `Enter Remote Mode` scheduled task.
+- `/home/dmejiame/scripts/ssh_restore_local`: the now-removed inverse display
+  task.
+
+Those two display helpers and all `169.254.x.x` direct-link values are obsolete.
+The current fixed network identities are:
+
+- WOL: `wakeonlan -i 192.168.1.255 34:5A:60:D7:4C:2C`
+- normal-LAN SSH: `ssh -i ~/.ssh/windows_remote_mode Daniel@192.168.1.209`
+- physical monitor power: Home Assistant only, targeting exactly
+  `switch.desktop_gigabyte` and `switch.desktop_oled`
 
 The workflow owns sequencing, network and TCP/SSH readiness, separate polling
 deadlines, cancellation, structured stages, error handling, and tracing. Ping
-is never treated as Windows readiness. The existing scripts retain the actual
-manual WOL and remote-mode operations. The repository broker reproduces their
-fixed semantic operations; it never invokes the mutable files.
+is never treated as Windows readiness. WOL and monitor power remain independent.
+The composed Parsec/headless workflow wakes when necessary, waits for normal-LAN
+readiness, and then turns off both physical monitors through one fixed Home
+Assistant service call. It never changes Windows displays or the Parsec Virtual
+Display Adapter.
 
-Later deployment must create a dedicated root-owned desktop key at the broker
-config path. It must not copy a personal interactive credential. On Windows,
-the corresponding authorized key should be restricted to a forced dispatcher
-that accepts only the reviewed scheduled-task operations (remote, restore,
-lock/sleep/restart/shutdown if enabled), with no port forwarding, agent
-forwarding, PTY, or arbitrary command. The broker config fixes host, user, key,
-MAC, and broadcast, is root-owned mode `0600`, and separately enables each
-operation. The original scripts remain manually usable and unchanged.
+The broker config fixes host, user, key, MAC, broadcast, and loopback Home
+Assistant URL, is root-owned mode `0600`, and separately enables each operation.
+The HA token is read only from the existing root-controlled
+`/etc/home-sensor/printer.env`; it is never stored in source or returned in a
+result. The monitor operations accept no entity argument. Optional generic
+fixed SSH actions retain the pinned-host/no-forwarding/no-PTY boundary and must
+use the existing `windows_remote_mode` key material; do not regenerate it.
 
 Destructive desktop skills exist behind `FRESH` but ship disabled. Lock is
 ELEVATED and also disabled. They remain unavailable until the dedicated
@@ -170,15 +178,19 @@ Provisioning sequence after independent review:
 
 1. Install the reviewed application and Python dependency set.
 2. Create `/etc/butters/action-broker` root-owned mode `0700`.
-3. Provision a dedicated restricted desktop private key there, root-owned mode
-   `0600`, and its forced-command public-key restriction on Windows.
+3. If optional fixed SSH actions are needed, provision the existing
+   `windows_remote_mode` private key at the configured root-readable path and a
+   verified pinned `known_hosts`; do not replace or regenerate the key.
 4. Create `/etc/butters/action-broker.toml` root-owned mode `0600`; replace
    placeholders and enable only reviewed operations.
 5. Match the unprivileged `[broker]` and `[actions]` capability gates without
    copying infrastructure identifiers into that file.
-6. Install/enable the socket artifacts, verify peer rejection and fixed
+6. Ensure `/etc/home-sensor/printer.env` supplies `HOME_ASSISTANT_TOKEN`, then
+   enable only `desktop.monitors_on` / `desktop.monitors_off` after verifying the
+   two compiled entity IDs.
+7. Install/enable the socket artifacts, verify peer rejection and fixed
    operations with deployment-specific acceptance tests, then enable actions.
-7. Run `butters-passkey bootstrap` locally as root and enroll the first passkey
+8. Run `butters-passkey bootstrap` locally as root and enroll the first passkey
    through the exact configured HTTPS origin.
 
 ## Printer and environmental evidence

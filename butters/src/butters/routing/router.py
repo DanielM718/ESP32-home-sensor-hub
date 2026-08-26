@@ -1079,12 +1079,31 @@ class IntentRouter:
     def _desktop_action(text: str) -> str | None:
         mappings = (
             (
-                ("wake my desktop", "wake the desktop", "turn on my computer"),
-                "wake_desktop",
+                (
+                    "turn off my monitors",
+                    "turn desktop monitors off",
+                    "headless mode",
+                    "remote mode",
+                    "enter headless mode",
+                ),
+                "monitors_off",
             ),
             (
-                ("restore local desktop", "restore local display", "exit remote mode"),
-                "restore_local_desktop_session",
+                (
+                    "turn on my monitors",
+                    "turn desktop monitors on",
+                    "local mode",
+                    "restore local mode",
+                    "restore local desktop",
+                    "restore local display",
+                    "exit remote mode",
+                    "return to local mode",
+                ),
+                "monitors_on",
+            ),
+            (
+                ("wake my desktop", "wake the desktop", "turn on my computer"),
+                "wake_desktop",
             ),
             (("lock my desktop", "lock the desktop"), "lock_desktop"),
             (("sleep my desktop", "sleep the desktop"), "sleep_desktop"),

@@ -91,8 +91,19 @@ class ActionSkillImplementations:
     def wake_desktop(self, _arguments: SkillArguments) -> SkillResult:
         return self.broker_action(BrokerOperation.DESKTOP_WAKE)
 
-    def restore_local_desktop_session(self, _arguments: SkillArguments) -> SkillResult:
-        return self.broker_action(BrokerOperation.DESKTOP_RESTORE_LOCAL)
+    def monitors_off(self, _arguments: SkillArguments) -> SkillResult:
+        result = self.actions.execute(
+            BrokerOperation.DESKTOP_MONITORS_OFF,
+            cancel_event=current_cancel_event(),
+        )
+        return StructuredSkillResult("desktop_monitors", result)
+
+    def monitors_on(self, _arguments: SkillArguments) -> SkillResult:
+        result = self.actions.execute(
+            BrokerOperation.DESKTOP_MONITORS_ON,
+            cancel_event=current_cancel_event(),
+        )
+        return StructuredSkillResult("desktop_monitors", result)
 
     def lock_desktop(self, _arguments: SkillArguments) -> SkillResult:
         return self.broker_action(BrokerOperation.DESKTOP_LOCK)
@@ -257,11 +268,19 @@ def register_action_skills(
         local_console=True,
     )
     action(
-        "restore_local_desktop_session",
-        "Restore the configured desktop local display mode.",
-        impl.restore_local_desktop_session,
+        "monitors_off",
+        "Turn off only the two configured desktop monitors through Home Assistant.",
+        impl.monitors_off,
         authentication=AuthenticationLevel.ELEVATED,
-        available=desktop.restore_enabled,
+        available=desktop.headless_enabled,
+        local_console=True,
+    )
+    action(
+        "monitors_on",
+        "Turn on only the two configured desktop monitors through Home Assistant.",
+        impl.monitors_on,
+        authentication=AuthenticationLevel.ELEVATED,
+        available=desktop.monitors_enabled,
         local_console=True,
     )
     action(

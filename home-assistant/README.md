@@ -245,6 +245,24 @@ sensor.printer_room_dehumidifier_voltage
 Entity availability depends on the plug model, hardware revision, firmware, and
 the integration. A P115 may not expose every illustrative energy name above.
 
+### Desktop monitor ownership
+
+Home Assistant exclusively owns physical desktop-monitor power. Butters calls
+the HA API and never connects to a Tapo plug directly. The only approved outlet
+entities in the desktop skill are:
+
+```text
+switch.desktop_gigabyte
+switch.desktop_oled
+```
+
+Headless/remote mode turns both off; local mode turns both on. The service call
+targets both entities together and then verifies each state, so already-correct,
+partial, unavailable, timeout, and authentication outcomes remain explicit.
+LED, auto-off, auto-update, other P115 configuration entities, and unrelated
+outlets are not accepted by the skill. These outlets power monitors—not desktop
+AC—and the Parsec Virtual Display Adapter is outside Home Assistant control.
+
 ## Automation examples and manual control
 
 Every item in `configuration/automations.yaml` has `initial_state: false`, so it

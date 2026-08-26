@@ -55,7 +55,7 @@ class Desktop:
             "wake_sent": False,
             "network_reachable": True,
             "ssh_ready": True,
-            "remote_mode_requested": True,
+            "headless_mode_requested": True,
             "parsec_ready": True,
             "verification_complete": True,
             "elapsed_ms": 1,
@@ -70,7 +70,7 @@ def _application(tmp_path):
         base,
         diagnostics=replace(base.diagnostics, enabled=False),
         broker=replace(base.broker, enabled=True),
-        desktop=replace(base.desktop, restart_enabled=True, remote_enabled=True),
+        desktop=replace(base.desktop, restart_enabled=True, headless_enabled=True),
         web=replace(
             base.web,
             state_dir=tmp_path,

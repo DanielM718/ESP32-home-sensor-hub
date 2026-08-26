@@ -43,7 +43,7 @@ class Operations:
         self.wake_calls += 1
         return self.wake
 
-    def request_remote_mode(self) -> bool:
+    def request_headless_mode(self) -> bool:
         self.remote_calls += 1
         return self.remote
 
@@ -69,19 +69,20 @@ def _workflow(operations: Operations, *, step: float = 0.1) -> DesktopWorkflow:
     return DesktopWorkflow(settings, operations, clock=Clock(step))
 
 
-def test_desktop_already_fully_ready_is_observation_only() -> None:
+def test_desktop_already_fully_ready_still_enters_headless_mode() -> None:
     operations = Operations(network=[True], ssh=[True], parsec=[True])
     result = _workflow(operations).start_remote_session("desktop")
     assert result["verification_complete"] is True
     assert result["wake_sent"] is False
-    assert result["remote_mode_requested"] is False
-    assert operations.wake_calls == operations.remote_calls == 0
+    assert result["headless_mode_requested"] is True
+    assert operations.wake_calls == 0
+    assert operations.remote_calls == 1
 
 
-def test_reachable_desktop_requests_fixed_remote_mode_when_parsec_not_ready() -> None:
+def test_reachable_desktop_requests_headless_mode_when_parsec_not_ready() -> None:
     operations = Operations(network=[True], ssh=[True], parsec=[False, True])
     result = _workflow(operations).start_remote_session("desktop")
-    assert result["remote_mode_requested"] is True
+    assert result["headless_mode_requested"] is True
     assert result["parsec_ready"] is True
     assert result["verification_complete"] is True
 
@@ -96,7 +97,7 @@ def test_offline_desktop_wakes_then_waits_for_network_and_ssh() -> None:
     assert result["wake_sent"] is True
     assert result["network_reachable"] is True
     assert result["ssh_ready"] is True
-    assert result["remote_mode_requested"] is True
+    assert result["headless_mode_requested"] is True
 
 
 def test_wol_failure_stops_before_remote_script() -> None:
@@ -124,7 +125,7 @@ def test_script_failure_and_verification_failure_are_distinct() -> None:
     verify = _workflow(
         Operations(network=[True], ssh=[True], parsec=[False, False])
     ).start_remote_session("desktop")
-    assert script["failed_stage"] == "remote_mode_requested"
+    assert script["failed_stage"] == "headless_mode_requested"
     assert verify["failed_stage"] == "verification"
 
 

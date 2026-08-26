@@ -10,6 +10,7 @@ import socket
 import stat
 import sys
 from pathlib import Path
+from urllib.parse import urlparse
 
 import tomllib
 
@@ -25,16 +26,19 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     _require_root_private(path, "broker configuration")
     with path.open("rb") as source:
         raw = tomllib.load(source)
-    if set(raw) != {"broker", "desktop", "nas", "operations"}:
+    if set(raw) != {"broker", "desktop", "home_assistant", "nas", "operations"}:
         raise ValueError("broker configuration sections are invalid")
     broker = raw["broker"]
     desktop = raw["desktop"]
+    home_assistant = raw["home_assistant"]
     nas = raw["nas"]
     operations = raw["operations"]
     if set(broker) != {"service_user"}:
         raise ValueError("broker configuration fields are invalid")
     if set(desktop) != {"host", "user", "mac", "broadcast", "key"}:
         raise ValueError("desktop broker fields are invalid")
+    if set(home_assistant) != {"url"}:
+        raise ValueError("Home Assistant broker fields are invalid")
     if set(nas) != {"mac", "broadcast"}:
         raise ValueError("NAS broker fields are invalid")
     expected_operations = {item.value for item in BrokerOperation}
@@ -50,8 +54,6 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     if not key.is_absolute():
         raise ValueError("desktop credential path must be absolute")
     desktop_ssh_operations = {
-        BrokerOperation.DESKTOP_ENTER_REMOTE,
-        BrokerOperation.DESKTOP_RESTORE_LOCAL,
         BrokerOperation.DESKTOP_LOCK,
         BrokerOperation.DESKTOP_SLEEP,
         BrokerOperation.DESKTOP_RESTART,
@@ -62,15 +64,26 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         # Fail closed rather than fall back to trust-on-first-use: the pinned
         # host key must already be provisioned beside the credential.
         _require_root_private(key.parent / "known_hosts", "desktop known_hosts")
+    home_assistant_url = str(home_assistant["url"]).rstrip("/")
+    parsed = urlparse(home_assistant_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Home Assistant URL must be HTTP(S)")
+    if parsed.scheme == "http" and parsed.hostname not in {
+        "127.0.0.1",
+        "localhost",
+        "::1",
+    }:
+        raise ValueError("plain HTTP Home Assistant access is restricted to loopback")
     return uid, FixedBrokerConfig(
-        str(desktop["host"]),
-        str(desktop["user"]),
-        str(desktop["mac"]),
-        str(desktop["broadcast"]),
-        key,
-        str(nas["mac"]),
-        str(nas["broadcast"]),
-        enabled_operations,
+        desktop_host=str(desktop["host"]),
+        desktop_user=str(desktop["user"]),
+        desktop_mac=str(desktop["mac"]),
+        desktop_broadcast=str(desktop["broadcast"]),
+        desktop_key=key,
+        nas_mac=str(nas["mac"]),
+        nas_broadcast=str(nas["broadcast"]),
+        enabled_operations=enabled_operations,
+        home_assistant_url=home_assistant_url,
     )
 
 
@@ -103,7 +116,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         expected_uid, configuration = _configuration(args.config)
         server = BrokerServer(
-            FixedBrokerOperations(configuration).handlers(),
+            FixedBrokerOperations(
+                configuration,
+                home_assistant_token=os.environ.get("HOME_ASSISTANT_TOKEN", ""),
+            ).handlers(),
             expected_uid=expected_uid,
         )
         if (

@@ -409,10 +409,20 @@ create a second collection pipeline. The SEN66 is already stored once at high
 resolution. Manual and printer-triggered intervals may overlap as metadata
 windows without duplicating sensor writes.
 
-On preparing/printing, a unique `printer_session_id` creates one
-`trigger_source=printer` monitoring session. Pause, resume, duplicate events,
-browser closure, restart, and temporary HA/MQTT loss preserve that association.
-The observer synchronizes the latest session every poll to close crash windows.
+On preparing/printing, the coordinator first resolves the configured SEN66
+location with the dashboard's same `last_seen` and stale-threshold semantics.
+Only an `online` station permits a unique `printer_session_id` to create one
+`trigger_source=printer` monitoring session. If it is stale, offline, unknown,
+or the availability query fails, no empty session is created; a durable
+`printer_monitoring_status` row records `skipped`, the reason, last seen, and
+sensor status. A skipped print is not silently started later if SEN66 returns.
+
+Pause, resume, duplicate events, browser closure, and restart preserve an
+existing association. If SEN66 is lost during an existing print, the interval
+remains intact and its durable state becomes `degraded`; recovery returns it to
+`running` without creating a second session. The print observer and printer
+session continue normally in every case. The observer synchronizes the latest
+session every poll to close crash windows.
 After terminal confirmation it records the exact print end, schedules the
 configured recovery end (120 minutes by default), and lets the existing export
 worker close/export the interval. The monitoring database's unique index makes

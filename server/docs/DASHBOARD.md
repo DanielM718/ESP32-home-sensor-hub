@@ -29,6 +29,11 @@ Current cards retain temperature, humidity, valid battery voltage and decoded
 flags, all nine SEN66 measurements, stale/invalid/warm-up handling, and the
 source-backed air-quality interpretations.
 
+Cards are identity-driven, not live-cache-driven. Previously known offline
+sources remain selectable and show status plus last-seen time. Stale/offline
+values are explicitly labeled last-known and are never presented as current;
+their historical charts remain queryable for retained/permanent periods.
+
 The historical measurement checklist is derived from fields actually observed
 for the selected source(s). Any combination can share the chart, including
 Temperature + Humidity + CO2. Chart.js creates one Y axis per unit, reuses an
@@ -43,8 +48,8 @@ are not normal chart datasets.
 ## Source capabilities and workflow forms
 
 `/api/latest` and `/api/nodes` expose `available_fields` for each individual
-source. This comes from the fields actually returned by the latest InfluxDB
-query, not a sensor-type template. Selecting sources immediately rebuilds the
+source. This comes from fields actually observed in InfluxDB, including the
+permanent identity inventory, not a sensor-type template. Selecting sources immediately rebuilds the
 Active Monitoring and Historical Export measurement checklists. With multiple
 sources, each choice says whether all or only some selected sources provide it.
 The API repeats this validation when a job is created.

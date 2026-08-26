@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from butters.assistant_config import BrokerSettings
 
@@ -35,8 +37,8 @@ _CODE_PATTERN = re.compile(r"\A[a-z][a-z_]{0,47}\Z")
 
 class BrokerOperation(str, Enum):
     DESKTOP_WAKE = "desktop.wake"
-    DESKTOP_ENTER_REMOTE = "desktop.enter_remote"
-    DESKTOP_RESTORE_LOCAL = "desktop.restore_local"
+    DESKTOP_MONITORS_OFF = "desktop.monitors_off"
+    DESKTOP_MONITORS_ON = "desktop.monitors_on"
     DESKTOP_LOCK = "desktop.lock"
     DESKTOP_SLEEP = "desktop.sleep"
     DESKTOP_RESTART = "desktop.restart"
@@ -286,6 +288,7 @@ class FixedBrokerConfig:
     nas_mac: str = ""
     nas_broadcast: str = ""
     enabled_operations: frozenset[BrokerOperation] = frozenset()
+    home_assistant_url: str = "http://127.0.0.1:8123"
 
     @property
     def desktop_known_hosts(self) -> Path:
@@ -303,24 +306,29 @@ class FixedBrokerConfig:
 class FixedBrokerOperations:
     """Fixed reviewed argv templates; no caller-controlled field reaches argv."""
 
+    MONITOR_ENTITIES = (
+        "switch.desktop_gigabyte",
+        "switch.desktop_oled",
+    )
+
     def __init__(
         self,
         config: FixedBrokerConfig,
         *,
         runner: Callable[..., Any] = subprocess.run,
+        home_assistant_token: str = "",
+        opener: Callable[..., Any] = urlopen,
     ) -> None:
         self.config = config
         self.runner = runner
+        self.home_assistant_token = home_assistant_token.strip()
+        self.opener = opener
 
     def handlers(self) -> dict[BrokerOperation, Callable[[], dict[str, object]]]:
         candidates = {
             BrokerOperation.DESKTOP_WAKE: self.desktop_wake,
-            BrokerOperation.DESKTOP_ENTER_REMOTE: lambda: self._desktop_task(
-                "Enter Remote Mode"
-            ),
-            BrokerOperation.DESKTOP_RESTORE_LOCAL: lambda: self._desktop_task(
-                "Restore Local Mode"
-            ),
+            BrokerOperation.DESKTOP_MONITORS_OFF: self.desktop_monitors_off,
+            BrokerOperation.DESKTOP_MONITORS_ON: self.desktop_monitors_on,
             BrokerOperation.DESKTOP_LOCK: lambda: self._desktop_fixed(
                 "rundll32.exe user32.dll,LockWorkStation"
             ),
@@ -360,6 +368,104 @@ class FixedBrokerOperations:
             10,
         )
 
+    def desktop_monitors_off(self) -> dict[str, object]:
+        return self._set_desktop_monitors("off")
+
+    def desktop_monitors_on(self) -> dict[str, object]:
+        return self._set_desktop_monitors("on")
+
+    def _set_desktop_monitors(self, desired_state: str) -> dict[str, object]:
+        """Set and verify only the two reviewed monitor outlets through HA."""
+
+        if not self.home_assistant_token:
+            raise BrokerError(
+                "home_assistant_unconfigured",
+                "Home Assistant authentication is not configured",
+            )
+        before = self._monitor_states()
+        if all(before.get(entity) == desired_state for entity in self.MONITOR_ENTITIES):
+            return {
+                "accepted": True,
+                "desired_state": desired_state,
+                "already_in_state": True,
+                "partial": False,
+                "entities": before,
+            }
+
+        self._home_assistant_request(
+            f"/api/services/switch/turn_{desired_state}",
+            method="POST",
+            body={"entity_id": list(self.MONITOR_ENTITIES)},
+        )
+        after = self._monitor_states()
+        matching = sum(
+            after.get(entity) == desired_state for entity in self.MONITOR_ENTITIES
+        )
+        return {
+            "accepted": matching == len(self.MONITOR_ENTITIES),
+            "desired_state": desired_state,
+            "already_in_state": False,
+            "partial": 0 < matching < len(self.MONITOR_ENTITIES),
+            "entities": after,
+        }
+
+    def _monitor_states(self) -> dict[str, str]:
+        states: dict[str, str] = {}
+        for entity in self.MONITOR_ENTITIES:
+            payload = self._home_assistant_request(f"/api/states/{entity}")
+            state = payload.get("state") if isinstance(payload, dict) else None
+            states[entity] = str(state) if state is not None else "unknown"
+        return states
+
+    def _home_assistant_request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: dict[str, object] | None = None,
+    ) -> object:
+        encoded = None if body is None else json.dumps(body).encode("utf-8")
+        request = Request(
+            self.config.home_assistant_url.rstrip("/") + path,
+            data=encoded,
+            method=method,
+            headers={
+                "Accept": "application/json",
+                "Authorization": f"Bearer {self.home_assistant_token}",
+                **({"Content-Type": "application/json"} if encoded is not None else {}),
+            },
+        )
+        try:
+            with self.opener(request, timeout=5.0) as response:
+                if getattr(response, "status", 200) not in {200, 201}:
+                    raise BrokerError(
+                        "home_assistant_failed", "Home Assistant request failed"
+                    )
+                raw = response.read(65537)
+        except HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise BrokerError(
+                    "home_assistant_auth_failed",
+                    "Home Assistant authentication was denied",
+                ) from None
+            raise BrokerError(
+                "home_assistant_failed", "Home Assistant request failed"
+            ) from None
+        except (URLError, TimeoutError, OSError):
+            raise BrokerError(
+                "home_assistant_unavailable", "Home Assistant is unavailable"
+            ) from None
+        if len(raw) > 65536:
+            raise BrokerError(
+                "home_assistant_failed", "Home Assistant response exceeded its limit"
+            )
+        try:
+            return json.loads(raw) if raw else {}
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise BrokerError(
+                "home_assistant_failed", "Home Assistant returned malformed JSON"
+            ) from None
+
     def nas_wake(self) -> dict[str, object]:
         return self._run(
             [
@@ -385,9 +491,6 @@ class FixedBrokerOperations:
             ],
             15,
         )
-
-    def _desktop_task(self, task: str) -> dict[str, object]:
-        return self._desktop_fixed(f'schtasks.exe /Run /TN "{task}"')
 
     def _desktop_fixed(self, command: str) -> dict[str, object]:
         return self._run(

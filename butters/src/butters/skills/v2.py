@@ -587,24 +587,24 @@ def register_v2_skills(
     registry.register(
         spec(
             "start_remote_desktop_session",
-            "Run the fixed WOL, readiness, and remote-mode workflow for the configured desktop.",
+            "Run the fixed WOL, readiness, and headless monitor-power workflow for the configured desktop.",
             ActionClass.ACTION,
             _parse_desktop,
             impl.authorize_desktop,
             impl.start_remote_desktop_session,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
             timeout=desktop.settings.total_timeout_seconds + 5,
-            side_effects="wake configured desktop and request its fixed remote mode",
+            side_effects="wake configured desktop and turn off its two physical monitors through Home Assistant",
             explicit=True,
             authentication=AuthenticationLevel.ELEVATED,
             local_console_allowed=True,
-            configured=desktop.settings.remote_enabled,
+            configured=desktop.settings.headless_enabled,
             available=(
-                desktop.settings.remote_enabled and desktop.broker_settings.enabled
+                desktop.settings.headless_enabled and desktop.broker_settings.enabled
             ),
             unavailable_reason=(
                 None
-                if desktop.settings.remote_enabled and desktop.broker_settings.enabled
+                if desktop.settings.headless_enabled and desktop.broker_settings.enabled
                 else "privileged action broker is not provisioned"
             ),
         )

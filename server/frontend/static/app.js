@@ -325,6 +325,10 @@ function renderPrinter(printer) {
   const expectedFinish = printer.expected_finished_at
     ? formatDateTime(printer.expected_finished_at)
     : "Unknown";
+  const sen66Monitoring = printer.sen66_monitoring || null;
+  const sen66MonitoringText = sen66Monitoring
+    ? `${formatLabel(sen66Monitoring.state)}${sen66Monitoring.reason ? ` — ${sen66Monitoring.reason}` : ""}`
+    : "No automatic SEN66 monitoring decision recorded";
   container.innerHTML = `
     <article class="reading-card printer-card printer-current-card">
       <div class="air-station-heading">
@@ -346,6 +350,7 @@ function renderPrinter(printer) {
         <div><dt>Expected finish</dt><dd>${escapeHtml(expectedFinish)} <span class="subtle">(upstream estimate)</span></dd></div>
         <div><dt>Tool / tray</dt><dd>${escapeHtml([printer.active_tool, printer.ams_slot].filter(Boolean).join(" · ") || "Unknown")}</dd></div>
         <div><dt>Temperatures</dt><dd>${escapeHtml(printerTemperatureSummary(printer))}</dd></div>
+        <div><dt>SEN66 monitoring</dt><dd>${escapeHtml(sen66MonitoringText)}</dd></div>
         <div><dt>Observed</dt><dd>${escapeHtml(relativeTime(printer.observed_at))}</dd></div>
       </dl>
     </article>`;
@@ -1732,7 +1737,10 @@ function renderLatest(data) {
   const readings = [
     ...(data.environment || []),
     ...(data.air_quality || []),
-  ];
+  ].sort((left, right) => {
+    const rank = { online: 0, stale: 1, offline: 2, unknown: 3 };
+    return (rank[left.status] ?? 3) - (rank[right.status] ?? 3);
+  });
 
   if (readings.length === 0) {
     grid.innerHTML = '<div class="empty-state">No readings found in InfluxDB.</div>';
@@ -1753,6 +1761,11 @@ function readingCard(reading) {
     ? `Node ${reading.node_id}`
     : formatLabel(reading.location || reading.id);
   const isEnvironment = reading.sensor_type === "environment";
+  const current = reading.values_are_current === true;
+  const sensorStatus = reading.status || "unknown";
+  if (!current) {
+    card.classList.add("reading-card-inactive");
+  }
 
   if (!isEnvironment) {
     card.classList.add("reading-card-air");
@@ -1761,24 +1774,33 @@ function readingCard(reading) {
       <div class="air-station-heading">
         <div>
           <h3>${escapeHtml(title)}</h3>
-          <span class="authority-label">SEN66 · live 5-second feed</span>
+          <span class="authority-label">SEN66 · ${current ? "live 5-second feed" : "last stored measurements"}</span>
         </div>
+        <div class="sensor-card-status">
+          <span class="status-pill ${sensorStatusPillClass(sensorStatus)}">${escapeHtml(formatLabel(sensorStatus))}</span>
+          <span class="metric-small">Last seen ${escapeHtml(relativeTime(reading.last_seen))}</span>
+        </div>
+      </div>
+      ${current ? `
         <span class="interpretation-status severity-${escapeHtml(overall.severity || "unavailable")}">
           Room summary: ${escapeHtml(overall.category || "Unavailable")}
           ${overall.driving_metric ? ` · driven by ${escapeHtml(formatLabel(overall.driving_metric))}` : ""}
-        </span>
-      </div>
+        </span>` : '<span class="reading-warning">Last-known values below are not current.</span>'}
       <div class="air-reading-groups">
         ${AIR_QUALITY_METRIC_GROUPS.map((group) => airMetricGroupHtml(reading, group)).join("")}
       </div>
       ${advancedDiagnosticsHtml(reading)}
-      <div class="metric-small">Station updated ${escapeHtml(relativeTime(reading.last_seen))}</div>
+      <div class="metric-small">Station last seen ${escapeHtml(relativeTime(reading.last_seen))}</div>
     `;
     return card;
   }
 
   card.innerHTML = `
-    <h3>${escapeHtml(title)}</h3>
+    <div class="sensor-card-heading">
+      <h3>${escapeHtml(title)}</h3>
+      <span class="status-pill ${sensorStatusPillClass(sensorStatus)}">${escapeHtml(formatLabel(sensorStatus))}</span>
+    </div>
+    ${current ? "" : '<span class="reading-warning">Last-known values below are not current.</span>'}
     <div class="reading-values">
       ${metricHtml("Temp", formatNumber(reading.temperature_c, 1, " °C"))}
       ${metricHtml("Humidity", formatNumber(reading.humidity, 1, "%"))}
@@ -1786,7 +1808,7 @@ function readingCard(reading) {
       ${statusFlagsMetricHtml(reading)}
     </div>
     ${batteryAlertHtml(reading)}
-    <div class="metric-small">${escapeHtml(relativeTime(reading.last_seen))}</div>
+    <div class="metric-small">Last seen ${escapeHtml(relativeTime(reading.last_seen))}</div>
   `;
   return card;
 }
@@ -2186,6 +2208,12 @@ function nodeStatusClass(node) {
     return "node-low";
   }
   return `node-${node.status || "unknown"}`;
+}
+
+function sensorStatusPillClass(status) {
+  if (status === "online") return "status-ok";
+  if (status === "offline") return "status-error";
+  return "status-loading";
 }
 
 function renderCharts(data) {

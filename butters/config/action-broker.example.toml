@@ -3,16 +3,21 @@
 service_user = "butters"
 
 [desktop]
-host = "CONFIGURE_FIXED_DESKTOP"
-user = "CONFIGURE_RESTRICTED_AUTOMATION_USER"
-mac = "CONFIGURE_FIXED_MAC"
-broadcast = "CONFIGURE_FIXED_BROADCAST"
+host = "192.168.1.209"
+user = "Daniel"
+mac = "34:5A:60:D7:4C:2C"
+broadcast = "192.168.1.255"
 # The broker pins the desktop host key to <key directory>/known_hosts and
 # refuses to start when any SSH operation is enabled without it. Provision it as
 # root:root 0600, for example:
 #   ssh-keyscan -H <fixed desktop> > /etc/butters/action-broker/known_hosts
 # after verifying the fingerprint out of band.
-key = "/etc/butters/action-broker/desktop_ed25519"
+key = "/etc/butters/action-broker/windows_remote_mode"
+
+[home_assistant]
+# Authentication comes only from HOME_ASSISTANT_TOKEN in the root-controlled
+# service environment. Monitor operations are compiled to two approved entities.
+url = "http://127.0.0.1:8123"
 
 [nas]
 mac = ""
@@ -22,8 +27,8 @@ broadcast = ""
 # false until its fixed target, credential, and operation have been reviewed.
 [operations]
 "desktop.wake" = false
-"desktop.enter_remote" = false
-"desktop.restore_local" = false
+"desktop.monitors_off" = false
+"desktop.monitors_on" = false
 "desktop.lock" = false
 "desktop.sleep" = false
 "desktop.restart" = false
