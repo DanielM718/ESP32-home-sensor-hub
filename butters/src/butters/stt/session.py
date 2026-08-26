@@ -26,6 +26,8 @@ class UtteranceResult:
     processing_cpu_seconds: float = 0.0
     effective_text: str = ""
     semantic_status: str = "unclassified"
+    preprocessing_seconds: float = 0.0
+    inference_seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)

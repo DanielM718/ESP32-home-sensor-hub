@@ -330,40 +330,54 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
     database = tmp_path / "printer.sqlite3"
     local = PrinterStore(database)
     local.initialize()
-    _finish(local, start=NOW, hours=9, job_id="one")
     intelligence = PrinterIntelligenceStore(database)
     intelligence.initialize()
-    intelligence.sync_maintenance_tasks(
-        (
-            MaintenanceTaskSettings(
-                "user_inspection",
-                "User-defined inspection",
-                interval_hours=10,
-                warning_hours=2,
-                interval_prints=2,
-                warning_prints=1,
-                due_when="any",
-                source="user_configured",
-            ),
-            MaintenanceTaskSettings(
-                "job_service",
-                "Job-count service",
-                interval_prints=1,
-                source="user_configured",
-            ),
-            MaintenanceTaskSettings(
-                "calendar_service",
-                "Calendar service",
-                interval_days=1,
-                source="user_configured",
-            ),
+    configured = (
+        MaintenanceTaskSettings(
+            "user_inspection",
+            "User-defined inspection",
+            interval_hours=10,
+            warning_hours=2,
+            interval_prints=2,
+            warning_prints=1,
+            due_when="any",
+            source="user_configured",
         ),
-        now=NOW,
+        MaintenanceTaskSettings(
+            "job_service",
+            "Job-count service",
+            interval_prints=1,
+            source="user_configured",
+        ),
+        MaintenanceTaskSettings(
+            "calendar_service",
+            "Calendar service",
+            interval_days=1,
+            source="user_configured",
+        ),
     )
+    intelligence.sync_maintenance_tasks(configured, now=NOW, manufacturer_tasks=())
+
+    # A configured task without local completion history cannot be evaluated
+    # yet: the dashboard does not know when the work was last performed.
+    pending = {
+        task["maintenance_task_id"]: task
+        for task in intelligence.maintenance("x2d", now=NOW + timedelta(days=2))[
+            "tasks"
+        ]
+    }
+    assert {task["state"] for task in pending.values()} == {"baseline_required"}
+    assert all(task["overdue"] is False for task in pending.values())
+
+    intelligence.complete_all_maintenance(
+        notes="Baseline", completed_at=NOW, printer_id="x2d"
+    )
+    _finish(local, start=NOW, hours=9, job_id="one")
     initial = intelligence.maintenance("x2d", now=NOW + timedelta(days=2))
     tasks = {task["maintenance_task_id"]: task for task in initial["tasks"]}
     task = tasks["user_inspection"]
     assert task["warning"] is True and task["due"] is False
+    assert task["state"] == "due_soon"
     assert tasks["job_service"]["state"] == "due"
     assert tasks["job_service"]["due"] is True
     assert tasks["job_service"]["overdue"] is False
@@ -386,12 +400,14 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
     )
     result = intelligence.maintenance("x2d", now=NOW + timedelta(days=1))
     assert first["printer_control"] is False and second["printer_control"] is False
-    assert len(result["completion_history"]) == 2
+    assert len(result["completion_history"]) == 5
     assert result["completion_history"][0]["notes"] == "Later service"
     updated = {task["maintenance_task_id"]: task for task in result["tasks"]}
     assert updated["user_inspection"]["state"] == "ok"
 
-    intelligence.sync_maintenance_tasks((), now=NOW + timedelta(days=2))
+    intelligence.sync_maintenance_tasks(
+        (), now=NOW + timedelta(days=2), manufacturer_tasks=()
+    )
     disabled = {
         task["maintenance_task_id"]: task
         for task in intelligence.maintenance("x2d", now=NOW + timedelta(days=2))[
@@ -399,7 +415,7 @@ def test_maintenance_thresholds_and_append_only_completion_audit(
         ]
     }
     assert all(task["enabled"] is False for task in disabled.values())
-    assert len(intelligence.maintenance("x2d")["completion_history"]) == 2
+    assert len(intelligence.maintenance("x2d")["completion_history"]) == 5
 
 
 def test_printer_monitoring_is_restart_safe_and_coexists_with_manual_session(

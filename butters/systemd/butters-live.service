@@ -1,0 +1,84 @@
+[Unit]
+Description=Butters physical wake-word listener
+Documentation=file:/opt/butters/BETA1.md
+# Audio devices must exist before arecord is spawned, and the dashboard API is
+# what the read-only skills read. Neither is Requires=: a listener that keeps
+# retrying is better than one that refuses to start.
+Wants=sound.target
+After=sound.target home-sensor-dashboard.service
+# A continuous listener restarts on any exit, so bound the retry loop instead of
+# the exit reason: five failures inside five minutes stops rather than hot-loops.
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=butters
+Group=butters
+# /dev/snd/* are root:audio 0660 and the microphone's USB sibling is
+# root:video 0660. Granting the groups to this unit alone keeps butters-web --
+# which runs as the same user with PrivateDevices=true -- with no audio access
+# at all, so audio capture never becomes an ambient property of the account.
+SupplementaryGroups=audio video
+WorkingDirectory=/opt/butters
+# Deployment values only. /etc/butters/butters.env is deliberately NOT loaded:
+# the physical listener answers from the local deterministic registry and the
+# local language model, so it has no use for the cloud provider credential.
+EnvironmentFile=-/etc/butters/butters.conf
+Environment=BUTTERS_CONFIG=/opt/butters/config/assistant.toml
+Environment=BUTTERS_AUDIO_CONFIG=/opt/butters/config/audio.local.toml
+Environment=PYTHONPATH=/opt/butters/src
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+# --assistant is what creates the LOCAL_CONSOLE authorization path, so the
+# reviewed wake -> request -> frozen action -> spoken confirmation -> execute
+# flow exists. It grants no new authority: every ACTION skill stays unavailable
+# until the privileged broker is separately provisioned and enabled.
+ExecStart=/opt/butters/.venv/bin/python -m butters live --assistant
+# The source loop can also end by returning cleanly when the capture device
+# disappears, which Restart=on-failure would not recover. StartLimitBurst above
+# is what keeps "always" safe.
+Restart=always
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+# PrivateDevices=true would hide /dev/snd and is therefore NOT set. The device
+# allow-list is the equivalent control: everything is denied except the ALSA
+# character devices arecord/aplay need and the V4L node the UVC microphone's
+# optional warm-up touches.
+DevicePolicy=closed
+DeviceAllow=char-alsa rw
+DeviceAllow=char-video4linux rw
+# /opt/butters is read-only to this unit; only the shared action/job state is
+# writable, which is what recover_interrupted_jobs(local_console=True) needs.
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/butters
+StateDirectory=butters
+StateDirectoryMode=0700
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+# AF_INET/AF_INET6 reach the loopback dashboard API and the local model server.
+# AF_UNIX reaches the journal. No listening socket is opened, so this unit adds
+# nothing to the web/Tailscale attack surface.
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+TasksMax=96
+# Two sherpa-onnx models are resident. Confirm the reported RSS during the
+# microphone acceptance check before treating this ceiling as final.
+MemoryMax=1500M
+
+[Install]
+WantedBy=multi-user.target

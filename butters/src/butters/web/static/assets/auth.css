@@ -1,0 +1,41 @@
+.chat-shell {
+  grid-template-rows: auto 1fr auto auto auto;
+}
+
+.auth-button {
+  max-width: 190px;
+  white-space: normal;
+  line-height: 1.2;
+}
+
+.action-card {
+  margin: 0 16px 10px;
+  padding: 13px 15px;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--panel);
+}
+
+.action-card p {
+  margin: 6px 0;
+}
+
+.action-card .button-row {
+  margin-top: 10px;
+}
+
+@media (max-width: 760px) {
+  .chat-header,
+  .chat-header-actions {
+    flex-wrap: wrap;
+  }
+
+  .chat-header-actions {
+    justify-content: flex-end;
+  }
+
+  .auth-button {
+    max-width: 150px;
+    font-size: 0.75rem;
+  }
+}

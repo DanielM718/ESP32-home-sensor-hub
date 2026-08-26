@@ -208,18 +208,66 @@ credentials or raw Home Assistant attributes:
 - `GET /api/printer/sessions/<id>`: one canonical local/cloud history item.
 - `GET /api/printer/history?limit=100`: reconciled local and Bambu Cloud
   history; `limit` is restricted to `1..500`.
-- `GET /api/printer/maintenance`: usage provenance, configured reminder state,
-  and append-only completion history.
+- `GET /api/printer/usage`: canonical Tracked Print Time, rolling utilization,
+  maintenance mode, and the pre-existing usage provenance fields.
+- `GET /api/printer/maintenance`: usage provenance, maintenance summary, task
+  state, append-only completion history, and recent notification events.
+- `GET /api/printer/maintenance/events?limit=100&pending=false`: durable
+  maintenance state-transition events; `limit` is restricted to `1..500`.
 - `GET /api/printer/environment-summary?session_id=<id>`: observational
   baseline/print/recovery summary over retained raw SEN66 data. Missing or
   expired raw data is explicit and is never replaced by 15-minute aggregates.
 - `POST /api/printer/maintenance/<task>/complete` with
   `{"confirm":true,"notes":"..."}`: append a local maintenance audit record.
   The response includes `local_record_only=true` and `printer_control=false`.
+- `POST /api/printer/maintenance/complete-all` with
+  `{"confirm":true,"notes":"..."}`: append one local audit record per enabled
+  task. This exists to establish the maintenance baseline after installation.
 
-The sole POST changes only the home-sensor SQLite database. There is no
+Both POSTs change only the home-sensor SQLite database. There is no
 printer-control endpoint or HA service invocation. Details and response fields are in
 [`BAMBU_X2D.md`](BAMBU_X2D.md).
+
+#### Tracked print time fields
+
+`GET /api/printer` (`usage` object) and `GET /api/printer/usage` (`usage`
+object) carry the same additive block. Every previously published usage field
+is unchanged:
+
+| Field | Meaning |
+|---|---|
+| `tracked_print_seconds` / `tracked_print_hours` | Sum of known actual print intervals (`ended_at - started_at`), deduplicated across local and cloud history |
+| `tracked_job_count` | Prints contributing a known interval |
+| `tracked_completed_count` | Of those, results recorded as completed |
+| `tracked_failed_or_cancelled_count` | Of those, failed, cancelled, or cloud `aborted_or_failed` |
+| `tracked_unknown_result_count` | Known interval, unknown outcome |
+| `tracked_unknown_interval_job_count` | Jobs excluded because their interval is unknown |
+| `tracked_first_print_at` / `tracked_last_print_at` | Bounds of tracked history |
+| `tracked_history_complete` | Always `false`; completeness is not knowable |
+| `tracked_history_completeness_reasons` | Why completeness cannot be claimed |
+| `tracked_history_provenance` | Contributing sources |
+| `rolling_window_days` / `rolling_window_source` | Local averaging policy |
+| `rolling_tracked_print_hours` | Tracked hours inside the window |
+| `rolling_tracked_history_days` | Observed history covered by the window |
+| `rolling_tracked_print_hours_per_day` | Average printing hours per day |
+| `maintenance_mode` | `heavy_use`, `normal`, or `low_use` per Bambu Lab tiers |
+| `maintenance_mode_reason` | Why that tier applies |
+| `maintenance_mode_source` | Manufacturer source identifier |
+
+#### Maintenance response
+
+`GET /api/printer/maintenance` keeps `usage`, `tasks`, `completion_history`,
+`local_record_only`, and `printer_control`, and adds `summary`,
+`recent_notifications`, and `manufacturer_source`. Each task keeps `enabled`,
+`due`, `overdue`, `warning`, `name`, `state`, `triggers`, `last_completed_at`,
+and `provenance`, and adds `trigger_kind`, `cadence`, `baseline_required`,
+`next_due_at`, `remaining_days`, `applied_interval_months`,
+`maintenance_mode_applied`, `manufacturer_source*`, and `warning_source`.
+
+`state` now takes one of `baseline_required`, `advisory`, `ok`, `due_soon`,
+`due`, or `overdue`. The former `warning` state string is reported as
+`due_soon`; the boolean `warning` field is unchanged, so existing consumers
+that read `overdue`/`warning` booleans keep working.
 
 ### `GET /api/nodes`
 

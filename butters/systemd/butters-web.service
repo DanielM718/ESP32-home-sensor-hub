@@ -1,0 +1,60 @@
+[Unit]
+Description=Butters Beta 1 Private Web Assistant
+Documentation=file:/opt/butters/BETA1.md
+Wants=network-online.target
+After=network-online.target home-sensor-dashboard.service
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=butters
+Group=butters
+WorkingDirectory=/opt/butters
+EnvironmentFile=-/etc/butters/butters.conf
+EnvironmentFile=-/etc/butters/butters.env
+Environment=BUTTERS_CONFIG=/opt/butters/config/assistant.toml
+Environment=PYTHONPATH=/opt/butters/src
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/butters/.venv/bin/python -m butters.web
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+# The web daemon never owns physical audio; butters-live and the wake-word
+# assistant keep exclusive ALSA access.
+PrivateDevices=true
+# /opt/butters is read-only to this unit. The daemon has no repository write
+# authority, and gaining it would be a separate reviewed deployment change.
+ProtectSystem=strict
+# read-only rather than tmpfs so an operator-configured, deliberately readable
+# repository under a home directory can still be inspected when one is set.
+ProtectHome=read-only
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+# AF_INET/AF_INET6 reach the loopback proxy and the optional provider endpoint;
+# AF_UNIX reaches systemd and the journal. AF_NETLINK is deliberately absent:
+# interface observation enumerates /sys/class/net instead of if_nameindex().
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RestrictSUIDSGID=true
+ReadWritePaths=/var/lib/butters
+RuntimeDirectory=butters
+RuntimeDirectoryMode=0700
+StateDirectory=butters
+StateDirectoryMode=0700
+TasksMax=96
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,24 @@
+[Unit]
+Description=Butters privileged action broker socket
+# /run/butters-action-broker is owned by the tmpfiles rule shipped beside this
+# unit, because SocketUser=/SocketGroup= below apply to the socket node only and
+# would leave the parent root:root and untraversable by the butters uid.
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
+
+[Socket]
+ListenStream=/run/butters-action-broker/broker.sock
+SocketUser=butters
+SocketGroup=butters
+SocketMode=0600
+# Fallback only, for the case where the tmpfiles rule has not been applied: the
+# directory is then created root:root 0710 and the broker is unreachable rather
+# than reachable by anyone but its one intended peer.
+DirectoryMode=0710
+# Remove the socket node with the unit. The tmpfiles-owned parent directory is
+# not a node created by this unit and deliberately survives, so its ownership
+# and mode stay correct across socket restarts.
+RemoveOnStop=true
+
+[Install]
+WantedBy=sockets.target

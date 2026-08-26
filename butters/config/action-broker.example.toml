@@ -1,0 +1,40 @@
+# Install as root:root 0600 at /etc/butters/action-broker.toml only after review.
+[broker]
+service_user = "butters"
+
+[desktop]
+host = "CONFIGURE_FIXED_DESKTOP"
+user = "CONFIGURE_RESTRICTED_AUTOMATION_USER"
+mac = "CONFIGURE_FIXED_MAC"
+broadcast = "CONFIGURE_FIXED_BROADCAST"
+# The broker pins the desktop host key to <key directory>/known_hosts and
+# refuses to start when any SSH operation is enabled without it. Provision it as
+# root:root 0600, for example:
+#   ssh-keyscan -H <fixed desktop> > /etc/butters/action-broker/known_hosts
+# after verifying the fingerprint out of band.
+key = "/etc/butters/action-broker/desktop_ed25519"
+
+[nas]
+mac = ""
+broadcast = ""
+
+# Every privileged operation has a second, broker-local gate. Keep all values
+# false until its fixed target, credential, and operation have been reviewed.
+[operations]
+"desktop.wake" = false
+"desktop.enter_remote" = false
+"desktop.restore_local" = false
+"desktop.lock" = false
+"desktop.sleep" = false
+"desktop.restart" = false
+"desktop.shutdown" = false
+"host.restart_butters" = false
+"host.reboot" = false
+"host.shutdown" = false
+"nas.wake" = false
+"environment.heater_on" = false
+"environment.heater_off" = false
+"environment.dehumidifier_on" = false
+"environment.dehumidifier_off" = false
+"environment.ventilation_on" = false
+"environment.ventilation_off" = false

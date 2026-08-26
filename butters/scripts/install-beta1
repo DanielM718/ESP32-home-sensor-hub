@@ -1,0 +1,265 @@
+#!/usr/bin/env bash
+# Stage, verify, then atomically swap. A failure before the swap leaves the
+# previously installed tree untouched, and the replaced tree is retained as
+# /opt/butters.previous for rollback.
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_dir="$(dirname "${script_dir}")"
+install_dir="/opt/butters"
+staging_dir="/opt/butters.staging.$$"
+previous_dir="/opt/butters.previous"
+state_dir="/var/lib/butters"
+config_dir="/etc/butters"
+unit_name="butters-web.service"
+listener_unit_name="butters-live.service"
+enable_service=0
+start_service=0
+
+usage() {
+  echo "Usage: sudo ./butters/scripts/install-beta1 [--enable] [--start]"
+}
+
+cleanup() {
+  rm -rf "${staging_dir}"
+}
+
+# Seal a staged tree for the unprivileged service user. rsync -a faithfully
+# reproduces the checkout's private modes (0700 directories, 0600 files), which
+# root can read but `butters` cannot, so ownership and modes must both be reset
+# before the tree is published. Existing executable bits are preserved so the
+# interpreter, helper scripts, and native libraries stay runnable; everything
+# else becomes read-only data. Nothing is world-accessible or group-writable.
+normalize_application_tree() {
+  local root="$1" owner="$2" group="$3"
+  # -h changes a symlink's own ownership and never follows it out of the tree:
+  # .venv/bin/python3 points at /usr/bin/python3.
+  chown -h -R "${owner}:${group}" "${root}"
+  # -type d and -type f never match symlinks, so link targets are untouched here
+  # too. Leading zeroes also clear any setuid/setgid/sticky bit.
+  find "${root}" -type d -exec chmod 0750 {} +
+  find "${root}" -type f -perm /111 -exec chmod 0750 {} +
+  find "${root}" -type f ! -perm /111 -exec chmod 0640 {} +
+}
+
+# Build the production virtualenv from the reviewed pinned requirements instead
+# of copying the developer checkout's .venv. A copied venv carries whatever the
+# developer happened to install (pytest, ruff, ad-hoc packages) into production,
+# and silently omits anything they never installed -- which is how webauthn, a
+# declared runtime dependency of the passkey ceremonies, could reach a
+# deployment missing entirely and fail closed only when someone tried to elevate.
+build_runtime_venv() {
+  local root="$1"
+  /usr/bin/python3 -m venv "${root}/.venv" \
+    || { echo "Could not create the production virtualenv." >&2; return 3; }
+  "${root}/.venv/bin/python" -m pip install \
+      --no-input --disable-pip-version-check --quiet -r "${root}/requirements.txt" \
+    || { echo "Declared runtime dependencies failed to install." >&2; return 3; }
+}
+
+# Every pinned requirement must be present at exactly its pinned version. This
+# is a post-condition on the built tree, so a partial or substituted install is
+# refused before anything is published.
+verify_runtime_dependencies() {
+  local python="$1" requirements="$2"
+  "${python}" - "${requirements}" <<'PYTHON'
+import pathlib
+import sys
+from importlib.metadata import PackageNotFoundError, version
+
+
+def pinned(path, seen):
+    """Collect name==version pins, following -r includes relative to the file."""
+
+    resolved = pathlib.Path(path).resolve()
+    if resolved in seen:
+        return {}
+    seen.add(resolved)
+    found = {}
+    for raw in resolved.read_text(encoding="utf-8").splitlines():
+        line = raw.split("#", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("-r "):
+            found.update(pinned(resolved.parent / line[3:].strip(), seen))
+        elif "==" in line:
+            name, _, wanted = line.partition("==")
+            found[name.strip()] = wanted.strip()
+    return found
+
+
+expected = pinned(sys.argv[1], set())
+if not expected:
+    sys.exit(f"no pinned requirements were parsed from {sys.argv[1]}")
+problems = []
+for name, wanted in sorted(expected.items()):
+    try:
+        installed = version(name)
+    except PackageNotFoundError:
+        problems.append(f"{name}=={wanted} is not installed")
+        continue
+    if installed != wanted:
+        problems.append(f"{name} is {installed}, expected {wanted}")
+if problems:
+    sys.exit("runtime dependency verification failed: " + "; ".join(problems))
+print(f"verified {len(expected)} pinned runtime dependencies")
+PYTHON
+}
+
+# Sourcing this file defines the helpers without performing an installation, so
+# the regression tests can exercise normalize_application_tree(),
+# build_runtime_venv(), and verify_runtime_dependencies() directly.
+(return 0 2>/dev/null) && return 0
+
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) enable_service=1 ;;
+    --start) enable_service=1; start_service=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run this installer with sudo." >&2
+  exit 2
+fi
+command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
+# The production interpreter is the system one, never the developer checkout's.
+[[ -x /usr/bin/python3 ]] || { echo "/usr/bin/python3 is required" >&2; exit 2; }
+/usr/bin/python3 -c 'import venv, ensurepip' 2>/dev/null \
+  || { echo "python3 venv/ensurepip are required (apt install python3-venv)" >&2; exit 2; }
+[[ -f "${butters_dir}/requirements.txt" ]] \
+  || { echo "Butters requirements.txt is missing" >&2; exit 2; }
+[[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
+
+# A production install must never ship the development authorization bypass.
+if grep -Eq '^[[:space:]]*development_mode[[:space:]]*=[[:space:]]*true' \
+    "${butters_dir}/config/assistant.toml"; then
+  echo "Refusing to install: config/assistant.toml sets development_mode = true" >&2
+  exit 2
+fi
+
+if ! getent group butters >/dev/null; then
+  groupadd --system butters
+fi
+if ! id butters >/dev/null 2>&1; then
+  useradd --system --gid butters --home-dir "${state_dir}" --shell /usr/sbin/nologin butters
+fi
+
+install -d -m 0700 -o butters -g butters "${state_dir}" "${state_dir}/codex-jobs"
+install -d -m 0750 -o root -g butters "${config_dir}"
+
+# 1. Stage a complete tree next to the target.
+rm -rf "${staging_dir}"
+install -d -m 0755 -o root -g root "${staging_dir}"
+rsync -a --delete \
+  --exclude runtime \
+  --exclude models/llm \
+  --exclude models/sherpa-onnx-streaming-zipformer-en-20M-2023-02-17 \
+  --exclude __pycache__ \
+  --exclude '*.pyc' \
+  --exclude .venv \
+  "${butters_dir}/" "${staging_dir}/"
+# Freeze the snapshot before root executes anything out of it. Running as root,
+# rsync -a preserves the *source* owner, so without this the staged tree would
+# still be owned by the invoking user while the interpreter below runs as root.
+# -h retargets the copied symlinks themselves, never their referents.
+chown -h -R root:butters "${staging_dir}"
+
+# 2a. Build the production virtualenv into the frozen snapshot, using the system
+#     interpreter. Root never executes an interpreter the unprivileged checkout
+#     owner could have swapped, and the resulting closure is reproducible from
+#     the reviewed pinned requirements rather than from developer state.
+build_runtime_venv "${staging_dir}" \
+  || { echo "Dependency installation failed; nothing was replaced." >&2; exit 3; }
+verify_runtime_dependencies \
+    "${staging_dir}/.venv/bin/python" "${staging_dir}/requirements.txt" \
+  || { echo "Dependency verification failed; nothing was replaced." >&2; exit 3; }
+
+# 2b. Verify the staged tree before it can ever be executed. Byte-compiling
+#    writes __pycache__ into the staging tree, so it has to finish before the
+#    tree is sealed in step 3.
+"${staging_dir}/.venv/bin/python" -m compileall -q "${staging_dir}/src" >/dev/null \
+  || { echo "Staged tree failed to compile; nothing was replaced." >&2; exit 3; }
+[[ -f "${staging_dir}/src/butters/web/app.py" ]] \
+  || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
+
+# 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
+#    also covers the bytecode compileall just generated and establishes the final
+#    modes. It is the last write to the tree, so the swap below publishes an
+#    already-correct tree and /opt/butters is never momentarily unreadable by the
+#    service user.
+normalize_application_tree "${staging_dir}" root butters
+
+# 4. Swap. Renames are atomic, so no mixed tree is ever importable, and the
+#    replaced tree is kept for rollback.
+if [[ -d "${install_dir}" ]]; then
+  rm -rf "${previous_dir}"
+  mv "${install_dir}" "${previous_dir}"
+fi
+mv "${staging_dir}" "${install_dir}"
+
+if [[ ! -e "${config_dir}/butters.env" ]]; then
+  install -m 0640 -o root -g butters "${butters_dir}/config/butters.env.example" "${config_dir}/butters.env"
+fi
+chown root:butters "${config_dir}/butters.env"
+chmod 0640 "${config_dir}/butters.env"
+
+# Non-secret deployment values. BUTTERS_ALLOWED_ORIGINS is required before the
+# daemon will issue sessions or accept mutations in production; the private
+# Tailscale HTTPS origin is only known after `tailscale serve` has been run.
+if [[ ! -e "${config_dir}/butters.conf" ]]; then
+  install -m 0640 -o root -g butters /dev/null "${config_dir}/butters.conf"
+  cat >"${config_dir}/butters.conf" <<'CONF'
+# Exact private Tailscale HTTPS origin, e.g.
+# BUTTERS_ALLOWED_ORIGINS=https://pi.tailnet-name.ts.net
+BUTTERS_ALLOWED_ORIGINS=
+
+# Optional. Only set this to a repository that is deliberately readable by the
+# butters service user. Leave it empty on an ordinary deployment; repository
+# inspection then reports repository_unavailable instead of reaching into a
+# private home directory.
+# BUTTERS_PROJECT_INSPECTION_ROOT=
+CONF
+  chown root:butters "${config_dir}/butters.conf"
+  chmod 0640 "${config_dir}/butters.conf"
+fi
+
+install -m 0644 -o root -g root "${butters_dir}/systemd/${unit_name}" "/etc/systemd/system/${unit_name}"
+# The physical wake-word listener is installed but never enabled or started
+# here. It takes exclusive ownership of the ALSA capture device, so bringing it
+# up is a deliberate step in controlled deployment, not a side effect of
+# installing the web assistant. --enable/--start above apply to ${unit_name}
+# only.
+install -m 0644 -o root -g root "${butters_dir}/systemd/${listener_unit_name}" \
+  "/etc/systemd/system/${listener_unit_name}"
+
+systemctl daemon-reload
+if [[ "${enable_service}" == "1" ]]; then
+  systemctl enable "${unit_name}"
+fi
+if [[ "${start_service}" == "1" ]]; then
+  systemctl restart "${unit_name}"
+fi
+
+echo "Installed Butters Beta 1 at ${install_dir}."
+echo "Application tree: ${install_dir} (root:butters, 0750 directories, 0640 files)."
+echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then restart)."
+echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
+echo "Deployment values: ${config_dir}/butters.conf (set BUTTERS_ALLOWED_ORIGINS)."
+echo "State: ${state_dir} (butters:butters 0700)."
+echo "Runtime venv: ${install_dir}/.venv built from ${install_dir}/requirements.txt."
+echo
+echo "Physical wake-word listener: ${listener_unit_name} installed but NOT enabled."
+echo "It claims the ALSA capture device exclusively, so enable it deliberately:"
+echo "  sudo systemctl enable --now ${listener_unit_name}"
+echo "Microphone acceptance check (first ~30s of output):"
+echo "  journalctl -u ${listener_unit_name} -f"
+echo "  expect: 'live source=alsa input=hw:CARD=Camera,DEV=0' then '[READY] Waiting for wake word',"
+echo "  then say the wake phrase and expect '[WAKE] phrase=...' followed by [PARTIAL]/[FINAL RAW]."
+echo "  Confirm the reported rss=... MiB stays under the unit's MemoryMax."
+echo "Stop any interactive ./butters/scripts/butters-live first; only one process may own the capture device."

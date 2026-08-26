@@ -1338,13 +1338,75 @@ tbody tr:last-child td {
   border-left: 4px solid var(--danger);
 }
 
-.maintenance-warning {
+.maintenance-warning,
+.maintenance-due_soon {
   border-left: 4px solid var(--warning);
+}
+
+.maintenance-baseline_required {
+  border-left: 4px solid var(--muted);
+}
+
+.maintenance-advisory {
+  border-left: 4px dashed var(--panel-border);
 }
 
 .maintenance-card ul {
   margin: 10px 0;
   padding-left: 20px;
+}
+
+.maintenance-cadence {
+  margin: 8px 0 0;
+}
+
+.maintenance-baseline {
+  margin: 8px 0 0;
+  color: var(--muted);
+}
+
+.maintenance-summary {
+  padding: 14px;
+  margin-bottom: 14px;
+  background: #fbfcfb;
+  border: 1px solid var(--panel-border);
+  border-radius: 8px;
+}
+
+.maintenance-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.usage-hero {
+  display: grid;
+  gap: 12px;
+}
+
+.usage-headline {
+  display: grid;
+  gap: 4px;
+}
+
+.usage-label {
+  color: var(--muted);
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.usage-value {
+  font-size: clamp(2rem, 6vw, 3rem);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.1;
+}
+
+.usage-facts {
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
 }
 
 .tray-grid {
@@ -1529,6 +1591,14 @@ tbody tr:last-child td {
   .printer-detail-facts,
   .interval-markers {
     grid-template-columns: 1fr;
+  }
+
+  .usage-facts {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .maintenance-counts {
+    gap: 4px 12px;
   }
 
   .printer-history-wrap {

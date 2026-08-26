@@ -481,8 +481,18 @@ class DiagnosticImplementations:
 
     # Network tools
     def get_network_interfaces(self, _args: ToolArguments) -> EvidenceItem:
+        # sysfs enumeration keeps this observation inside the read-only
+        # procfs/sysfs boundary. glibc's if_nameindex() needs an AF_NETLINK
+        # socket, which the hardened unit deliberately does not grant.
+        names = _list_interface_names()
+        if names is None:
+            return EvidenceItem.create(
+                "network.interfaces", "network_interfaces", "kernel", "butters",
+                EvidenceStatus.UNAVAILABLE,
+                error="interface enumeration is unavailable in this sandbox",
+            )
         interfaces: list[dict[str, object]] = []
-        for _index, name in socket.if_nameindex()[:32]:
+        for name in names:
             state = _read_text(Path("/sys/class/net") / name / "operstate", 64)
             carrier = _read_text(Path("/sys/class/net") / name / "carrier", 8)
             interfaces.append({"name": name, "state": state.strip() if state else None, "carrier": carrier.strip() == "1" if carrier else None})
@@ -626,10 +636,48 @@ class DiagnosticImplementations:
             query["location"] = entity.source_id
         payload = self.dashboard.get("/api/readings?" + urllib.parse.urlencode(query))
         timestamps = _collect_timestamps(payload)
+        summaries: dict[str, dict[str, float | int | str]] = {}
+        raw_series = payload.get("series")
+        if isinstance(raw_series, list):
+            for series in raw_series[:4]:
+                if not isinstance(series, dict):
+                    continue
+                points = series.get("points")
+                if not isinstance(points, list):
+                    continue
+                values_by_metric: dict[str, list[float]] = {}
+                for point in points[:2048]:
+                    if not isinstance(point, dict):
+                        continue
+                    for field, raw in point.items():
+                        if field == "time" or isinstance(raw, bool) or not isinstance(raw, (int, float)):
+                            continue
+                        values_by_metric.setdefault(str(field), []).append(float(raw))
+                for field, samples in list(values_by_metric.items())[:16]:
+                    if not samples:
+                        continue
+                    difference = samples[-1] - samples[0]
+                    summaries[field] = {
+                        "count": len(samples),
+                        "minimum": round(min(samples), 4),
+                        "maximum": round(max(samples), 4),
+                        "mean": round(sum(samples) / len(samples), 4),
+                        "first": round(samples[0], 4),
+                        "last": round(samples[-1], 4),
+                        "difference": round(difference, 4),
+                        "trend": "rising" if difference > 0 else "falling" if difference < 0 else "flat",
+                    }
         return EvidenceItem.create(
             f"sensor.{entity.entity_id}.history.{values.range_key}", "sensor_history_summary", "dashboard_api", entity.entity_id,
             EvidenceStatus.OK if timestamps else EvidenceStatus.DEGRADED,
-            values={"range": values.range_key, "point_timestamps_found": len(timestamps), "oldest": min(timestamps) if timestamps else None, "newest": max(timestamps) if timestamps else None},
+            values={
+                "range": values.range_key,
+                "point_timestamps_found": len(timestamps),
+                "oldest": min(timestamps) if timestamps else None,
+                "newest": max(timestamps) if timestamps else None,
+                "metric_summaries": summaries,
+                "calculation": "local deterministic min/max/mean/first/last difference",
+            },
         )
 
     def get_air_quality(self, args: ToolArguments) -> EvidenceItem:
@@ -1095,6 +1143,19 @@ def _target_from_arguments(values: Mapping[str, object]) -> str:
 
 def _metric_evidence(evidence_id: str, kind: str, target: str, value: float | None, key: str) -> EvidenceItem:
     return EvidenceItem.create(evidence_id, kind, "procfs", target, EvidenceStatus.OK if value is not None else EvidenceStatus.UNAVAILABLE, values={key: value}, error=None if value is not None else f"{kind} unavailable")
+
+
+def _list_interface_names(maximum: int = 32) -> list[str] | None:
+    """Enumerate interfaces from sysfs, falling back to the netlink helper."""
+
+    try:
+        return sorted(item.name for item in Path("/sys/class/net").iterdir())[:maximum]
+    except OSError:
+        pass
+    try:
+        return [name for _index, name in socket.if_nameindex()[:maximum]]
+    except OSError:
+        return None
 
 
 def _read_text(path: Path, maximum: int) -> str | None:

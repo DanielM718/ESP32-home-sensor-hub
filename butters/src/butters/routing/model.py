@@ -16,6 +16,9 @@ class RoutedIntent:
     message: str | None = None
     allow_fallback: bool = False
     missing_arguments: tuple[str, ...] = ()
+    aggregate: bool = False
+    ambiguity_candidates: tuple[str, ...] = ()
+    action_plan: tuple[tuple[str, dict[str, object]], ...] = ()
 
     @property
     def matched(self) -> bool:
@@ -30,3 +33,18 @@ class RoutedIntent:
             and self.skill is not None
             and bool(self.missing_arguments)
         )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingClarification:
+    """Structured, expiring state for one deterministic missing-slot turn."""
+
+    original_text: str
+    normalized_text: str
+    skill: str | None
+    arguments: dict[str, object]
+    aggregate: bool
+    missing_argument: str
+    ambiguity_candidates: tuple[str, ...]
+    created_monotonic: float
+    expires_monotonic: float

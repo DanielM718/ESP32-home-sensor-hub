@@ -6,7 +6,9 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
-from butters.routing.model import RoutedIntent
+from butters.routing.conversation import route_conversation_turn
+from butters.routing.model import PendingClarification, RoutedIntent
+from butters.routing.router import IntentRouter
 
 
 @dataclass(frozen=True, slots=True)
@@ -15,6 +17,7 @@ class SemanticEndpointAssessment:
     route: RoutedIntent
     effective_text: str
     continued: bool = False
+    pending: PendingClarification | None = None
 
 
 def incomplete_route_progressed(
@@ -31,35 +34,47 @@ def incomplete_route_progressed(
 
 
 class SemanticEndpointEvaluator:
-    """Preview deterministic routing and, only for known pending requests, merge."""
+    """Preview routing and fill only a known structured pending slot."""
 
-    def __init__(self, preview_route: Callable[[str], RoutedIntent]) -> None:
+    def __init__(
+        self,
+        preview_route: Callable[[str], RoutedIntent],
+        *,
+        router: IntentRouter | None = None,
+    ) -> None:
         self.preview_route = preview_route
+        owner = getattr(preview_route, "__self__", None)
+        inferred = owner if isinstance(owner, IntentRouter) else getattr(owner, "router", None)
+        self.router = router or inferred
+        if not isinstance(self.router, IntentRouter):
+            raise TypeError("structured semantic continuation requires an IntentRouter")
 
     def assess(
         self,
         text: str,
         *,
-        pending_text: str | None = None,
+        pending: PendingClarification | None = None,
     ) -> SemanticEndpointAssessment:
         current = text.strip()
-        standalone = self.preview_route(current)
-        if standalone.matched:
-            return SemanticEndpointAssessment("complete", standalone, current)
-
-        if pending_text:
-            pending_route = self.preview_route(pending_text)
-            merged = f"{pending_text.strip()} {current}".strip()
-            merged_route = self.preview_route(merged)
-            if merged_route.matched:
-                return SemanticEndpointAssessment(
-                    "complete", merged_route, merged, continued=True
-                )
-            if incomplete_route_progressed(pending_route, merged_route):
-                return SemanticEndpointAssessment(
-                    "incomplete", merged_route, merged, continued=True
-                )
-
-        if standalone.incomplete:
-            return SemanticEndpointAssessment("incomplete", standalone, current)
-        return SemanticEndpointAssessment("unrecognized", standalone, current)
+        outcome = route_conversation_turn(
+            self.router,
+            current,
+            pending,
+            now=0.0,
+            ttl_seconds=float("inf"),
+            preview_route=self.preview_route,
+        )
+        status: Literal["complete", "incomplete", "unrecognized"]
+        if outcome.route.matched:
+            status = "complete"
+        elif outcome.route.incomplete:
+            status = "incomplete"
+        else:
+            status = "unrecognized"
+        return SemanticEndpointAssessment(
+            status,
+            outcome.route,
+            current,
+            continued=outcome.disposition in {"resolved", "retry"},
+            pending=outcome.pending,
+        )

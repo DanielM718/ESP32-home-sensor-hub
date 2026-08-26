@@ -117,6 +117,7 @@ class CloudDiagnosticEscalator:
                         success=False,
                         escalation_occurred=escalation_steps > 1,
                         error_code=exc.code,
+                        estimated_cost_override=estimate,
                     )
                     return _local_fallback(request, local_assessment, session, exc.code)
                 session.input_tokens += turn.usage.input_tokens

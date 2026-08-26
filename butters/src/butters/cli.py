@@ -539,12 +539,8 @@ def command_wake_test(args: argparse.Namespace) -> int:
     cpu_started = time.process_time()
     try:
         with detector, source:
-            while (
-                (args.max_detections <= 0 or detections < args.max_detections)
-                and (
-                    args.max_audio_seconds <= 0
-                    or audio_seconds < args.max_audio_seconds
-                )
+            while (args.max_detections <= 0 or detections < args.max_detections) and (
+                args.max_audio_seconds <= 0 or audio_seconds < args.max_audio_seconds
             ):
                 frame = source.read_frame()
                 if frame is None:
@@ -634,17 +630,30 @@ def command_live(args: argparse.Namespace) -> int:
         else NullChimePlayer()
     )
     attack_frames = max(1, math.ceil(settings.vad_attack_ms / settings.frame_ms))
-    release_frames = max(
-        1, math.ceil(settings.vad_release_ms / settings.frame_ms)
-    )
+    release_frames = max(1, math.ceil(settings.vad_release_ms / settings.frame_ms))
     from butters.assistant import create_assistant
     from butters.assistant_config import load_assistant_settings
     from butters.live.controller import LiveEvent, LiveVoiceController, run_live_source
     from butters.live.semantic import SemanticEndpointEvaluator
 
+    assistant_settings = load_assistant_settings(args.assistant_config)
+    action_state = None
+    if args.assistant:
+        from butters.actions.store import ActionStateStore
+
+        action_state = ActionStateStore(
+            assistant_settings.web.state_dir / "actions.sqlite3",
+            assistant_settings.actions,
+            pending_seconds=assistant_settings.authentication.pending_action_seconds,
+        )
+        action_state.recover_interrupted_jobs(local_console=True)
     assistant = create_assistant(
-        load_assistant_settings(args.assistant_config), vocabulary
+        assistant_settings,
+        vocabulary,
+        action_state=action_state,
     )
+    if assistant.environment_adapter is not None:
+        assistant.environment_adapter.recover_overrides()
     semantic_endpoint = SemanticEndpointEvaluator(assistant.preview_route)
 
     controller = LiveVoiceController(
@@ -680,18 +689,26 @@ def command_live(args: argparse.Namespace) -> int:
         continuation_timeout_seconds=live_settings.continuation_timeout_seconds,
     )
     responder = None
+    conversation = None
     if args.assistant:
+        from butters.actions.coordinator import ActionCoordinator
         from butters.assistant import (
             AssistantResponse,
             AsyncAssistantResponder,
         )
+        from butters.live.authorization import LocalVoiceAuthorization
         from butters.live.conversation import BoundedVoiceConversation
 
+        assert action_state is not None
+        local_authorization = LocalVoiceAuthorization(
+            assistant,
+            ActionCoordinator(assistant.skills, action_state),
+            context_seconds=assistant_settings.authentication.local_console_seconds,
+        )
         conversation = BoundedVoiceConversation(
             assistant,
-            continuation_timeout_seconds=(
-                live_settings.continuation_timeout_seconds
-            ),
+            continuation_timeout_seconds=(live_settings.continuation_timeout_seconds),
+            local_authorization=local_authorization,
         )
 
         def report_assistant(response: AssistantResponse) -> None:
@@ -707,7 +724,9 @@ def command_live(args: argparse.Namespace) -> int:
             print(f"[RESPONSE] {response.response_text}", flush=True)
 
         responder = AsyncAssistantResponder(conversation, report_assistant)
-    input_name = settings.alsa_device if settings.source == "alsa" else settings.wave_path
+    input_name = (
+        settings.alsa_device if settings.source == "alsa" else settings.wave_path
+    )
     print(
         f"live source={settings.source} input={input_name} "
         "internal=16000 Hz mono S16_LE single_capture_owner=yes"
@@ -735,6 +754,8 @@ def command_live(args: argparse.Namespace) -> int:
         if event.kind == "ready":
             print("[READY] Waiting for wake word", flush=True)
         elif event.kind == "wake" and event.detection is not None:
+            if conversation is not None:
+                conversation.note_physical_wake()
             detection = event.detection
             confidence = (
                 "n/a" if detection.confidence is None else f"{detection.confidence:.3f}"
@@ -772,23 +793,35 @@ def command_live(args: argparse.Namespace) -> int:
                 f"semantic={result.semantic_status}",
                 flush=True,
             )
-            if (
-                responder is not None
-                and result.effective_text
-                and not responder.submit(result.effective_text)
-            ):
-                print(
-                    "[ERROR] read-only response queue is full; transcript dropped",
-                    file=sys.stderr,
-                    flush=True,
+            if responder is not None and result.effective_text:
+                local_response = (
+                    None
+                    if conversation is None
+                    else conversation.handle_local_action(result.effective_text)
                 )
+                if local_response is not None:
+                    report_assistant(local_response)
+                    if local_response.policy_status == "confirmation_required":
+                        controller.await_local_confirmation()
+                elif not responder.submit(result.effective_text):
+                    print(
+                        "[ERROR] read-only response queue is full; transcript dropped",
+                        file=sys.stderr,
+                        flush=True,
+                    )
         elif event.kind == "awaiting_continuation":
             print(f"[CLARIFYING] {event.text}", flush=True)
         elif event.kind == "continuation_timeout":
+            if conversation is not None:
+                conversation.cancel_local_confirmation()
             print("[TIMEOUT] Incomplete request expired", flush=True)
         elif event.kind == "timeout":
+            if conversation is not None:
+                conversation.cancel_local_confirmation()
             print("[TIMEOUT] No speech; returning to wake listening", flush=True)
         elif event.kind == "error":
+            if conversation is not None:
+                conversation.cancel_local_confirmation()
             print(f"[ERROR] {event.text}", file=sys.stderr, flush=True)
 
     live_started = time.perf_counter()

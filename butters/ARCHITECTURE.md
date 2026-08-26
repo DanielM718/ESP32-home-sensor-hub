@@ -9,6 +9,81 @@ Mosquitto, the sensor bridge, InfluxDB, Grafana, Home Assistant, dashboards, and
 historical data continue to operate when every Butters process is stopped or
 failed.
 
+## Beta 1 deployed topology
+
+Beta 1 implements the first persistent browser service without merging into
+the Flask dashboard:
+
+```text
+private HTTPS browser
+  -> Tailscale Serve (tailnet only; terminates TLS and adds identity)
+  -> 127.0.0.1:8090 Starlette/Uvicorn
+       -> bounded sessions + structured in-memory TraceBuffer
+       -> shared BetaAssistantService
+            -> deterministic SkillRegistry (default)
+            -> local diagnostic planner/playbooks
+            -> optional bounded general/diagnostic cloud provider
+       -> browser PCM -> explicit downmix/resample -> existing StreamingSTTEngine
+       -> local or explicitly paid TTS -> WAV response
+       -> SQLite non-content usage/budgets + non-secret voice presets
+       -> review-gated Codex job metadata
+```
+
+The web daemon is an unprivileged `butters` systemd service with a strict
+loopback bind, bounded worker pool/queues, a separate unqueued teardown path,
+clean executor shutdown, restart limits, no capabilities, protected
+system/home, and only `/var/lib/butters` writable. It has no repository write
+authority. It does not own ALSA.
+
+Tailscale identity headers are authoritative only in this loopback proxy
+topology; every admin API, the `/admin` document, and the admin WebSocket check
+the exact configured login allow-list, and an unauthorized identity always
+receives a bounded 403 rather than an opaque error. The loopback peer check is
+a topology assumption, not a perimeter: any local process that can reach the
+port can present a header, so tailnet ACLs and host hygiene remain part of the
+control set.
+
+Production mutations require an allow-listed HTTPS `Origin` — a server-known
+value, never a client-supplied `Host` comparison — plus a session CSRF token.
+Session allocation is admission-controlled before allocation: same-origin
+browser context, per-identity rate limit, per-identity session cap, and an
+administrator reserve that a flood cannot consume. When the production origin
+is unconfigured the daemon reports `not_ready` and refuses sessions and
+mutations rather than weakening the check. Development bypass requires
+loopback, `development_mode`, and an explicit `BUTTERS_DEV_ADMIN=1`; no
+test-only peer identity exists in the deployed authorization path.
+
+Skills carry an audience alongside their action class, so a read-only
+observation that describes the deployment (repository state, detailed network
+views) is refused for ordinary callers by the registry, by the orchestrator
+before any adapter or cloud stage, and by the cloud tool-exposure filter.
+
+Browser sessions use 256-bit random opaque IDs in HttpOnly/Secure/SameSite
+cookies, expire on inactivity, and cap active sessions, messages, and context
+characters. Detailed traces are a bounded memory ring and expose only
+programmatic stages/reason codes—not model chain-of-thought. Persistent usage
+stores provider/route/model/token/cost/latency/error metadata only; no prompt,
+transcript, response, evidence, raw log, audio, or secret columns exist.
+All paid text/STT/TTS permit-call-record sequences share one daemon gate so
+concurrent requests cannot race persistent totals. Uncertain failures consume
+their conservative preflight estimate.
+
+The general cloud path receives only bounded recent context and up to six
+relevant read-only schemas. Every requested tool re-enters typed parsing and
+`PolicyValidator`. The loop caps output, context bytes, retries, wall time,
+rounds, tools, and cost. Unknown model/speech pricing denies the call. The
+diagnostic-specific cloud path remains intact for diagnostic requests.
+
+Codex has no normal-chat endpoint. Administrator skill descriptions are
+validated as untrusted, explicitly read-only job data. A clean base commit,
+detached worktree, allowed path set, file/patch bounds, tests, and explicit
+approval gate the patch. The subprocess environment is constructed from a
+small allow-list and excludes provider, MQTT, Home Assistant, database, and
+admin secrets. The in-daemon skill runner also refuses a parent containing
+recognized secrets, because stripping child variables alone does not prevent
+same-user parent inspection through `/proc`; such deployments need a distinct
+secret-free worker. Codex completion cannot commit, push, deploy, or restart.
+
 The intended pipeline is:
 
 ```text
@@ -42,7 +117,7 @@ printer-room fan" should match a deterministic intent and typed arguments. They
 must not pay LLM latency. An LLM is a constrained fallback for phrasing and
 selection, not an authority and not the execution environment.
 
-## Current implementation through the local diagnostic milestone
+## Physical voice implementation retained by Beta 1
 
 Both sources implement the same pull-based `AudioSource` contract and emit
 16 kHz, mono, signed 16-bit little-endian PCM. Milestone 3 adds replaceable
@@ -117,14 +192,16 @@ required missing arguments or an unrecognized fragment remains open until the
 disabled by production configuration so it cannot preempt this policy.
 
 At a hard endpoint, a recognized incomplete route carries its intended skill,
-resolved arguments, and `missing_arguments`. It emits the targeted router
-question and enters `AWAITING_CONTINUATION` for at most 12 seconds. Speech that
-arrives before the hard endpoint stays in the same recognizer stream. A later
-clarification turn is merged only while this explicit pending request exists;
-a complete standalone route is evaluated first and cancels stale context.
-Unrecognized text gains no pending authority. A successful logical request
-emits one executable handoff, then all recognizer and conversational state is
-cleared while both models remain resident.
+resolved arguments, aggregate flag, missing slot, optional ambiguity
+candidates, and creation/expiry time. It emits the targeted router question and
+enters `AWAITING_CONTINUATION` for at most 12 seconds. Speech that arrives
+before the hard endpoint stays in the same recognizer stream. A later
+clarification turn is parsed as a value for that structured slot only while the
+pending request exists; raw request strings are never concatenated. A complete
+standalone route is evaluated first and cancels stale context. Unrecognized
+text gains no pending authority. A successful logical request emits one
+executable handoff, then all recognizer and conversational state is cleared
+while both models remain resident.
 
 `StreamingSTTEngine` owns the lifecycle operations (`start_utterance`,
 `accept_audio`, partial lookup, endpoint detection, `finalize`, `reset`, and
@@ -136,11 +213,16 @@ transcripts leave the Pi.
 The STT default remains one inference thread, but production selection is now
 `sherpa-onnx-streaming-zipformer-en-2023-06-21`. It exactly decoded the fixed
 real-user carbon-dioxide query that the old 20M model repeatedly truncated.
-Measured larger-model initialization is 6-7.7 seconds, RSS 240-293 MiB, RTF
-0.45-0.52, and CPU-per-audio 45-52%. Accuracy is preferred over the old
-107 MiB process footprint while still comfortably below real time and leaving
+Measured larger-model cold initialization is 8.5-14.1 seconds under the current
+Beta 1 development load, RSS 240-295 MiB, and warm transcription RTF 0.49-0.52.
+The web service therefore owns one bounded prewarmed recognizer instead of
+constructing one per WebSocket: a lease is exclusive, a healthy stream is reset
+and returned, and a failed stream is discarded. Accuracy is preferred over the
+old 107 MiB process footprint while still below real time and leaving
 monitoring services priority. See
-[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md).
+[benchmarks/human-voice-semantic-endpoint.md](benchmarks/human-voice-semantic-endpoint.md)
+and
+[benchmarks/beta1-conversational-voice-stt.md](benchmarks/beta1-conversational-voice-stt.md).
 
 The current energy VAD remains deterministic RMS hysteresis, not a trained
 speech/noise classifier. Actual room noise calibrated this host's local gate to
@@ -167,9 +249,11 @@ raw text / final STT transcript
        -> separate explicit AudioOutput
 ```
 
-The six current skills cover one sensor metric, sensor reporting status,
-last-seen time, maximum filament-box humidity, printer-room air quality, and
-server health. All are `READ_ONLY`. Every skill declares its stable name,
+The initial skills covered sensor metrics/status/last-seen/comparison,
+printer-room air quality, and server health; printer work brought the pre-Beta
+inventory to thirteen. Beta 1 adds five promoted host/stack/network/history/
+project skills for eighteen total. All are `READ_ONLY`. Every skill declares
+its stable name,
 description, argument parser, action class, policy authorizer, implementation,
 and deadline. The registry rejects unknown names, missing/unexpected fields,
 unknown entities/metrics, incompatible entity/metric pairs, non-allow-listed
@@ -183,6 +267,12 @@ the three filament boxes, with unambiguous aliases. This explicit mapping is
 intentional: deployed-but-unreviewed sources do not become voice entities by
 accident. Metrics form a separate compatibility allow-list. Ambiguous
 questions request clarification rather than selecting the first candidate.
+Exact registered aliases have priority. Fuzzy recovery is a deterministic,
+length-sensitive edit-distance comparison only against registered entity and
+metric aliases, with a conservative threshold and runner-up margin; numeric
+and short aliases receive stricter treatment. Aggregate reading language
+expands the matched entity's configured metric capabilities in stable order,
+then uses the existing multi-value skill and one dashboard snapshot.
 
 Current sensor data comes from the established local dashboard `/api/latest`
 representation through `DashboardSensorAdapter`. That interface was selected
@@ -372,14 +462,24 @@ calls, hypotheses, escalation/usage accounting, and a stopping reason.
 
 Usage records deliberately omit request/evidence content. They include model,
 effort/tier, token categories, tool rounds, time, estimated dated-price cost,
-success/error, and escalation. Per-request and process-local daily/monthly
-limits apply before a call. Durable cross-process budgeting is required before
-any permanent paid deployment.
+success/error, and escalation. Beta 1 writes this non-content metadata plus
+model-free request summaries to SQLite under `/var/lib/butters`. Per-request
+and durable daily/monthly limits apply before a call, so daemon restart does
+not reset spending totals. The administrator report is computed with bounded
+SQL aggregates on a worker thread; it never materializes the retained ledger.
+
+Two accounting limits are stated rather than claimed away. A per-request
+estimate is a conservative preflight *reservation*, not a hard ceiling across
+multi-round tool use, so the durable daily/monthly budgets are the effective
+control. A crash between a provider call and its accounting write loses that
+charge; a pending-charge reservation design would close this and is deferred
+while paid providers remain disabled by default.
 
 Cloud requires explicit configuration plus `OPENAI_API_KEY`; the key is read
 only for the Authorization header, never put in a request body, diagnostic,
-benchmark, telemetry record, or tracked file. The default always-on assistant
-does not construct a cloud escalator. No permanent cloud service is installed.
+benchmark, telemetry record, or tracked file. The persistent service constructs
+the provider boundary, but committed defaults make no paid calls; availability
+still requires explicit paid configuration, reviewed pricing, and a key.
 
 ### Engineering remediation is a separate authority
 

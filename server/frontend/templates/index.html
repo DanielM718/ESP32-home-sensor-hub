@@ -91,6 +91,22 @@
           </div>
         </section>
 
+        <section class="printer-panel" aria-labelledby="printer-usage-heading">
+          <div class="section-heading">
+            <div><h2 id="printer-usage-heading">Printer Usage</h2><p class="subtle">Cumulative machine runtime from known print-history intervals.</p></div>
+          </div>
+          <div id="printer-usage" aria-live="polite"><p class="empty-state">Waiting for tracked print history.</p></div>
+        </section>
+
+        <section class="printer-panel" aria-labelledby="maintenance-heading">
+          <div class="section-heading">
+            <div><h2 id="maintenance-heading">Maintenance</h2><p class="subtle">Bambu Lab X2D published intervals plus any local reminders you configure. “Mark complete” records an audit event only—it never sends a command to the X2D.</p></div>
+            <button id="maintenance-complete-all" class="secondary-button" type="button">Mark all maintenance completed today</button>
+          </div>
+          <div id="maintenance-summary" aria-live="polite"></div>
+          <div id="printer-maintenance" class="maintenance-grid" aria-live="polite"><p class="empty-state">No maintenance tasks configured.</p></div>
+        </section>
+
         <div class="printer-dashboard-grid">
           <section class="printer-panel" aria-labelledby="printer-details-heading">
             <div class="section-heading"><div><h2 id="printer-details-heading">Printer</h2><p class="subtle">Identity, connectivity, usage provenance, and toolheads.</p></div></div>
@@ -102,13 +118,6 @@
             <div id="printer-ams" class="ams-grid" aria-live="polite"><p class="empty-state">Waiting for AMS state.</p></div>
           </section>
         </div>
-
-        <section class="printer-panel" aria-labelledby="maintenance-heading">
-          <div class="section-heading">
-            <div><h2 id="maintenance-heading">Maintenance</h2><p class="subtle">Local reminders configured by you. “Mark complete” records an audit event only—it never sends a command to the X2D.</p></div>
-          </div>
-          <div id="printer-maintenance" class="maintenance-grid" aria-live="polite"><p class="empty-state">No maintenance tasks configured.</p></div>
-        </section>
 
         <section class="printer-panel" aria-labelledby="print-history-heading">
           <div class="section-heading"><div><h2 id="print-history-heading">Print History</h2><p class="subtle">Locally observed sessions and idempotently imported Bambu Cloud task metadata.</p></div></div>

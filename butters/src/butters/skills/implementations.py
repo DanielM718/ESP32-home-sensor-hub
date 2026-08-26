@@ -8,6 +8,7 @@ from typing import cast
 from butters.integrations.model import (
     IntegrationError,
     PrintEnvironmentSnapshot,
+    PrinterIntelligenceSnapshot,
     PrinterSnapshotProvider,
     SensorRecord,
     SensorSnapshot,
@@ -27,6 +28,7 @@ from butters.skills.model import (
     LastPrintResult,
     PrintEnvironmentResult,
     PrinterArgs,
+    PrinterMaintenanceEventsResult,
     PrinterMaintenanceResult,
     PrinterStatusResult,
     PrinterTemperaturesResult,
@@ -37,20 +39,175 @@ from butters.skills.model import (
     SensorStatusResult,
     SensorValueArgs,
     SensorValueResult,
+    SensorValuesArgs,
+    SensorValuesResult,
     ServerHealthArgs,
     ServerHealthResult,
     SkillArguments,
     SkillError,
     SkillResult,
 )
-from butters.skills.policy import allow_arguments
+from butters.skills.policy import PolicyValidator, allow_arguments
 from butters.skills.registry import (
     SkillRegistry,
     SkillSpec,
     optional_string,
     required_string,
+    required_string_tuple,
     strict_arguments,
 )
+
+_SKILL_METADATA: dict[str, dict[str, object]] = {
+    "get_sensor_value": {
+        "category": "sensors",
+        "input_schema": {
+            "entity": "allow-listed entity ID",
+            "metric": "allow-listed metric ID",
+        },
+        "result_description": "Current value, unit, reporting state, timestamp, and age.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("what is the humidity in box three", "printer room CO2"),
+        "negative_examples": ("set the humidity", "read an unknown sensor"),
+    },
+    "get_sensor_values": {
+        "category": "sensors",
+        "input_schema": {
+            "entity": "allow-listed entity ID",
+            "metrics": "ordered list of allow-listed metric IDs",
+        },
+        "result_description": "One current value, unit, and availability per requested metric.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("what is the temperature and humidity in box three",),
+        "negative_examples": ("set the humidity", "read an unknown sensor"),
+    },
+    "get_sensor_status": {
+        "category": "sensors",
+        "input_schema": {"entity": "optional allow-listed entity ID"},
+        "result_description": "Bounded reporting state for one or all configured sensors.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("is every sensor reporting",),
+        "negative_examples": ("restart the offline sensor",),
+    },
+    "get_sensor_last_seen": {
+        "category": "sensors",
+        "input_schema": {"entity": "allow-listed entity ID"},
+        "result_description": "Latest receive time and age for one sensor.",
+        "permission_summary": ("dashboard_api_read", "configured_entities_only"),
+        "positive_examples": ("when was box two last seen",),
+        "negative_examples": ("change its timestamp",),
+    },
+    "compare_sensor_metric": {
+        "category": "sensors",
+        "input_schema": {
+            "group": "filament_boxes",
+            "metric": "humidity",
+            "operation": "max",
+        },
+        "result_description": "Deterministically calculated maximum and missing observations.",
+        "permission_summary": ("dashboard_api_read", "local_computation"),
+        "positive_examples": ("which filament box is most humid",),
+        "negative_examples": ("change the driest box",),
+    },
+    "get_room_air_quality": {
+        "category": "sensors",
+        "input_schema": {"entity": "allow-listed air-quality entity ID"},
+        "result_description": "Current bounded air-quality measurements and category.",
+        "permission_summary": ("dashboard_api_read", "air_quality_entities_only"),
+        "positive_examples": ("how is the printer room air quality",),
+        "negative_examples": ("turn on an air purifier",),
+    },
+    "get_server_health": {
+        "category": "system",
+        "input_schema": {},
+        "result_description": "Host resources and fixed allow-listed service states.",
+        "permission_summary": (
+            "procfs_read",
+            "fixed_system_commands",
+            "allowlisted_services",
+        ),
+        "positive_examples": ("what is the server status",),
+        "negative_examples": ("run a command", "restart the server"),
+    },
+}
+
+
+# get_printer_maintenance returns the whole bounded maintenance catalog, so it is
+# structurally larger than any other read-only result and does not fit the 8192-byte
+# SkillSpec default. The cap below is derived from the limits the maintenance
+# adapter actually enforces, not from today's payload:
+#
+#   tasks               DashboardPrinterAdapter.maintenance keeps only
+#                       MAINTENANCE_TASK_FIELDS (20 fields) per task, and tasks come
+#                       solely from the fixed manufacturer catalog
+#                       (server X2D_MAINTENANCE_TASKS: 11 entries, largest entry
+#                       encodes to 825 bytes). Bounded here at 24 entries of 1024
+#                       bytes, i.e. more than double the catalog with per-entry
+#                       headroom.
+#   completion_history  bounded by the adapter to completions[:20].
+#   notifications       bounded by the adapter to recent_notifications[:20]; a
+#                       MAINTENANCE_EVENT_FIELDS entry encodes to 551 bytes even
+#                       when every field is a long identifier.
+#   envelope            usage (USAGE_FIELDS encodes to 1559 bytes with long values),
+#                       maintenance_summary, manufacturer_source, and dataclass keys.
+#
+# print_history is always empty on this path. The result therefore stays bounded and
+# far below the 2 MiB integration response ceiling.
+_MAINTENANCE_MAX_TASKS = 24
+_MAINTENANCE_TASK_BYTES = 1024
+_MAINTENANCE_HISTORY_ENTRIES = 20
+_MAINTENANCE_HISTORY_ENTRY_BYTES = 512
+_MAINTENANCE_EVENT_ENTRIES = 20
+_MAINTENANCE_EVENT_ENTRY_BYTES = 640
+_MAINTENANCE_ENVELOPE_BYTES = 4096
+MAINTENANCE_MAX_RESULT_BYTES = (
+    _MAINTENANCE_MAX_TASKS * _MAINTENANCE_TASK_BYTES
+    + _MAINTENANCE_HISTORY_ENTRIES * _MAINTENANCE_HISTORY_ENTRY_BYTES
+    + _MAINTENANCE_EVENT_ENTRIES * _MAINTENANCE_EVENT_ENTRY_BYTES
+    + _MAINTENANCE_ENVELOPE_BYTES
+)
+
+# Explicit per-skill result budgets. Everything absent keeps the SkillSpec default.
+_SKILL_RESULT_BYTES: dict[str, int] = {
+    "get_printer_maintenance": MAINTENANCE_MAX_RESULT_BYTES,
+}
+
+
+def _skill(
+    name: str,
+    description: str,
+    action_class: ActionClass,
+    parser: object,
+    authorizer: object,
+    implementation: object,
+    timeout_seconds: float,
+) -> SkillSpec:
+    metadata = dict(_SKILL_METADATA.get(name, {}))
+    if name.startswith("get_printer") or name in {
+        "get_current_print",
+        "get_print_environment_summary",
+        "get_last_print",
+    }:
+        metadata = {
+            "category": "printer",
+            "input_schema": {"entity": "configured printer entity ID"},
+            "result_description": "Read-only observation from the bounded printer adapter.",
+            "permission_summary": ("dashboard_api_read", "configured_printer_only"),
+            "positive_examples": (description.removeprefix("Return ").rstrip("."),),
+            "negative_examples": ("control the printer", "start or stop a print"),
+        }
+    if name in _SKILL_RESULT_BYTES:
+        metadata["max_result_bytes"] = _SKILL_RESULT_BYTES[name]
+    return SkillSpec(
+        name,
+        description,
+        action_class,
+        parser,  # type: ignore[arg-type]
+        authorizer,  # type: ignore[arg-type]
+        implementation,  # type: ignore[arg-type]
+        timeout_seconds,
+        source_reference="butters.skills.implementations",
+        **metadata,
+    )
 
 
 class ReadOnlySkillImplementations:
@@ -77,6 +234,17 @@ class ReadOnlySkillImplementations:
                 "policy_denied",
                 f"{entity.entity_id} does not allow metric {metric.metric_id}",
             )
+
+    def authorize_values(self, arguments: SkillArguments) -> None:
+        args = cast(SensorValuesArgs, arguments)
+        entity = self._allowed_entity(args.entity)
+        for metric_id in args.metrics:
+            metric = self._allowed_metric(metric_id)
+            if entity.sensor_type not in metric.sensor_types:
+                raise SkillError(
+                    "policy_denied",
+                    f"{entity.entity_id} does not allow metric {metric.metric_id}",
+                )
 
     def authorize_status(self, arguments: SkillArguments) -> None:
         args = cast(SensorStatusArgs, arguments)
@@ -119,6 +287,27 @@ class ReadOnlySkillImplementations:
         entity = self.entities.require(args.entity)
         metric = self.metrics.require(args.metric)
         record = self._record_or_missing(self.sensor_provider.snapshot(), entity)
+        return self._measurement(entity, metric, record)
+
+    def get_sensor_values(self, arguments: SkillArguments) -> SkillResult:
+        args = cast(SensorValuesArgs, arguments)
+        entity = self.entities.require(args.entity)
+        # One snapshot serves every requested metric, so the measurements in a
+        # single answer are read from the same reported packet.
+        record = self._record_or_missing(self.sensor_provider.snapshot(), entity)
+        return SensorValuesResult(
+            entity.entity_id,
+            entity.display_name,
+            record.status,
+            tuple(
+                self._measurement(entity, self.metrics.require(metric_id), record)
+                for metric_id in args.metrics
+            ),
+        )
+
+    def _measurement(
+        self, entity: Entity, metric: Metric, record: SensorRecord
+    ) -> SensorValueResult:
         raw = record.values.get(metric.field)
         battery_valid = not (
             metric.field == "battery_mv"
@@ -301,11 +490,27 @@ class ReadOnlySkillImplementations:
 
     def get_printer_usage(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "usage", None)
+        if callable(method):
+            usage = method()
+            return PrinterUsageResult(PrinterIntelligenceSnapshot(usage, (), (), ()))
         return PrinterUsageResult(self.printer_provider.intelligence())
 
     def get_printer_maintenance(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "maintenance", None)
+        if callable(method):
+            return PrinterMaintenanceResult(method())
         return PrinterMaintenanceResult(self.printer_provider.intelligence())
+
+    def get_printer_maintenance_events(self, arguments: SkillArguments) -> SkillResult:
+        self._printer_entity(arguments)
+        method = getattr(self.printer_provider, "maintenance_events", None)
+        if callable(method):
+            return PrinterMaintenanceEventsResult(method(20))
+        return PrinterMaintenanceEventsResult(
+            self.printer_provider.intelligence().maintenance_notifications
+        )
 
     def get_last_print(self, arguments: SkillArguments) -> SkillResult:
         self._printer_entity(arguments)
@@ -365,14 +570,15 @@ def build_read_only_registry(
     entities: EntityRegistry,
     metrics: MetricRegistry,
     printer_provider: PrinterSnapshotProvider | None = None,
+    policy: PolicyValidator | None = None,
 ) -> SkillRegistry:
     printer_provider = printer_provider or _UnavailablePrinterProvider()
     implementation = ReadOnlySkillImplementations(
         sensor_provider, server_provider, entities, metrics, printer_provider
     )
-    registry = SkillRegistry()
+    registry = SkillRegistry(policy)
     registry.register(
-        SkillSpec(
+        _skill(
             "get_sensor_value",
             "Return one current allow-listed sensor measurement.",
             ActionClass.READ_ONLY,
@@ -383,7 +589,18 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
+            "get_sensor_values",
+            "Return several current allow-listed measurements from one sensor.",
+            ActionClass.READ_ONLY,
+            _parse_sensor_values,
+            implementation.authorize_values,
+            implementation.get_sensor_values,
+            5.0,
+        )
+    )
+    registry.register(
+        _skill(
             "get_sensor_status",
             "Return reporting status for one or all configured sensors.",
             ActionClass.READ_ONLY,
@@ -394,7 +611,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_sensor_last_seen",
             "Return the latest timestamp and age for one configured sensor.",
             ActionClass.READ_ONLY,
@@ -405,7 +622,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "compare_sensor_metric",
             "Compare current values across one allow-listed sensor group.",
             ActionClass.READ_ONLY,
@@ -416,7 +633,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_room_air_quality",
             "Return a concise structured room air-quality snapshot.",
             ActionClass.READ_ONLY,
@@ -427,7 +644,7 @@ def build_read_only_registry(
         )
     )
     registry.register(
-        SkillSpec(
+        _skill(
             "get_server_health",
             "Return local host resources and fixed allow-listed service status.",
             ActionClass.READ_ONLY,
@@ -469,13 +686,18 @@ def build_read_only_registry(
             implementation.get_printer_maintenance,
         ),
         (
+            "get_printer_maintenance_events",
+            "Return up to twenty recent printer maintenance transition events.",
+            implementation.get_printer_maintenance_events,
+        ),
+        (
             "get_last_print",
             "Return read-only metadata for the latest local or cloud-history print.",
             implementation.get_last_print,
         ),
     ):
         registry.register(
-            SkillSpec(
+            _skill(
                 name,
                 description,
                 ActionClass.READ_ONLY,
@@ -492,6 +714,13 @@ def _parse_sensor_value(values: Mapping[str, object]) -> SkillArguments:
     strict_arguments(values, required=frozenset({"entity", "metric"}))
     return SensorValueArgs(
         required_string(values, "entity"), required_string(values, "metric")
+    )
+
+
+def _parse_sensor_values(values: Mapping[str, object]) -> SkillArguments:
+    strict_arguments(values, required=frozenset({"entity", "metrics"}))
+    return SensorValuesArgs(
+        required_string(values, "entity"), required_string_tuple(values, "metrics")
     )
 
 
