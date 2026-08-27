@@ -65,6 +65,30 @@ let currentTurn = 0;
 let pendingAction = null;
 let activeJob = null;
 let authExpiry = 0;
+let sessionReady = false;
+let renewing = null;
+// Every abortable request this generation owns. Retiring a generation aborts
+// what can be aborted; whatever cannot is suppressed by the isCurrentTurn
+// guard at each mutation site instead.
+const generationWork = {chat: null, speech: null};
+
+// Distinct client-side outcomes, kept separate so the UI never reports a
+// server cancellation it did not observe.
+//   capture_cancelled - microphone input stopped before it produced a turn
+//   stopped_waiting   - this browser gave up; the backend may still be running
+//   suppressed        - a result arrived for a retired generation
+const CLIENT_STOP = Object.freeze({
+  CAPTURE_CANCELLED: "capture_cancelled",
+  STOPPED_WAITING: "stopped_waiting",
+  SUPPRESSED: "suppressed",
+});
+
+// The most recent client-side stop, exposed for support and for the asset
+// contract tests. It deliberately has no "backend cancelled" value: this
+// browser cannot observe that, and must not claim it.
+function noteClientStop(reason) {
+  form.dataset.clientStop = reason;
+}
 
 function setState(label, key = "idle") {
   stateLabel.textContent = label;
@@ -99,9 +123,12 @@ function setVoiceOutputPreference(enabled) {
   if (!voiceOutputEnabled) stopPlayback();
 }
 
-// Only the newest exchange may write the header, so a reply that finishes
-// speaking after the next question was asked cannot report "Ready" over it.
+// One browser interaction is one generation. Only the newest generation may
+// write the header, render a message, or move the controls, so a reply that
+// finishes after the next question was asked - or after Clear - cannot report
+// "Ready" over it or repopulate a conversation the user emptied.
 function beginTurn() {
+  retireGeneration();
   currentTurn += 1;
   return currentTurn;
 }
@@ -110,11 +137,38 @@ function isCurrentTurn(turn) {
   return turn === currentTurn;
 }
 
+// Abort everything the outgoing generation still owns. A backend turn that has
+// already started may keep running: that is reported as CLIENT_STOP, never as
+// a server cancellation.
+function retireGeneration() {
+  for (const key of Object.keys(generationWork)) {
+    const controller = generationWork[key];
+    generationWork[key] = null;
+    if (!controller) continue;
+    try {
+      controller.abort();
+    } catch (_) {
+      // An already-settled request needs no cancellation.
+    }
+  }
+}
+
+// The composer must never look usable before a session and CSRF token exist.
+// The text field itself stays enabled so no failure can lock the user out of
+// typing; only the controls that would produce an unauthenticated request are
+// withheld.
+function setSessionReady(ready) {
+  sessionReady = Boolean(ready);
+  sendButton.disabled = !sessionReady || pending;
+  micButton.disabled = !sessionReady;
+  form.dataset.sessionReady = sessionReady ? "true" : "false";
+}
+
 // The text field is never disabled. A pending request only blocks Send, so no
 // request, playback, or rendering failure can leave the composer unusable.
 function setPending(value) {
   pending = value;
-  sendButton.disabled = value;
+  sendButton.disabled = value || !sessionReady;
   form.dataset.pending = value ? "true" : "false";
 }
 
@@ -162,11 +216,45 @@ async function initialize() {
       conversation.replaceChildren();
       for (const message of data.messages) addMessage(message.role, message.text);
     }
+    setSessionReady(true);
     setState("Ready", "idle");
     await refreshAuthStatus();
   } catch (error) {
+    // Without a session and CSRF token nothing can be sent, so the controls
+    // must not pretend otherwise.
+    csrf = "";
+    setSessionReady(false);
     setState("Connection error", "error");
   }
+}
+
+// Re-bootstrap a session the server no longer holds, after an expiry or a
+// service restart. Renewal is concurrency-safe and never widens a boundary:
+// it re-runs the ordinary browser-context endpoint, which still applies
+// Origin, same-origin admission, peer identity, and per-peer limits, and it
+// issues a fresh CSRF token rather than reusing the old one.
+function renewSession() {
+  if (renewing) return renewing;
+  renewing = (async () => {
+    try {
+      const response = await fetch("/api/session", {credentials: "same-origin"});
+      const data = await readJson(response);
+      if (!response.ok) throw new Error(data.message || "Session failed");
+      if (typeof data.csrf_token !== "string" || !data.csrf_token) {
+        throw new Error("Invalid server response");
+      }
+      csrf = data.csrf_token;
+      setSessionReady(true);
+      return true;
+    } catch (_) {
+      csrf = "";
+      setSessionReady(false);
+      return false;
+    } finally {
+      renewing = null;
+    }
+  })();
+  return renewing;
 }
 
 async function sendText(text) {
@@ -178,40 +266,72 @@ async function sendText(text) {
   setPending(true);
   let traceId = null;
   let requestTimer = 0;
+  let stop = "";
   try {
-    const controller = new AbortController();
-    requestTimer = window.setTimeout(() => controller.abort(), CHAT_LIMIT_MS);
-    const response = await fetch("/api/chat", {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {"Content-Type": "application/json", "X-Butters-CSRF": csrf},
-      body: JSON.stringify({text}),
-      signal: controller.signal,
-    });
-    const data = await readJson(response);
-    if (!response.ok) throw new Error(data.message || "Request failed");
-    if (typeof data.response_text !== "string" || !data.response_text.trim()) {
-      throw new Error("Invalid server response");
-    }
-    addMessage("assistant", data.response_text);
-    traceId = typeof data.trace_id === "string" ? data.trace_id : null;
-    if (data.pending_action && typeof data.pending_action === "object") {
-      showPendingAction(data.pending_action);
-    } else if (Array.isArray(data.jobs) && data.jobs.length) {
-      showJob(data.jobs[0]);
+    let renewed = false;
+    for (;;) {
+      if (requestTimer) window.clearTimeout(requestTimer);
+      const controller = new AbortController();
+      generationWork.chat = controller;
+      requestTimer = window.setTimeout(() => {
+        stop = CLIENT_STOP.STOPPED_WAITING;
+        noteClientStop(stop);
+        controller.abort();
+      }, CHAT_LIMIT_MS);
+      const response = await fetch("/api/chat", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {"Content-Type": "application/json", "X-Butters-CSRF": csrf},
+        body: JSON.stringify({text}),
+        signal: controller.signal,
+      });
+      if (generationWork.chat === controller) generationWork.chat = null;
+      const data = await readJson(response);
+      if (response.ok) {
+        if (typeof data.response_text !== "string" || !data.response_text.trim()) {
+          throw new Error("Invalid server response");
+        }
+        // A result that outlived its generation is discarded, never rendered.
+        if (!isCurrentTurn(turn)) return noteClientStop(CLIENT_STOP.SUPPRESSED);
+        addMessage("assistant", data.response_text);
+        traceId = typeof data.trace_id === "string" ? data.trace_id : null;
+        if (data.pending_action && typeof data.pending_action === "object") {
+          showPendingAction(data.pending_action);
+        } else if (Array.isArray(data.jobs) && data.jobs.length) {
+          showJob(data.jobs[0]);
+        }
+        break;
+      }
+      // The session guard runs before /api/chat reaches the assistant, so an
+      // invalid_session response proves this turn never executed and is the
+      // one case that may be sent again. It is retried at most once, and only
+      // after a fresh session exists. No timeout, transport failure, or any
+      // other status is ever replayed, because the server may already have
+      // acted on it.
+      if (renewed || data.error !== "invalid_session") {
+        throw new Error(data.message || "Request failed");
+      }
+      renewed = true;
+      if (!(await renewSession()) || !isCurrentTurn(turn)) {
+        throw new Error(data.message || "Request failed");
+      }
     }
   } catch (error) {
+    if (!isCurrentTurn(turn)) return noteClientStop(CLIENT_STOP.SUPPRESSED);
     const message = error && error.name === "AbortError"
-      ? "The request timed out. Please try again."
+      ? (stop === CLIENT_STOP.STOPPED_WAITING
+        ? "I stopped waiting for that response. The server may still be finishing it, and it will appear after a reload if it completes."
+        : "That request was cancelled in this browser.")
       : (error && error.message) || "The request failed safely.";
     addMessage("assistant", message);
-    if (isCurrentTurn(turn)) setState("Error", "error");
+    setState("Error", "error");
     return;
   } finally {
     // The composer recovers with the answer, never with the audio that may
-    // follow it: spoken playback is a separate, non-blocking phase.
+    // follow it: spoken playback is a separate, non-blocking phase. A retired
+    // generation must not move controls that now belong to a newer one.
     if (requestTimer) window.clearTimeout(requestTimer);
-    setPending(false);
+    if (isCurrentTurn(turn)) setPending(false);
   }
   await playResponse(turn, traceId);
 }
@@ -382,11 +502,17 @@ actionCancel.addEventListener("click", async () => {
 
 async function playResponse(turn, traceId) {
   if (!isCurrentTurn(turn)) return;
+  let outcome = "skipped";
   if (traceId && voiceOutputEnabled) {
     setState("Speaking", "speaking");
-    await speak(traceId);
+    outcome = await speak(traceId);
   }
-  if (isCurrentTurn(turn)) setState("Ready", "idle");
+  // Speech is an optional phase. A synthesis or playback failure is surfaced,
+  // but the assistant's text answer already succeeded, so the turn is not
+  // reported as failed and the composer stays ready.
+  if (isCurrentTurn(turn)) {
+    setState(outcome === "failed" ? "Ready · voice unavailable" : "Ready", "idle");
+  }
 }
 
 function finishPlayback(playback) {
@@ -402,6 +528,17 @@ function finishPlayback(playback) {
 }
 
 function stopPlayback() {
+  // Pending synthesis is cancellable work too: stopping speech must stop the
+  // fetch that would otherwise arrive and start playing a moment later.
+  const speech = generationWork.speech;
+  generationWork.speech = null;
+  if (speech) {
+    try {
+      speech.abort();
+    } catch (_) {
+      // An already-settled synthesis request needs no cancellation.
+    }
+  }
   const playback = currentPlayback;
   if (playback) {
     playback.stopped = true;
@@ -433,16 +570,24 @@ async function speak(traceId) {
   currentPlayback = playback;
   let url = "";
   try {
-    if (!voiceOutputEnabled) return;
+    if (!voiceOutputEnabled) return "skipped";
+    const controller = new AbortController();
+    generationWork.speech = controller;
+    // Synthesis is cancellable from this moment, so Stop Speaking is offered
+    // now rather than only once audio finally begins.
+    stopAudio.hidden = false;
     const response = await fetch("/api/speech", {
       method: "POST",
       credentials: "same-origin",
       headers: {"Content-Type": "application/json", "X-Butters-CSRF": csrf},
       body: JSON.stringify({trace_id: traceId}),
+      signal: controller.signal,
     });
-    if (!response.ok) return;
+    if (generationWork.speech === controller) generationWork.speech = null;
+    if (!response.ok) return "failed";
     const blob = await response.blob();
-    if (!blob.size || !voiceOutputEnabled || playback.stopped || currentPlayback !== playback) return;
+    if (!blob.size) return "failed";
+    if (!voiceOutputEnabled || playback.stopped || currentPlayback !== playback) return "skipped";
     url = URL.createObjectURL(blob);
     const audio = new Audio(url);
     playback.audio = audio;
@@ -460,8 +605,11 @@ async function speak(traceId) {
       const started = audio.play();
       if (started && typeof started.catch === "function") started.catch(finish);
     });
-  } catch (_) {
-    // Text response remains usable when local audio is not configured.
+    return "spoken";
+  } catch (error) {
+    // Text response remains usable when local audio is not configured. A
+    // cancelled synthesis is a deliberate stop, not a fault to report.
+    return error && error.name === "AbortError" ? "skipped" : "failed";
   } finally {
     finishPlayback(playback);
     if (playback.audio) {
@@ -493,7 +641,20 @@ form.addEventListener("submit", event => {
   sendText(text);
 });
 
-clearButton.addEventListener("click", async () => {
+// Clear terminates the current browser interaction generation and prevents
+// every result from that generation from reappearing. Retiring the generation
+// aborts the chat request and any pending synthesis; playback, capture, and
+// the voice socket are torn down explicitly; and the isCurrentTurn guard at
+// every mutation site suppresses whatever could not be aborted. A backend turn
+// that already started may still finish server-side, so this reports only what
+// the browser actually did.
+async function clearConversation() {
+  const turn = beginTurn();
+  noteClientStop(CLIENT_STOP.SUPPRESSED);
+  stopPlayback();
+  cleanupVoice();
+  setPending(false);
+  setState("Clearing", "processing");
   try {
     const response = await fetch("/api/session/conversation", {
       method: "DELETE",
@@ -504,12 +665,20 @@ clearButton.addEventListener("click", async () => {
     if (!response.ok) throw new Error();
     if (typeof data.csrf_token !== "string" || !data.csrf_token) throw new Error();
     csrf = data.csrf_token;
+    if (!isCurrentTurn(turn)) return;
     conversation.replaceChildren();
     addMessage("assistant", "Conversation cleared.");
+    setState("Ready", "idle");
   } catch (_) {
+    if (!isCurrentTurn(turn)) return;
+    // The browser side is already terminated and idle; only the server-side
+    // clear is unconfirmed, so the composer stays usable.
+    conversation.replaceChildren();
     setState("Could not clear", "error");
   }
-});
+}
+
+clearButton.addEventListener("click", clearConversation);
 
 stopAudio.addEventListener("click", stopPlayback);
 voiceOutputToggle.addEventListener("click", () => {
@@ -690,9 +859,19 @@ async function beginVoice(event) {
   } catch (error) {
     if (!voiceIsCurrent(turn)) return;
     const denied = error && (error.name === "NotAllowedError" || error.name === "SecurityError");
+    // A handshake refused before it opened carries no error frame: the session
+    // may simply have expired or the service may have restarted. Re-bootstrap
+    // once so the next tap works. Captured audio is discarded, never replayed,
+    // so the user starts the new voice turn.
+    const refused = Boolean(voiceSession) && !voiceSession.connectedAt;
+    if (!denied && refused) renewSession();
     failVoice(
       turn,
-      denied ? "Microphone permission was denied." : "Microphone or voice connection is unavailable.",
+      denied
+        ? "Microphone permission was denied."
+        : refused
+          ? "The voice connection was refused. Tap the microphone to try again."
+          : "Microphone or voice connection is unavailable.",
       denied ? "Microphone permission denied" : "Microphone unavailable",
     );
   }
@@ -738,8 +917,11 @@ function stopVoice(event, expectedTurn = voiceTurn, reason = "tap") {
   transitionVoice(VOICE_STATE.TRANSCRIBING, expectedTurn);
 }
 
-function cancelVoice(turn = voiceTurn, message = "Voice request cancelled.") {
+// CLIENT_STOP.CAPTURE_CANCELLED: microphone input stopped before it produced a
+// turn. The server is told, but nothing here claims the backend stopped.
+function cancelVoice(turn = voiceTurn, message = "Voice input cancelled.") {
   if (!voiceIsCurrent(turn)) return;
+  noteClientStop(CLIENT_STOP.CAPTURE_CANCELLED);
   if (socket && socket.readyState === WebSocket.OPEN) {
     try { socket.send(JSON.stringify({type: "cancel"})); } catch (_) { /* cleanup closes it */ }
   }
@@ -801,6 +983,13 @@ function handleVoiceEvent(event, turn) {
     return;
   }
   if (data.type === "error") {
+    // Captured audio is never re-sent. A lost session is re-bootstrapped so the
+    // microphone works again, but the user starts the next voice turn.
+    if (data.code === "invalid_session") {
+      failVoice(turn, "Your session expired. Tap the microphone to try again.");
+      renewSession();
+      return;
+    }
     failVoice(
       turn,
       typeof data.message === "string" && data.message.trim()
@@ -871,6 +1060,9 @@ function handleVoicePointerCancel(event) {
 micButton.addEventListener("click", toggleVoice);
 micButton.addEventListener("pointercancel", handleVoicePointerCancel);
 window.addEventListener("beforeunload", () => cleanupVoice());
+// The composer starts withheld and is released only once a session and CSRF
+// token exist, so a failed bootstrap never looks usable.
+setSessionReady(false);
 setPending(false);
 setMicActive(false);
 loadVoiceOutputPreference();
