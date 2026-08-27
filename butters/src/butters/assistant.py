@@ -30,7 +30,7 @@ from butters.integrations.printer import DashboardPrinterAdapter
 from butters.integrations.project import ProjectInspectionAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
 from butters.llm.catalog import (
-    build_tool_catalog,
+    derive_safe_tool_catalog,
     entity_alias_summary,
     metric_alias_summary,
 )
@@ -472,7 +472,10 @@ def create_assistant(
         ResponseFormatter(),
         vocabulary,
         language_model=language_model,
-        llm_tools=build_tool_catalog(entities, metrics),
+        # Model visibility is derived from the registry under explicit policy,
+        # so a newly registered safe capability appears here and an ACTION
+        # never can.
+        llm_tools=derive_safe_tool_catalog(skills, entities, metrics),
         llm_context=(
             *(f"entity {item}" for item in entity_alias_summary(entities)),
             *(f"metric {item}" for item in metric_alias_summary(metrics)),

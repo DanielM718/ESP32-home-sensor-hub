@@ -566,6 +566,85 @@ model's choice correct. Tests must cover wrong-device names, prompt injection in
 sensor text, unsupported actions, ambiguous rooms, negation, confirmation, and
 timeouts. Policy defaults to deny.
 
+## Request resolution order
+
+Every ordinary conversational turn is resolved by walking exactly one ordered
+path. Each stage may answer; only if it does not does the next stage run.
+
+1. **Deterministic route.** The intent router matches the whole request against
+   the registered skills. A same-entity multi-metric question resolves here as a
+   single `get_sensor_values` call and is never decomposed.
+2. **Bounded compound planner.** Reached only when the whole-text route failed.
+   It splits the request on independent conjunctions, re-routes each clause
+   through the same deterministic router, and answers only if at least two
+   clauses resolve to non-mutating registered capabilities. It is capped at
+   `MAX_COMPOUND_OPERATIONS` operations and `MAX_COMPOUND_CLAUSES` clauses; a
+   broader request is refused rather than truncated. It cannot invent an
+   operation, call a model, plan recursively, or compose a mutating action.
+3. **Configured reasoning provider.** Runs only when one is enabled. It receives
+   the derived safe catalog and nothing else, and its proposals are parsed and
+   re-validated locally: the registry and policy layer remain authoritative and
+   a provider cannot bypass authorization.
+4. **Truthful fixed fallback.** With no provider enabled, the turn returns a
+   fallback that states plainly that the request cannot be answered with the
+   locally enabled skills. It never implies a conversational model exists.
+
+Production runs with `llm.enabled`, `cloud.enabled`, and `allow_paid_calls` all
+false, so stage 3 is currently inert and open-ended conversation reaches stage 4.
+
+### Mutating requests are not planned
+
+A request that includes an action never reaches the compound planner. It routes
+to the existing reviewed action, is frozen into an immutable plan, and requires
+the established pending-action and passkey ceremony. A plan may end with one
+non-mutating observation so an authorized action can report its own outcome -
+for example, whether a woken desktop actually became reachable. That observation
+is validated more strictly than an action, may only be the final step, and
+contributes no authentication of its own, so it can never lower what the plan
+requires. A plan consisting only of observations is refused.
+
+## Model-visible capability policy
+
+The `SkillRegistry` is authoritative for what Butters can do. What a *model* may
+see is a separate, narrower question, decided by explicit policy in
+`butters.llm.catalog` rather than by a hand-maintained list.
+
+A capability is categorically ineligible unless its action class is non-mutating.
+`ACTION`, anything requiring authentication, anything declaring side effects, and
+anything demanding explicit intent or confirmation can never become model-visible
+by a later edit. An administrator-audience capability is never model-visible even
+though it is read-only, because audience is an authorization boundary rather than
+a mutation boundary.
+
+Whatever survives must still present a strict, enum-bound, closed schema.
+Anything eligible but nonetheless withheld is listed in `DOCUMENTED_EXCLUSIONS`
+with a reason. A parity test fails if a registered safe skill is neither exposed
+nor documented, so a newly added capability cannot silently vanish from - or
+silently appear on - the model surface.
+
+## Cancellation semantics
+
+These are kept distinct so the interface never claims something it did not
+observe:
+
+- **Capture cancelled** - microphone input stopped before it produced a turn.
+- **Client stopped waiting** - the browser gave up; the backend may still run.
+- **Response suppressed** - a result arrived for a retired browser generation.
+- **Backend cooperatively cancelled** - the service observed a cancellation
+  token at a safe boundary and stopped before starting further work.
+- **May still be running** - an already-started uncooperative tool or provider
+  call, which is allowed to finish.
+
+The browser has no "backend cancelled" outcome of its own, because it cannot
+observe one. A client timeout reports that this browser stopped waiting and that
+the server may still be finishing the turn.
+
+Cooperative cancellation is a plain `threading.Event` threaded through
+`handle_text` into the skill registry, which already supported it. It is checked
+before any tool starts and between compound reads. A tool already executing is
+stopped only if it cooperates with the same token; otherwise it runs to
+completion and only the browser-side result is suppressed.
+
 ## Failure and degradation behavior
 
 - Audio failure prevents new sessions but does not affect home monitoring.

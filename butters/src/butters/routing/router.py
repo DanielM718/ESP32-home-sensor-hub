@@ -79,6 +79,27 @@ class IntentRouter:
             )
         desktop_action = self._desktop_action(normalized)
         if desktop_action is not None:
+            # "Wake my desktop and tell me when it is reachable" is one request,
+            # not two. The wake stays the same authenticated action with the
+            # same pending-action and passkey flow; the readiness question is
+            # answered by appending the existing read-only observation to the
+            # frozen plan, so it runs only after the action the user authorized
+            # actually succeeded. No new privilege is composed here: a mutating
+            # step is never added by this branch.
+            if desktop_action == "wake_desktop" and self._desktop_readiness_follow_up(
+                normalized
+            ):
+                return RoutedIntent(
+                    "matched",
+                    normalized,
+                    "wake_desktop",
+                    {"machine": "desktop"},
+                    confidence=1.0,
+                    action_plan=(
+                        ("wake_desktop", {"machine": "desktop"}),
+                        ("get_desktop_status", {"machine": "desktop"}),
+                    ),
+                )
             return self._matched(
                 normalized,
                 desktop_action,
@@ -1046,6 +1067,26 @@ class IntentRouter:
             "print_selector": selector,
             "baseline_minutes": 60 if "hour before" in text else None,
         }
+
+    @staticmethod
+    def _desktop_readiness_follow_up(text: str) -> bool:
+        """Whether a wake request also asks to be told when the machine is up."""
+
+        return any(
+            phrase in text
+            for phrase in (
+                "reachable",
+                "when it is up",
+                "when it's up",
+                "when it comes up",
+                "when it is ready",
+                "when it's ready",
+                "when it is online",
+                "when it's online",
+                "tell me when",
+                "let me know when",
+            )
+        )
 
     @staticmethod
     def _desktop_remote_action(text: str) -> bool:

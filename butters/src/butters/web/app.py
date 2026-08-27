@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -1318,13 +1319,62 @@ def create_app(
                         }
                     )
                     break
-                result = await run_blocking(
-                    runtime.handle_text,
-                    session,
-                    utterance.raw,
-                    source="voice",
-                    trace=trace,
+                # Cancellation stays possible after finalization. The routing
+                # turn carries a cooperative token, and a cancel frame that
+                # arrives while it runs sets that token. Whether it takes effect
+                # depends on how far the turn has got: the service checks it
+                # before any tool starts and between compound reads, so work
+                # that has not begun is genuinely stopped, while a tool already
+                # running may still finish. The client is told which happened
+                # rather than being promised a cancellation that did not occur.
+                cancel_event = threading.Event()
+                routing = asyncio.ensure_future(
+                    run_blocking(
+                        runtime.handle_text,
+                        session,
+                        utterance.raw,
+                        source="voice",
+                        trace=trace,
+                        cancel_event=cancel_event,
+                    )
                 )
+                listener = asyncio.ensure_future(websocket.receive())
+                try:
+                    while not routing.done():
+                        finished, _pending = await asyncio.wait(
+                            {routing, listener},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if listener not in finished:
+                            continue
+                        frame = listener.result()
+                        listener = asyncio.ensure_future(websocket.receive())
+                        if frame.get("type") == "websocket.disconnect":
+                            cancel_event.set()
+                            break
+                        raw_frame = frame.get("text")
+                        if not isinstance(raw_frame, str):
+                            continue
+                        try:
+                            late = json.loads(raw_frame)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(late, dict) and late.get("type") == "cancel":
+                            cancel_event.set()
+                            trace.emit(
+                                TraceStage.ROUTING,
+                                "cancel_requested",
+                                reason_code="client_cancelled",
+                            )
+                    result = await routing
+                finally:
+                    listener.cancel()
+                if cancel_event.is_set() and not routing.cancelled():
+                    trace.emit(
+                        TraceStage.ROUTING,
+                        "cancel_observed",
+                        reason_code="client_cancelled",
+                    )
                 await websocket.send_json({"type": "assistant", **result.as_dict()})
                 break
         except asyncio.TimeoutError:

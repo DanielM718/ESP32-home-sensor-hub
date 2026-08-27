@@ -345,6 +345,47 @@ class SkillRegistry:
             return SkillFailure("policy_denied", "proposal validation failed")
         return None
 
+    def validate_observation_intent(
+        self,
+        skill_name: str,
+        arguments: Mapping[str, object],
+    ) -> tuple[dict[str, object] | None, SkillFailure | None]:
+        """Validate a non-mutating observation for inclusion in a frozen plan.
+
+        This exists so an authorized action can report its own outcome - for
+        example, whether the desktop it just woke actually became reachable -
+        without the caller gaining any new privilege. It admits strictly less
+        than validate_action_intent: the skill must be non-mutating, require no
+        authentication of its own, declare no side effects, and be available to
+        the ordinary conversational audience.
+        """
+
+        spec = self._skills.get(skill_name)
+        if spec is None:
+            return None, SkillFailure("unknown_skill", "skill is not registered")
+        if not self.is_enabled(skill_name):
+            return None, SkillFailure("policy_denied", "skill is not enabled")
+        if spec.action_class not in {ActionClass.READ_ONLY, ActionClass.ANALYTICAL}:
+            return None, SkillFailure(
+                "policy_denied", "plan observations must be non-mutating"
+            )
+        if (
+            spec.authentication is not AuthenticationLevel.NONE
+            or spec.side_effects != "none"
+            or spec.audience is not SkillAudience.NORMAL
+            or spec.explicit_intent_required
+            or spec.confirmation_required
+        ):
+            return None, SkillFailure(
+                "policy_denied", "skill is not a plain observation"
+            )
+        if not spec.available:
+            return None, SkillFailure(
+                "capability_unavailable",
+                spec.unavailable_reason or "capability is unavailable",
+            )
+        return self._canonical_arguments(spec, arguments)
+
     def validate_action_intent(
         self,
         skill_name: str,
@@ -370,6 +411,15 @@ class SkillRegistry:
                 "capability_unavailable",
                 spec.unavailable_reason or "capability is unavailable",
             )
+        return self._canonical_arguments(spec, arguments)
+
+    @staticmethod
+    def _canonical_arguments(
+        spec: SkillSpec,
+        arguments: Mapping[str, object],
+    ) -> tuple[dict[str, object] | None, SkillFailure | None]:
+        """Parse, authorize, and canonicalize arguments for an immutable plan."""
+
         try:
             parsed = spec.parse_arguments(arguments)
             spec.authorize(parsed)

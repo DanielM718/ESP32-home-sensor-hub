@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 APP_JS = (
     Path(__file__).resolve().parents[1] / "src/butters/web/static/assets/app.js"
 ).read_text(encoding="utf-8")
