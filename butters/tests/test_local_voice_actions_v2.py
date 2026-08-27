@@ -186,3 +186,37 @@ def test_local_console_cannot_satisfy_fresh_desktop_restart(tmp_path) -> None:
     assert not state.jobs(identity="local-console")
     spec = voice.assistant.skills.get("restart_desktop")
     assert spec and spec.authentication is AuthenticationLevel.FRESH
+
+
+def test_local_console_wake_still_works_when_readiness_is_also_asked(
+    tmp_path,
+) -> None:
+    """A composed observation must not turn a console-allowed wake into a
+    passkey demand.
+
+    "Wake my desktop and tell me when it is reachable" now freezes the wake
+    together with the existing read-only readiness observation. That
+    observation declares no authentication and no local-console alternative of
+    its own - it is not an action - so the console gate must ignore it and
+    judge the plan by the action it actually contains.
+    """
+
+    voice, _state, _desktop, _clock = _voice(tmp_path)
+    voice.note_physical_wake()
+
+    plain = voice.handle_text("Wake my desktop")
+    assert plain and plain.policy_status == "confirmation_required"
+    voice.handle_text("no")
+
+    voice.note_physical_wake()
+    composed = voice.handle_text("Wake my desktop and tell me when it is reachable")
+
+    assert composed is not None
+    assert composed.policy_status == "confirmation_required", (
+        composed.policy_status,
+        composed.response_text,
+    )
+    assert composed.route.action_plan == (
+        ("wake_desktop", {"machine": "desktop"}),
+        ("get_desktop_status", {"machine": "desktop"}),
+    )

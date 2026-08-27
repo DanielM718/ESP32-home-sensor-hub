@@ -1339,6 +1339,7 @@ def create_app(
                     )
                 )
                 listener = asyncio.ensure_future(websocket.receive())
+                disconnected = False
                 try:
                     while not routing.done():
                         finished, _pending = await asyncio.wait(
@@ -1348,10 +1349,13 @@ def create_app(
                         if listener not in finished:
                             continue
                         frame = listener.result()
-                        listener = asyncio.ensure_future(websocket.receive())
                         if frame.get("type") == "websocket.disconnect":
+                            # Do not schedule another receive on a closed
+                            # socket; it would only fail and be discarded.
+                            disconnected = True
                             cancel_event.set()
                             break
+                        listener = asyncio.ensure_future(websocket.receive())
                         raw_frame = frame.get("text")
                         if not isinstance(raw_frame, str):
                             continue
@@ -1366,15 +1370,26 @@ def create_app(
                                 "cancel_requested",
                                 reason_code="client_cancelled",
                             )
+                    # The routing thread cannot be killed, so it is always
+                    # awaited; the token only stops work it had not started.
                     result = await routing
                 finally:
                     listener.cancel()
-                if cancel_event.is_set() and not routing.cancelled():
+                if cancel_event.is_set():
                     trace.emit(
                         TraceStage.ROUTING,
                         "cancel_observed",
                         reason_code="client_cancelled",
                     )
+                if disconnected:
+                    # A browser that has already gone away is not an error, and
+                    # must not retire a healthy recognizer from the pool.
+                    trace.emit(
+                        TraceStage.AUDIO,
+                        "disconnected",
+                        reason_code="browser_disconnect",
+                    )
+                    break
                 await websocket.send_json({"type": "assistant", **result.as_dict()})
                 break
         except asyncio.TimeoutError:

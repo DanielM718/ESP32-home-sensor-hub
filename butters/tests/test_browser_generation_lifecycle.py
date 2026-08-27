@@ -236,3 +236,20 @@ def test_a_speech_failure_does_not_fail_the_chat_turn() -> None:
     # The turn still settles on an idle state, so the composer stays usable.
     assert '"idle"' in play
     assert '"error"' not in play
+
+
+def test_renewal_discards_action_state_bound_to_the_old_session() -> None:
+    """A plan frozen against a dead session can never complete."""
+
+    renew = _block(APP_JS, "function renewSession()")
+
+    assert "pendingAction = activeJob = null" in renew
+    assert "actionCard.hidden = true" in renew
+
+
+def test_enter_cannot_submit_before_the_session_exists() -> None:
+    """Disabling the button leaves the Enter key, which submits the form."""
+
+    body = _block(APP_JS, 'form.addEventListener("submit"')
+
+    assert "if (!sessionReady) return;" in body

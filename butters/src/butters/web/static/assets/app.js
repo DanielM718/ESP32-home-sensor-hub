@@ -244,6 +244,12 @@ function renewSession() {
         throw new Error("Invalid server response");
       }
       csrf = data.csrf_token;
+      // A renewed session is a different session, so any pending action or job
+      // frozen against the previous one can never complete. The elevation that
+      // would have authorized it is gone with it. Clear the card rather than
+      // leaving a control the user cannot finish.
+      pendingAction = activeJob = null;
+      actionCard.hidden = true;
       setSessionReady(true);
       return true;
     } catch (_) {
@@ -630,6 +636,9 @@ async function speak(traceId) {
 form.addEventListener("submit", event => {
   event.preventDefault();
   if (pending) return;
+  // Withholding the button is not enough: the Enter key submits the form too,
+  // and without a session there is nothing valid to send.
+  if (!sessionReady) return;
   const text = input.value.trim();
   if (!text) return;
   // Refocusing inside the submit gesture keeps an open keyboard up. Focusing

@@ -11,7 +11,11 @@ from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorErro
 from butters.actions.store import ActionStateError, PendingPlan
 from butters.assistant import AssistantResponse, DeterministicAssistant
 from butters.routing.model import RoutedIntent
-from butters.skills.model import AuthenticationContext, AuthenticationLevel
+from butters.skills.model import (
+    ActionClass,
+    AuthenticationContext,
+    AuthenticationLevel,
+)
 from butters.stt.normalization import normalize_transcript
 
 AFFIRMATIVE = frozenset({"yes", "yeah", "confirm", "do it"})
@@ -74,9 +78,17 @@ class LocalVoiceAuthorization:
             spec = self.assistant.skills.get(route.skill)
             if spec is None or spec.action_class.value != "action":
                 return None
+            # The local-console gate applies to the actions in a plan. A
+            # trailing non-mutating observation declares no authentication and
+            # no local-console alternative of its own, so including it here
+            # would refuse an action the console is otherwise allowed to run.
             plan_specs = tuple(
-                self.assistant.skills.get(skill)
-                for skill, _arguments in route.action_plan
+                item
+                for item in (
+                    self.assistant.skills.get(skill)
+                    for skill, _arguments in route.action_plan
+                )
+                if item is None or item.action_class is ActionClass.ACTION
             ) or (spec,)
             if self.clock() >= self._context_expires_at:
                 return self._response(

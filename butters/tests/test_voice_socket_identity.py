@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 
 from beta1_harness import (
@@ -158,6 +159,66 @@ def test_voice_socket_rejects_a_session_when_identity_is_absent(tmp_path: Path) 
                     assert outcome["kind"] == "websocket.close", outcome
                 finally:
                     await socket.finish()
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_a_disconnect_during_routing_unwinds_the_cancel_watch_cleanly(
+    tmp_path: Path,
+) -> None:
+    """The socket watches for frames while routing runs, so a late cancel can
+    be observed. That concurrent watch must unwind cleanly when the browser
+    leaves mid-turn: the routing thread is still awaited, the frame listener is
+    cancelled rather than left pending on a closed socket, and the voice slot
+    and recognizer go back to their pools intact for the next turn.
+    """
+
+    async def scenario() -> None:
+        app, service, _settings = build_app(
+            tmp_path, stt_engine_factory=TranscribingEngine
+        )
+        routing_started = threading.Event()
+        may_finish = threading.Event()
+        original = service.handle_text
+
+        def slow_handle_text(*args, **kwargs):
+            routing_started.set()
+            may_finish.wait(5)
+            return original(*args, **kwargs)
+
+        service.handle_text = slow_handle_text
+        try:
+            async with client(app) as http:
+                session = await start_session(http, headers=_identity(OWNER))
+                socket = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers=_socket_headers(_session_id(http), OWNER),
+                )
+                await socket.connect()
+                await _start_frame(socket, str(session["csrf_token"]))
+                assert (await socket.receive())["type"] == "listening"
+                await socket.send_bytes(
+                    (1000).to_bytes(2, "little", signed=True) * 640
+                )
+                await socket.send_json({"type": "stop", "endpoint_reason": "tap"})
+                # Leave while the turn is provably still being routed.
+                await asyncio.get_running_loop().run_in_executor(
+                    None, routing_started.wait, 5
+                )
+                await socket.disconnect()
+                await asyncio.sleep(0.05)
+                may_finish.set()
+                await socket.finish()
+                # The engine must go back to the pool intact and reusable. One
+                # retired as unreusable is closed instead, leaving nothing
+                # available and dropping the created count.
+                stats = app.state.stt_pool.stats()
+                assert stats["in_use"] == 0
+                assert stats["available"] == 1, stats
+                assert stats["created"] == 1, stats
         finally:
             await app.state.shutdown_workers()
 
