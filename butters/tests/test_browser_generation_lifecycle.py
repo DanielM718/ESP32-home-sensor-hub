@@ -44,7 +44,7 @@ def test_retiring_a_generation_aborts_the_work_it_owns() -> None:
 
     assert "generationWork[key] = null" in retire
     assert "controller.abort()" in retire
-    assert "const generationWork = {chat: null, speech: null};" in APP_JS
+    assert "const generationWork = {chat: null, speech: null, clear: null};" in APP_JS
 
 
 def test_the_chat_request_is_registered_so_it_can_be_retired() -> None:
@@ -70,6 +70,22 @@ def test_clear_terminates_playback_capture_and_the_voice_socket() -> None:
     assert "cleanupVoice()" in clear
     assert "setPending(false)" in clear
     assert clear.index("stopPlayback()") < clear.index('fetch("/api/session/conversation"')
+
+
+def test_clear_empties_the_view_before_waiting_for_the_server() -> None:
+    clear = _block(APP_JS, "async function clearConversation()")
+
+    assert clear.index("conversation.replaceChildren()") < clear.index(
+        'fetch("/api/session/conversation"'
+    )
+
+
+def test_clear_is_abortable_and_carries_its_server_ordering_generation() -> None:
+    clear = _block(APP_JS, "async function clearConversation()")
+
+    assert "generationWork.clear = controller" in clear
+    assert '"X-Butters-Generation": String(turn)' in clear
+    assert "signal: controller.signal" in clear
 
 
 def test_clear_aborts_synthesis_that_is_still_being_fetched() -> None:
@@ -122,6 +138,7 @@ def test_chat_is_replayed_only_when_the_server_proved_it_never_ran() -> None:
     # invalid_session is raised by the session guard before /api/chat reaches
     # the assistant, so it is the only replayable outcome.
     assert 'data.error !== "invalid_session"' in send
+    assert "data.safe_to_retry !== true" in send
     assert "renewed" in send
 
 
@@ -130,22 +147,44 @@ def test_chat_renewal_is_attempted_at_most_once() -> None:
 
     assert "if (renewed || " in send
     assert "renewed = true" in send
-    assert send.count("await renewSession()") == 1
+    assert send.count("await renewSession(turn)") == 1
 
 
 def test_renewal_failure_stops_cleanly_without_retrying() -> None:
     send = _block(APP_JS, "async function sendText")
 
-    assert "if (!(await renewSession()) || !isCurrentTurn(turn))" in send
+    assert "if (!(await renewSession(turn)) || !isCurrentTurn(turn))" in send
 
 
 def test_renewal_is_single_flight_and_never_recurses() -> None:
-    renew = _block(APP_JS, "function renewSession()")
+    renew = _block(APP_JS, "async function renewSession(turn = currentTurn)")
 
-    assert "if (renewing) return renewing;" in renew
-    assert "renewing = null" in renew
-    # Renewal re-runs the ordinary bootstrap endpoint; it never calls itself.
-    assert "renewSession(" not in renew
+    assert "if (!renewing)" in renew
+    assert "if (renewing === flight) renewing = null" in renew
+    assert renew.count('fetch("/api/session"') == 1
+
+
+def test_renewal_installs_cookie_coupled_state_before_new_requests_proceed() -> None:
+    renew = _block(APP_JS, "async function renewSession(turn = currentTurn)")
+
+    # Set-Cookie is processed by the user agent, outside JavaScript's
+    # generation guards. Its paired CSRF value must therefore be installed by
+    # the shared renewal itself; only the caller's decision to retry is scoped
+    # to the generation.
+    assert renew.index("csrf = data.csrf_token") < renew.index(
+        "return (await flight) && isCurrentTurn(turn)"
+    )
+    assert "setSessionReady(false)" in renew
+
+    barrier = _block(APP_JS, "async function awaitPendingRenewal(turn)")
+    assert "const flight = renewing" in barrier
+    assert "await flight" in barrier
+    assert "isCurrentTurn(turn)" in barrier
+
+    send = _block(APP_JS, "async function sendText")
+    clear = _block(APP_JS, "async function clearConversation")
+    assert "await awaitPendingRenewal(turn)" in send
+    assert "await awaitPendingRenewal(turn)" in clear
 
 
 def test_privileged_actions_are_never_automatically_replayed() -> None:
@@ -161,11 +200,11 @@ def test_voice_recovery_never_replays_captured_audio() -> None:
     begin = _block(APP_JS, "async function beginVoice(event)")
     handler = _block(APP_JS, "function handleVoiceEvent(event, turn)")
 
-    assert "renewSession()" in begin
-    assert "renewSession()" in handler
+    assert "renewSession(turn)" in begin
+    assert "renewSession(turn)" in handler
     # Recovery re-bootstraps the session only; nothing re-sends PCM frames.
     for body in (begin, handler):
-        recovery = body[body.index("renewSession()") :]
+        recovery = body[body.index("renewSession(turn)") :]
         assert "socket.send" not in recovery
 
 
@@ -210,6 +249,15 @@ def test_a_failed_session_bootstrap_withholds_the_composer_controls() -> None:
     assert "input.disabled" not in APP_JS
 
 
+def test_programmatic_text_and_voice_paths_also_require_a_session() -> None:
+    send = _block(APP_JS, "async function sendText")
+    voice = _block(APP_JS, "async function beginVoice(event)")
+
+    assert "if ((!sessionReady || !csrf) && !renewing) return;" in send
+    assert "await awaitPendingRenewal(turn)" in send
+    assert "if (!sessionReady || !csrf || voiceState" in voice
+
+
 def test_the_composer_starts_withheld_before_the_session_exists() -> None:
     tail = APP_JS[APP_JS.index("micButton.addEventListener") :]
 
@@ -238,13 +286,37 @@ def test_a_speech_failure_does_not_fail_the_chat_turn() -> None:
     assert '"error"' not in play
 
 
+def test_wake_job_completion_reports_reachability_or_timeout() -> None:
+    summary = _block(APP_JS, "function summarizeCompletedAction(job)")
+
+    assert 'item.skill === "wait_for_desktop_reachability"' in summary
+    assert "Desktop is reachable" in summary
+    assert "reachability timed out" in summary
+
+
 def test_renewal_discards_action_state_bound_to_the_old_session() -> None:
     """A plan frozen against a dead session can never complete."""
 
-    renew = _block(APP_JS, "function renewSession()")
+    renew = _block(APP_JS, "async function renewSession(turn = currentTurn)")
 
     assert "pendingAction = activeJob = null" in renew
     assert "actionCard.hidden = true" in renew
+
+
+def test_text_and_voice_send_the_same_interaction_generation_to_the_server() -> None:
+    send = _block(APP_JS, "async function sendText")
+    voice = _block(APP_JS, "async function beginVoice(event)")
+
+    assert '"X-Butters-Generation": String(turn)' in send
+    assert "interaction_generation: turn" in voice
+
+
+def test_a_stale_clear_response_cannot_replace_a_newer_csrf_token() -> None:
+    clear = _block(APP_JS, "async function clearConversation()")
+
+    assert clear.index("if (!isCurrentTurn(turn)) return;") < clear.index(
+        "csrf = data.csrf_token"
+    )
 
 
 def test_enter_cannot_submit_before_the_session_exists() -> None:

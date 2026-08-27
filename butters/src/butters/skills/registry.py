@@ -35,6 +35,11 @@ _CURRENT_JOB_ID: ContextVar[str | None] = ContextVar(
     "butters_skill_job_id", default=None
 )
 
+# Action plans may contain only this reviewed post-action observer. Keeping the
+# set explicit prevents a future nominally read-only host or broker capability
+# from becoming executable after a passkey ceremony merely through metadata.
+PLAN_OBSERVATION_SKILLS = frozenset({"wait_for_desktop_reachability"})
+
 
 def current_cancel_event() -> threading.Event | None:
     return _CURRENT_CANCEL_EVENT.get()
@@ -363,6 +368,10 @@ class SkillRegistry:
         spec = self._skills.get(skill_name)
         if spec is None:
             return None, SkillFailure("unknown_skill", "skill is not registered")
+        if skill_name not in PLAN_OBSERVATION_SKILLS:
+            return None, SkillFailure(
+                "policy_denied", "skill is not an allow-listed plan observation"
+            )
         if not self.is_enabled(skill_name):
             return None, SkillFailure("policy_denied", "skill is not enabled")
         if spec.action_class not in {ActionClass.READ_ONLY, ActionClass.ANALYTICAL}:

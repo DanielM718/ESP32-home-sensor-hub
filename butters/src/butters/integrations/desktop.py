@@ -138,6 +138,45 @@ class DesktopWorkflow:
         parsec = self.operations.parsec_ready() if ssh else False
         return DesktopState(machine, network, ssh, parsec)
 
+    def wait_for_reachability(
+        self, machine: str, *, cancel_event: threading.Event | None = None
+    ) -> dict[str, object]:
+        """Poll the fixed desktop until network/SSH reachability or timeout.
+
+        This is the observation half of an authenticated wake plan. It never
+        sends WOL, invokes SSH commands, or changes monitor state; sequencing in
+        ActionCoordinator starts it only after the frozen wake action succeeds.
+        """
+
+        self._require_machine(machine)
+        event = cancel_event or threading.Event()
+        started = self.clock()
+        deadline = min(
+            started + self.settings.network_timeout_seconds,
+            started + self.settings.total_timeout_seconds,
+        )
+        observed = {"network": False, "ssh": False}
+
+        def reachable() -> bool:
+            ssh = self.operations.ssh_ready()
+            network = self.operations.network_reachable() or ssh
+            observed["network"] = network
+            observed["ssh"] = ssh
+            return network
+
+        ready = self._wait_for(reachable, deadline, event)
+        cancelled = event.is_set()
+        parsec = self.operations.parsec_ready() if ready and observed["ssh"] else False
+        return {
+            "machine": machine,
+            "network_reachable": bool(ready and observed["network"]),
+            "ssh_ready": bool(ready and observed["ssh"]),
+            "parsec_ready": parsec,
+            "timed_out": not ready and not cancelled,
+            "cancelled": cancelled,
+            "elapsed_ms": round((self.clock() - started) * 1000),
+        }
+
     def start_remote_session(
         self, machine: str, *, cancel_event: threading.Event | None = None
     ) -> dict[str, object]:

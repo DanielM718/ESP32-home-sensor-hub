@@ -11,8 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+import time
 from pathlib import Path
 
+import pytest
 from beta1_harness import (
     TranscribingEngine,
     WebSocketHarness,
@@ -110,7 +112,7 @@ def test_voice_socket_rejects_a_session_copied_to_another_peer(tmp_path: Path) -
 
     async def scenario() -> None:
         CountingEngine.created = 0
-        app, _service, _settings = build_app(
+        app, service, _settings = build_app(
             tmp_path, stt_engine_factory=CountingEngine
         )
         try:
@@ -132,6 +134,7 @@ def test_voice_socket_rejects_a_session_copied_to_another_peer(tmp_path: Path) -
                 # Rejection precedes every expensive resource: no recognizer was
                 # allocated for the intruder's connection.
                 assert CountingEngine.created == 0
+                assert service.sessions.require(_session_id(http)).messages == []
         finally:
             await app.state.shutdown_workers()
 
@@ -159,6 +162,209 @@ def test_voice_socket_rejects_a_session_when_identity_is_absent(tmp_path: Path) 
                     assert outcome["kind"] == "websocket.close", outcome
                 finally:
                     await socket.finish()
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_direct_same_socket_peer_session_remains_supported(tmp_path: Path) -> None:
+    """The fallback equivalence class is intentionally the direct socket peer."""
+
+    async def scenario() -> None:
+        app, service, _settings = build_app(
+            tmp_path, stt_engine_factory=TranscribingEngine
+        )
+        try:
+            session = service.sessions.create(peer_key="peer:127.0.0.1")
+            socket = WebSocketHarness(
+                app,
+                "/ws/voice",
+                headers=_socket_headers(session.session_id, None),
+            )
+            await socket.connect()
+            await _start_frame(socket, session.csrf_token)
+            assert (await socket.receive())["type"] == "listening"
+            await socket.disconnect()
+            await socket.finish()
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_missing_session_is_rejected_before_accept_and_stt(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, _service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            socket = WebSocketHarness(
+                app,
+                "/ws/voice",
+                headers=_socket_headers("A" * 43, OWNER),
+            )
+            await socket.incoming.put({"type": "websocket.connect"})
+            assert (await _first_frame(socket))["kind"] == "websocket.close"
+            await socket.finish()
+            assert CountingEngine.created == 0
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("login", ["   ", "intruder@example.com"])
+def test_voice_socket_rejects_missing_or_mismatched_identity_before_stt(
+    tmp_path: Path, login: str
+) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, _service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            async with client(app) as http:
+                await start_session(http, headers=_identity(OWNER))
+                socket = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers=_socket_headers(_session_id(http), login),
+                )
+                await socket.incoming.put({"type": "websocket.connect"})
+                assert (await _first_frame(socket))["kind"] == "websocket.close"
+                await socket.finish()
+                assert CountingEngine.created == 0
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_untrusted_proxy_identity_cannot_reuse_a_bound_session(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, _service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            async with client(app) as http:
+                await start_session(http, headers=_identity(OWNER))
+                socket = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers=_socket_headers(_session_id(http), OWNER),
+                    client_host="100.64.0.22",
+                )
+                await socket.incoming.put({"type": "websocket.connect"})
+                assert (await _first_frame(socket))["kind"] == "websocket.close"
+                await socket.finish()
+                assert CountingEngine.created == 0
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("csrf", [None, "wrong-token"])
+def test_missing_or_invalid_csrf_is_rejected_before_stt(
+    tmp_path: Path, csrf: str | None
+) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, _service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            async with client(app) as http:
+                session = await start_session(http, headers=_identity(OWNER))
+                socket = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers=_socket_headers(_session_id(http), OWNER),
+                )
+                await socket.connect()
+                await _start_frame(socket, csrf or "")
+                event = await socket.receive()
+                assert event["type"] == "error"
+                assert event["code"] == "csrf_denied"
+                assert CountingEngine.created == 0
+                assert session["csrf_token"] != csrf
+                await socket.finish()
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_invalid_origin_and_expired_session_are_rejected_before_accept(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            async with client(app) as http:
+                await start_session(http, headers=_identity(OWNER))
+                session_id = _session_id(http)
+                bad_origin = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers={
+                        **_socket_headers(session_id, OWNER),
+                        "origin": "http://attacker.invalid",
+                    },
+                )
+                await bad_origin.incoming.put({"type": "websocket.connect"})
+                assert (await _first_frame(bad_origin))["kind"] == "websocket.close"
+                await bad_origin.finish()
+
+                session = service.sessions.require(session_id)
+                session.last_active_monotonic = (
+                    time.monotonic() - service.sessions.ttl_seconds - 1
+                )
+                expired = WebSocketHarness(
+                    app,
+                    "/ws/voice",
+                    headers=_socket_headers(session_id, OWNER),
+                )
+                await expired.incoming.put({"type": "websocket.connect"})
+                assert (await _first_frame(expired))["kind"] == "websocket.close"
+                await expired.finish()
+                assert CountingEngine.created == 0
+        finally:
+            await app.state.shutdown_workers()
+
+    asyncio.run(scenario())
+
+
+def test_cookie_and_csrf_from_different_sessions_are_rejected_before_stt(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        CountingEngine.created = 0
+        app, service, _settings = build_app(
+            tmp_path, stt_engine_factory=CountingEngine
+        )
+        try:
+            first = service.sessions.create(peer_key="identity:" + OWNER)
+            second = service.sessions.create(peer_key="identity:" + OWNER)
+            socket = WebSocketHarness(
+                app,
+                "/ws/voice",
+                headers=_socket_headers(first.session_id, OWNER),
+            )
+            await socket.connect()
+            await _start_frame(socket, second.csrf_token)
+            event = await socket.receive()
+            assert event["type"] == "error"
+            assert event["code"] == "csrf_denied"
+            assert first.messages == second.messages == []
+            assert CountingEngine.created == 0
+            await socket.finish()
         finally:
             await app.state.shutdown_workers()
 
@@ -205,9 +411,10 @@ def test_a_disconnect_during_routing_unwinds_the_cancel_watch_cleanly(
                 )
                 await socket.send_json({"type": "stop", "endpoint_reason": "tap"})
                 # Leave while the turn is provably still being routed.
-                await asyncio.get_running_loop().run_in_executor(
-                    None, routing_started.wait, 5
-                )
+                deadline = asyncio.get_running_loop().time() + 5
+                while not routing_started.is_set():
+                    assert asyncio.get_running_loop().time() < deadline
+                    await asyncio.sleep(0.005)
                 await socket.disconnect()
                 await asyncio.sleep(0.05)
                 may_finish.set()

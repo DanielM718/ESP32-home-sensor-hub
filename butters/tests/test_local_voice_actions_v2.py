@@ -218,5 +218,5 @@ def test_local_console_wake_still_works_when_readiness_is_also_asked(
     )
     assert composed.route.action_plan == (
         ("wake_desktop", {"machine": "desktop"}),
-        ("get_desktop_status", {"machine": "desktop"}),
+        ("wait_for_desktop_reachability", {"machine": "desktop"}),
     )

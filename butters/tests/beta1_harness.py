@@ -146,7 +146,15 @@ async def start_session(
 class WebSocketHarness:
     """Drive an ASGI WebSocket route directly, as a real loopback peer would."""
 
-    def __init__(self, app, path: str, *, headers: dict[str, str], host: str = "testserver") -> None:
+    def __init__(
+        self,
+        app,
+        path: str,
+        *,
+        headers: dict[str, str],
+        host: str = "testserver",
+        client_host: str = "127.0.0.1",
+    ) -> None:
         self.incoming: asyncio.Queue = asyncio.Queue()
         self.outgoing: asyncio.Queue = asyncio.Queue()
         request_headers = {"host": host, **headers}
@@ -159,7 +167,7 @@ class WebSocketHarness:
             "query_string": b"",
             "root_path": "",
             "headers": [(key.lower().encode(), value.encode()) for key, value in request_headers.items()],
-            "client": ("127.0.0.1", 1234),
+            "client": (client_host, 1234),
             "server": ("testserver", 80),
             "subprotocols": [],
             "state": {},

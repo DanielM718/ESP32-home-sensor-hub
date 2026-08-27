@@ -14,6 +14,10 @@ CONTROL_START = re.compile(
     r"cool|load|unload|upload|delete|print|extrude)\b"
 )
 CONTROL_TOGGLE = re.compile(r"\bturn\b.+\b(?:on|off)\b")
+NEGATED_DESKTOP_ACTION = re.compile(
+    r"\b(?:do not|don't|dont|never)\s+(?:\w+\s+){0,3}"
+    r"(?:wake|turn|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
+)
 
 
 def _distinct_metrics(metrics: tuple[Metric, ...]) -> tuple[Metric, ...]:
@@ -97,7 +101,10 @@ class IntentRouter:
                     confidence=1.0,
                     action_plan=(
                         ("wake_desktop", {"machine": "desktop"}),
-                        ("get_desktop_status", {"machine": "desktop"}),
+                        (
+                            "wait_for_desktop_reachability",
+                            {"machine": "desktop"},
+                        ),
                     ),
                 )
             return self._matched(
@@ -1090,6 +1097,8 @@ class IntentRouter:
 
     @staticmethod
     def _desktop_remote_action(text: str) -> bool:
+        if NEGATED_DESKTOP_ACTION.search(text):
+            return False
         if "prepare my computer" in text:
             return True
         wake = any(
@@ -1118,6 +1127,8 @@ class IntentRouter:
 
     @staticmethod
     def _desktop_action(text: str) -> str | None:
+        if NEGATED_DESKTOP_ACTION.search(text):
+            return None
         mappings = (
             (
                 (

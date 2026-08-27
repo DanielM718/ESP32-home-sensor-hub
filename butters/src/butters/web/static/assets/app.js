@@ -70,7 +70,7 @@ let renewing = null;
 // Every abortable request this generation owns. Retiring a generation aborts
 // what can be aborted; whatever cannot is suppressed by the isCurrentTurn
 // guard at each mutation site instead.
-const generationWork = {chat: null, speech: null};
+const generationWork = {chat: null, speech: null, clear: null};
 
 // Distinct client-side outcomes, kept separate so the UI never reports a
 // server cancellation it did not observe.
@@ -212,6 +212,10 @@ async function initialize() {
       throw new Error("Invalid server response");
     }
     csrf = data.csrf_token;
+    const serverGeneration = Number(data.interaction_generation);
+    if (Number.isSafeInteger(serverGeneration) && serverGeneration >= 0) {
+      currentTurn = Math.max(currentTurn, serverGeneration);
+    }
     if (Array.isArray(data.messages) && data.messages.length) {
       conversation.replaceChildren();
       for (const message of data.messages) addMessage(message.role, message.text);
@@ -233,37 +237,58 @@ async function initialize() {
 // it re-runs the ordinary browser-context endpoint, which still applies
 // Origin, same-origin admission, peer identity, and per-peer limits, and it
 // issues a fresh CSRF token rather than reusing the old one.
-function renewSession() {
-  if (renewing) return renewing;
-  renewing = (async () => {
-    try {
-      const response = await fetch("/api/session", {credentials: "same-origin"});
-      const data = await readJson(response);
-      if (!response.ok) throw new Error(data.message || "Session failed");
-      if (typeof data.csrf_token !== "string" || !data.csrf_token) {
-        throw new Error("Invalid server response");
+async function renewSession(turn = currentTurn) {
+  if (!renewing) {
+    // A renewal response can install Set-Cookie before fetch resolves. Gate
+    // every new authenticated interaction until the matching CSRF token has
+    // also been installed, so those two pieces of session state never diverge.
+    setSessionReady(false);
+    renewing = (async () => {
+      try {
+        const response = await fetch("/api/session", {credentials: "same-origin"});
+        const data = await readJson(response);
+        if (!response.ok) throw new Error(data.message || "Session failed");
+        if (typeof data.csrf_token !== "string" || !data.csrf_token) {
+          throw new Error("Invalid server response");
+        }
+        // This assignment is intentionally not generation-guarded. The user
+        // agent has already accepted this response's HttpOnly cookie, so its
+        // paired synchronizer token must become globally authoritative too.
+        csrf = data.csrf_token;
+        const serverGeneration = Number(data.interaction_generation);
+        if (Number.isSafeInteger(serverGeneration) && serverGeneration >= 0) {
+          currentTurn = Math.max(currentTurn, serverGeneration);
+        }
+        // A renewed session is a different session, so any pending action or
+        // job frozen against the previous one can never complete.
+        pendingAction = activeJob = null;
+        actionCard.hidden = true;
+        setSessionReady(true);
+        return true;
+      } catch (_) {
+        csrf = "";
+        setSessionReady(false);
+        return false;
       }
-      csrf = data.csrf_token;
-      // A renewed session is a different session, so any pending action or job
-      // frozen against the previous one can never complete. The elevation that
-      // would have authorized it is gone with it. Clear the card rather than
-      // leaving a control the user cannot finish.
-      pendingAction = activeJob = null;
-      actionCard.hidden = true;
-      setSessionReady(true);
-      return true;
-    } catch (_) {
-      csrf = "";
-      setSessionReady(false);
-      return false;
-    } finally {
-      renewing = null;
-    }
-  })();
-  return renewing;
+    })();
+  }
+  const flight = renewing;
+  try {
+    return (await flight) && isCurrentTurn(turn);
+  } finally {
+    if (renewing === flight) renewing = null;
+  }
+}
+
+async function awaitPendingRenewal(turn) {
+  const flight = renewing;
+  if (!flight) return true;
+  const ready = await flight;
+  return ready && isCurrentTurn(turn);
 }
 
 async function sendText(text) {
+  if ((!sessionReady || !csrf) && !renewing) return;
   cleanupVoice();
   const turn = beginTurn();
   stopPlayback();
@@ -274,6 +299,7 @@ async function sendText(text) {
   let requestTimer = 0;
   let stop = "";
   try {
+    if (!(await awaitPendingRenewal(turn))) return;
     let renewed = false;
     for (;;) {
       if (requestTimer) window.clearTimeout(requestTimer);
@@ -287,7 +313,11 @@ async function sendText(text) {
       const response = await fetch("/api/chat", {
         method: "POST",
         credentials: "same-origin",
-        headers: {"Content-Type": "application/json", "X-Butters-CSRF": csrf},
+        headers: {
+          "Content-Type": "application/json",
+          "X-Butters-CSRF": csrf,
+          "X-Butters-Generation": String(turn),
+        },
         body: JSON.stringify({text}),
         signal: controller.signal,
       });
@@ -314,11 +344,11 @@ async function sendText(text) {
       // after a fresh session exists. No timeout, transport failure, or any
       // other status is ever replayed, because the server may already have
       // acted on it.
-      if (renewed || data.error !== "invalid_session") {
+      if (renewed || data.error !== "invalid_session" || data.safe_to_retry !== true) {
         throw new Error(data.message || "Request failed");
       }
       renewed = true;
-      if (!(await renewSession()) || !isCurrentTurn(turn)) {
+      if (!(await renewSession(turn)) || !isCurrentTurn(turn)) {
         throw new Error(data.message || "Request failed");
       }
     }
@@ -448,7 +478,9 @@ async function pollJob(jobId) {
     actionCancel.hidden = !["queued", "running", "waiting"].includes(job.state);
     if (["completed", "failed", "cancelled", "expired"].includes(job.state)) {
       actionTitle.textContent = job.state === "completed" ? "Action completed" : "Action did not complete";
-      if (job.failure_reason) actionProgress.textContent += ` · ${job.failure_reason}`;
+      const completion = summarizeCompletedAction(job);
+      if (completion) actionProgress.textContent = completion;
+      else if (job.failure_reason) actionProgress.textContent += ` · ${job.failure_reason}`;
       return;
     }
     window.setTimeout(() => pollJob(jobId), 1000);
@@ -456,6 +488,22 @@ async function pollJob(jobId) {
     actionTitle.textContent = "Action status unavailable";
     actionProgress.textContent = error.message;
   }
+}
+
+function summarizeCompletedAction(job) {
+  const steps = job && job.result && Array.isArray(job.result.steps)
+    ? job.result.steps
+    : [];
+  const observation = steps.find(item => item && item.skill === "wait_for_desktop_reachability");
+  const data = observation && observation.result && observation.result.data;
+  if (!data || typeof data !== "object") return "";
+  if (data.network_reachable === true) {
+    return data.ssh_ready === true
+      ? "Desktop is reachable and SSH is ready."
+      : "Desktop is reachable; SSH is not ready yet.";
+  }
+  if (data.timed_out === true) return "Wake completed, but desktop reachability timed out.";
+  return "Desktop reachability could not be confirmed.";
 }
 
 authButton.addEventListener("click", async () => {
@@ -663,27 +711,36 @@ async function clearConversation() {
   stopPlayback();
   cleanupVoice();
   setPending(false);
+  conversation.replaceChildren();
   setState("Clearing", "processing");
+  const controller = new AbortController();
+  generationWork.clear = controller;
   try {
+    if (!(await awaitPendingRenewal(turn))) throw new Error();
     const response = await fetch("/api/session/conversation", {
       method: "DELETE",
       credentials: "same-origin",
-      headers: {"X-Butters-CSRF": csrf},
+      headers: {
+        "X-Butters-CSRF": csrf,
+        "X-Butters-Generation": String(turn),
+      },
+      signal: controller.signal,
     });
+    if (generationWork.clear === controller) generationWork.clear = null;
     const data = await readJson(response);
     if (!response.ok) throw new Error();
     if (typeof data.csrf_token !== "string" || !data.csrf_token) throw new Error();
-    csrf = data.csrf_token;
     if (!isCurrentTurn(turn)) return;
-    conversation.replaceChildren();
+    csrf = data.csrf_token;
     addMessage("assistant", "Conversation cleared.");
     setState("Ready", "idle");
   } catch (_) {
     if (!isCurrentTurn(turn)) return;
     // The browser side is already terminated and idle; only the server-side
     // clear is unconfirmed, so the composer stays usable.
-    conversation.replaceChildren();
     setState("Could not clear", "error");
+  } finally {
+    if (generationWork.clear === controller) generationWork.clear = null;
   }
 }
 
@@ -773,7 +830,7 @@ function transitionVoice(next, turn, label = null) {
 
 async function beginVoice(event) {
   if (event) event.preventDefault();
-  if (!csrf || voiceState !== VOICE_STATE.IDLE) return;
+  if (!sessionReady || !csrf || voiceState !== VOICE_STATE.IDLE) return;
   const turn = beginTurn();
   voiceTurn = turn;
   voiceSession = {
@@ -842,6 +899,7 @@ async function beginVoice(event) {
       sample_rate: audioContext.sampleRate,
       channels: 1,
       encoding: "pcm_s16le",
+      interaction_generation: turn,
       client_permission_ms: Math.round(voiceSession.permissionMs),
       client_setup_ms: Math.round(performance.now() - voiceSession.requestedAt),
     }));
@@ -873,7 +931,7 @@ async function beginVoice(event) {
     // once so the next tap works. Captured audio is discarded, never replayed,
     // so the user starts the new voice turn.
     const refused = Boolean(voiceSession) && !voiceSession.connectedAt;
-    if (!denied && refused) renewSession();
+    if (!denied && refused) renewSession(turn);
     failVoice(
       turn,
       denied
@@ -996,7 +1054,7 @@ function handleVoiceEvent(event, turn) {
     // microphone works again, but the user starts the next voice turn.
     if (data.code === "invalid_session") {
       failVoice(turn, "Your session expired. Tap the microphone to try again.");
-      renewSession();
+      renewSession(turn);
       return;
     }
     failVoice(

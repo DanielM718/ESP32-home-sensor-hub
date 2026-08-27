@@ -43,7 +43,7 @@ from butters.skills.model import (
     AuthenticationLevel,
 )
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
-from butters.web.sessions import BrowserSession, SessionManager
+from butters.web.sessions import BrowserSession, SessionError, SessionManager
 from butters.web.speech import (
     LocalTTSProvider,
     OpenAISTTProvider,
@@ -202,11 +202,13 @@ class BetaAssistantService:
         administrator: bool = False,
         trace: ExecutionTrace | None = None,
         cancel_event: threading.Event | None = None,
+        interaction_generation: int | None = None,
     ) -> ServiceResponse:
         # One browser conversation has one ordered turn stream.  This makes the
         # read/update/clear of pending clarification state atomic even when a
         # client accidentally submits overlapping HTTP and voice turns.
         with session.turn_lock:
+            self._claim_interaction_generation(session, interaction_generation)
             return self._handle_text_locked(
                 session,
                 raw_text,
@@ -1159,12 +1161,54 @@ class BetaAssistantService:
             else "no repository is configured for this deployment",
         }
 
-    def clear_conversation(self, session: BrowserSession) -> None:
+    def clear_conversation(
+        self,
+        session: BrowserSession,
+        *,
+        interaction_generation: int | None = None,
+    ) -> bool:
         """Clear a conversation and the detailed traces that quote it."""
 
         with session.turn_lock:
-            self.sessions.clear(session)
+            if not self._claim_interaction_generation(
+                session, interaction_generation, stale_is_noop=True
+            ):
+                return False
+            # Clear is allowed to overlap the next browser interaction. Rotating
+            # CSRF here would make that newer request race a token it cannot
+            # learn until this response arrives. The per-session synchronizer
+            # token remains secret and valid; only session renewal replaces it.
+            self.sessions.clear(session, rotate_csrf=False)
             self.traces.drop_sessions((session.session_id,))
+            return True
+
+    @staticmethod
+    def _claim_interaction_generation(
+        session: BrowserSession,
+        generation: int | None,
+        *,
+        stale_is_noop: bool = False,
+    ) -> bool:
+        """Atomically admit only the newest shipped-browser interaction.
+
+        Legacy/internal callers that do not carry a generation retain their
+        existing behavior. Browser generations are claimed under turn_lock, so
+        worker scheduling cannot let an older Clear erase a newer text or voice
+        turn. Equal generations are rejected as duplicate submissions.
+        """
+
+        if generation is None:
+            return True
+        if generation <= session.interaction_generation:
+            if stale_is_noop:
+                return False
+            raise SessionError(
+                "stale_generation",
+                "browser interaction was superseded before it ran",
+                409,
+            )
+        session.interaction_generation = generation
+        return True
 
     def credential_status(self) -> dict[str, object]:
         return {
@@ -1992,36 +2036,21 @@ class BetaAssistantService:
         }
         tools: list[dict[str, object]] = []
         for name in sorted(names):
-            if name in catalog:
-                definition = catalog[name]
-                tools.append(
-                    {
-                        "type": "function",
-                        "name": name,
-                        "description": definition.description,
-                        "parameters": definition.parameters,
-                        "strict": True,
-                    }
-                )
+            definition = catalog.get(name)
+            if definition is None:
+                # The derived catalog is the complete provider boundary.
+                # Reconstructing a schema here would silently undo documented
+                # exclusions for sensitive nominally-read-only capabilities.
                 continue
-            schema = self._promoted_schema(name)
-            spec = self.assistant.skills.get(name)
-            if spec is not None and spec.action_class is ActionClass.ACTION:
-                # Action requests are frozen and authenticated locally. They
-                # are never model-callable tools, even for administrators.
-                continue
-            if spec is not None and spec.version.startswith("2."):
-                schema = spec.input_schema
-            if spec is not None and schema is not None:
-                tools.append(
-                    {
-                        "type": "function",
-                        "name": name,
-                        "description": spec.description,
-                        "parameters": schema,
-                        "strict": True,
-                    }
-                )
+            tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": definition.description,
+                    "parameters": definition.parameters,
+                    "strict": True,
+                }
+            )
         return tuple(tools[:6])
 
     def _prefetch_local_evidence(
@@ -2088,57 +2117,6 @@ class BetaAssistantService:
                     }
                 )
         return tuple(observations)
-
-    def _promoted_schema(self, name: str) -> dict[str, object] | None:
-        entity_ids = [
-            item.entity_id
-            for item in self.assistant.router.entities.entities
-            if item.sensor_type != "printer"
-        ]
-        values: dict[str, tuple[str, list[str]]] = {
-            "get_host_observation": (
-                "metric",
-                [
-                    "uptime",
-                    "load",
-                    "memory",
-                    "swap",
-                    "disk",
-                    "temperature",
-                    "throttle",
-                    "failed_units",
-                ],
-            ),
-            "get_stack_observation": (
-                "component",
-                [
-                    "mqtt",
-                    "bridge",
-                    "dashboard",
-                    "influxdb",
-                    "grafana",
-                    "home_assistant",
-                    "services",
-                ],
-            ),
-            "get_network_observation": (
-                "view",
-                ["interfaces", "routes", "tailscale", "listeners"],
-            ),
-        }
-        if name == "get_sensor_history_summary":
-            return _object_schema(
-                {
-                    "entity": {"type": "string", "enum": entity_ids},
-                    "range_key": {"type": "string", "enum": ["1h", "24h", "7d"]},
-                },
-                ["entity", "range_key"],
-            )
-        item = values.get(name)
-        if item is None:
-            return None
-        field, allowed = item
-        return _object_schema({field: {"type": "string", "enum": allowed}}, [field])
 
     def _wire_diagnostic_cloud(self) -> None:
         engine = self.assistant.diagnostic_engine

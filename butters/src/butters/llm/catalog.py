@@ -28,6 +28,7 @@ vanish from the model surface.
 from __future__ import annotations
 
 from collections.abc import Callable
+from copy import deepcopy
 
 from butters.llm.model import ToolDefinition
 from butters.routing.entities import EntityRegistry, MetricRegistry
@@ -42,6 +43,20 @@ MAX_MODEL_TOOLS = 32
 
 # Eligible under the categorical policy, yet deliberately withheld.
 DOCUMENTED_EXCLUSIONS: dict[str, str] = {
+    "get_action_broker_status": (
+        "privileged broker provisioning and socket readiness are administrator "
+        "internals, even though observing them is non-mutating"
+    ),
+    "get_butters_host_status": (
+        "host load, memory, disk, uptime, and temperature are deployment internals"
+    ),
+    "get_butters_service_status": (
+        "service state and restart counts are deployment internals"
+    ),
+    "get_environment_control_status": (
+        "control provisioning, safety-interlock, override, and job state should "
+        "not be sent to a conversational provider"
+    ),
     "get_host_observation": (
         "deployment-internal host detail; the conversational surface has no "
         "use for it and it should not be summarised by a model"
@@ -53,6 +68,21 @@ DOCUMENTED_EXCLUSIONS: dict[str, str] = {
     "get_sensor_history_summary": (
         "superseded for model use by get_sensor_history and "
         "summarize_sensor_window, which both declare strict window arguments"
+    ),
+    "get_server_health": (
+        "combined host resources and service state duplicate administrator-sensitive "
+        "host and stack observations"
+    ),
+    "get_storage_status": "root-filesystem capacity is a host internal",
+    "get_network_service_health": (
+        "fixed dependency and Tailscale service state describe deployment topology"
+    ),
+    "get_nas_status": (
+        "NAS provisioning and availability are operational topology, not model context"
+    ),
+    "wait_for_desktop_reachability": (
+        "bounded polling is reserved for the authenticated wake workflow and is "
+        "never independently model-controlled"
     ),
 }
 
@@ -323,10 +353,30 @@ def _strict_schema(spec: SkillSpec) -> dict[str, object] | None:
         and schema.get("type") == "object"
         and isinstance(schema.get("properties"), dict)
     ):
-        strict = dict(schema)
+        strict = deepcopy(schema)
         strict["additionalProperties"] = False
-        return strict
+        return _bound_schema_node(strict)
     return None
+
+
+def _bound_schema_node(value: object) -> object:
+    """Close nested objects and bound free strings/arrays in model schemas."""
+
+    if isinstance(value, list):
+        return [_bound_schema_node(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    node = {key: _bound_schema_node(item) for key, item in value.items()}
+    kind = node.get("type")
+    kinds = set(kind) if isinstance(kind, list) else {kind}
+    if "object" in kinds and isinstance(node.get("properties"), dict):
+        node["additionalProperties"] = False
+    if "string" in kinds and "enum" not in node:
+        node.setdefault("maxLength", 128)
+    if "array" in kinds and "maxItems" not in node:
+        # An unbounded array is not strict enough for provider exposure.
+        raise ValueError("model tool array schema must declare maxItems")
+    return node
 
 
 def model_visibility_report(

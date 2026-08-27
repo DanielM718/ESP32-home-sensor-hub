@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 from dataclasses import replace
 from pathlib import Path
 
@@ -13,13 +14,20 @@ from beta1_harness import build_app
 from butters.actions.coordinator import ActionCoordinatorError
 from butters.assistant import create_assistant
 from butters.assistant_config import load_assistant_settings
+from butters.integrations.model import PrinterSnapshot, SensorRecord, SensorSnapshot
 from butters.routing.compound import (
     MAX_COMPOUND_OPERATIONS,
     plan_compound_request,
     split_clauses,
 )
 from butters.routing.normalization import normalize_request
-from butters.skills.model import ActionClass
+from butters.skills.model import (
+    ActionClass,
+    AuthenticationContext,
+    AuthenticationLevel,
+    SkillError,
+    StructuredSkillResult,
+)
 from butters.stt.normalization import DomainVocabulary
 from butters.web.service import BetaAssistantService
 
@@ -31,7 +39,55 @@ WAKE_AND_REACH = "Wake my desktop and tell me when it is reachable."
 @pytest.fixture
 def service(tmp_path: Path):
     _app, runtime, _settings = build_app(tmp_path)
+    implementation = runtime.assistant.skills.get(
+        "get_sensor_value"
+    ).implementation.__self__
+    implementation.sensor_provider = _CompoundSensors()
+    implementation.printer_provider = _CompoundPrinter()
     return runtime
+
+
+class _CompoundSensors:
+    def snapshot(self) -> SensorSnapshot:
+        return SensorSnapshot(
+            "2026-08-27T12:00:00Z",
+            (
+                SensorRecord(
+                    "environment",
+                    "3",
+                    "2026-08-27T12:00:00Z",
+                    1,
+                    "online",
+                    {"humidity": 42.0},
+                ),
+                SensorRecord(
+                    "air_quality",
+                    "office",
+                    "2026-08-27T12:00:00Z",
+                    1,
+                    "online",
+                    {
+                        "temperature_c": 23.0,
+                        "humidity": 45.0,
+                        "co2": 600,
+                        "pm25": 4.0,
+                        "voc_index": 80,
+                    },
+                ),
+            ),
+        )
+
+
+class _CompoundPrinter:
+    def current(self) -> PrinterSnapshot:
+        return PrinterSnapshot(
+            "x2d",
+            "X2D",
+            True,
+            "idle",
+            "2026-08-27T12:00:00Z",
+            {},
+        )
 
 
 def _session(runtime, name: str):
@@ -69,7 +125,8 @@ def test_two_independent_reads_are_both_planned_and_answered(service) -> None:
     assert result["reason_codes"] == ("bounded_compound_plan",)
     text = str(result["response_text"]).casefold()
     assert "x2d" in text
-    assert "air-quality" in text or "air quality" in text
+    assert "printer room" in text
+    assert "co2" in text
 
 
 def test_the_compound_answer_is_not_a_clarification(service) -> None:
@@ -117,7 +174,7 @@ def test_wake_with_a_readiness_question_composes_the_existing_observation(
     assert route.skill == "wake_desktop"
     assert route.action_plan == (
         ("wake_desktop", {"machine": "desktop"}),
-        ("get_desktop_status", {"machine": "desktop"}),
+        ("wait_for_desktop_reachability", {"machine": "desktop"}),
     )
 
 
@@ -129,7 +186,7 @@ def test_a_plain_wake_request_is_left_exactly_as_it_was(service) -> None:
 
 
 def test_the_composed_step_is_a_non_mutating_observation(service) -> None:
-    spec = service.assistant.skills.get("get_desktop_status")
+    spec = service.assistant.skills.get("wait_for_desktop_reachability")
 
     assert spec is not None
     assert spec.action_class is ActionClass.READ_ONLY
@@ -153,7 +210,7 @@ def test_the_wake_step_still_carries_its_own_authentication(tmp_path: Path) -> N
     plan = runtime.actions.freeze_plan(
         steps=(
             ("wake_desktop", {"machine": "desktop"}),
-            ("get_desktop_status", {"machine": "desktop"}),
+            ("wait_for_desktop_reachability", {"machine": "desktop"}),
         ),
         summary="wake and report readiness",
         session_id="session",
@@ -164,7 +221,7 @@ def test_the_wake_step_still_carries_its_own_authentication(tmp_path: Path) -> N
 
     assert [step.skill for step in plan.steps] == [
         "wake_desktop",
-        "get_desktop_status",
+        "wait_for_desktop_reachability",
     ]
     # The plan still demands the same elevated ceremony the wake alone did.
     assert plan.authentication.value == "elevated"
@@ -186,7 +243,7 @@ def test_a_plan_of_observations_alone_is_refused(tmp_path: Path) -> None:
     )
     with pytest.raises(ActionCoordinatorError) as failure:
         runtime.actions.freeze_plan(
-            steps=(("get_desktop_status", {"machine": "desktop"}),),
+            steps=(("wait_for_desktop_reachability", {"machine": "desktop"}),),
             summary="observation only",
             session_id="session",
             identity="identity:admin@example.com",
@@ -399,6 +456,215 @@ def test_a_compound_turn_stops_between_reads_when_cancelled(service) -> None:
 
     # The first read ran; the second was not started.
     assert len(counting.calls) == 1
+
+
+def test_an_uncooperative_read_finishes_after_the_client_stops_waiting(service) -> None:
+    """A set token is not proof that an already-running adapter was stopped."""
+
+    skill = service.assistant.skills.get("get_sensor_value")
+    assert skill is not None
+    original = skill.implementation
+    started = threading.Event()
+    release = threading.Event()
+    cancelled = threading.Event()
+    responses = []
+
+    def uncooperative(arguments):
+        started.set()
+        assert release.wait(2)
+        return original(arguments)
+
+    service.assistant.skills._skills[skill.name] = replace(
+        skill, implementation=uncooperative
+    )
+
+    worker = threading.Thread(
+        target=lambda: responses.append(
+            service.handle_text(
+                _session(service, "uncooperative"),
+                "what is the humidity in box three",
+                cancel_event=cancelled,
+            )
+        )
+    )
+    worker.start()
+    assert started.wait(2)
+    cancelled.set()
+
+    # The adapter ignores cancellation and is still running. The browser's
+    # interaction-generation guard must suppress this response if it is stale.
+    assert worker.is_alive()
+    release.set()
+    worker.join(2)
+
+    assert not worker.is_alive()
+    assert len(responses) == 1
+    assert responses[0].reason_codes != ("client_cancelled",)
+
+
+def test_a_sensitive_read_cannot_replace_the_reviewed_plan_observation(
+    tmp_path: Path,
+) -> None:
+    base = load_assistant_settings()
+    settings = replace(
+        base,
+        diagnostics=replace(base.diagnostics, enabled=False),
+        broker=replace(base.broker, enabled=True),
+        web=replace(base.web, state_dir=tmp_path, development_mode=True).validated(),
+        remediation=replace(base.remediation, jobs_dir=tmp_path / "jobs"),
+    )
+    runtime = BetaAssistantService(
+        settings, DomainVocabulary((), ()), state_dir=tmp_path
+    )
+
+    with pytest.raises(ActionCoordinatorError):
+        runtime.actions.freeze_plan(
+            steps=(
+                ("wake_desktop", {"machine": "desktop"}),
+                ("get_server_health", {}),
+            ),
+            summary="wake and inspect host",
+            session_id="session",
+            identity="identity:admin@example.com",
+            request_id="request",
+            source="text",
+        )
+
+
+def test_a_negated_wake_never_becomes_an_action(service) -> None:
+    route = service.assistant.router.route(
+        normalize_request("do not wake my desktop and tell me printer status")
+    )
+
+    assert route.skill != "wake_desktop"
+    assert not route.action_plan
+
+
+def _action_runtime(tmp_path: Path) -> BetaAssistantService:
+    base = load_assistant_settings()
+    settings = replace(
+        base,
+        diagnostics=replace(base.diagnostics, enabled=False),
+        broker=replace(base.broker, enabled=True),
+        web=replace(base.web, state_dir=tmp_path, development_mode=True).validated(),
+        remediation=replace(base.remediation, jobs_dir=tmp_path / "jobs"),
+    )
+    return BetaAssistantService(settings, DomainVocabulary((), ()), state_dir=tmp_path)
+
+
+def _completed_job(runtime, job_id: str, *, identity: str = "identity:admin"):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        job = runtime.action_state.job(
+            job_id, session_id="session", identity=identity
+        )
+        if job["state"] in {"completed", "failed", "cancelled"}:
+            return job
+        time.sleep(0.005)
+    raise AssertionError("action job did not settle")
+
+
+def _run_fake_wake_plan(tmp_path: Path, *, wake_fails=False, reachable=True):
+    runtime = _action_runtime(tmp_path)
+    calls: list[str] = []
+    wake = runtime.assistant.skills.get("wake_desktop")
+    observe = runtime.assistant.skills.get("wait_for_desktop_reachability")
+    assert wake is not None and observe is not None
+
+    def fake_wake(_arguments):
+        calls.append("wake")
+        if wake_fails:
+            raise SkillError("operation_failed", "fixed wake failed")
+        return StructuredSkillResult("action_result", {"accepted": True})
+
+    def fake_observe(_arguments):
+        calls.append("wait")
+        return StructuredSkillResult(
+            "desktop_reachability_wait",
+            {
+                "network_reachable": reachable,
+                "ssh_ready": reachable,
+                "parsec_ready": None,
+                "timed_out": not reachable,
+                "cancelled": False,
+                "elapsed_ms": 1000,
+            },
+        )
+
+    runtime.assistant.skills._skills["wake_desktop"] = replace(
+        wake, implementation=fake_wake
+    )
+    runtime.assistant.skills._skills["wait_for_desktop_reachability"] = replace(
+        observe, implementation=fake_observe
+    )
+    plan = runtime.actions.freeze_plan(
+        steps=(
+            ("wake_desktop", {"machine": "desktop"}),
+            ("wait_for_desktop_reachability", {"machine": "desktop"}),
+        ),
+        summary="wake and wait",
+        session_id="session",
+        identity="identity:admin",
+        request_id="request",
+        source="text",
+    )
+    authentication = AuthenticationContext(
+        AuthenticationLevel.ELEVATED,
+        "session",
+        "identity:admin",
+        time.time() + 60,
+        "webauthn",
+    )
+    job = runtime.actions.execute(
+        plan.plan_id,
+        session_id="session",
+        identity="identity:admin",
+        authentication=authentication,
+    )[0]
+    return _completed_job(runtime, str(job["job_id"])), calls
+
+
+def test_authorized_wake_waits_only_after_wake_succeeds(tmp_path: Path) -> None:
+    job, calls = _run_fake_wake_plan(tmp_path, reachable=True)
+
+    assert calls == ["wake", "wait"]
+    assert job["state"] == "completed"
+    data = job["result"]["steps"][1]["result"]["data"]
+    assert data["network_reachable"] is True
+    assert all(step["skill"] != "monitors_off" for step in job["result"]["steps"])
+
+
+def test_wake_success_with_reachability_timeout_is_truthful(tmp_path: Path) -> None:
+    job, calls = _run_fake_wake_plan(tmp_path, reachable=False)
+
+    assert calls == ["wake", "wait"]
+    assert job["state"] == "completed"
+    data = job["result"]["steps"][1]["result"]["data"]
+    assert data["network_reachable"] is False
+    assert data["timed_out"] is True
+
+
+def test_wake_failure_stops_before_reachability_polling(tmp_path: Path) -> None:
+    job, calls = _run_fake_wake_plan(tmp_path, wake_fails=True)
+
+    assert calls == ["wake"]
+    assert job["state"] == "failed"
+    assert job["failure_code"] == "operation_failed"
+
+
+def test_unauthorized_wake_never_starts_a_job(tmp_path: Path) -> None:
+    runtime = _action_runtime(tmp_path)
+    session = runtime.sessions.create(
+        peer_key="identity:not-admin@example.com", administrator=False
+    )
+
+    result = runtime.handle_text(
+        session, "wake my desktop and tell me when it is reachable"
+    )
+
+    assert result.route == "action_denied"
+    assert result.reason_codes == ("administrator_required",)
+    assert runtime.action_state.jobs(identity=session.peer_key) == ()
 
 
 def test_an_uncancelled_turn_is_unaffected(service) -> None:

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import pytest
 
+from butters.actions.store import ActionStateStore
 from butters.assistant import create_assistant
 from butters.assistant_config import load_assistant_settings
 from butters.llm.catalog import (
@@ -21,11 +22,26 @@ from butters.llm.catalog import (
 )
 from butters.skills.model import ActionClass, AuthenticationLevel, SkillAudience
 from butters.stt.normalization import DomainVocabulary
+from butters.web.service import BetaAssistantService
 
 
 @pytest.fixture(scope="module")
-def assembled():
-    assistant = create_assistant(load_assistant_settings(), DomainVocabulary((), ()))
+def assembled(tmp_path_factory):
+    """Use the production-shaped registry, including broker-adjacent reads.
+
+    The original test built create_assistant without an action state, silently
+    omitting the read-only capabilities registered beside browser actions.
+    """
+
+    settings = load_assistant_settings()
+    state = ActionStateStore(
+        tmp_path_factory.mktemp("catalog") / "actions.sqlite3", settings.actions
+    )
+    assistant = create_assistant(
+        settings,
+        DomainVocabulary((), ()),
+        action_state=state,
+    )
     return assistant, assistant.router.entities, assistant.router.metrics
 
 
@@ -164,6 +180,54 @@ def test_no_arbitrary_execution_surface_is_exposed(catalog) -> None:
         assert not any(token in name for token in forbidden), name
 
 
+def test_sensitive_operational_reads_are_explicitly_excluded(catalog) -> None:
+    sensitive = {
+        "get_action_broker_status",
+        "get_butters_host_status",
+        "get_butters_service_status",
+        "get_environment_control_status",
+        "get_host_observation",
+        "get_nas_status",
+        "get_network_observation",
+        "get_network_service_health",
+        "get_project_status",
+        "get_server_health",
+        "get_stack_observation",
+        "get_storage_status",
+        "wait_for_desktop_reachability",
+    }
+
+    assert sensitive.isdisjoint(_names(catalog))
+
+
+def test_reasoner_selection_cannot_reconstruct_a_documented_exclusion(
+    assembled, tmp_path
+) -> None:
+    assistant, _entities, _metrics = assembled
+
+    class NoCloud:
+        available = False
+
+    service = BetaAssistantService(
+        load_assistant_settings(),
+        DomainVocabulary((), ()),
+        assistant=assistant,
+        general_reasoner=NoCloud(),
+        state_dir=tmp_path,
+    )
+    try:
+        names = {
+            item["name"]
+            for item in service._relevant_skill_tools(
+                "check pi memory grafana mqtt tailscale and broker status",
+                administrator=True,
+            )
+        }
+        assert names == set()
+    finally:
+        service.local_tts.close()
+
+
 def test_the_catalog_stays_bounded(catalog) -> None:
     assert len(catalog) <= MAX_MODEL_TOOLS + 2
 
@@ -172,6 +236,27 @@ def test_every_tool_declares_a_strict_closed_schema(catalog) -> None:
     for tool in catalog:
         assert tool.parameters["type"] == "object"
         assert tool.parameters["additionalProperties"] is False
+
+
+def test_every_free_string_and_array_in_the_catalog_is_bounded(catalog) -> None:
+    def check(node) -> None:
+        if isinstance(node, list):
+            for item in node:
+                check(item)
+            return
+        if not isinstance(node, dict):
+            return
+        kind = node.get("type")
+        kinds = set(kind) if isinstance(kind, list) else {kind}
+        if "string" in kinds and "enum" not in node:
+            assert 1 <= node["maxLength"] <= 128
+        if "array" in kinds:
+            assert 1 <= node["maxItems"] <= 256
+        for item in node.values():
+            check(item)
+
+    for tool in catalog:
+        check(tool.parameters)
 
 
 def test_the_control_outcomes_are_not_executable(catalog) -> None:

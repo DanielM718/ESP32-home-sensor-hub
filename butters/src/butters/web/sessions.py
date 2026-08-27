@@ -32,6 +32,10 @@ class BrowserSession:
     peer_key: str = ANONYMOUS_PEER
     administrator: bool = False
     pending_clarification: PendingClarification | None = None
+    # Monotonic browser interaction number. Shipped browser clients attach one
+    # number to every text turn, voice turn, and Clear request so an older
+    # request that waited behind newer work cannot mutate the conversation.
+    interaction_generation: int = 0
     turn_lock: threading.RLock = field(default_factory=threading.RLock, repr=False)
 
 
@@ -160,11 +164,12 @@ class SessionManager:
             for item in reversed(selected)
         )
 
-    def clear(self, session: BrowserSession) -> None:
+    def clear(self, session: BrowserSession, *, rotate_csrf: bool = True) -> None:
         with self._lock:
             session.messages.clear()
             session.pending_clarification = None
-            session.csrf_token = secrets.token_urlsafe(24)
+            if rotate_csrf:
+                session.csrf_token = secrets.token_urlsafe(24)
             session.last_active_monotonic = self.clock()
 
     def expire(self) -> int:

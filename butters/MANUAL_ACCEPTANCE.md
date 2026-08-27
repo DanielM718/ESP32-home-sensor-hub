@@ -53,7 +53,8 @@ be completed without weakening one of those, stop and treat it as a failure.
       same passkey ceremony as a plain wake, and the summary shown before
       authentication names the action being authorized.
 - [ ] After authorizing it, the reply reports actual reachability rather than
-      only that a wake was sent.
+      only that a wake was sent. Confirm the fixed bounded wait reports either
+      reachable or timed out and does not change either monitor outlet.
 
 ## Voice
 

@@ -596,12 +596,14 @@ false, so stage 3 is currently inert and open-ended conversation reaches stage 4
 
 A request that includes an action never reaches the compound planner. It routes
 to the existing reviewed action, is frozen into an immutable plan, and requires
-the established pending-action and passkey ceremony. A plan may end with one
-non-mutating observation so an authorized action can report its own outcome -
-for example, whether a woken desktop actually became reachable. That observation
-is validated more strictly than an action, may only be the final step, and
-contributes no authentication of its own, so it can never lower what the plan
-requires. A plan consisting only of observations is refused.
+the established pending-action and passkey ceremony. A plan may end with the
+explicitly allow-listed `wait_for_desktop_reachability` observation so an
+authorized wake can poll the fixed desktop under fixed local deadlines and
+report whether it became reachable. That observation is included in the
+immutable plan digest, may only be the final step, never wakes the machine or
+changes monitor state, and contributes no authentication of its own. A plan
+consisting only of observations or substituting another read-only capability is
+refused.
 
 ## Model-visible capability policy
 
@@ -616,7 +618,8 @@ by a later edit. An administrator-audience capability is never model-visible eve
 though it is read-only, because audience is an authorization boundary rather than
 a mutation boundary.
 
-Whatever survives must still present a strict, enum-bound, closed schema.
+Whatever survives must still present a strict, enum-bound, closed schema; free
+strings and arrays carry explicit size bounds.
 Anything eligible but nonetheless withheld is listed in `DOCUMENTED_EXCLUSIONS`
 with a reason. A parity test fails if a registered safe skill is neither exposed
 nor documented, so a newly added capability cannot silently vanish from - or
