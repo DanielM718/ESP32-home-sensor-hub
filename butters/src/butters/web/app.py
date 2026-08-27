@@ -1098,6 +1098,15 @@ def create_app(
         try:
             auth.require_origin(websocket.headers, websocket.headers.get("host"))
             session = runtime.sessions.require(websocket.cookies.get(SESSION_COOKIE))
+            # Identity is bound before the handshake is accepted, so a copied
+            # cookie never reaches the rate limiter, a voice slot, the STT pool,
+            # a recognizer, the assistant, or the stored conversation.
+            _require_peer_identity(
+                websocket.headers,
+                websocket.client.host if websocket.client else None,
+                session,
+                auth,
+            )
             await websocket.accept()
             first = await asyncio.wait_for(websocket.receive(), timeout=5.0)
             if first.get("type") != "websocket.receive" or not isinstance(
@@ -1570,7 +1579,26 @@ def _require_session_peer(
     auth: AuthPolicy,
 ) -> None:
     client = request.client.host if request.client else None
-    if session.peer_key != auth.peer_key(request.headers, client):
+    _require_peer_identity(request.headers, client, session, auth)
+
+
+def _require_peer_identity(
+    headers: object,
+    client_host: str | None,
+    session: BrowserSession,
+    auth: AuthPolicy,
+) -> None:
+    """Bind a browser session to the identity that created it.
+
+    The HTTP surface and `/ws/voice` share this one check so the WebSocket
+    cannot drift back into a weaker rule. `AuthPolicy.peer_key` already
+    degrades a missing identity header or an untrusted proxy topology to a
+    socket-peer key, so a session created under a tailnet identity matches
+    neither, and the failure is reported with the same opaque code the HTTP
+    path uses.
+    """
+
+    if session.peer_key != auth.peer_key(headers, client_host):
         raise SecurityError(
             "session_identity_denied",
             "browser session belongs to another identity",

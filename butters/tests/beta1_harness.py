@@ -118,6 +118,21 @@ def admin_headers(origin: str | None = None, csrf: str | None = None) -> dict[st
     return headers
 
 
+def peer_identity_headers(peer_key: str) -> dict[str, str]:
+    """Present the tailnet identity a session is bound to.
+
+    `/ws/voice` binds a session to its creating identity exactly as the HTTP
+    surface does, so a test that fabricates a session under `identity:...`
+    must connect as that identity, like the browser it stands in for.
+    """
+
+    return (
+        {"tailscale-user-login": peer_key.removeprefix("identity:")}
+        if peer_key.startswith("identity:")
+        else {}
+    )
+
+
 async def start_session(
     http: httpx.AsyncClient,
     *,
