@@ -14,6 +14,10 @@ CONTROL_START = re.compile(
     r"cool|load|unload|upload|delete|print|extrude)\b"
 )
 CONTROL_TOGGLE = re.compile(r"\bturn\b.+\b(?:on|off)\b")
+NEGATED_DESKTOP_ACTION = re.compile(
+    r"\b(?:do not|don't|dont|never)\s+(?:\w+\s+){0,3}"
+    r"(?:wake|turn|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
+)
 
 
 def _distinct_metrics(metrics: tuple[Metric, ...]) -> tuple[Metric, ...]:
@@ -79,6 +83,30 @@ class IntentRouter:
             )
         desktop_action = self._desktop_action(normalized)
         if desktop_action is not None:
+            # "Wake my desktop and tell me when it is reachable" is one request,
+            # not two. The wake stays the same authenticated action with the
+            # same pending-action and passkey flow; the readiness question is
+            # answered by appending the existing read-only observation to the
+            # frozen plan, so it runs only after the action the user authorized
+            # actually succeeded. No new privilege is composed here: a mutating
+            # step is never added by this branch.
+            if desktop_action == "wake_desktop" and self._desktop_readiness_follow_up(
+                normalized
+            ):
+                return RoutedIntent(
+                    "matched",
+                    normalized,
+                    "wake_desktop",
+                    {"machine": "desktop"},
+                    confidence=1.0,
+                    action_plan=(
+                        ("wake_desktop", {"machine": "desktop"}),
+                        (
+                            "wait_for_desktop_reachability",
+                            {"machine": "desktop"},
+                        ),
+                    ),
+                )
             return self._matched(
                 normalized,
                 desktop_action,
@@ -1048,7 +1076,29 @@ class IntentRouter:
         }
 
     @staticmethod
+    def _desktop_readiness_follow_up(text: str) -> bool:
+        """Whether a wake request also asks to be told when the machine is up."""
+
+        return any(
+            phrase in text
+            for phrase in (
+                "reachable",
+                "when it is up",
+                "when it's up",
+                "when it comes up",
+                "when it is ready",
+                "when it's ready",
+                "when it is online",
+                "when it's online",
+                "tell me when",
+                "let me know when",
+            )
+        )
+
+    @staticmethod
     def _desktop_remote_action(text: str) -> bool:
+        if NEGATED_DESKTOP_ACTION.search(text):
+            return False
         if "prepare my computer" in text:
             return True
         wake = any(
@@ -1077,6 +1127,8 @@ class IntentRouter:
 
     @staticmethod
     def _desktop_action(text: str) -> str | None:
+        if NEGATED_DESKTOP_ACTION.search(text):
+            return None
         mappings = (
             (
                 (

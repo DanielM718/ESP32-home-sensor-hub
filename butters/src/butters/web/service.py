@@ -34,6 +34,7 @@ from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticRequest, RequestDepth
 from butters.diagnostics.sanitizer import sanitize_value
 from butters.remediation.skill_builder import CodexSkillBuilder
+from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
 from butters.routing.model import RoutedIntent
 from butters.skills.model import (
@@ -42,7 +43,7 @@ from butters.skills.model import (
     AuthenticationLevel,
 )
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
-from butters.web.sessions import BrowserSession, SessionManager
+from butters.web.sessions import BrowserSession, SessionError, SessionManager
 from butters.web.speech import (
     LocalTTSProvider,
     OpenAISTTProvider,
@@ -200,11 +201,14 @@ class BetaAssistantService:
         max_output_tokens: int | None = None,
         administrator: bool = False,
         trace: ExecutionTrace | None = None,
+        cancel_event: threading.Event | None = None,
+        interaction_generation: int | None = None,
     ) -> ServiceResponse:
         # One browser conversation has one ordered turn stream.  This makes the
         # read/update/clear of pending clarification state atomic even when a
         # client accidentally submits overlapping HTTP and voice turns.
         with session.turn_lock:
+            self._claim_interaction_generation(session, interaction_generation)
             return self._handle_text_locked(
                 session,
                 raw_text,
@@ -215,6 +219,7 @@ class BetaAssistantService:
                 max_output_tokens=max_output_tokens,
                 administrator=administrator,
                 trace=trace,
+                cancel_event=cancel_event,
             )
 
     def _handle_text_locked(
@@ -229,6 +234,7 @@ class BetaAssistantService:
         max_output_tokens: int | None,
         administrator: bool,
         trace: ExecutionTrace | None,
+        cancel_event: threading.Event | None = None,
     ) -> ServiceResponse:
         started = time.perf_counter()
         text = " ".join(raw_text.replace("\x00", "").split())
@@ -362,6 +368,31 @@ class BetaAssistantService:
         )
         current_trace.emit(TraceStage.COMPLEXITY, "classified", fields=features)
 
+        # A cooperative checkpoint before any tool runs. Cancellation observed
+        # here genuinely stopped the backend, so it is reported as such; once a
+        # tool has started, the registry's own cancel_event is the only thing
+        # that can still stop it, and an uncooperative one runs to completion.
+        if cancel_event is not None and cancel_event.is_set():
+            current_trace.emit(
+                TraceStage.ROUTING, "cancelled", reason_code="client_cancelled"
+            )
+            result = self._unsupported_response(
+                text,
+                normalized,
+                RoutedIntent(
+                    "unsupported",
+                    normalized,
+                    message="That request was cancelled before it ran.",
+                ),
+                "client_cancelled",
+            )
+            response = self._from_assistant_result(
+                result,
+                current_trace,
+                RouteDecision("cancelled", ("client_cancelled",), features, None, True),
+            )
+            return self._finish(session, current_trace, response, started)
+
         matched_spec = (
             self.assistant.skills.get(route.skill)
             if route.matched and route.skill is not None
@@ -381,6 +412,18 @@ class BetaAssistantService:
                 source=source,
             )
             return self._finish(session, current_trace, response, started)
+
+        # Escalation order: deterministic route, then this bounded compound
+        # planner, then a configured reasoning provider, then the truthful
+        # fallback. The planner runs only once the whole-text route failed, so
+        # a request the router already answers - a single sensor asked for
+        # several metrics at once, for example - keeps its single efficient
+        # call and is never split.
+        compound = (
+            plan_compound_request(self.assistant.router, normalized, self.assistant.skills)
+            if not route.matched and override is RouteOverride.AUTO
+            else CompoundPlan("not_compound")
+        )
 
         if override is RouteOverride.LOCAL_DIAGNOSTIC:
             if diagnostic_request is None:
@@ -506,6 +549,40 @@ class BetaAssistantService:
                 administrator=administrator,
             )
             return self._finish(session, current_trace, response, started)
+        elif compound.planned:
+            result = self._execute_compound(
+                text, normalized, compound, current_trace, cancel_event
+            )
+            decision = RouteDecision(
+                "compound",
+                ("bounded_compound_plan",),
+                features,
+                None,
+                True,
+            )
+        elif compound.status == "too_broad":
+            # Refused rather than truncated: a partial answer to a request this
+            # broad would look complete and would not be.
+            result = self._unsupported_response(
+                text,
+                normalized,
+                RoutedIntent(
+                    "unsupported",
+                    normalized,
+                    message=(
+                        "That asks for too many separate things at once. "
+                        "Please ask for up to three at a time."
+                    ),
+                ),
+                "compound_request_too_broad",
+            )
+            decision = RouteDecision(
+                "unsupported",
+                ("compound_request_too_broad",),
+                features,
+                None,
+                True,
+            )
         elif route.incomplete:
             result = self._unsupported_response(
                 text, normalized, route, "missing_required_argument"
@@ -1084,12 +1161,54 @@ class BetaAssistantService:
             else "no repository is configured for this deployment",
         }
 
-    def clear_conversation(self, session: BrowserSession) -> None:
+    def clear_conversation(
+        self,
+        session: BrowserSession,
+        *,
+        interaction_generation: int | None = None,
+    ) -> bool:
         """Clear a conversation and the detailed traces that quote it."""
 
         with session.turn_lock:
-            self.sessions.clear(session)
+            if not self._claim_interaction_generation(
+                session, interaction_generation, stale_is_noop=True
+            ):
+                return False
+            # Clear is allowed to overlap the next browser interaction. Rotating
+            # CSRF here would make that newer request race a token it cannot
+            # learn until this response arrives. The per-session synchronizer
+            # token remains secret and valid; only session renewal replaces it.
+            self.sessions.clear(session, rotate_csrf=False)
             self.traces.drop_sessions((session.session_id,))
+            return True
+
+    @staticmethod
+    def _claim_interaction_generation(
+        session: BrowserSession,
+        generation: int | None,
+        *,
+        stale_is_noop: bool = False,
+    ) -> bool:
+        """Atomically admit only the newest shipped-browser interaction.
+
+        Legacy/internal callers that do not carry a generation retain their
+        existing behavior. Browser generations are claimed under turn_lock, so
+        worker scheduling cannot let an older Clear erase a newer text or voice
+        turn. Equal generations are rejected as duplicate submissions.
+        """
+
+        if generation is None:
+            return True
+        if generation <= session.interaction_generation:
+            if stale_is_noop:
+                return False
+            raise SessionError(
+                "stale_generation",
+                "browser interaction was superseded before it ran",
+                409,
+            )
+        session.interaction_generation = generation
+        return True
 
     def credential_status(self) -> dict[str, object]:
         return {
@@ -1186,6 +1305,98 @@ class BetaAssistantService:
             execution,
             routing_path="deterministic",
             policy_status="allowed" if execution.ok else "denied",
+        )
+
+    def _execute_compound(
+        self,
+        raw: str,
+        normalized: str,
+        plan: CompoundPlan,
+        trace: ExecutionTrace,
+        cancel_event: threading.Event | None = None,
+    ) -> AssistantResponse:
+        """Run a planned set of independent reads and answer with all of them.
+
+        Execution is owned here, not by the planner and never by a model. Every
+        operation was produced by the deterministic router and re-checked
+        against the registry, so each call is validated exactly as the
+        single-clause path validates its one call.
+        """
+
+        trace.emit(
+            TraceStage.ROUTING,
+            "compound_planned",
+            reason_code="bounded_compound_plan",
+            fields={
+                "operations": [item.skill for item in plan.operations],
+                "unresolved": list(plan.unresolved),
+            },
+        )
+        answers: list[str] = []
+        failures: list[str] = []
+        elapsed = 0.0
+        last = None
+        for operation in plan.operations:
+            if cancel_event is not None and cancel_event.is_set():
+                # Between operations is a safe boundary: the reads already done
+                # are reported, and no further one is started.
+                failures.append(operation.clause)
+                continue
+            execution = self.assistant.skills.execute(
+                operation.skill, operation.arguments, cancel_event=cancel_event
+            )
+            elapsed += execution.elapsed_seconds
+            trace.emit(
+                TraceStage.TOOL,
+                "complete" if execution.ok else "failed",
+                reason_code=execution.failure.code if execution.failure else None,
+                fields={
+                    "skill": operation.skill,
+                    "arguments": operation.arguments,
+                    "latency_ms": round(execution.elapsed_seconds * 1000, 3),
+                    "result_summary": _bounded_result(execution.result),
+                },
+            )
+            if execution.ok:
+                last = execution
+                answers.append(self.assistant.formatter.format_execution(execution))
+            else:
+                # Partial failure is stated, never hidden behind the parts that
+                # did work.
+                failures.append(operation.clause)
+        failures.extend(plan.unresolved)
+        if not answers:
+            return self._unsupported_response(
+                raw,
+                normalized,
+                RoutedIntent(
+                    "unsupported",
+                    normalized,
+                    message="I couldn't complete any part of that request.",
+                ),
+                "compound_failed",
+            )
+        message = " ".join(answers)
+        if failures:
+            message += " I couldn't answer the rest of that request: " + "; ".join(
+                failures
+            ) + "."
+        route = RoutedIntent(
+            "matched",
+            normalized,
+            plan.operations[0].skill,
+            dict(plan.operations[0].arguments),
+            confidence=1.0,
+        )
+        return AssistantResponse(
+            raw,
+            normalized,
+            route,
+            message,
+            elapsed,
+            last,
+            routing_path="compound",
+            policy_status="allowed",
         )
 
     def _execute_diagnostic(
@@ -1825,36 +2036,21 @@ class BetaAssistantService:
         }
         tools: list[dict[str, object]] = []
         for name in sorted(names):
-            if name in catalog:
-                definition = catalog[name]
-                tools.append(
-                    {
-                        "type": "function",
-                        "name": name,
-                        "description": definition.description,
-                        "parameters": definition.parameters,
-                        "strict": True,
-                    }
-                )
+            definition = catalog.get(name)
+            if definition is None:
+                # The derived catalog is the complete provider boundary.
+                # Reconstructing a schema here would silently undo documented
+                # exclusions for sensitive nominally-read-only capabilities.
                 continue
-            schema = self._promoted_schema(name)
-            spec = self.assistant.skills.get(name)
-            if spec is not None and spec.action_class is ActionClass.ACTION:
-                # Action requests are frozen and authenticated locally. They
-                # are never model-callable tools, even for administrators.
-                continue
-            if spec is not None and spec.version.startswith("2."):
-                schema = spec.input_schema
-            if spec is not None and schema is not None:
-                tools.append(
-                    {
-                        "type": "function",
-                        "name": name,
-                        "description": spec.description,
-                        "parameters": schema,
-                        "strict": True,
-                    }
-                )
+            tools.append(
+                {
+                    "type": "function",
+                    "name": name,
+                    "description": definition.description,
+                    "parameters": definition.parameters,
+                    "strict": True,
+                }
+            )
         return tuple(tools[:6])
 
     def _prefetch_local_evidence(
@@ -1921,57 +2117,6 @@ class BetaAssistantService:
                     }
                 )
         return tuple(observations)
-
-    def _promoted_schema(self, name: str) -> dict[str, object] | None:
-        entity_ids = [
-            item.entity_id
-            for item in self.assistant.router.entities.entities
-            if item.sensor_type != "printer"
-        ]
-        values: dict[str, tuple[str, list[str]]] = {
-            "get_host_observation": (
-                "metric",
-                [
-                    "uptime",
-                    "load",
-                    "memory",
-                    "swap",
-                    "disk",
-                    "temperature",
-                    "throttle",
-                    "failed_units",
-                ],
-            ),
-            "get_stack_observation": (
-                "component",
-                [
-                    "mqtt",
-                    "bridge",
-                    "dashboard",
-                    "influxdb",
-                    "grafana",
-                    "home_assistant",
-                    "services",
-                ],
-            ),
-            "get_network_observation": (
-                "view",
-                ["interfaces", "routes", "tailscale", "listeners"],
-            ),
-        }
-        if name == "get_sensor_history_summary":
-            return _object_schema(
-                {
-                    "entity": {"type": "string", "enum": entity_ids},
-                    "range_key": {"type": "string", "enum": ["1h", "24h", "7d"]},
-                },
-                ["entity", "range_key"],
-            )
-        item = values.get(name)
-        if item is None:
-            return None
-        field, allowed = item
-        return _object_schema({field: {"type": "string", "enum": allowed}}, [field])
 
     def _wire_diagnostic_cloud(self) -> None:
         engine = self.assistant.diagnostic_engine

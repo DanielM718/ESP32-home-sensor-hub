@@ -192,7 +192,7 @@ def test_voice_slot_is_released_when_recognizer_close_fails(tmp_path: Path) -> N
         app, service, settings = build_app(tmp_path, stt_engine_factory=factory)
         limit = settings.browser_audio.max_concurrent_sessions
         try:
-            from beta1_harness import WebSocketHarness
+            from beta1_harness import WebSocketHarness, peer_identity_headers
 
             for attempt in range(limit + 2):
                 session = service.sessions.create(peer_key=f"identity:voice{attempt}@example.com")
@@ -202,6 +202,7 @@ def test_voice_slot_is_released_when_recognizer_close_fails(tmp_path: Path) -> N
                     headers={
                         "origin": "http://testserver",
                         "cookie": f"butters_session={session.session_id}",
+                        **peer_identity_headers(session.peer_key),
                     },
                 )
                 await socket.connect()
@@ -256,7 +257,7 @@ def test_voice_slot_is_released_when_the_worker_queue_rejects_teardown(tmp_path:
         app, service, settings = build_app(tmp_path, stt_engine_factory=factory)
         limit = settings.browser_audio.max_concurrent_sessions
         try:
-            from beta1_harness import WebSocketHarness
+            from beta1_harness import WebSocketHarness, peer_identity_headers
 
             for attempt in range(limit + 2):
                 session = service.sessions.create(peer_key=f"identity:queue{attempt}@example.com")
@@ -266,6 +267,7 @@ def test_voice_slot_is_released_when_the_worker_queue_rejects_teardown(tmp_path:
                     headers={
                         "origin": "http://testserver",
                         "cookie": f"butters_session={session.session_id}",
+                        **peer_identity_headers(session.peer_key),
                     },
                 )
                 await socket.connect()

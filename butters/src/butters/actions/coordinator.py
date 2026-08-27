@@ -71,8 +71,22 @@ class ActionCoordinator:
     ) -> PendingPlan:
         frozen: list[FrozenStep] = []
         requirements: list[AuthenticationLevel] = []
-        for skill, arguments in steps:
+        for index, (skill, arguments) in enumerate(steps):
+            # A plan may end with one non-mutating observation, so an authorized
+            # action can report its own outcome without the caller gaining any
+            # privilege. It is validated more strictly than an action, may only
+            # be the final step, and contributes no authentication of its own,
+            # so it can never lower what the plan as a whole requires.
+            last = index == len(steps) - 1
             canonical, failure = self.registry.validate_action_intent(skill, arguments)
+            if failure is not None and last:
+                observed, observation_failure = (
+                    self.registry.validate_observation_intent(skill, arguments)
+                )
+                if observation_failure is None and observed is not None:
+                    frozen.append(FrozenStep(skill, observed))
+                    requirements.append(AuthenticationLevel.NONE)
+                    continue
             if failure is not None or canonical is None:
                 raise ActionCoordinatorError(
                     failure.code if failure else "policy_denied",
@@ -82,6 +96,12 @@ class ActionCoordinator:
             assert spec is not None
             frozen.append(FrozenStep(skill, canonical))
             requirements.append(spec.authentication)
+        if all(level is AuthenticationLevel.NONE for level in requirements):
+            # An observation-only plan is not an action and must never acquire
+            # an action's authorization.
+            raise ActionCoordinatorError(
+                "policy_denied", "an action plan must contain at least one action"
+            )
         authentication = (
             AuthenticationLevel.FRESH
             if AuthenticationLevel.FRESH in requirements

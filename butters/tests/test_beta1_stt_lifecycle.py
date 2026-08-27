@@ -4,7 +4,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from beta1_harness import WebSocketHarness, build_app, client
+from beta1_harness import (
+    WebSocketHarness,
+    build_app,
+    client,
+    peer_identity_headers,
+)
 from butters.web.stt_pool import STTEnginePool, STTEnginePoolError
 
 
@@ -105,6 +110,7 @@ async def _voice_turn(
     *,
     session_id: str,
     csrf_token: str,
+    peer_key: str = "",
 ) -> tuple[dict[str, object], ...]:
     socket = WebSocketHarness(
         app,
@@ -112,6 +118,7 @@ async def _voice_turn(
         headers={
             "origin": "http://testserver",
             "cookie": f"butters_session={session_id}",
+            **peer_identity_headers(peer_key),
         },
     )
     await socket.connect()
@@ -162,11 +169,13 @@ def test_repeated_websocket_turns_reuse_model_and_persist_text(tmp_path: Path) -
                 app,
                 session_id=session.session_id,
                 csrf_token=session.csrf_token,
+                peer_key=session.peer_key,
             )
             second = await _voice_turn(
                 app,
                 session_id=session.session_id,
                 csrf_token=session.csrf_token,
+                peer_key=session.peer_key,
             )
 
             assert len(engines) == 1
@@ -245,6 +254,7 @@ def test_voice_and_text_turns_share_one_ordered_conversation(tmp_path: Path) -> 
                 app,
                 session_id=session.session_id,
                 csrf_token=session.csrf_token,
+                peer_key=session.peer_key,
             )
             after = service.handle_text(
                 session,
@@ -297,11 +307,13 @@ def test_stt_failure_discards_native_engine_and_next_turn_recovers(
                 app,
                 session_id=first_session.session_id,
                 csrf_token=first_session.csrf_token,
+                peer_key=first_session.peer_key,
             )
             recovered = await _voice_turn(
                 app,
                 session_id=second_session.session_id,
                 csrf_token=second_session.csrf_token,
+                peer_key=second_session.peer_key,
             )
 
             error = next(item for item in failed if item.get("type") == "error")

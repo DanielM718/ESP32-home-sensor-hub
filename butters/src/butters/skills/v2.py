@@ -147,6 +147,24 @@ class V2SkillImplementations:
             {"observed": ["network_reachable", "ssh_ready", "parsec_ready"]},
         )
 
+    def wait_for_desktop_reachability(
+        self, arguments: SkillArguments
+    ) -> SkillResult:
+        data = self.desktop.wait_for_reachability(
+            cast(DesktopArgs, arguments).machine,
+            cancel_event=current_cancel_event(),
+        )
+        if data["cancelled"]:
+            raise SkillError("cancelled", "desktop reachability wait was cancelled")
+        return StructuredSkillResult(
+            "desktop_reachability_wait",
+            data,
+            {
+                "observed": ["network_reachable", "ssh_ready", "parsec_ready"],
+                "calculated": ["timed_out", "elapsed_ms"],
+            },
+        )
+
     def start_remote_desktop_session(self, arguments: SkillArguments) -> SkillResult:
         data = self.desktop.start_remote_session(
             cast(DesktopArgs, arguments).machine,
@@ -582,6 +600,22 @@ def register_v2_skills(
             impl.get_desktop_status,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
             timeout=5,
+        )
+    )
+    registry.register(
+        spec(
+            "wait_for_desktop_reachability",
+            "Wait within fixed local deadlines for the configured desktop to become reachable.",
+            ActionClass.READ_ONLY,
+            _parse_desktop,
+            impl.authorize_desktop,
+            impl.wait_for_desktop_reachability,
+            _schema({"machine": _enum(["desktop"])}, ["machine"]),
+            timeout=min(
+                desktop.settings.network_timeout_seconds,
+                desktop.settings.total_timeout_seconds,
+            )
+            + 5,
         )
     )
     registry.register(

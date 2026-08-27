@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import threading
 import time
 import wave
 from concurrent.futures import ThreadPoolExecutor
@@ -267,6 +268,7 @@ def create_app(
                 {
                     "session": "ready",
                     "csrf_token": existing.csrf_token,
+                    "interaction_generation": existing.interaction_generation,
                     "messages": [
                         {
                             "role": item.role,
@@ -287,29 +289,59 @@ def create_app(
                 path="/",
             )
             return response
-        except (SecurityError, SessionError) as exc:
+        except (SecurityError, SessionError, ValueError) as exc:
             return _exception_response(exc)
 
     async def clear_session(request: Request) -> Response:
         try:
             session = _mutation_session(request, runtime, auth)
+            generation = _interaction_generation(
+                request.headers.get("x-butters-generation")
+            )
             # Clearing now waits on the per-session turn lock, so it must not run
             # on the event loop: an in-flight turn would stall the whole service.
-            await run_blocking(runtime.clear_conversation, session)
-            return JSONResponse({"status": "cleared", "csrf_token": session.csrf_token})
-        except (SecurityError, SessionError) as exc:
+            cleared = await run_blocking(
+                runtime.clear_conversation,
+                session,
+                interaction_generation=generation,
+            )
+            return JSONResponse(
+                {
+                    "status": "cleared" if cleared else "superseded",
+                    "csrf_token": session.csrf_token,
+                }
+            )
+        except (SecurityError, SessionError, ValueError) as exc:
             return _exception_response(exc)
 
     async def chat(request: Request) -> Response:
         try:
             session = _mutation_session(request, runtime, auth)
+        except (SecurityError, SessionError) as exc:
+            # Only this guard can prove the assistant was never entered. Keep
+            # the retry semantic attached to the control-flow boundary rather
+            # than trusting an error-code string returned from deeper work.
+            return _exception_response(
+                exc,
+                safe_to_retry=isinstance(exc, SessionError)
+                and exc.code == "invalid_session",
+            )
+        try:
+            generation = _interaction_generation(
+                request.headers.get("x-butters-generation")
+            )
             if not normal_rate.check(session.session_id):
                 return _error("rate_limited", "request rate limit exceeded", 429)
             payload = await _json_body(request, configured.web.max_request_bytes)
             text = payload.get("text")
             if not isinstance(text, str):
                 return _error("invalid_request", "text must be a string", 400)
-            result = await run_blocking(runtime.handle_text, session, text)
+            result = await run_blocking(
+                runtime.handle_text,
+                session,
+                text,
+                interaction_generation=generation,
+            )
             return JSONResponse(result.as_dict())
         except (SecurityError, SessionError, ValueError, PermissionError) as exc:
             return _exception_response(exc)
@@ -1098,6 +1130,15 @@ def create_app(
         try:
             auth.require_origin(websocket.headers, websocket.headers.get("host"))
             session = runtime.sessions.require(websocket.cookies.get(SESSION_COOKIE))
+            # Identity is bound before the handshake is accepted, so a copied
+            # cookie never reaches the rate limiter, a voice slot, the STT pool,
+            # a recognizer, the assistant, or the stored conversation.
+            _require_peer_identity(
+                websocket.headers,
+                websocket.client.host if websocket.client else None,
+                session,
+                auth,
+            )
             await websocket.accept()
             first = await asyncio.wait_for(websocket.receive(), timeout=5.0)
             if first.get("type") != "websocket.receive" or not isinstance(
@@ -1119,6 +1160,9 @@ def create_app(
                 raise BrowserAudioError(
                     "protocol_error", "first message must have type start"
                 )
+            interaction_generation = _interaction_generation(
+                start_message.get("interaction_generation")
+            )
             AuthPolicy.require_csrf(session, start_message.get("csrf_token"))
             if not normal_rate.check("voice:" + session.session_id, cost=2):
                 raise BrowserAudioError("rate_limited", "voice rate limit exceeded")
@@ -1309,13 +1353,84 @@ def create_app(
                         }
                     )
                     break
-                result = await run_blocking(
-                    runtime.handle_text,
-                    session,
-                    utterance.raw,
-                    source="voice",
-                    trace=trace,
+                # Cancellation stays possible after finalization. The routing
+                # turn carries a cooperative token, and a cancel frame that
+                # arrives while it runs sets that token. Whether it takes effect
+                # depends on how far the turn has got: the service checks it
+                # before any tool starts and between compound reads, so work
+                # that has not begun is genuinely stopped, while a tool already
+                # running may still finish. The client is told which happened
+                # rather than being promised a cancellation that did not occur.
+                cancel_event = threading.Event()
+                routing = asyncio.ensure_future(
+                    run_blocking(
+                        runtime.handle_text,
+                        session,
+                        utterance.raw,
+                        source="voice",
+                        trace=trace,
+                        cancel_event=cancel_event,
+                        interaction_generation=interaction_generation,
+                    )
                 )
+                listener = asyncio.ensure_future(websocket.receive())
+                disconnected = False
+                try:
+                    while not routing.done():
+                        finished, _pending = await asyncio.wait(
+                            {routing, listener},
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if listener not in finished:
+                            continue
+                        try:
+                            frame = listener.result()
+                        except WebSocketDisconnect:
+                            disconnected = True
+                            cancel_event.set()
+                            break
+                        if frame.get("type") == "websocket.disconnect":
+                            # Do not schedule another receive on a closed
+                            # socket; it would only fail and be discarded.
+                            disconnected = True
+                            cancel_event.set()
+                            break
+                        listener = asyncio.ensure_future(websocket.receive())
+                        raw_frame = frame.get("text")
+                        if not isinstance(raw_frame, str):
+                            continue
+                        try:
+                            late = json.loads(raw_frame)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(late, dict) and late.get("type") == "cancel":
+                            cancel_event.set()
+                            trace.emit(
+                                TraceStage.ROUTING,
+                                "cancel_requested",
+                                reason_code="client_cancelled",
+                            )
+                    # The routing thread cannot be killed, so it is always
+                    # awaited; the token only stops work it had not started.
+                    result = await routing
+                finally:
+                    listener.cancel()
+                    await asyncio.gather(listener, return_exceptions=True)
+                if cancel_event.is_set():
+                    trace.emit(
+                        TraceStage.ROUTING,
+                        "cancel_observed",
+                        reason_code="client_cancelled",
+                    )
+                if disconnected:
+                    # A browser that has already gone away is not an error, and
+                    # must not retire a healthy recognizer from the pool.
+                    trace.emit(
+                        TraceStage.AUDIO,
+                        "disconnected",
+                        reason_code="browser_disconnect",
+                    )
+                    break
                 await websocket.send_json({"type": "assistant", **result.as_dict()})
                 break
         except asyncio.TimeoutError:
@@ -1570,7 +1685,26 @@ def _require_session_peer(
     auth: AuthPolicy,
 ) -> None:
     client = request.client.host if request.client else None
-    if session.peer_key != auth.peer_key(request.headers, client):
+    _require_peer_identity(request.headers, client, session, auth)
+
+
+def _require_peer_identity(
+    headers: object,
+    client_host: str | None,
+    session: BrowserSession,
+    auth: AuthPolicy,
+) -> None:
+    """Bind a browser session to the identity that created it.
+
+    The HTTP surface and `/ws/voice` share this one check so the WebSocket
+    cannot drift back into a weaker rule. `AuthPolicy.peer_key` already
+    degrades a missing identity header or an untrusted proxy topology to a
+    socket-peer key, so a session created under a tailnet identity matches
+    neither, and the failure is reported with the same opaque code the HTTP
+    path uses.
+    """
+
+    if session.peer_key != auth.peer_key(headers, client_host):
         raise SecurityError(
             "session_identity_denied",
             "browser session belongs to another identity",
@@ -1614,6 +1748,24 @@ def _bounded_client_ms(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return round(value) if 0 <= value <= 300_000 else None
+
+
+def _interaction_generation(value: object) -> int | None:
+    """Parse the optional shipped-browser ordering token within JS precision."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        if not value.isdigit():
+            raise ValueError("interaction generation is invalid")
+        value = int(value)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int)
+        or not 1 <= value <= 9_007_199_254_740_991
+    ):
+        raise ValueError("interaction generation is invalid")
+    return value
 
 
 async def _bounded_body(request: Request, maximum: int) -> bytes:
@@ -1667,11 +1819,18 @@ async def _handle_typed_exception(_request: Request, exc: Exception) -> JSONResp
     return _exception_response(exc)
 
 
-def _exception_response(exc: Exception) -> JSONResponse:
+def _exception_response(
+    exc: Exception, *, safe_to_retry: bool = False
+) -> JSONResponse:
     if isinstance(exc, SecurityError):
         return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SessionError):
-        return _error(exc.code, str(exc), exc.status_code)
+        return _error(
+            exc.code,
+            str(exc),
+            exc.status_code,
+            safe_to_retry=safe_to_retry and exc.code == "invalid_session",
+        )
     if isinstance(exc, SpeechProviderError):
         return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)
     if isinstance(exc, SkillAuthoringError):
@@ -1711,9 +1870,19 @@ def _exception_response(exc: Exception) -> JSONResponse:
     return _error("invalid_request", str(exc), 400)
 
 
-def _error(code: str, message: str, status: int) -> JSONResponse:
+def _error(
+    code: str,
+    message: str,
+    status: int,
+    *,
+    safe_to_retry: bool = False,
+) -> JSONResponse:
     return JSONResponse(
-        {"error": code[:64], "message": sanitize_text(message, max_bytes=512).text},
+        {
+            "error": code[:64],
+            "message": sanitize_text(message, max_bytes=512).text,
+            "safe_to_retry": safe_to_retry,
+        },
         status_code=status,
     )
 

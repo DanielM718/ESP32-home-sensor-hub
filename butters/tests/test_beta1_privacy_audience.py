@@ -217,10 +217,10 @@ def test_administrator_routing_test_can_still_reach_sensitive_skills(tmp_path: P
     asyncio.run(scenario())
 
 
-def test_cloud_tool_exposure_excludes_administrator_skills_for_normal_callers(
+def test_cloud_tool_exposure_excludes_administrator_skills_for_every_caller(
     tmp_path: Path,
 ) -> None:
-    """M-8: a cloud model can never be handed a tool its caller could not run."""
+    """Administrator access does not make deployment internals provider-safe."""
 
     app, service, _settings = build_app(tmp_path)
     try:
@@ -228,7 +228,7 @@ def test_cloud_tool_exposure_excludes_administrator_skills_for_normal_callers(
         normal = {item["name"] for item in service._relevant_skill_tools(text, False)}
         privileged = {item["name"] for item in service._relevant_skill_tools(text, True)}
         assert "get_network_observation" not in normal
-        assert "get_network_observation" in privileged
+        assert "get_network_observation" not in privileged
     finally:
         asyncio.run(app.state.shutdown_workers())
 

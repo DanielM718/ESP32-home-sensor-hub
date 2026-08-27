@@ -118,6 +118,21 @@ def admin_headers(origin: str | None = None, csrf: str | None = None) -> dict[st
     return headers
 
 
+def peer_identity_headers(peer_key: str) -> dict[str, str]:
+    """Present the tailnet identity a session is bound to.
+
+    `/ws/voice` binds a session to its creating identity exactly as the HTTP
+    surface does, so a test that fabricates a session under `identity:...`
+    must connect as that identity, like the browser it stands in for.
+    """
+
+    return (
+        {"tailscale-user-login": peer_key.removeprefix("identity:")}
+        if peer_key.startswith("identity:")
+        else {}
+    )
+
+
 async def start_session(
     http: httpx.AsyncClient,
     *,
@@ -131,7 +146,15 @@ async def start_session(
 class WebSocketHarness:
     """Drive an ASGI WebSocket route directly, as a real loopback peer would."""
 
-    def __init__(self, app, path: str, *, headers: dict[str, str], host: str = "testserver") -> None:
+    def __init__(
+        self,
+        app,
+        path: str,
+        *,
+        headers: dict[str, str],
+        host: str = "testserver",
+        client_host: str = "127.0.0.1",
+    ) -> None:
         self.incoming: asyncio.Queue = asyncio.Queue()
         self.outgoing: asyncio.Queue = asyncio.Queue()
         request_headers = {"host": host, **headers}
@@ -144,7 +167,7 @@ class WebSocketHarness:
             "query_string": b"",
             "root_path": "",
             "headers": [(key.lower().encode(), value.encode()) for key, value in request_headers.items()],
-            "client": ("127.0.0.1", 1234),
+            "client": (client_host, 1234),
             "server": ("testserver", 80),
             "subprotocols": [],
             "state": {},

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 from dataclasses import replace
 
 from butters.assistant_config import load_assistant_settings
@@ -163,3 +164,69 @@ def test_invalid_machine_is_rejected_before_any_probe() -> None:
         assert exc.code == "policy_denied"
     else:
         raise AssertionError("invalid machine was accepted")
+
+
+def test_reachability_wait_polls_without_wake_or_monitor_side_effects() -> None:
+    operations = Operations(
+        network=[False, False, True],
+        ssh=[False, False, False],
+        parsec=[False],
+    )
+
+    result = _workflow(operations).wait_for_reachability("desktop")
+
+    assert result["network_reachable"] is True
+    assert result["timed_out"] is False
+    assert result["cancelled"] is False
+    assert operations.wake_calls == 0
+    assert operations.remote_calls == 0
+
+
+def test_reachability_wait_reports_its_fixed_timeout_truthfully() -> None:
+    operations = Operations(network=[False], ssh=[False], parsec=[False])
+
+    result = _workflow(operations, step=0.4).wait_for_reachability("desktop")
+
+    assert result["network_reachable"] is False
+    assert result["timed_out"] is True
+    assert result["cancelled"] is False
+    assert operations.wake_calls == operations.remote_calls == 0
+
+
+def test_reachability_wait_respects_cancellation_before_any_probe() -> None:
+    event = threading.Event()
+    event.set()
+    operations = Operations(network=[True], ssh=[True], parsec=[True])
+
+    result = _workflow(operations).wait_for_reachability(
+        "desktop", cancel_event=event
+    )
+
+    assert result["cancelled"] is True
+    assert result["timed_out"] is False
+    assert operations.network_values == [True]
+    assert operations.ssh_values == [True]
+    assert operations.wake_calls == operations.remote_calls == 0
+
+
+def test_reachability_wait_respects_cancellation_between_polls() -> None:
+    settings = replace(
+        load_assistant_settings().desktop,
+        poll_interval_seconds=0.01,
+        network_timeout_seconds=1.0,
+        total_timeout_seconds=1.0,
+    )
+    operations = Operations(network=[False], ssh=[False], parsec=[False])
+    event = threading.Event()
+    timer = threading.Timer(0.03, event.set)
+    timer.start()
+    try:
+        result = DesktopWorkflow(settings, operations, clock=time.monotonic).wait_for_reachability(
+            "desktop", cancel_event=event
+        )
+    finally:
+        timer.cancel()
+
+    assert result["cancelled"] is True
+    assert result["timed_out"] is False
+    assert operations.wake_calls == operations.remote_calls == 0
