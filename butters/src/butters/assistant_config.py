@@ -278,7 +278,7 @@ class BrowserAudioSettings:
     # the bounded queue instead of multiplying resident models.
     max_concurrent_sessions: int = 1
     max_queue_depth: int = 2
-    allowed_sample_rates: tuple[int, ...] = (16000, 44100, 48000)
+    allowed_sample_rates: tuple[int, ...] = (16000, 44100, 48000, 96000)
 
     def validated(self) -> BrowserAudioSettings:
         if not 1 <= self.max_utterance_seconds <= 120:
@@ -612,7 +612,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
     ).validated()
 
     audio_table = _table(data, "browser_audio")
-    raw_rates = audio_table.get("allowed_sample_rates", [16000, 44100, 48000])
+    raw_rates = audio_table.get(
+        "allowed_sample_rates", [16000, 44100, 48000, 96000]
+    )
     if not isinstance(raw_rates, list) or not all(
         isinstance(item, int) for item in raw_rates
     ):
