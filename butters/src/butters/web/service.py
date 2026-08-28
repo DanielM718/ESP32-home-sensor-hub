@@ -2209,6 +2209,8 @@ def _action_summary(skill: str, arguments: dict[str, object]) -> str:
         "start_remote_desktop_session": "Wake the configured desktop and prepare its remote session",
         "monitors_off": "Turn off the configured desktop monitors through Home Assistant",
         "monitors_on": "Turn on the configured desktop monitors through Home Assistant",
+        "ensure_parsec_running": "Make the configured desktop's fixed Parsec service ready",
+        "restart_parsec": "Restart the configured desktop's fixed Parsec service",
         "lock_desktop": "Lock the configured desktop",
         "sleep_desktop": "Put the configured desktop to sleep",
         "restart_desktop": "Restart the configured desktop",

@@ -147,6 +147,24 @@ class V2SkillImplementations:
             {"observed": ["network_reachable", "ssh_ready", "parsec_ready"]},
         )
 
+    def get_parsec_status(self, arguments: SkillArguments) -> SkillResult:
+        data = self.desktop.parsec_status(cast(DesktopArgs, arguments).machine)
+        return StructuredSkillResult(
+            "parsec_status",
+            data,
+            {
+                "observed": [
+                    "desktop_reachable",
+                    "ssh_reachable",
+                    "installed",
+                    "service_running",
+                    "host_process_present",
+                    "plausibly_ready",
+                ],
+                "unknown": [] if data.get("observed") else ["parsec_state"],
+            },
+        )
+
     def wait_for_desktop_reachability(
         self, arguments: SkillArguments
     ) -> SkillResult:
@@ -600,6 +618,29 @@ def register_v2_skills(
             impl.get_desktop_status,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
             timeout=5,
+        )
+    )
+    registry.register(
+        spec(
+            "get_parsec_status",
+            "Observe bounded Parsec installation, service, process, and plausible readiness state for the configured desktop.",
+            ActionClass.READ_ONLY,
+            _parse_desktop,
+            impl.authorize_desktop,
+            impl.get_parsec_status,
+            _schema({"machine": _enum(["desktop"])}, ["machine"]),
+            timeout=30,
+            configured=desktop.settings.parsec_status_enabled,
+            available=(
+                desktop.settings.parsec_status_enabled
+                and desktop.broker_settings.enabled
+            ),
+            unavailable_reason=(
+                None
+                if desktop.settings.parsec_status_enabled
+                and desktop.broker_settings.enabled
+                else "fixed Parsec status operation is disabled or the broker is unprovisioned"
+            ),
         )
     )
     registry.register(

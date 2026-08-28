@@ -41,6 +41,8 @@ class DesktopOperations(Protocol):
 
     def parsec_ready(self) -> bool | None: ...
 
+    def parsec_status(self) -> dict[str, object] | None: ...
+
     def send_wake(self) -> bool: ...
 
     def request_headless_mode(self) -> bool: ...
@@ -92,9 +94,19 @@ class BrokerDesktopOperations:
         return True
 
     def parsec_ready(self) -> bool | None:
-        # The inspected scripts expose no read-only Parsec process/status probe.
-        # Unknown is safer than treating ping or SSH as application readiness.
-        return None
+        status = self.parsec_status()
+        ready = None if status is None else status.get("plausibly_ready")
+        return ready if isinstance(ready, bool) else None
+
+    def parsec_status(self) -> dict[str, object] | None:
+        try:
+            result = self.broker.request(
+                BrokerOperation.DESKTOP_PARSEC_STATUS,
+                request_id=secrets.token_urlsafe(18),
+            )
+        except BrokerError:
+            return None
+        return dict(result.status) if result.ok else None
 
     def send_wake(self) -> bool:
         return self._broker(BrokerOperation.DESKTOP_WAKE)
@@ -137,6 +149,34 @@ class DesktopWorkflow:
         network = network or ssh
         parsec = self.operations.parsec_ready() if ssh else False
         return DesktopState(machine, network, ssh, parsec)
+
+    def parsec_status(self, machine: str) -> dict[str, object]:
+        """Return only bounded user-relevant state for the fixed Parsec host."""
+
+        self._require_machine(machine)
+        network = self.operations.network_reachable()
+        ssh = self.operations.ssh_ready()
+        network = network or ssh
+        status = self.operations.parsec_status() if ssh else None
+        result: dict[str, object] = {
+            "machine": machine,
+            "desktop_reachable": network,
+            "ssh_reachable": ssh,
+            "installed": None,
+            "installation_type": "unknown",
+            "service_present": None,
+            "service_running": None,
+            "service_startup": "unknown",
+            "service_process_present": None,
+            "host_process_present": None,
+            "system_host_process_present": None,
+            "user_host_process_present": None,
+            "plausibly_ready": False,
+            "observed": status is not None,
+        }
+        if status is not None:
+            result.update(status)
+        return result
 
     def wait_for_reachability(
         self, machine: str, *, cancel_event: threading.Event | None = None

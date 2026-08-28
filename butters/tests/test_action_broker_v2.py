@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
+
 from butters.actions.broker import (
     BrokerClient,
     BrokerError,
@@ -432,6 +433,9 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
 
     class Result:
         returncode = 0
+        stdout = json.dumps(
+            {"accepted": True, "transition": "restart", "scheduled": True}
+        )
 
     config = FixedBrokerConfig(
         "192.168.1.209",
@@ -457,7 +461,14 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     assert "UpdateHostKeys=no" in options
     assert "-T" in argv
     assert not any(item.startswith("StrictHostKeyChecking=no") for item in options)
-    assert argv[-2:] == ["Daniel@192.168.1.209", "shutdown.exe /r /t 0"]
+    assert argv[-2:] == [
+        "Daniel@192.168.1.209",
+        (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass -File "
+            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Restart"
+        ),
+    ]
     assert argv[argv.index("-i") + 1].endswith("windows_remote_mode")
 
 

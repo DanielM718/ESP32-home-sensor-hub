@@ -473,6 +473,18 @@ class ResponseFormatter:
             if data.get("parsec_ready") is True:
                 return "The desktop is reachable, remote management is ready, and Parsec is ready."
             return "The desktop and remote management are ready. Parsec readiness is not independently observable."
+        if result.kind == "parsec_status":
+            if not data.get("desktop_reachable"):
+                return "The desktop is offline, so Parsec is not currently reachable."
+            if not data.get("ssh_reachable") or not data.get("observed"):
+                return "The desktop is reachable, but I couldn't observe Parsec's fixed service state."
+            if not data.get("installed"):
+                return "Parsec is not installed in the reviewed per-machine location."
+            if data.get("plausibly_ready") is True:
+                return "Parsec's fixed service and host process are running, so the desktop appears ready for a Parsec connection."
+            if data.get("service_running") is not True:
+                return "Parsec is installed, but its fixed service is not running."
+            return "Parsec's service is running, but its expected host process is not ready."
         if result.kind == "desktop_remote_session":
             if data.get("failed_stage"):
                 return f"The desktop remote-session workflow stopped at {str(data['failed_stage']).replace('_', ' ')}."
