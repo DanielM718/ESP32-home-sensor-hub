@@ -74,3 +74,23 @@ def test_common_sample_rates_preserve_duration_across_uneven_chunks() -> None:
 
         expected_samples = round(input_count * 16_000 / input_rate)
         assert len(output) // 2 == expected_samples
+
+
+def test_96khz_pcm_preserves_duration_when_resampled_to_16khz() -> None:
+    input_count = 96_000
+    raw = _little_endian_bytes(array("h", [1_234]) * input_count)
+    converter = StreamingPcmConverter(
+        input_rate=96_000,
+        input_channels=1,
+        input_sample_width=2,
+    )
+
+    output = bytearray()
+    for offset in range(0, len(raw), 1_978):
+        output.extend(converter.convert(raw[offset : offset + 1_978]))
+    output.extend(converter.finish())
+
+    samples = _decode_s16(bytes(output))
+    assert len(samples) == 16_000
+    assert set(samples) == {1_234}
+    assert converter.buffered_samples == 0

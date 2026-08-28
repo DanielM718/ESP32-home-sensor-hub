@@ -4,7 +4,7 @@ from dataclasses import replace
 
 import pytest
 
-from butters.assistant_config import BrowserAudioSettings
+from butters.assistant_config import BrowserAudioSettings, ConfigError
 from butters.stt.model import StreamingSTTEngine
 from butters.stt.normalization import DomainVocabulary
 from butters.web.audio import BrowserAudioError, BrowserAudioStream
@@ -61,6 +61,76 @@ def test_browser_audio_converts_48khz_and_emits_bounded_final() -> None:
     assert final.result.processing_seconds == pytest.approx(
         final.result.preprocessing_seconds + final.result.inference_seconds
     )
+
+
+def test_browser_audio_accepts_96khz_and_counts_input_duration_once() -> None:
+    engine = Engine()
+    stream = BrowserAudioStream(
+        engine, DomainVocabulary((), ()), BrowserAudioSettings()
+    )
+
+    events = stream.start(sample_rate=96000, channels=1, encoding="pcm_s16le")
+    stream.accept((1000).to_bytes(2, "little", signed=True) * 9600)
+    final = stream.finish()
+
+    assert len(events) == 1
+    assert events[0].kind == "listening"
+    assert engine.samples == 1600
+    assert final.result is not None
+    assert final.result.audio_seconds == pytest.approx(0.1)
+
+
+@pytest.mark.parametrize("sample_rate", [16000, 44100, 48000, 96000])
+def test_browser_audio_accepts_each_discrete_configured_rate(sample_rate: int) -> None:
+    stream = BrowserAudioStream(
+        Engine(), DomainVocabulary((), ()), BrowserAudioSettings()
+    )
+
+    events = stream.start(
+        sample_rate=sample_rate, channels=1, encoding="pcm_s16le"
+    )
+
+    assert events[0].kind == "listening"
+    stream.abort()
+
+
+def test_browser_audio_still_rejects_a_rate_outside_the_discrete_allow_list() -> None:
+    stream = BrowserAudioStream(
+        Engine(), DomainVocabulary((), ()), BrowserAudioSettings()
+    )
+
+    with pytest.raises(BrowserAudioError) as rejected:
+        stream.start(sample_rate=8000, channels=1, encoding="pcm_s16le")
+
+    assert rejected.value.code == "unsupported_sample_rate"
+
+
+def test_browser_audio_configuration_still_rejects_rates_above_96khz() -> None:
+    settings = replace(BrowserAudioSettings(), allowed_sample_rates=(192000,))
+
+    with pytest.raises(ConfigError, match="unsafe rate"):
+        settings.validated()
+
+
+@pytest.mark.parametrize(
+    ("channels", "encoding", "code"),
+    [
+        (0, "pcm_s16le", "unsupported_channels"),
+        (3, "pcm_s16le", "unsupported_channels"),
+        (1, "pcm_f32le", "unsupported_encoding"),
+    ],
+)
+def test_browser_audio_channel_and_encoding_limits_are_unchanged(
+    channels: int, encoding: str, code: str
+) -> None:
+    stream = BrowserAudioStream(
+        Engine(), DomainVocabulary((), ()), BrowserAudioSettings()
+    )
+
+    with pytest.raises(BrowserAudioError) as rejected:
+        stream.start(sample_rate=96000, channels=channels, encoding=encoding)
+
+    assert rejected.value.code == code
 
 
 def test_browser_audio_rejects_malformed_oversized_and_overlong_frames() -> None:

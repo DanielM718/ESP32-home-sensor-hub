@@ -148,7 +148,7 @@ session_timeout_seconds = 60.0
 # The accurate Zipformer is large; keep one recognizer warm and queue briefly.
 max_concurrent_sessions = 1
 max_queue_depth = 2
-allowed_sample_rates = [16000, 44100, 48000]
+allowed_sample_rates = [16000, 44100, 48000, 96000]
 
 # Local STT and TTS remain defaults. Text, STT, and TTS paid-call switches are
 # independent. Unknown speech pricing fails closed until an administrator adds
