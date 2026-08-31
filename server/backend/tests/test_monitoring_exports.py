@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import io
 import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -8,7 +9,6 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-
 from app.config import (
     AirQualitySettings,
     AppSettings,
@@ -19,6 +19,7 @@ from app.config import (
 from app.export_queries import (
     ExportPoint,
     InfluxExportQueryRepository,
+    _aligned_tier_boundary,
     _downsample_points,
     air_quality_aggregate_export_flux,
     air_quality_raw_export_flux,
@@ -26,7 +27,12 @@ from app.export_queries import (
     preview_recent_flux,
     printer_telemetry_export_flux,
 )
-from app.export_worker import LONG_HEADER, ExportWorker, _bounded_chunk_seconds
+from app.export_worker import (
+    LONG_HEADER,
+    ExportWorker,
+    _bounded_chunk_seconds,
+    _write_wide,
+)
 from app.persistence import MonitoringExportStore
 from app.web import create_app
 from app.workflow_services import ExportService, csv_safe_text, download_filename
@@ -1590,3 +1596,100 @@ class TestExportFlux:
         assert not any(
             'from(bucket: "environment_live")' in query for query in query_api.queries
         )
+
+    def test_boundary_bucket_wide_rows_stay_whole_and_single_tier(self) -> None:
+        """A downsample window may not be split across the live-retention edge.
+
+        A straddling window used to be averaged once per tier while the wide
+        writer grouped on tier but sorted on field, so ``groupby`` broke each
+        tier into one partially populated row per field.
+        """
+
+        start = BASE
+        points = [
+            ExportPoint(
+                iso_utc(start + timedelta(minutes=minute)),
+                "ams",
+                "x2d/ams_1",
+                None,
+                None,
+                field,
+                value,
+                unit_for_field(field),
+                tier,
+                "x2d",
+                "ams_1",
+            )
+            for minute, tier in ((0, "durable_5m"), (5, "durable_5m"), (10, "live_raw"))
+            for field, value in (
+                ("ams_humidity", 22.0 + minute),
+                ("ams_temperature_c", 30.0 + minute),
+            )
+        ]
+
+        downsampled = list(
+            _downsample_points(iter(points), start=start, resolution="15m")
+        )
+        handle = io.StringIO()
+        writer = csv.writer(handle, lineterminator="\n")
+        wide_fields = ("ams_humidity", "ams_temperature_c")
+        state: dict[tuple[str, str], dict[str, Any]] = {
+            ("ams", "x2d/ams_1"): {"rows_written": 0}
+        }
+        rows_written = _write_wide(
+            writer, downsampled, wide_fields, state, include_bambu_identity=True
+        )
+
+        rows = list(csv.reader(io.StringIO(handle.getvalue())))
+        assert rows_written == 2
+        # One whole row per tier, both measurements populated, no duplicate tier.
+        assert [row[-3] for row in rows] == [
+            "15m_mean_from_durable_5m",
+            "15m_mean_from_live_raw",
+        ]
+        for row in rows:
+            assert row[5] and row[6], f"wide row is missing a measurement: {row}"
+            assert row[-2:] == ["x2d", "ams_1"]
+
+    def test_retention_boundary_snaps_to_the_downsample_grid(self) -> None:
+        """Each emitted bucket must resolve to exactly one storage tier."""
+
+        start = BASE - timedelta(days=7)
+        # 72h of retention places the raw edge 8 minutes inside a 15m window.
+        clock_now = start + timedelta(days=7) + timedelta(minutes=8)
+        queries: list[str] = []
+
+        class QueryApi:
+            def query_stream(self, **kwargs: Any):
+                queries.append(kwargs["query"])
+                return iter(())
+
+        repository = InfluxExportQueryRepository(
+            SimpleNamespace(
+                bucket="environment", live_bucket="environment_live", org="home"
+            ),
+            query_api=QueryApi(),
+            raw_retention_seconds=72 * 3600,
+            clock=lambda: clock_now,
+        )
+        list(
+            repository.query_source_type(
+                sensor_type="ams",
+                start=start,
+                stop=clock_now,
+                sources=[Source("ams", printer_id="x2d", ams_id="ams_1")],
+                fields=["ams_humidity"],
+                resolution="15m",
+            )
+        )
+
+        durable = [q for q in queries if 'from(bucket: "environment")' in q]
+        live = [q for q in queries if 'from(bucket: "environment_live")' in q]
+        assert len(durable) == 1 and len(live) == 1
+        # The shared edge is aligned to a 15m window boundary anchored at start,
+        # so no window draws from both tiers.
+        edge = _aligned_tier_boundary(
+            clock_now - timedelta(seconds=72 * 3600), start=start, resolution="15m"
+        )
+        assert (edge - start).total_seconds() % 900 == 0
+        assert iso_utc(edge) in durable[0] and iso_utc(edge) in live[0]

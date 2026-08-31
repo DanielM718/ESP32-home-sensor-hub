@@ -189,8 +189,11 @@ class InfluxExportQueryRepository:
                 else _downsample_points(points, start=start, resolution=resolution)
             )
 
-        boundary = self._clock().astimezone(timezone.utc) - timedelta(
-            seconds=self._raw_retention_seconds
+        boundary = _aligned_tier_boundary(
+            self._clock().astimezone(timezone.utc)
+            - timedelta(seconds=self._raw_retention_seconds),
+            start=start,
+            resolution=resolution,
         )
         tier_streams: list[Iterable[ExportPoint]] = []
         if start < boundary:
@@ -831,9 +834,9 @@ def _downsample_points(
             str,
             int | None,
             str | None,
+            str | None,
+            str | None,
             str,
-            str | None,
-            str | None,
             str,
         ],
         list[float],
@@ -844,16 +847,18 @@ def _downsample_points(
         bucket_time = start + timedelta(
             seconds=int(offset_seconds // window_seconds) * window_seconds
         )
+        # Field sorts last so that every field of one
+        # (time, source, tier) row is contiguous for the wide writer's groupby.
         key = (
             bucket_time,
             point.sensor_type,
             point.source_id,
             point.node_id,
             point.location,
-            point.field,
             point.printer_id,
             point.ams_id,
             point.data_tier,
+            point.field,
         )
         buckets.setdefault(key, []).append(float(point.value))
 
@@ -864,10 +869,10 @@ def _downsample_points(
             source_id,
             node_id,
             location,
-            field,
             printer_id,
             ams_id,
             source_tier,
+            field,
         ) = key
         values = buckets[key]
         data_tier = (
@@ -888,6 +893,27 @@ def _downsample_points(
             printer_id=printer_id,
             ams_id=ams_id,
         )
+
+
+def _aligned_tier_boundary(
+    boundary: datetime, *, start: datetime, resolution: str
+) -> datetime:
+    """Round the live-retention boundary up onto the downsample grid.
+
+    ``_downsample_points`` anchors its windows at ``start``. If the tier
+    boundary fell inside a window, that window would be averaged twice - once
+    per tier - and the wide writer would emit one partially populated row per
+    tier. Rounding up keeps every emitted bucket whole and single-tier; the
+    straddling window resolves to durable data, which is the tier guaranteed to
+    still cover it.
+    """
+
+    window_seconds = resolution_window_seconds(resolution)
+    if window_seconds is None or boundary <= start:
+        return boundary
+    offset_seconds = (boundary - start).total_seconds()
+    windows = int(-(-offset_seconds // window_seconds))
+    return start + timedelta(seconds=windows * window_seconds)
 
 
 def _values(record: Any) -> Mapping[str, Any]:

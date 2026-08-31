@@ -91,7 +91,10 @@ and 24h dashboard views use high-resolution live data with display
 downsampling, while the 7d view uses durable five-minute samples. Raw/1-minute
 exports are honest live-tier queries and warn when part of the requested range
 has expired; coarser Bambu exports can combine labeled live-derived and
-durable-derived intervals. Durable samples are never described as raw.
+durable-derived intervals. Durable samples are never described as raw. The
+live/durable split is snapped onto the requested resolution's window grid, so
+each emitted interval is averaged from exactly one tier and the wide CSV keeps
+its one-row-per-timestamp/source shape across the retention boundary.
 
 The sensor source catalog is reconstructed from both recent live samples and
 permanent telemetry. A temporarily offline printer or AMS stays selectable,

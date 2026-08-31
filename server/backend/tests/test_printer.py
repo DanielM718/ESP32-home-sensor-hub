@@ -6,7 +6,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from app.config import (
     AirQualitySettings,
     AppSettings,
