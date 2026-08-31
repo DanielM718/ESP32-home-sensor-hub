@@ -3,8 +3,10 @@ from __future__ import annotations
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+
 from app.config import (
     AirQualitySettings,
     AppSettings,
@@ -20,22 +22,29 @@ from app.printer_adapter import (
     printer_state_from_home_assistant,
     unavailable_printer_state,
 )
-from app.printer_config import PrinterObserverSettings
+from app.printer_config import AmsObserverSettings, PrinterObserverSettings
 from app.printer_intelligence import PrinterIntelligenceStore
 from app.printer_model import (
+    AmsUnitState,
     NormalizedPrinterState,
     PrinterState,
     PrintSession,
     ValueProvenance,
     print_session_point,
     printer_state_point,
+    printer_telemetry_points,
 )
 from app.printer_persistence import PrinterStore
 from app.printer_queries import (
     PrinterReadRepository,
     environment_summary_response,
     printer_environment_flux,
+    printer_telemetry_flux,
+    printer_telemetry_query_from_params,
+    printer_telemetry_response,
 )
+from app.printer_worker import persist_observation
+from app.queries import QueryValidationError
 from app.web import create_app
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
@@ -553,6 +562,231 @@ def test_influx_points_keep_unbounded_text_out_of_tags() -> None:
     assert session_point.fields["job_name"] == "unique file name.3mf"
 
 
+def test_first_class_printer_and_multiple_ams_points_are_bounded_and_typed() -> None:
+    state = PrinterState(
+        printer_id="x2d",
+        printer_model="X2D",
+        online=True,
+        normalized_state=NormalizedPrinterState.PRINTING,
+        source="home_assistant",
+        source_timestamp=NOW,
+        observed_at=NOW,
+        job_id="never-a-tag",
+        job_name="also never a tag.3mf",
+        chamber_temperature=38.5,
+        bed_temperature=60.0,
+        nozzle_1_temperature=220.0,
+        progress_percent=42.5,
+        remaining_seconds=1234,
+        ams_units=(
+            AmsUnitState(
+                ams_id="ams_1",
+                model="AMS 2 Pro",
+                active=True,
+                humidity_percent=22.0,
+                humidity_index=3,
+                temperature=25.5,
+                drying=False,
+                remaining_drying_seconds=0,
+            ),
+            AmsUnitState(
+                ams_id="ams_2",
+                model="AMS 2 Pro",
+                humidity_percent=41.5,
+                temperature=None,
+            ),
+        ),
+    )
+
+    printer, ams_1, ams_2 = printer_telemetry_points(state)
+
+    assert printer.measurement == "printer_telemetry"
+    assert printer.tags == {
+        "printer_id": "x2d",
+        "component_type": "printer",
+        "component_id": "main",
+        "source": "home_assistant",
+    }
+    assert printer.timestamp == NOW
+    assert printer.fields["chamber_temperature_c"] == 38.5
+    assert printer.fields["remaining_print_seconds"] == 1234
+    assert printer.fields["online"] is True
+    assert "job_id" not in printer.tags and "job_name" not in printer.tags
+    assert {ams_1.tags["component_id"], ams_2.tags["component_id"]} == {
+        "ams_1",
+        "ams_2",
+    }
+    assert ams_1.fields == {
+        "ams_humidity": 22.0,
+        "ams_temperature_c": 25.5,
+        "ams_humidity_index": 3,
+        "ams_remaining_drying_seconds": 0,
+        "ams_active": True,
+        "ams_drying": False,
+    }
+    assert ams_2.fields == {"ams_humidity": 41.5}
+    assert "ams_temperature_c" not in ams_2.fields
+    assert printer_state_point(state, measurement="printer_state").fields[
+        "ams_inventory_json"
+    ]
+
+
+def test_adapter_normalizes_multiple_ams_telemetry_without_fabricating_values(
+    tmp_path: Path,
+) -> None:
+    ams_units = tuple(
+        AmsObserverSettings(
+            ams_id=f"ams_{index}",
+            model="AMS 2 Pro",
+            entities={
+                "active": f"binary_sensor.ams_{index}_active",
+                "humidity_percent": f"sensor.ams_{index}_humidity",
+                "humidity_index": f"sensor.ams_{index}_humidity_index",
+                "temperature": f"sensor.ams_{index}_temperature",
+                "drying": f"binary_sensor.ams_{index}_drying",
+                "remaining_drying_time": f"sensor.ams_{index}_drying_remaining",
+            },
+        ).validated()
+        for index in (1, 2)
+    )
+    settings = PrinterObserverSettings(
+        printer_id="x2d",
+        printer_model="X2D",
+        home_assistant_url="http://127.0.0.1:8123",
+        entities={
+            "online": "binary_sensor.x2d_online",
+            "print_status": "sensor.x2d_print_status",
+        },
+        database_path=tmp_path / "printer.sqlite3",
+        ams_units=ams_units,
+    ).validated()
+    states = _ha_states(settings)
+    states.update(
+        {
+            "binary_sensor.ams_1_active": _ha_entity("on"),
+            "sensor.ams_1_humidity": _ha_entity("22"),
+            "sensor.ams_1_humidity_index": _ha_entity("3"),
+            "sensor.ams_1_temperature": _ha_entity(
+                "77", attributes={"unit_of_measurement": "°F"}
+            ),
+            "binary_sensor.ams_1_drying": _ha_entity("off"),
+            "sensor.ams_1_drying_remaining": _ha_entity("01:30"),
+            "sensor.ams_2_humidity": _ha_entity("not-a-number"),
+            "sensor.ams_2_temperature": _ha_entity("unavailable"),
+        }
+    )
+
+    state = printer_state_from_home_assistant(states, settings, observed_at=NOW)
+
+    assert len(state.ams_units) == 2
+    first, second = state.ams_units
+    assert first.humidity_percent == 22.0
+    assert first.humidity_index == 3
+    assert first.temperature == 25.0
+    assert first.active is True and first.drying is False
+    assert first.remaining_drying_seconds == 5400
+    assert second.humidity_percent is None
+    assert second.temperature is None
+    assert second.active is None and second.drying is None
+
+
+def test_worker_writes_live_and_durable_telemetry_with_failure_isolation() -> None:
+    state = PrinterState(
+        printer_id="x2d",
+        printer_model="X2D",
+        online=True,
+        normalized_state=NormalizedPrinterState.IDLE,
+        source="home_assistant",
+        source_timestamp=NOW,
+        observed_at=NOW,
+        chamber_temperature=29.0,
+        ams_units=(
+            AmsUnitState(
+                ams_id="ams_1",
+                model="AMS 2 Pro",
+                humidity_percent=22.0,
+            ),
+        ),
+    )
+
+    class Writer:
+        def __init__(self) -> None:
+            self.single = []
+            self.many = []
+            self.fail_live_telemetry = True
+
+        def write_point_data(self, point, *, bucket=None):
+            self.single.append((point.measurement, bucket))
+
+        def write_point_data_many(self, points, *, bucket=None):
+            self.many.append((tuple(points), bucket))
+            if bucket == "environment_live" and self.fail_live_telemetry:
+                self.fail_live_telemetry = False
+                raise RuntimeError("optional telemetry failure")
+
+    class Store:
+        def __init__(self) -> None:
+            self.marked = []
+            self.due = True
+
+        def permanent_sample_due(self, *_args):
+            return self.due
+
+        def mark_permanent_sample(self, printer_id, observed_at):
+            self.marked.append((printer_id, observed_at))
+            self.due = False
+
+    writer = Writer()
+    store = Store()
+    session = PrintSession(
+        session_id="session-1",
+        printer_id="x2d",
+        job_id="job-1",
+        job_name="test.3mf",
+        started_at=NOW,
+        start_provenance=ValueProvenance.OBSERVED,
+        ended_at=None,
+        end_provenance=ValueProvenance.UNKNOWN,
+        result=None,
+        material=None,
+        material_provenance=ValueProvenance.UNKNOWN,
+        active_tool=None,
+        ams_slot=None,
+        source="home_assistant",
+        updated_at=NOW,
+    )
+    persist_observation(
+        writer,
+        store,
+        state,
+        previous=state,
+        changed_sessions=(session,),
+        permanent_sample_seconds=300,
+        live_bucket="environment_live",
+    )
+
+    assert ("printer_state", "environment_live") in writer.single
+    assert ("printer_state_5m", None) in writer.single
+    assert ("print_session", None) in writer.single
+    assert [bucket for _points, bucket in writer.many] == ["environment_live", None]
+    assert all(point.measurement == "printer_telemetry" for point in writer.many[-1][0])
+    assert store.marked == [("x2d", NOW)]
+
+    persist_observation(
+        writer,
+        store,
+        state,
+        previous=state,
+        changed_sessions=(),
+        permanent_sample_seconds=300,
+        live_bucket="environment_live",
+    )
+    assert [measurement for measurement, _bucket in writer.single].count(
+        "printer_state_5m"
+    ) == 1
+    assert [bucket for _points, bucket in writer.many].count(None) == 1
+
+
 def test_environment_summary_uses_configured_windows_and_observational_wording() -> (
     None
 ):
@@ -614,6 +848,95 @@ def test_environment_flux_is_bounded_and_filters_only_location_and_known_fields(
     assert "job_name" not in flux
 
 
+def test_printer_telemetry_query_is_allowlisted_and_uses_field_type_aggregation() -> (
+    None
+):
+    query = printer_telemetry_query_from_params(
+        {
+            "range": "7d",
+            "sensor_type": "ams",
+            "printer_id": "x2d",
+            "ams_id": "ams_1",
+            "fields": "ams_humidity,ams_drying",
+        }
+    )
+    flux = printer_telemetry_flux("environment", query)
+
+    assert query.data_tier == "durable_5m_downsampled_30m"
+    assert 'from(bucket: "environment")' in flux
+    assert 'r._measurement == "printer_telemetry"' in flux
+    assert 'r.printer_id == "x2d"' in flux
+    assert 'r.component_id == "ams_1"' in flux
+    assert "fn: mean" in flux
+    assert "fn: last" in flux
+    assert "ams_inventory_json" not in flux
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"range": "30d"},
+        {"sensor_type": "printer", "ams_id": "ams_1", "printer_id": "x2d"},
+        {"sensor_type": "printer", "fields": "ams_humidity"},
+        {"sensor_type": "ams", "fields": "chamber_temperature_c"},
+        {"fields": ",,,"},
+        {"printer_id": 'x2d" or true'},
+    ],
+)
+def test_printer_telemetry_query_rejects_invalid_filters(params) -> None:
+    with pytest.raises(QueryValidationError):
+        printer_telemetry_query_from_params(params)
+
+
+def test_printer_telemetry_response_keeps_multiple_ams_and_real_types() -> None:
+    query = printer_telemetry_query_from_params(
+        {"range": "24h", "fields": "ams_humidity,ams_drying"}
+    )
+    records = [
+        SimpleNamespace(
+            values={
+                "_time": NOW,
+                "_field": "ams_humidity",
+                "_value": 22.0,
+                "printer_id": "x2d",
+                "component_type": "ams",
+                "component_id": "ams_1",
+            }
+        ),
+        SimpleNamespace(
+            values={
+                "_time": NOW,
+                "_field": "ams_drying",
+                "_value": False,
+                "printer_id": "x2d",
+                "component_type": "ams",
+                "component_id": "ams_1",
+            }
+        ),
+        SimpleNamespace(
+            values={
+                "_time": NOW,
+                "_field": "ams_humidity",
+                "_value": 41.0,
+                "printer_id": "x2d",
+                "component_type": "ams",
+                "component_id": "ams_2",
+            }
+        ),
+    ]
+
+    response = printer_telemetry_response(records, query)
+
+    assert [series["source_id"] for series in response["series"]] == [
+        "x2d/ams_1",
+        "x2d/ams_2",
+    ]
+    first = response["series"][0]
+    assert first["points"] == [
+        {"time": "2026-08-11T12:00:00Z", "ams_humidity": 22.0, "ams_drying": False}
+    ]
+
+
 def test_printer_grafana_dashboard_has_session_and_environment_foundation() -> None:
     path = (
         Path(__file__).resolve().parents[2]
@@ -630,11 +953,17 @@ def test_printer_grafana_dashboard_has_session_and_environment_foundation() -> N
         "Printer temperatures",
         "Printer-room PM2.5, VOC, and NOx (observational)",
         "Print sessions",
+        "AMS humidity (durable telemetry)",
+        "AMS temperature (durable telemetry)",
     }
     assert dashboard["annotations"]["list"][0]["name"] == "Print starts and ends"
     serialized = json.dumps(dashboard)
     assert "environment_live" in serialized
     assert "print_session" in serialized
+    assert "printer_telemetry" in serialized
+    assert "ams_humidity" in serialized
+    assert "ams_temperature_c" in serialized
+    assert "ams_inventory_json" not in serialized
 
 
 class _SensorRepository:
@@ -654,6 +983,28 @@ class _PrinterRepository:
         if self.fail:
             raise TimeoutError("printer only")
         return {"printer_id": "x2d", "normalized_state": "idle"}
+
+    def telemetry(self, query):
+        return {
+            "range": query.range_key,
+            "window": query.window_every,
+            "data_tier": query.data_tier,
+            "series": [
+                {
+                    "sensor_type": "ams",
+                    "source_id": "x2d/ams_1",
+                    "printer_id": "x2d",
+                    "ams_id": "ams_1",
+                    "fields": ["ams_humidity"],
+                    "points": [
+                        {
+                            "timestamp": "2026-08-11T12:00:00Z",
+                            "ams_humidity": 22.0,
+                        }
+                    ],
+                }
+            ],
+        }
 
     def sessions(self, *, limit: int):
         return {"sessions": [], "limit": limit}
@@ -754,6 +1105,20 @@ def test_printer_api_is_bounded_and_read_only(tmp_path: Path) -> None:
     assert client.get("/api/printer/sessions?limit=7").get_json()["limit"] == 7
     assert client.get("/api/printer/sessions?limit=101").status_code == 400
     assert client.post("/api/printer").status_code == 405
+    telemetry = client.get(
+        "/api/printer/telemetry?range=7d&sensor_type=ams"
+        "&printer_id=x2d&ams_id=ams_1&fields=ams_humidity"
+    )
+    assert telemetry.status_code == 200
+    assert telemetry.get_json()["range"] == "7d"
+    assert telemetry.get_json()["series"][0]["source_id"] == "x2d/ams_1"
+    assert client.get("/api/printer/telemetry?range=30d").status_code == 400
+    assert (
+        client.get("/api/printer/telemetry?fields=ams_inventory_json").status_code
+        == 400
+    )
+    assert client.get("/api/printer/telemetry?fields=,,,").status_code == 400
+    assert client.post("/api/printer/telemetry").status_code == 405
     assert client.get("/api/printer/history?limit=500").status_code == 200
     assert client.get("/api/printer/history?limit=501").status_code == 400
     assert client.get("/api/printer/sessions/one").status_code == 200

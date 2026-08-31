@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+import math
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from statistics import fmean
@@ -13,6 +16,8 @@ from app.config import InfluxSettings
 from app.printer_intelligence import PrinterIntelligenceStore
 from app.printer_model import PrintSession, ValueProvenance
 from app.printer_persistence import PrinterStore
+from app.queries import QueryValidationError
+from app.workflows import AMS_FIELDS, BOOLEAN_FIELDS, NUMERIC_FIELDS, PRINTER_FIELDS
 
 ENVIRONMENT_METRICS = (
     "co2",
@@ -25,6 +30,86 @@ ENVIRONMENT_METRICS = (
     "temperature_c",
     "humidity",
 )
+PRINTER_TELEMETRY_MEASUREMENT = "printer_telemetry"
+PRINTER_TELEMETRY_RANGES = {
+    "1h": ("-1h", "1m", "live_raw_downsampled_1m"),
+    "6h": ("-6h", "5m", "live_raw_downsampled_5m"),
+    "24h": ("-24h", "15m", "live_raw_downsampled_15m"),
+    "7d": ("-7d", "30m", "durable_5m_downsampled_30m"),
+}
+STABLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+
+
+@dataclass(frozen=True)
+class PrinterTelemetryQuery:
+    range_key: str
+    flux_start: str
+    window_every: str
+    data_tier: str
+    printer_id: str | None = None
+    ams_id: str | None = None
+    sensor_type: str = "all"
+    fields: tuple[str, ...] = PRINTER_FIELDS + AMS_FIELDS
+
+
+def printer_telemetry_query_from_params(
+    params: Mapping[str, str | None],
+) -> PrinterTelemetryQuery:
+    range_key = str(params.get("range") or "24h").strip()
+    if range_key not in PRINTER_TELEMETRY_RANGES:
+        raise QueryValidationError(
+            "range must be one of: " + ", ".join(PRINTER_TELEMETRY_RANGES)
+        )
+    sensor_type = str(params.get("sensor_type") or "all").strip()
+    if sensor_type not in {"all", "printer", "ams"}:
+        raise QueryValidationError("sensor_type must be one of: all, printer, ams")
+    printer_id = _stable_query_id(params.get("printer_id"), "printer_id")
+    ams_id = _stable_query_id(params.get("ams_id"), "ams_id")
+    if ams_id is not None and printer_id is None:
+        raise QueryValidationError("ams_id requires printer_id")
+    if ams_id is not None and sensor_type == "printer":
+        raise QueryValidationError("ams_id cannot be used with sensor_type=printer")
+    raw_fields = str(params.get("fields") or "").strip()
+    fields = (
+        tuple(
+            dict.fromkeys(
+                item.strip() for item in raw_fields.split(",") if item.strip()
+            )
+        )
+        if raw_fields
+        else PRINTER_FIELDS + AMS_FIELDS
+    )
+    if not fields:
+        raise QueryValidationError("fields must include at least one telemetry field")
+    invalid = [field for field in fields if field not in PRINTER_FIELDS + AMS_FIELDS]
+    if invalid:
+        raise QueryValidationError(
+            "unsupported printer telemetry field: " + ", ".join(invalid)
+        )
+    supported_for_type = (
+        PRINTER_FIELDS
+        if sensor_type == "printer"
+        else AMS_FIELDS
+        if sensor_type == "ams"
+        else PRINTER_FIELDS + AMS_FIELDS
+    )
+    incompatible = [field for field in fields if field not in supported_for_type]
+    if incompatible:
+        raise QueryValidationError(
+            f"field is not supported by sensor_type={sensor_type}: "
+            + ", ".join(incompatible)
+        )
+    flux_start, window_every, data_tier = PRINTER_TELEMETRY_RANGES[range_key]
+    return PrinterTelemetryQuery(
+        range_key=range_key,
+        flux_start=flux_start,
+        window_every=window_every,
+        data_tier=data_tier,
+        printer_id=printer_id,
+        ams_id=ams_id,
+        sensor_type=sensor_type,
+        fields=fields,
+    )
 
 
 class PrinterReadRepository:
@@ -107,6 +192,13 @@ class PrinterReadRepository:
         if not self.database_path.exists():
             return None
         return self.intelligence.history_item(history_id)
+
+    def telemetry(self, query: PrinterTelemetryQuery) -> dict[str, Any]:
+        bucket = (
+            self.influx.bucket if query.range_key == "7d" else self.influx.live_bucket
+        )
+        records = self._query(printer_telemetry_flux(bucket, query))
+        return printer_telemetry_response(records, query)
 
     def usage(self) -> dict[str, Any]:
         """Canonical tracked print time and usage provenance."""
@@ -251,6 +343,168 @@ def printer_environment_flux(
   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
   |> sort(columns: ["_time"])
 """
+
+
+def printer_telemetry_flux(bucket: str, query: PrinterTelemetryQuery) -> str:
+    selected_numeric = tuple(field for field in query.fields if field in NUMERIC_FIELDS)
+    selected_boolean = tuple(field for field in query.fields if field in BOOLEAN_FIELDS)
+    filters = [
+        f"  |> filter(fn: (r) => r._measurement == {json.dumps(PRINTER_TELEMETRY_MEASUREMENT)})"
+    ]
+    if query.sensor_type != "all":
+        filters.append(
+            f"  |> filter(fn: (r) => r.component_type == {json.dumps(query.sensor_type)})"
+        )
+    if query.printer_id is not None:
+        filters.append(
+            f"  |> filter(fn: (r) => r.printer_id == {json.dumps(query.printer_id)})"
+        )
+    if query.ams_id is not None:
+        filters.append(
+            f"  |> filter(fn: (r) => r.component_id == {json.dumps(query.ams_id)})"
+        )
+    base = "\n".join(
+        [
+            f"data = from(bucket: {json.dumps(bucket)})",
+            f"  |> range(start: {query.flux_start})",
+            *filters,
+        ]
+    )
+    streams: list[str] = []
+    sections = [base]
+    if selected_numeric:
+        sections.extend(
+            [
+                "",
+                "numeric = data",
+                f"  |> filter(fn: (r) => contains(value: r._field, set: {json.dumps(list(selected_numeric))}))",
+                '  |> group(columns: ["printer_id", "component_type", "component_id", "source", "_field"])',
+                f"  |> aggregateWindow(every: {query.window_every}, fn: mean, createEmpty: false)",
+            ]
+        )
+        streams.append("numeric")
+    if selected_boolean:
+        sections.extend(
+            [
+                "",
+                "status = data",
+                f"  |> filter(fn: (r) => contains(value: r._field, set: {json.dumps(list(selected_boolean))}))",
+                '  |> group(columns: ["printer_id", "component_type", "component_id", "source", "_field"])',
+                f"  |> aggregateWindow(every: {query.window_every}, fn: last, createEmpty: false)",
+            ]
+        )
+        streams.append("status")
+    sections.extend(
+        [
+            "",
+            streams[0]
+            if len(streams) == 1
+            else f"union(tables: [{', '.join(streams)}])",
+            '  |> sort(columns: ["_time"])',
+            "",
+        ]
+    )
+    return "\n".join(sections)
+
+
+def printer_telemetry_response(
+    tables: Iterable[Any], query: PrinterTelemetryQuery
+) -> dict[str, Any]:
+    series: dict[tuple[str, str], dict[str, Any]] = {}
+    points: dict[tuple[str, str], dict[str, dict[str, Any]]] = {}
+    for table in tables:
+        records = getattr(table, "records", None)
+        rows = records if records is not None else (table,)
+        for record in rows:
+            values = getattr(record, "values", {})
+            component_type = str(values.get("component_type") or "")
+            printer_id = str(values.get("printer_id") or "")
+            component_id = str(values.get("component_id") or "")
+            if (
+                component_type not in {"printer", "ams"}
+                or not printer_id
+                or (component_type == "ams" and not component_id)
+            ):
+                continue
+            source_id = (
+                printer_id
+                if component_type == "printer"
+                else f"{printer_id}/{component_id}"
+            )
+            key = (component_type, source_id)
+            item = series.setdefault(
+                key,
+                {
+                    "id": source_id,
+                    "source_id": source_id,
+                    "sensor_type": component_type,
+                    "printer_id": printer_id,
+                    "component_id": component_id,
+                    "ams_id": component_id if component_type == "ams" else None,
+                    "label": (
+                        f"{printer_id} · {component_id}"
+                        if component_type == "ams"
+                        else f"Printer · {printer_id}"
+                    ),
+                    "available_fields": [],
+                },
+            )
+            field = str(
+                values.get("_field")
+                or (record.get_field() if hasattr(record, "get_field") else "")
+            )
+            if field not in query.fields:
+                continue
+            timestamp = values.get("_time")
+            if timestamp is None and hasattr(record, "get_time"):
+                timestamp = record.get_time()
+            time_key = (
+                _iso(timestamp) if isinstance(timestamp, datetime) else str(timestamp)
+            )
+            value = values.get("_value")
+            if value is None and hasattr(record, "get_value"):
+                value = record.get_value()
+            if field in BOOLEAN_FIELDS:
+                if not isinstance(value, bool):
+                    continue
+            elif (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
+                continue
+            if not time_key or time_key == "None":
+                continue
+            point = points.setdefault(key, {}).setdefault(time_key, {"time": time_key})
+            point[field] = value
+            if field not in item["available_fields"]:
+                item["available_fields"].append(field)
+    response_series = []
+    for key, item in series.items():
+        item["available_fields"].sort()
+        item["points"] = sorted(
+            points.get(key, {}).values(), key=lambda row: row["time"]
+        )
+        response_series.append(item)
+    return {
+        "generated_at": _iso(datetime.now(timezone.utc)),
+        "range": query.range_key,
+        "window": query.window_every,
+        "data_tier": query.data_tier,
+        "series": sorted(
+            response_series,
+            key=lambda item: (str(item["sensor_type"]), str(item["source_id"])),
+        ),
+    }
+
+
+def _stable_query_id(value: Any, name: str) -> str | None:
+    if value in (None, ""):
+        return None
+    text = str(value).strip()
+    if not STABLE_ID_RE.fullmatch(text):
+        raise QueryValidationError(f"{name} must be a stable 1-64 character slug")
+    return text
 
 
 def environment_summary_response(

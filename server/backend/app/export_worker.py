@@ -23,7 +23,9 @@ from app.persistence import MonitoringExportStore
 from app.workflow_services import ExportService, csv_safe_text, utc_now
 from app.workflows import (
     SENSOR_TYPE_AIR_QUALITY,
+    SENSOR_TYPE_AMS,
     SENSOR_TYPE_ENVIRONMENT,
+    SENSOR_TYPE_PRINTER,
     Source,
     fields_for_source,
     parse_stored_time,
@@ -44,6 +46,7 @@ LONG_HEADER = (
     "unit",
     "data_tier",
 )
+BAMBU_IDENTITY_HEADER = ("printer_id", "ams_id")
 WIDE_IDENTITY_HEADER = (
     "timestamp_utc",
     "sensor_type",
@@ -183,7 +186,12 @@ class ExportWorker:
         )
         sensor_types = [
             sensor_type
-            for sensor_type in (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY)
+            for sensor_type in (
+                SENSOR_TYPE_ENVIRONMENT,
+                SENSOR_TYPE_AIR_QUALITY,
+                SENSOR_TYPE_PRINTER,
+                SENSOR_TYPE_AMS,
+            )
             if any(source.sensor_type == sensor_type for source in sources)
         ]
         work_total = chunk_count * len(sensor_types)
@@ -210,10 +218,22 @@ class ExportWorker:
             ):
                 writer = csv.writer(handle, lineterminator="\n")
                 wide_fields = _wide_fields(fields, resolution)
+                include_bambu_identity = any(
+                    source.sensor_type in {SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS}
+                    for source in sources
+                )
                 if csv_format == "long":
-                    writer.writerow(LONG_HEADER)
+                    writer.writerow(
+                        LONG_HEADER
+                        + (BAMBU_IDENTITY_HEADER if include_bambu_identity else ())
+                    )
                 else:
-                    writer.writerow(WIDE_IDENTITY_HEADER + wide_fields + ("data_tier",))
+                    writer.writerow(
+                        WIDE_IDENTITY_HEADER
+                        + wide_fields
+                        + ("data_tier",)
+                        + (BAMBU_IDENTITY_HEADER if include_bambu_identity else ())
+                    )
 
                 for chunk_index, (chunk_start, chunk_stop) in enumerate(
                     _time_chunks(start, end, chunk_seconds), start=1
@@ -228,6 +248,8 @@ class ExportWorker:
                                 "querying_environment"
                                 if sensor_type == SENSOR_TYPE_ENVIRONMENT
                                 else "querying_air_quality"
+                                if sensor_type == SENSOR_TYPE_AIR_QUALITY
+                                else "querying_printer_telemetry"
                             )
                         )
                         self.store.update_job_progress(
@@ -268,9 +290,20 @@ class ExportWorker:
                         work_units_completed=work_completed,
                     )
                     if csv_format == "long":
-                        written = _write_long(writer, points, source_state)
+                        written = _write_long(
+                            writer,
+                            points,
+                            source_state,
+                            include_bambu_identity=include_bambu_identity,
+                        )
                     else:
-                        written = _write_wide(writer, points, wide_fields, source_state)
+                        written = _write_wide(
+                            writer,
+                            points,
+                            wide_fields,
+                            source_state,
+                            include_bambu_identity=include_bambu_identity,
+                        )
                     rows_written += written
                     self._check_interruption(job_id)
                     handle.flush()
@@ -451,7 +484,8 @@ def _bounded_chunk_seconds(
         relevant = [
             source
             for source in sources
-            if source.sensor_type == SENSOR_TYPE_AIR_QUALITY
+            if source.sensor_type
+            in {SENSOR_TYPE_AIR_QUALITY, SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS}
         ]
         minimum = 300
     else:
@@ -459,7 +493,8 @@ def _bounded_chunk_seconds(
         relevant = [
             source
             for source in sources
-            if source.sensor_type == SENSOR_TYPE_AIR_QUALITY
+            if source.sensor_type
+            in {SENSOR_TYPE_AIR_QUALITY, SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS}
         ]
         minimum = 3600
     if not relevant:
@@ -526,6 +561,8 @@ def _write_long(
     writer: Any,
     points: Sequence[ExportPoint],
     source_state: Mapping[tuple[str, str], dict[str, Any]],
+    *,
+    include_bambu_identity: bool = False,
 ) -> int:
     for point in points:
         writer.writerow(
@@ -539,6 +576,11 @@ def _write_long(
                 point.value,
                 point.unit,
                 point.data_tier,
+                *(
+                    (csv_safe_text(point.printer_id), csv_safe_text(point.ams_id))
+                    if include_bambu_identity
+                    else ()
+                ),
             )
         )
         source_state[point.source_key]["rows_written"] += 1
@@ -550,6 +592,8 @@ def _write_wide(
     points: Sequence[ExportPoint],
     wide_fields: Sequence[str],
     source_state: Mapping[tuple[str, str], dict[str, Any]],
+    *,
+    include_bambu_identity: bool = False,
 ) -> int:
     rows = 0
     for _key, grouped in groupby(
@@ -561,6 +605,8 @@ def _write_wide(
             point.node_id,
             point.location,
             point.data_tier,
+            point.printer_id,
+            point.ams_id,
         ),
     ):
         group = list(grouped)
@@ -575,6 +621,11 @@ def _write_wide(
                 csv_safe_text(first.location),
                 *(values.get(field, "") for field in wide_fields),
                 first.data_tier,
+                *(
+                    (csv_safe_text(first.printer_id), csv_safe_text(first.ams_id))
+                    if include_bambu_identity
+                    else ()
+                ),
             )
         )
         source_state[first.source_key]["rows_written"] += 1
@@ -610,7 +661,10 @@ def build_worker(settings: AppSettings) -> ExportWorker:
         settings.monitoring_exports.output_dir,
     )
     store.initialize()
-    query_repository = InfluxExportQueryRepository(settings.influx)
+    query_repository = InfluxExportQueryRepository(
+        settings.influx,
+        raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
+    )
     return ExportWorker(
         store,
         query_repository,

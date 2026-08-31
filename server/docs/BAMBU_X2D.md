@@ -76,6 +76,95 @@ during a live print is treated as an expected finish, not an observed actual end
 The observer uses terminal-state confirmation time for local session completion
 unless a genuinely observed actual completion timestamp exists.
 
+## First-class historical telemetry
+
+The observer projects a curated subset of each normalized `PrinterState` into
+`printer_telemetry`. It writes one `component_type=printer`,
+`component_id=main` point and, when values are actually observed, one
+`component_type=ams` point for each stable `AmsUnitState.ams_id`. It does not
+query Home Assistant from the dashboard or export path.
+
+Normal-poll points use the finite-retention `environment_live` bucket. At the
+existing permanent sample cadence (normally five minutes), the same logical
+measurement is written to the permanent `environment` bucket. Thus 1h, 6h,
+and 24h dashboard views use high-resolution live data with display
+downsampling, while the 7d view uses durable five-minute samples. Raw/1-minute
+exports are honest live-tier queries and warn when part of the requested range
+has expired; coarser Bambu exports can combine labeled live-derived and
+durable-derived intervals. Durable samples are never described as raw.
+
+The sensor source catalog is reconstructed from both recent live samples and
+permanent telemetry. A temporarily offline printer or AMS stays selectable,
+retains its last-seen/capability record, and remains usable for historical
+charts and exports. Missing upstream numeric values are omitted instead of
+being fabricated as zero.
+
+The exact tags and fields are documented in
+[`schema.md`](../config/influxdb/schema.md). Identity is bounded to
+`printer_id`, `component_type`, stable `component_id`, and normalized `source`.
+Job/session IDs, filenames, filament metadata, arbitrary Home Assistant entity
+IDs, and timestamps are not tags. `ams_inventory_json` remains whole-state
+inventory metadata and is never parsed for telemetry charts or CSV files.
+
+### Dashboard and Active Monitoring
+
+The **Bambu / Printer** tab includes a capability-driven Historical Telemetry
+chart with 1h, 6h, 24h, and 7d ranges. AMS humidity, AMS temperature, and
+chamber temperature are the initial selections; bed/nozzle targets and
+temperatures, fans, Wi-Fi, progress, remaining time, and observed status fields
+remain selectable. Every AMS is rendered from its backend source identity, so
+adding a second unit does not require JavaScript changes.
+
+Printer and AMS are also ordinary manual Active Monitoring sources alongside
+SHT41 and SEN66 sources. Sessions select an interval over readings the observer
+already stored in InfluxDB; they do not start another printer recorder. Numeric
+fields may be downsampled with means. Boolean fields are raw-only and are not
+averaged.
+
+Automatic environmental monitoring retains its safety rule: the configured
+SEN66 must be online when a print begins. If it is not, the automatic
+environmental interval is skipped and is not replaced with a printer-only
+session. That gate does not affect the observer: printer thermal and AMS
+telemetry continue to persist while idle, while SEN66 is offline, and after an
+automatic session is skipped.
+
+### Mixed exports
+
+The existing export job API accepts printer and AMS sources together with
+environment and air-quality sources. For example, one job can request AMS 1
+humidity/temperature, X2D chamber temperature, room temperature/humidity, and
+SEN66 CO2/VOC/PM2.5. Long CSV rows include `sensor_type`, stable `source_id`,
+unit, `data_tier`, and explicit `printer_id`/`ams_id` when Bambu sources are
+selected. Wide CSV uses stable source rows and understandable field columns.
+Legacy exports without Bambu sources retain their prior columns.
+
+Example durable AMS humidity query:
+
+```flux
+from(bucket: "environment")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r._measurement == "printer_telemetry")
+  |> filter(fn: (r) => r.printer_id == "x2d")
+  |> filter(fn: (r) => r.component_type == "ams" and r.component_id == "ams_1")
+  |> filter(fn: (r) => r._field == "ams_humidity")
+  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)
+```
+
+Example durable chamber-temperature query:
+
+```flux
+from(bucket: "environment")
+  |> range(start: -7d)
+  |> filter(fn: (r) => r._measurement == "printer_telemetry")
+  |> filter(fn: (r) => r.printer_id == "x2d")
+  |> filter(fn: (r) => r.component_type == "printer" and r.component_id == "main")
+  |> filter(fn: (r) => r._field == "chamber_temperature_c")
+  |> aggregateWindow(every: 30m, fn: mean, createEmpty: false)
+```
+
+This addition remains read-only. It adds no Home Assistant service call,
+printer/AMS command, credential response, or client-visible entity ID.
+
 ### AMS 2 Pro and spool coverage
 
 The AMS 2 Pro exposes active/drying flags, humidity and humidity index,

@@ -174,6 +174,33 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("@media (max-width: 640px)", self.styles)
         self.assertIn("session_id=", self.javascript)
 
+    def test_bambu_history_is_capability_driven_and_supports_required_ranges(
+        self,
+    ) -> None:
+        for element_id in (
+            "printer-telemetry-chart",
+            "printer-telemetry-ranges",
+            "printer-telemetry-metrics",
+            "printer-telemetry-tier",
+        ):
+            self.assertIn(f'id="{element_id}"', self.template)
+        for range_key in ("1h", "6h", "24h", "7d"):
+            self.assertIn(f'data-range="{range_key}"', self.template)
+        for field in (
+            "ams_humidity",
+            "ams_temperature_c",
+            "chamber_temperature_c",
+        ):
+            self.assertIn(f'"{field}"', self.javascript)
+        self.assertIn("API.printerTelemetry", self.javascript)
+        self.assertIn("state.fieldDefinitions", self.javascript)
+        self.assertIn('source.sensor_type === "ams"', self.javascript)
+        self.assertIn("source.available_fields", self.javascript)
+        self.assertIn("offline", self.javascript)
+        self.assertNotIn("const AMS_1", self.javascript)
+        self.assertNotIn("ams_inventory_json", self.javascript)
+        self.assertNotIn("home_assistant", self.javascript.lower())
+
     def test_tracked_print_time_is_a_first_class_qualified_usage_metric(self) -> None:
         self.assertIn('id="printer-usage"', self.template)
         self.assertIn("Printer Usage", self.template)

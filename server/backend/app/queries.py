@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app.air_quality_policy import interpret_station, rolling_24h_status
 from app.battery_status import decode_battery_status
+from app.workflows import AMS_FIELDS, PRINTER_FIELDS
 
 if TYPE_CHECKING:
     from app.config import InfluxSettings
@@ -33,6 +34,8 @@ AIR_QUALITY_LATEST_LOOKBACK = "-30m"
 SENSOR_TYPE_ALL = "all"
 SENSOR_TYPE_ENVIRONMENT = "environment"
 SENSOR_TYPE_AIR_QUALITY = "air_quality"
+SENSOR_TYPE_PRINTER = "printer"
+SENSOR_TYPE_AMS = "ams"
 SENSOR_TYPES = {
     SENSOR_TYPE_ALL,
     SENSOR_TYPE_ENVIRONMENT,
@@ -43,6 +46,8 @@ ENVIRONMENT_MEASUREMENT = "environment_reading"
 AIR_QUALITY_MEASUREMENT = "air_quality_reading"
 AIR_QUALITY_AGGREGATE_MEASUREMENT = "air_quality_15m"
 AIR_QUALITY_EVENT_MEASUREMENT = "air_quality_event"
+PRINTER_TELEMETRY_MEASUREMENT = "printer_telemetry"
+PRINTER_TELEMETRY_LATEST_LOOKBACK = "-30m"
 
 ENVIRONMENT_LATEST_FIELDS = (
     "sequence",
@@ -389,7 +394,14 @@ airQualityLatest = from(bucket: {_flux_string(live_bucket)})
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
-union(tables: [environmentLatest, airQualityLatest])
+printerTelemetryLatest = from(bucket: {_flux_string(live_bucket)})
+  |> range(start: {PRINTER_TELEMETRY_LATEST_LOOKBACK})
+  |> filter(fn: (r) => r._measurement == {_flux_string(PRINTER_TELEMETRY_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(PRINTER_FIELDS + AMS_FIELDS)}))
+  |> group(columns: ["_measurement", "printer_id", "component_type", "component_id", "source", "_field"])
+  |> last(column: "_value")
+
+union(tables: [environmentLatest, airQualityLatest, printerTelemetryLatest])
 """
 
 
@@ -410,7 +422,14 @@ airQualityInventory = from(bucket: {_flux_string(bucket)})
   |> group(columns: ["_measurement", "node_id", "location", "topic", "sensor_type", "_field"])
   |> last()
 
-union(tables: [environmentInventory, airQualityInventory])
+printerTelemetryInventory = from(bucket: {_flux_string(bucket)})
+  |> range(start: 0)
+  |> filter(fn: (r) => r._measurement == {_flux_string(PRINTER_TELEMETRY_MEASUREMENT)})
+  |> filter(fn: (r) => contains(value: r._field, set: {_flux_array(PRINTER_FIELDS + AMS_FIELDS)}))
+  |> group(columns: ["_measurement", "printer_id", "component_type", "component_id", "source", "_field"])
+  |> last()
+
+union(tables: [environmentInventory, airQualityInventory, printerTelemetryInventory])
 """
 
 
@@ -863,7 +882,7 @@ def latest_response(
     entities: dict[tuple[str, str], dict[str, Any]] = {}
     for record in records:
         measurement = _measurement(record)
-        sensor_type = _sensor_type_for_measurement(measurement)
+        sensor_type = _sensor_type_for_measurement(measurement, _values(record))
         if sensor_type is None:
             continue
 
@@ -904,6 +923,16 @@ def latest_response(
             for (sensor_type, _), item in entities.items()
             if sensor_type == SENSOR_TYPE_AIR_QUALITY
         ),
+        "printer": _sorted_entities(
+            item
+            for (sensor_type, _), item in entities.items()
+            if sensor_type == SENSOR_TYPE_PRINTER
+        ),
+        "ams": _sorted_entities(
+            item
+            for (sensor_type, _), item in entities.items()
+            if sensor_type == SENSOR_TYPE_AMS
+        ),
     }
 
 
@@ -922,7 +951,12 @@ def merge_latest_payloads(
             observed.get("generated_at") or durable.get("generated_at") or _now_iso()
         )
     }
-    for sensor_type in (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY):
+    for sensor_type in (
+        SENSOR_TYPE_ENVIRONMENT,
+        SENSOR_TYPE_AIR_QUALITY,
+        SENSOR_TYPE_PRINTER,
+        SENSOR_TYPE_AMS,
+    ):
         entities: dict[str, dict[str, Any]] = {}
         for source in (durable, observed):
             for original in source.get(sensor_type, []):
@@ -948,6 +982,8 @@ def _empty_latest_payload() -> dict[str, Any]:
         "generated_at": _now_iso(),
         "environment": [],
         "air_quality": [],
+        "printer": [],
+        "ams": [],
     }
 
 
@@ -980,7 +1016,19 @@ def _merge_latest_entities(
     result["last_seen"] = _max_iso_time(
         result.get("last_seen"), str(right.get("last_seen") or "")
     )
-    for key in ("node_id", "location", "topic", "sensor_type", "id"):
+    for key in (
+        "node_id",
+        "location",
+        "printer_id",
+        "ams_id",
+        "component_id",
+        "source_id",
+        "label",
+        "topic",
+        "source",
+        "sensor_type",
+        "id",
+    ):
         if result.get(key) in (None, "") and right.get(key) not in (None, ""):
             result[key] = deepcopy(right[key])
     return result
@@ -992,7 +1040,19 @@ def _newest_entity(left: dict[str, Any], right: dict[str, Any]) -> dict[str, Any
     newest = right if _max_iso_time(left_seen, right_seen) == right_seen else left
     other = left if newest is right else right
     result = deepcopy(newest)
-    for key in ("node_id", "location", "topic", "sensor_type", "id"):
+    for key in (
+        "node_id",
+        "location",
+        "printer_id",
+        "ams_id",
+        "component_id",
+        "source_id",
+        "label",
+        "topic",
+        "source",
+        "sensor_type",
+        "id",
+    ):
         if result.get(key) in (None, "") and other.get(key) not in (None, ""):
             result[key] = deepcopy(other[key])
     return result
@@ -1009,7 +1069,7 @@ def readings_response(
 
     for record in records:
         measurement = _measurement(record)
-        sensor_type = _sensor_type_for_measurement(measurement)
+        sensor_type = _sensor_type_for_measurement(measurement, _values(record))
         if sensor_type is None:
             continue
 
@@ -1098,6 +1158,9 @@ def nodes_response(
                 air_quality_stale_after_seconds or stale_after_seconds,
             )
         )
+    for sensor_type in (SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS):
+        for item in latest.get(sensor_type, []):
+            nodes.append(_node_status(dict(item), now, stale_after_seconds))
 
     return {
         "generated_at": generated_at,
@@ -1165,7 +1228,12 @@ def latest_with_node_status(
         (str(node.get("sensor_type")), str(node.get("id"))): node
         for node in node_payload["nodes"]
     }
-    for sensor_type in (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY):
+    for sensor_type in (
+        SENSOR_TYPE_ENVIRONMENT,
+        SENSOR_TYPE_AIR_QUALITY,
+        SENSOR_TYPE_PRINTER,
+        SENSOR_TYPE_AMS,
+    ):
         enriched = []
         for original in response.get(sensor_type, []):
             item = dict(original)
@@ -1284,6 +1352,8 @@ def _node_status(
             status = "stale"
         else:
             status = "offline"
+    if item.get("sensor_type") == SENSOR_TYPE_PRINTER and item.get("online") is False:
+        status = "offline"
 
     result = {
         "id": item.get("id"),
@@ -1297,6 +1367,11 @@ def _node_status(
     for key in (
         "node_id",
         "location",
+        "printer_id",
+        "ams_id",
+        "component_id",
+        "source_id",
+        "label",
         "battery_mv",
         "status_flags",
         "battery_measurement_ok",
@@ -1304,6 +1379,7 @@ def _node_status(
         "battery_shutdown",
         "sequence",
         "available_fields",
+        "online",
     ):
         if key in item:
             result[key] = item[key]
@@ -1325,13 +1401,12 @@ def _finalize_latest_item(item: dict[str, Any]) -> None:
 
     field_times = item.pop("_field_times", {})
     item.pop("_metadata_times", None)
-    supported_fields = (
-        ENVIRONMENT_HISTORY_FIELDS
-        if item.get("sensor_type") == SENSOR_TYPE_ENVIRONMENT
-        else AIR_QUALITY_FIELDS
-        if item.get("sensor_type") == SENSOR_TYPE_AIR_QUALITY
-        else ()
-    )
+    supported_fields = {
+        SENSOR_TYPE_ENVIRONMENT: ENVIRONMENT_HISTORY_FIELDS,
+        SENSOR_TYPE_AIR_QUALITY: AIR_QUALITY_FIELDS,
+        SENSOR_TYPE_PRINTER: PRINTER_FIELDS,
+        SENSOR_TYPE_AMS: AMS_FIELDS,
+    }.get(str(item.get("sensor_type")), ())
     item["available_fields"] = [
         field for field in supported_fields if field in field_times
     ]
@@ -1398,11 +1473,22 @@ def _base_entity(record: RecordLike, sensor_type: str, identity: str) -> dict[st
     }
     if sensor_type == SENSOR_TYPE_ENVIRONMENT:
         item["node_id"] = _int_or_string(identity)
-    else:
+    elif sensor_type == SENSOR_TYPE_AIR_QUALITY:
         item["location"] = identity
         node_id = values.get("node_id")
         if node_id not in (None, ""):
             item["node_id"] = _int_or_string(str(node_id))
+    else:
+        printer_id = str(values.get("printer_id") or "")
+        component_id = str(values.get("component_id") or "")
+        item["printer_id"] = printer_id
+        item["component_id"] = component_id
+        item["source_id"] = identity
+        if sensor_type == SENSOR_TYPE_AMS:
+            item["ams_id"] = component_id
+            item["label"] = f"{printer_id} · {component_id}"
+        else:
+            item["label"] = f"Printer · {printer_id}"
     return item
 
 
@@ -1417,7 +1503,11 @@ def _update_entity_metadata(
     values = _values(record)
     metadata_times = item.setdefault("_metadata_times", {})
     keys = (
-        ("topic",) if sensor_type == SENSOR_TYPE_ENVIRONMENT else ("topic", "node_id")
+        ("topic",)
+        if sensor_type == SENSOR_TYPE_ENVIRONMENT
+        else ("topic", "node_id")
+        if sensor_type == SENSOR_TYPE_AIR_QUALITY
+        else ("source", "printer_id", "component_id")
     )
     for key in keys:
         value = values.get(key)
@@ -1432,11 +1522,17 @@ def _update_entity_metadata(
             metadata_times[key] = record_time
 
 
-def _sensor_type_for_measurement(measurement: str) -> str | None:
+def _sensor_type_for_measurement(
+    measurement: str, values: Mapping[str, Any] | None = None
+) -> str | None:
     if measurement == ENVIRONMENT_MEASUREMENT:
         return SENSOR_TYPE_ENVIRONMENT
     if measurement in {AIR_QUALITY_MEASUREMENT, AIR_QUALITY_AGGREGATE_MEASUREMENT}:
         return SENSOR_TYPE_AIR_QUALITY
+    if measurement == PRINTER_TELEMETRY_MEASUREMENT:
+        component_type = str((values or {}).get("component_type") or "")
+        if component_type in {SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS}:
+            return component_type
     return None
 
 
@@ -1459,8 +1555,18 @@ def _entity_identity(record: RecordLike, sensor_type: str) -> str | None:
     if sensor_type == SENSOR_TYPE_ENVIRONMENT:
         node_id = values.get("node_id")
         return str(node_id) if node_id not in (None, "") else None
-    location = values.get("location")
-    return str(location) if location not in (None, "") else None
+    if sensor_type == SENSOR_TYPE_AIR_QUALITY:
+        location = values.get("location")
+        return str(location) if location not in (None, "") else None
+    printer_id = values.get("printer_id")
+    if printer_id in (None, ""):
+        return None
+    if sensor_type == SENSOR_TYPE_PRINTER:
+        return str(printer_id)
+    component_id = values.get("component_id")
+    if component_id in (None, ""):
+        return None
+    return f"{printer_id}/{component_id}"
 
 
 def _values(record: RecordLike) -> Mapping[str, Any]:

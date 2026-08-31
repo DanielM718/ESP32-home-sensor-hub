@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -323,6 +324,97 @@ def printer_state_point(state: PrinterState, *, measurement: str) -> PrinterPoin
         fields,
         state.observed_at,
     )
+
+
+def printer_telemetry_points(state: PrinterState) -> tuple[PrinterPoint, ...]:
+    """Build bounded-series printer and AMS telemetry points.
+
+    Stable physical identity is kept in tags. Job, session, filament, tray, and
+    Home Assistant entity metadata are deliberately absent. Missing numeric
+    observations are omitted rather than represented as zero.
+    """
+
+    printer_fields: dict[str, bool | float | int | str] = {
+        "online": bool(state.online),
+        "printer_is_printing": bool(state.printer_is_printing),
+        "session_active": bool(state.session_active),
+    }
+    _add_finite_fields(
+        printer_fields,
+        {
+            "chamber_temperature_c": state.chamber_temperature,
+            "chamber_target_c": state.chamber_target,
+            "bed_temperature_c": state.bed_temperature,
+            "bed_target_c": state.bed_target,
+            "nozzle_1_temperature_c": state.nozzle_1_temperature,
+            "nozzle_1_target_c": state.nozzle_1_target,
+            "nozzle_2_temperature_c": state.nozzle_2_temperature,
+            "nozzle_2_target_c": state.nozzle_2_target,
+            "cooling_fan_percent": state.cooling_fan_percent,
+            "auxiliary_fan_percent": state.auxiliary_fan_percent,
+            "chamber_fan_percent": state.chamber_fan_percent,
+            "heatbreak_fan_percent": state.heatbreak_fan_percent,
+            "wifi_signal_dbm": state.wifi_signal_dbm,
+            "print_progress_percent": state.progress_percent,
+            "remaining_print_seconds": state.remaining_seconds,
+        },
+    )
+    points = [
+        PrinterPoint(
+            "printer_telemetry",
+            {
+                "printer_id": state.printer_id,
+                "component_type": "printer",
+                "component_id": "main",
+                "source": state.source,
+            },
+            printer_fields,
+            state.observed_at,
+        )
+    ]
+
+    for unit in state.ams_units:
+        ams_fields: dict[str, bool | float | int | str] = {}
+        _add_finite_fields(
+            ams_fields,
+            {
+                "ams_humidity": unit.humidity_percent,
+                "ams_temperature_c": unit.temperature,
+                "ams_humidity_index": unit.humidity_index,
+                "ams_remaining_drying_seconds": unit.remaining_drying_seconds,
+            },
+        )
+        if unit.active is not None:
+            ams_fields["ams_active"] = bool(unit.active)
+        if unit.drying is not None:
+            ams_fields["ams_drying"] = bool(unit.drying)
+        if not ams_fields:
+            continue
+        points.append(
+            PrinterPoint(
+                "printer_telemetry",
+                {
+                    "printer_id": state.printer_id,
+                    "component_type": "ams",
+                    "component_id": unit.ams_id,
+                    "source": state.source,
+                },
+                ams_fields,
+                state.observed_at,
+            )
+        )
+    return tuple(points)
+
+
+def _add_finite_fields(
+    target: dict[str, bool | float | int | str], values: dict[str, Any]
+) -> None:
+    for key, value in values.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        if not math.isfinite(float(value)):
+            continue
+        target[key] = value
 
 
 def print_session_point(session: PrintSession) -> PrinterPoint:

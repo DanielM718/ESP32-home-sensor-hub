@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
 from app.config import (
     AirQualitySettings,
     AppSettings,
@@ -22,6 +23,8 @@ from app.export_queries import (
     air_quality_aggregate_export_flux,
     air_quality_raw_export_flux,
     environment_export_flux,
+    preview_recent_flux,
+    printer_telemetry_export_flux,
 )
 from app.export_worker import LONG_HEADER, ExportWorker, _bounded_chunk_seconds
 from app.persistence import MonitoringExportStore
@@ -33,6 +36,7 @@ from app.workflows import (
     WorkflowNotFoundError,
     iso_utc,
     parse_stored_time,
+    unit_for_field,
 )
 
 BASE = datetime(2026, 8, 1, 12, 0, tzinfo=timezone.utc)
@@ -84,6 +88,41 @@ class DashboardRepository:
                         "nox_index",
                     ],
                 }
+            ],
+            "printer": [
+                {
+                    "id": "x2d",
+                    "source_id": "x2d",
+                    "sensor_type": "printer",
+                    "printer_id": "x2d",
+                    "available_fields": [
+                        "chamber_temperature_c",
+                        "bed_temperature_c",
+                        "online",
+                    ],
+                }
+            ],
+            "ams": [
+                {
+                    "id": "x2d/ams_1",
+                    "source_id": "x2d/ams_1",
+                    "sensor_type": "ams",
+                    "printer_id": "x2d",
+                    "ams_id": "ams_1",
+                    "available_fields": [
+                        "ams_humidity",
+                        "ams_temperature_c",
+                        "ams_drying",
+                    ],
+                },
+                {
+                    "id": "x2d/ams_2",
+                    "source_id": "x2d/ams_2",
+                    "sensor_type": "ams",
+                    "printer_id": "x2d",
+                    "ams_id": "ams_2",
+                    "available_fields": ["ams_humidity"],
+                },
             ],
         }
 
@@ -264,6 +303,8 @@ def point(
     field: str = "temperature_c",
     value: float = 22.5,
     data_tier: str = "raw",
+    printer_id: str | None = None,
+    ams_id: str | None = None,
 ) -> ExportPoint:
     return ExportPoint(
         timestamp_utc=iso_utc(BASE + timedelta(seconds=seconds)),
@@ -273,8 +314,10 @@ def point(
         location=source_id if sensor_type == "air_quality" else None,
         field=field,
         value=value,
-        unit="degC" if field.startswith("temperature_c") else "percent",
+        unit=unit_for_field(field),
         data_tier=data_tier,
+        printer_id=printer_id,
+        ams_id=ams_id,
     )
 
 
@@ -298,6 +341,17 @@ class TestMonitoringApi:
             "15m",
             "1h",
         ]
+        assert [item["name"] for item in options["source_types"]] == [
+            "environment",
+            "air_quality",
+            "printer",
+            "ams",
+        ]
+        fields = {item["name"]: item for item in options["fields"]}
+        assert fields["ams_humidity"]["sensor_types"] == ["ams"]
+        assert fields["ams_humidity"]["numeric_aggregation"] is True
+        assert fields["ams_drying"]["numeric_aggregation"] is False
+        assert fields["chamber_temperature_c"]["sensor_types"] == ["printer"]
         assert query.calls == []
 
     def test_valid_session_creation_uses_server_timestamps(self, system: Any) -> None:
@@ -310,6 +364,110 @@ class TestMonitoringApi:
         assert body["scheduled_end_time_utc"] == iso_utc(BASE + timedelta(seconds=60))
         assert body["remaining_seconds"] == 60
         assert body["export"] is None
+
+    def test_manual_ams_printer_and_mixed_monitoring_use_shared_capabilities(
+        self, system: Any
+    ) -> None:
+        client = system[0]
+        ams_only = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                name="AMS desiccant",
+                sources=[
+                    {
+                        "sensor_type": "ams",
+                        "printer_id": "x2d",
+                        "ams_id": "ams_1",
+                    }
+                ],
+                fields=["ams_humidity", "ams_temperature_c"],
+            ),
+        )
+        printer_only = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                name="X2D chamber",
+                sources=[{"sensor_type": "printer", "printer_id": "x2d"}],
+                fields=["chamber_temperature_c"],
+            ),
+        )
+        mixed = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                name="Mixed sources",
+                sources=[
+                    {"sensor_type": "environment", "node_id": 1},
+                    {"sensor_type": "air_quality", "location": "printer_room"},
+                    {"sensor_type": "printer", "printer_id": "x2d"},
+                    {
+                        "sensor_type": "ams",
+                        "printer_id": "x2d",
+                        "ams_id": "ams_1",
+                    },
+                ],
+                fields=[
+                    "temperature_c",
+                    "humidity",
+                    "co2",
+                    "chamber_temperature_c",
+                    "ams_humidity",
+                    "ams_temperature_c",
+                ],
+            ),
+        )
+
+        assert ams_only.status_code == 201
+        assert ams_only.json["selected_sources"] == [
+            {"sensor_type": "ams", "printer_id": "x2d", "ams_id": "ams_1"}
+        ]
+        assert printer_only.status_code == 201
+        assert mixed.status_code == 201
+
+    def test_invalid_or_unsupported_bambu_selections_are_rejected(
+        self, system: Any
+    ) -> None:
+        client = system[0]
+        unknown = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[
+                    {
+                        "sensor_type": "ams",
+                        "printer_id": "x2d",
+                        "ams_id": "ams_99",
+                    }
+                ],
+                fields=["ams_humidity"],
+            ),
+        )
+        unsupported = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[{"sensor_type": "printer", "printer_id": "x2d"}],
+                fields=["ams_humidity"],
+            ),
+        )
+        averaged_boolean = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[{"sensor_type": "printer", "printer_id": "x2d"}],
+                fields=["online"],
+                resolution="5m",
+            ),
+        )
+        mixed_boolean_mean = client.post(
+            "/api/monitoring/sessions",
+            json=monitoring_payload(
+                sources=[{"sensor_type": "printer", "printer_id": "x2d"}],
+                fields=["chamber_temperature_c", "online"],
+                resolution="5m",
+            ),
+        )
+
+        assert unknown.status_code == 400
+        assert unsupported.status_code == 400
+        assert averaged_boolean.status_code == 400
+        assert mixed_boolean_mean.status_code == 400
 
     @pytest.mark.parametrize("name", ["", "  ", 42, "x" * 121])
     def test_invalid_names(self, system: Any, name: Any) -> None:
@@ -901,6 +1059,98 @@ class TestExportWorkerAndCsv:
         assert completed["work_units_completed"] == 2
         assert len(query.calls) == 2
 
+    @pytest.mark.parametrize("csv_format", ["long", "wide"])
+    def test_mixed_bambu_environment_csv_has_explicit_stable_identities(
+        self, system: Any, csv_format: str
+    ) -> None:
+        client, store, query, clock, _settings = system
+        query.points = [
+            point(-3600, source_id="1", field="temperature_c", value=21.0),
+            point(
+                -3600,
+                sensor_type="air_quality",
+                source_id="printer_room",
+                field="co2",
+                value=650,
+            ),
+            point(
+                -3600,
+                sensor_type="printer",
+                source_id="x2d",
+                field="chamber_temperature_c",
+                value=31.5,
+                printer_id="x2d",
+            ),
+            point(
+                -3600,
+                sensor_type="ams",
+                source_id="x2d/ams_1",
+                field="ams_humidity",
+                value=22.0,
+                printer_id="x2d",
+                ams_id="ams_1",
+            ),
+            point(
+                -3600,
+                sensor_type="ams",
+                source_id="x2d/ams_1",
+                field="ams_temperature_c",
+                value=25.0,
+                printer_id="x2d",
+                ams_id="ams_1",
+            ),
+        ]
+        response = client.post(
+            "/api/exports",
+            json=export_payload(
+                start_time=iso_utc(BASE - timedelta(hours=2)),
+                end_time=iso_utc(BASE),
+                sources=[
+                    {"sensor_type": "environment", "node_id": 1},
+                    {"sensor_type": "air_quality", "location": "printer_room"},
+                    {"sensor_type": "printer", "printer_id": "x2d"},
+                    {
+                        "sensor_type": "ams",
+                        "printer_id": "x2d",
+                        "ams_id": "ams_1",
+                    },
+                ],
+                fields=[
+                    "temperature_c",
+                    "co2",
+                    "chamber_temperature_c",
+                    "ams_humidity",
+                    "ams_temperature_c",
+                ],
+                csv_format=csv_format,
+            ),
+        )
+        assert response.status_code == 202
+        job = response.json
+        worker = ExportWorker(
+            store, query, clock=clock, worker_id="worker", start_heartbeat_thread=False
+        )
+        assert worker.run_once()
+        with (store.output_dir / f"{job['id']}.csv").open(
+            newline="", encoding="utf-8"
+        ) as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+        assert "printer_id" in reader.fieldnames and "ams_id" in reader.fieldnames
+        ams_rows = [row for row in rows if row["source_id"] == "x2d/ams_1"]
+        assert ams_rows
+        assert {row["printer_id"] for row in ams_rows} == {"x2d"}
+        assert {row["ams_id"] for row in ams_rows} == {"ams_1"}
+        if csv_format == "long":
+            units = {row["field"]: row["unit"] for row in ams_rows}
+            assert units == {
+                "ams_humidity": "percent",
+                "ams_temperature_c": "degC",
+            }
+        else:
+            assert ams_rows[0]["ams_humidity"] == "22.0"
+            assert ams_rows[0]["ams_temperature_c"] == "25.0"
+
     def test_wide_csv_has_blank_unavailable_fields(self, system: Any) -> None:
         client, store, query, clock, _settings = system
         query.points = [point(-3600, field="temperature_c", value=22.0)]
@@ -1166,3 +1416,177 @@ class TestExportFlux:
         assert 'r._measurement == "air_quality_15m"' in flux
         assert 'set: ["co2_mean", "pm25_mean"]' in flux
         assert "air_quality_reading" not in flux
+
+    def test_printer_flux_uses_stable_source_filters_and_structured_fields(
+        self,
+    ) -> None:
+        flux = printer_telemetry_export_flux(
+            "environment_live",
+            BASE,
+            BASE + timedelta(hours=1),
+            [
+                Source("printer", printer_id="x2d"),
+                Source("ams", printer_id="x2d", ams_id="ams_1"),
+                Source("ams", printer_id="x2d", ams_id="ams_2"),
+            ],
+            ["chamber_temperature_c", "ams_humidity"],
+        )
+
+        assert 'r._measurement == "printer_telemetry"' in flux
+        assert 'r.printer_id == "x2d"' in flux
+        assert 'r.component_type == "printer"' in flux
+        assert 'r.component_id == "main"' in flux
+        assert 'r.component_type == "ams"' in flux
+        assert 'r.component_id == "ams_1"' in flux
+        assert 'r.component_id == "ams_2"' in flux
+        assert 'set: ["chamber_temperature_c", "ams_humidity"]' in flux
+        assert "ams_inventory_json" not in flux
+
+    def test_bambu_preview_keeps_field_tables_separate_for_mixed_types(self) -> None:
+        flux = preview_recent_flux(
+            "environment_live",
+            "ams",
+            BASE,
+            BASE + timedelta(hours=1),
+            [Source("ams", printer_id="x2d", ams_id="ams_1")],
+            ["ams_humidity", "ams_drying"],
+            limit=20,
+        )
+
+        assert 'set: ["ams_humidity", "ams_drying"]' in flux
+        assert "|> group()" not in flux
+        assert "|> limit(n: 20)" in flux
+
+    def test_raw_bambu_export_preserves_numeric_boolean_and_ams_identity(
+        self,
+    ) -> None:
+        records = [
+            PivotRecord(
+                BASE,
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_1",
+                    "ams_humidity": 22.0,
+                    "ams_temperature_c": 25.5,
+                    "ams_drying": True,
+                },
+            )
+        ]
+
+        class QueryApi:
+            def query_stream(self, **_kwargs: Any):
+                return iter(records)
+
+        repository = InfluxExportQueryRepository(
+            SimpleNamespace(
+                bucket="environment",
+                live_bucket="environment_live",
+                org="home",
+            ),
+            query_api=QueryApi(),
+        )
+        result = list(
+            repository.query_source_type(
+                sensor_type="ams",
+                start=BASE,
+                stop=BASE + timedelta(minutes=1),
+                sources=[Source("ams", printer_id="x2d", ams_id="ams_1")],
+                fields=["ams_humidity", "ams_temperature_c", "ams_drying"],
+                resolution="raw",
+            )
+        )
+
+        assert {item.field: item.value for item in result} == {
+            "ams_humidity": 22.0,
+            "ams_temperature_c": 25.5,
+            "ams_drying": True,
+        }
+        assert {item.source_id for item in result} == {"x2d/ams_1"}
+        assert {item.printer_id for item in result} == {"x2d"}
+        assert {item.ams_id for item in result} == {"ams_1"}
+        assert {item.data_tier for item in result} == {"live_raw"}
+
+    def test_boolean_bambu_field_is_raw_only(self) -> None:
+        class QueryApi:
+            calls = 0
+
+            def query_stream(self, **_kwargs: Any):
+                self.calls += 1
+                return iter(())
+
+        query_api = QueryApi()
+        repository = InfluxExportQueryRepository(
+            SimpleNamespace(
+                bucket="environment",
+                live_bucket="environment_live",
+                org="home",
+            ),
+            query_api=query_api,
+        )
+        result = list(
+            repository.query_source_type(
+                sensor_type="printer",
+                start=BASE,
+                stop=BASE + timedelta(minutes=5),
+                sources=[Source("printer", printer_id="x2d")],
+                fields=["online"],
+                resolution="5m",
+            )
+        )
+
+        assert result == []
+        assert query_api.calls == 0
+
+    def test_old_bambu_downsampling_uses_durable_tier_and_labels_it(self) -> None:
+        records = [
+            PivotRecord(
+                BASE - timedelta(days=5),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_1",
+                    "ams_humidity": 22.0,
+                },
+            )
+        ]
+
+        class QueryApi:
+            def __init__(self) -> None:
+                self.queries: list[str] = []
+
+            def query_stream(self, **kwargs: Any):
+                self.queries.append(kwargs["query"])
+                return iter(records)
+
+        query_api = QueryApi()
+        repository = InfluxExportQueryRepository(
+            SimpleNamespace(
+                bucket="environment",
+                live_bucket="environment_live",
+                org="home",
+            ),
+            query_api=query_api,
+            raw_retention_seconds=72 * 3600,
+            clock=lambda: BASE,
+        )
+        result = list(
+            repository.query_source_type(
+                sensor_type="ams",
+                start=BASE - timedelta(days=7),
+                stop=BASE - timedelta(days=4),
+                sources=[Source("ams", printer_id="x2d", ams_id="ams_1")],
+                fields=["ams_humidity"],
+                resolution="5m",
+            )
+        )
+
+        assert len(result) == 1
+        assert result[0].value == 22.0
+        assert result[0].data_tier == "5m_mean_from_durable_5m"
+        assert any(
+            'from(bucket: "environment")' in query for query in query_api.queries
+        )
+        assert not any(
+            'from(bucket: "environment_live")' in query for query in query_api.queries
+        )

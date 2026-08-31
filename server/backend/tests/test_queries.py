@@ -68,6 +68,14 @@ class QueryHelpersTest(unittest.TestCase):
         with self.assertRaises(QueryValidationError):
             readings_query_from_params({"range": "2y"})
 
+    def test_generic_readings_route_does_not_accept_printer_source_types(self) -> None:
+        for sensor_type in ("printer", "ams"):
+            with (
+                self.subTest(sensor_type=sensor_type),
+                self.assertRaises(QueryValidationError),
+            ):
+                readings_query_from_params({"sensor_type": sensor_type})
+
     def test_incompatible_filter_is_rejected(self) -> None:
         with self.assertRaises(QueryValidationError):
             readings_query_from_params({"sensor_type": "air_quality", "node_id": "1"})
@@ -135,6 +143,65 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn("|> range(start: 0)", air_inventory)
         self.assertIn('r._measurement == "air_quality_15m"', air_inventory)
         self.assertIn('"co2_mean"', air_inventory)
+        self.assertIn("printerTelemetryInventory", flux)
+        self.assertIn('r._measurement == "printer_telemetry"', flux)
+
+    def test_printer_and_multiple_ams_sources_are_discovered_and_remain_stale(
+        self,
+    ) -> None:
+        records = [
+            FakeRecord(
+                "printer_telemetry",
+                "chamber_temperature_c",
+                31.5,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "printer",
+                    "component_id": "main",
+                    "source": "home_assistant",
+                },
+            ),
+            FakeRecord(
+                "printer_telemetry",
+                "ams_humidity",
+                22.0,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_1",
+                    "source": "home_assistant",
+                },
+            ),
+            FakeRecord(
+                "printer_telemetry",
+                "ams_humidity",
+                40.0,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_2",
+                    "source": "home_assistant",
+                },
+            ),
+        ]
+        latest = latest_response(records)
+
+        self.assertEqual([item["id"] for item in latest["printer"]], ["x2d"])
+        self.assertEqual(
+            [item["id"] for item in latest["ams"]],
+            ["x2d/ams_1", "x2d/ams_2"],
+        )
+        self.assertEqual(latest["ams"][0]["available_fields"], ["ams_humidity"])
+
+        latest["generated_at"] = "2026-08-02T12:00:00Z"
+        nodes = nodes_response(latest, stale_after_seconds=60)["nodes"]
+        ams = [item for item in nodes if item["sensor_type"] == "ams"]
+        self.assertEqual(len(ams), 2)
+        self.assertTrue(all(item["status"] == "offline" for item in ams))
+        self.assertEqual(ams[0]["source_id"], "x2d/ams_1")
 
     def test_latest_query_never_scans_unbounded_history(self) -> None:
         flux = latest_flux("environment", "environment_live")
