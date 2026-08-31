@@ -6,6 +6,111 @@ from pathlib import Path
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 
 
+def _bracket_balance_errors(source: str) -> list[str]:
+    """Balance JS brackets outside comments, strings, and regex literals.
+
+    No JavaScript runtime is installed on this host, so an unbalanced bracket
+    would otherwise ship as a parse error that disables the whole dashboard.
+    This is not a parser; it is the narrow guard that catches that failure.
+    """
+
+    errors: list[str] = []
+    stack: list[tuple[str, int]] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    # Template-literal nesting: each entry is the ``{`` depth at which a
+    # ``${`` interpolation opened, so a closing brace resumes the literal.
+    template_depths: list[int] = []
+    index, line, prev = 0, 1, ""
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char == "\n":
+            line += 1
+            index += 1
+            continue
+        pair = source[index : index + 2]
+        if pair == "//":
+            index = source.find("\n", index)
+            if index == -1:
+                break
+            continue
+        if pair == "/*":
+            end = source.find("*/", index + 2)
+            line += source.count("\n", index, end if end != -1 else length)
+            index = length if end == -1 else end + 2
+            continue
+        if char in "'\"":
+            index += 1
+            while index < length and source[index] != char:
+                index += 2 if source[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "`":
+            index += 1
+            while index < length:
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == "`":
+                    index += 1
+                    break
+                if source[index : index + 2] == "${":
+                    template_depths.append(len(stack))
+                    stack.append(("{", line))
+                    index += 2
+                    break
+                line += source[index] == "\n"
+                index += 1
+            continue
+        if char == "/" and prev not in ")]}" and not prev.isalnum() and prev != "_":
+            index += 1
+            while index < length and source[index] != "/":
+                index += 2 if source[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "([{":
+            stack.append((char, line))
+        elif char in pairs:
+            if not stack:
+                errors.append(f"line {line}: unmatched '{char}'")
+            elif stack[-1][0] != pairs[char]:
+                opener, opened = stack.pop()
+                errors.append(
+                    f"line {line}: '{char}' closes '{opener}' opened on line {opened}"
+                )
+            else:
+                stack.pop()
+                if (
+                    char == "}"
+                    and template_depths
+                    and template_depths[-1] == len(stack)
+                ):
+                    # Resume the template literal this interpolation interrupted.
+                    template_depths.pop()
+                    index += 1
+                    while index < length:
+                        if source[index] == "\\":
+                            index += 2
+                            continue
+                        if source[index] == "`":
+                            index += 1
+                            break
+                        if source[index : index + 2] == "${":
+                            template_depths.append(len(stack))
+                            stack.append(("{", line))
+                            index += 2
+                            break
+                        line += source[index] == "\n"
+                        index += 1
+                    prev = "`"
+                    continue
+        if not char.isspace():
+            prev = char
+        index += 1
+    errors.extend(f"line {opened}: unclosed '{opener}'" for opener, opened in stack)
+    return errors
+
+
 class FrontendContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -200,6 +305,30 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("const AMS_1", self.javascript)
         self.assertNotIn("ams_inventory_json", self.javascript)
         self.assertNotIn("home_assistant", self.javascript.lower())
+
+    def test_dashboard_javascript_brackets_are_balanced(self) -> None:
+        """Guards against a parse error taking the whole dashboard down.
+
+        The Bambu telemetry axis builder shipped with one extra ``)``, which no
+        substring assertion could see and no JS runtime was present to catch.
+        """
+
+        self.assertEqual(_bracket_balance_errors(self.javascript), [])
+
+    def test_environment_chart_frame_is_not_matched_by_the_bambu_frame(self) -> None:
+        """The Bambu tab added a second .chart-frame-large to the document.
+
+        The environment chart's empty-state toggle must resolve its own frame
+        rather than whichever one happens to come first in the DOM.
+        """
+
+        self.assertEqual(self.template.count("chart-frame-large"), 2)
+        self.assertNotIn('querySelector(".chart-frame-large")', self.javascript)
+        self.assertIn(
+            'document.getElementById("history-chart").closest(".chart-frame-large")',
+            self.javascript,
+        )
+        self.assertIn('id="printer-telemetry-frame"', self.template)
 
     def test_tracked_print_time_is_a_first_class_qualified_usage_metric(self) -> None:
         self.assertIn('id="printer-usage"', self.template)

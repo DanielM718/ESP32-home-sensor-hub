@@ -815,7 +815,7 @@ function renderPrinterTelemetryChart(data) {
         ? Array.from(state.fieldDefinitions.values()).find((field) => field.unit === unit)?.display_unit || unit
         : unit },
       grid: index === 0 ? { color: "#edf2ef" } : { drawOnChartArea: false },
-    }]))),
+    }])),
   };
   updateChart(chart, datasets, state.printerTelemetryRange);
   const tier = data.data_tier || "unknown";
@@ -2519,7 +2519,8 @@ function renderCharts(data) {
   document.getElementById("chart-series-count").textContent =
     `${datasets.length} ${datasets.length === 1 ? "series" : "series"}`;
   document.getElementById("chart-empty").hidden = datasets.length > 0;
-  document.querySelector(".chart-frame-large").hidden = datasets.length === 0;
+  // Scoped to this canvas: the Bambu tab also renders a .chart-frame-large.
+  document.getElementById("history-chart").closest(".chart-frame-large").hidden = datasets.length === 0;
 }
 
 function updateChart(chart, datasets, rangeKey = state.range) {
