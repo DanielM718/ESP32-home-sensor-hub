@@ -342,9 +342,10 @@ class ClientConnection:
     def __init__(self, response: bytes = b"", failure: Exception | None = None) -> None:
         self.response = bytearray(response)
         self.failure = failure
+        self.timeouts: list[float] = []
 
-    def settimeout(self, _timeout):
-        return None
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
 
     def connect(self, _path):
         if self.failure:
@@ -418,6 +419,35 @@ def test_broker_client_fails_closed_on_unavailable_timeout_and_bad_response(
             BrokerOperation.DESKTOP_WAKE, request_id="request_identifier_abc"
         )
     assert protocol.value.code == "protocol_mismatch"
+
+
+def test_broker_client_clips_every_socket_phase_to_one_absolute_deadline(
+    tmp_path,
+) -> None:
+    request_id = "request_identifier_deadline"
+    payload = {
+        "version": 1,
+        "request_id": request_id,
+        "ok": True,
+        "status": {"accepted": True},
+        "error_code": None,
+    }
+    connection = ClientConnection(json.dumps(payload).encode() + b"\n")
+    readings = iter((0.0, 0.2, 0.6, 0.8))
+    client = BrokerClient(
+        BrokerSettings(enabled=True, socket_path=tmp_path / "broker.sock"),
+        connector=lambda *_args: connection,
+        monotonic=lambda: next(readings),
+    )
+
+    result = client.request(
+        BrokerOperation.DESKTOP_WAKE,
+        request_id=request_id,
+        timeout_seconds=1.0,
+    )
+
+    assert result.ok is True
+    assert connection.timeouts == pytest.approx((0.8, 0.4, 0.2))
 
 
 def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(

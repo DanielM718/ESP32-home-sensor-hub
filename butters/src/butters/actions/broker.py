@@ -100,9 +100,11 @@ class BrokerClient:
         settings: BrokerSettings,
         *,
         connector: Callable[..., socket.socket] = socket.socket,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self.connector = connector
+        self.monotonic = monotonic
 
     def request(
         self,
@@ -110,6 +112,7 @@ class BrokerClient:
         *,
         request_id: str,
         cancel_event: threading.Event | None = None,
+        timeout_seconds: float | None = None,
     ) -> BrokerResult:
         if not self.settings.enabled:
             raise BrokerError("broker_unconfigured", "action broker is not enabled")
@@ -117,6 +120,13 @@ class BrokerClient:
             raise BrokerError("invalid_request_id", "broker request ID is invalid")
         if cancel_event is not None and cancel_event.is_set():
             raise BrokerError("cancelled", "action was cancelled")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise BrokerError("request_timeout", "broker request timed out")
+        deadline = (
+            None
+            if timeout_seconds is None
+            else self.monotonic() + timeout_seconds
+        )
         request = {
             "version": self.settings.protocol_version,
             "request_id": request_id,
@@ -127,11 +137,24 @@ class BrokerClient:
             raise BrokerError("request_too_large", "broker request exceeds its limit")
         connection = self.connector(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            connection.settimeout(self.settings.connect_timeout_seconds)
+            connection.settimeout(
+                self._remaining_timeout(
+                    self.settings.connect_timeout_seconds, deadline
+                )
+            )
             connection.connect(str(self.settings.socket_path))
-            connection.settimeout(self.settings.request_timeout_seconds)
+            connection.settimeout(
+                self._remaining_timeout(
+                    self.settings.request_timeout_seconds, deadline
+                )
+            )
             connection.sendall(encoded)
-            raw = _read_line(connection, self.settings.max_message_bytes)
+            raw = _read_line(
+                connection,
+                self.settings.max_message_bytes,
+                deadline=deadline,
+                clock=self.monotonic,
+            )
         except (OSError, TimeoutError) as exc:
             raise BrokerError(
                 "broker_unavailable", "action broker is unavailable"
@@ -163,6 +186,16 @@ class BrokerClient:
         if error_code is not None and not isinstance(error_code, str):
             raise BrokerError("malformed_response", "broker error code is invalid")
         return BrokerResult(operation, value["ok"], value["status"], error_code)
+
+    def _remaining_timeout(
+        self, configured_timeout: float, deadline: float | None
+    ) -> float:
+        if deadline is None:
+            return configured_timeout
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise BrokerError("request_timeout", "broker request timed out")
+        return min(configured_timeout, remaining)
 
 
 class BrokerServer:
@@ -781,12 +814,16 @@ def _peer_credentials(connection: socket.socket) -> tuple[int, int]:
 
 
 def _read_line(
-    connection: socket.socket, maximum: int, *, deadline: float | None = None
+    connection: socket.socket,
+    maximum: int,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> bytes:
     chunks = bytearray()
     while len(chunks) <= maximum:
         if deadline is not None:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - clock()
             if remaining <= 0:
                 raise BrokerError("request_timeout", "broker request timed out")
             # Re-armed per recv against one shared deadline so a peer that drips

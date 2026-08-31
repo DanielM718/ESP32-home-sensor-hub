@@ -11,8 +11,8 @@ Run `install-desktop-control.ps1` from an elevated Windows PowerShell with
 - backs up any previous helper, task definitions, and the Parsec service mode;
 - installs `C:\ProgramData\Butters\desktop-control.ps1`;
 - creates only `\Butters\LockDesktop` and `\Butters\SleepDesktop`;
-- changes only the fixed `Parsec` service from its observed Manual mode to
-  Automatic and starts it.
+- explicitly leaves the fixed `Parsec` service in Manual startup mode and does
+  not start it as an installer side effect.
 
 The helper accepts a `ValidateSet` of fixed operations. The Linux broker still
 selects each operation from its own enum and never accepts an operation argument
@@ -24,8 +24,13 @@ To roll back, use the timestamped directory printed by the installer:
    installed helper.
 2. Restore task XML files with `Register-ScheduledTask -Xml`, or unregister the
    two tasks if no prior XML exists.
-3. Restore the Parsec mode recorded in `parsec-service-before.json` (the August
-   2026 baseline was Manual) with `Set-Service Parsec -StartupType Manual`.
+3. Restore the Parsec mode recorded in `parsec-service-before.json`; for the
+   reviewed Manual baseline use `Set-Service Parsec -StartupType Manual`.
+
+`ParsecEnsure` and `ParsecRestart` may start the fixed service on demand. Neither
+operation changes its startup type, creates a Run key, or creates a scheduled
+startup task. Waking the desktop and changing monitor power are separate broker
+operations.
 
 ## Human Git Bash SSH
 

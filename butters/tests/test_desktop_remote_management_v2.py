@@ -22,11 +22,13 @@ from butters.assistant_config import load_assistant_settings
 from butters.integrations.desktop import DesktopWorkflow
 from butters.integrations.model import IntegrationError
 from butters.llm.catalog import derive_safe_tool_catalog
+from butters.skills.actions_v2 import ActionSkillImplementations
 from butters.skills.model import (
     ActionAuthorization,
     ActionClass,
     AuthenticationContext,
     AuthenticationLevel,
+    DesktopArgs,
 )
 from butters.stt.normalization import DomainVocabulary
 
@@ -35,7 +37,7 @@ PARSEC_HEALTHY = {
     "installation_type": "machine",
     "service_present": True,
     "service_running": True,
-    "service_startup": "auto",
+    "service_startup": "manual",
     "service_process_present": True,
     "host_process_present": True,
     "system_host_process_present": True,
@@ -199,6 +201,26 @@ def test_parsec_restart_success_and_subprocess_timeout_are_bounded(
     assert timeout.value.code == "operation_failed"
 
 
+def test_wake_and_simple_parsec_start_are_separate_fixed_operations() -> None:
+    calls: list[BrokerOperation] = []
+
+    class Actions:
+        def execute(self, operation, *, cancel_event=None):
+            calls.append(operation)
+            return {"accepted": True}
+
+    implementation = ActionSkillImplementations(None, Actions(), None, None)
+    arguments = DesktopArgs("desktop")
+
+    implementation.wake_desktop(arguments)
+    assert calls == [BrokerOperation.DESKTOP_WAKE]
+
+    calls.clear()
+    implementation.ensure_parsec_running(arguments)
+    assert calls == [BrokerOperation.DESKTOP_PARSEC_ENSURE]
+    assert BrokerOperation.DESKTOP_MONITORS_OFF not in calls
+
+
 def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_argv(
     tmp_path: Path,
 ) -> None:
@@ -259,22 +281,25 @@ class StatusOperations:
         self.network = network
         self.ssh = ssh
 
-    def network_reachable(self) -> bool:
+    def network_reachable(self, _timeout_seconds: float) -> bool:
         return self.network
 
-    def ssh_ready(self) -> bool:
+    def ssh_ready(self, _timeout_seconds: float) -> bool:
         return self.ssh
 
-    def parsec_status(self) -> dict[str, object] | None:
+    def parsec_status(self, _timeout_seconds: float) -> dict[str, object] | None:
         return self.value
 
-    def parsec_ready(self) -> bool | None:
+    def parsec_ready(self, _timeout_seconds: float) -> bool | None:
         return None if self.value is None else bool(self.value["plausibly_ready"])
 
-    def send_wake(self) -> bool:
+    def send_wake(self, _timeout_seconds: float) -> bool:
         raise AssertionError
 
-    def request_headless_mode(self) -> bool:
+    def ensure_parsec_running(self, _timeout_seconds: float) -> bool:
+        raise AssertionError
+
+    def request_headless_mode(self, _timeout_seconds: float) -> bool:
         raise AssertionError
 
 
@@ -385,6 +410,7 @@ def test_every_new_action_requires_fresh_auth_and_models_see_zero_actions(
 ) -> None:
     assistant, _state = _enabled_assistant(tmp_path)
     action_names = {
+        "start_remote_desktop_session",
         "ensure_parsec_running",
         "restart_parsec",
         "lock_desktop",
@@ -512,4 +538,23 @@ def test_windows_helper_uses_s3_not_hibernate_and_fixed_tasks_only() -> None:
     assert "\\Butters\\LockDesktop" in helper
     assert "\\Butters\\SleepDesktop" in helper
     assert "ValidateSet('ParsecStatus'" in helper
-    assert "Set-Service -Name 'Parsec' -StartupType Automatic" in installer
+    assert "Set-Service -Name 'Parsec' -StartupType Manual" in installer
+    assert "StartupType Automatic" not in installer
+    assert "Start-Service -Name 'Parsec'" not in installer
+    assert "Set-Service" not in helper
+
+
+def test_human_git_bash_launcher_cannot_change_automation_shell_semantics() -> None:
+    root = Path(__file__).resolve().parents[1]
+    launcher = (root / "windows" / "human-ssh-launcher.ps1").read_text(
+        encoding="utf-8"
+    )
+    powershell_files = "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "windows").glob("*.ps1")
+    )
+
+    assert "C:\\Program Files\\Git\\bin\\bash.exe" in launcher
+    assert "$env:SSH_ORIGINAL_COMMAND" in launcher
+    assert "& $bash '--login' '-i'" in launcher
+    assert "& $bash '--login' '-c' $original" in launcher
+    assert "DefaultShell" not in powershell_files

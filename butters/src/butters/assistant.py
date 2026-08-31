@@ -491,7 +491,10 @@ def create_assistant(
 
 def _direct_desktop_action(text: str) -> bool:
     text = text.casefold()
-    return any(
+    remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
+    wake = any(
         phrase in text
         for phrase in ("turn on my computer", "wake my computer", "wake the desktop")
-    ) and any(word in text for word in ("parsec", "remote"))
+    )
+    prepare = "prepare my computer" in text
+    return remote_intent and (wake or prepare)
