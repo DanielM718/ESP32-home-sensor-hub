@@ -91,6 +91,34 @@
           </div>
         </section>
 
+        <section class="printer-panel" aria-labelledby="printer-telemetry-heading">
+          <div class="section-heading chart-heading">
+            <div>
+              <h2 id="printer-telemetry-heading">Historical Telemetry</h2>
+              <p id="printer-telemetry-tier" class="subtle">Loading first-class AMS and printer sensor history.</p>
+            </div>
+            <span id="printer-telemetry-series-count" class="unit">No series</span>
+          </div>
+          <div class="printer-telemetry-controls">
+            <div id="printer-telemetry-ranges" class="segmented-control printer-telemetry-range" role="group" aria-label="Bambu telemetry history range">
+              <button class="printer-range-button" type="button" data-range="1h">1h</button>
+              <button class="printer-range-button" type="button" data-range="6h">6h</button>
+              <button class="printer-range-button is-active" type="button" data-range="24h">24h</button>
+              <button class="printer-range-button" type="button" data-range="7d">7d</button>
+            </div>
+            <fieldset class="metric-selector">
+              <legend>Printer and AMS measurements shown together</legend>
+              <div id="printer-telemetry-metrics" class="field-groups" aria-live="polite">
+                <span class="subtle">Waiting for discovered printer telemetry.</span>
+              </div>
+            </fieldset>
+          </div>
+          <div id="printer-telemetry-empty" class="empty-state" hidden>No samples exist for the selected measurements and range.</div>
+          <div id="printer-telemetry-frame" class="chart-frame chart-frame-large">
+            <canvas id="printer-telemetry-chart" aria-label="Historical Bambu printer and AMS telemetry"></canvas>
+          </div>
+        </section>
+
         <section class="printer-panel" aria-labelledby="printer-usage-heading">
           <div class="section-heading">
             <div><h2 id="printer-usage-heading">Printer Usage</h2><p class="subtle">Cumulative machine runtime from known print-history intervals.</p></div>

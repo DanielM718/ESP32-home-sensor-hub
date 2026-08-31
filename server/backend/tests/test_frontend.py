@@ -6,6 +6,111 @@ from pathlib import Path
 FRONTEND = Path(__file__).resolve().parents[2] / "frontend"
 
 
+def _bracket_balance_errors(source: str) -> list[str]:
+    """Balance JS brackets outside comments, strings, and regex literals.
+
+    No JavaScript runtime is installed on this host, so an unbalanced bracket
+    would otherwise ship as a parse error that disables the whole dashboard.
+    This is not a parser; it is the narrow guard that catches that failure.
+    """
+
+    errors: list[str] = []
+    stack: list[tuple[str, int]] = []
+    pairs = {")": "(", "]": "[", "}": "{"}
+    # Template-literal nesting: each entry is the ``{`` depth at which a
+    # ``${`` interpolation opened, so a closing brace resumes the literal.
+    template_depths: list[int] = []
+    index, line, prev = 0, 1, ""
+    length = len(source)
+    while index < length:
+        char = source[index]
+        if char == "\n":
+            line += 1
+            index += 1
+            continue
+        pair = source[index : index + 2]
+        if pair == "//":
+            index = source.find("\n", index)
+            if index == -1:
+                break
+            continue
+        if pair == "/*":
+            end = source.find("*/", index + 2)
+            line += source.count("\n", index, end if end != -1 else length)
+            index = length if end == -1 else end + 2
+            continue
+        if char in "'\"":
+            index += 1
+            while index < length and source[index] != char:
+                index += 2 if source[index] == "\\" else 1
+            index += 1
+            continue
+        if char == "`":
+            index += 1
+            while index < length:
+                if source[index] == "\\":
+                    index += 2
+                    continue
+                if source[index] == "`":
+                    index += 1
+                    break
+                if source[index : index + 2] == "${":
+                    template_depths.append(len(stack))
+                    stack.append(("{", line))
+                    index += 2
+                    break
+                line += source[index] == "\n"
+                index += 1
+            continue
+        if char == "/" and prev not in ")]}" and not prev.isalnum() and prev != "_":
+            index += 1
+            while index < length and source[index] != "/":
+                index += 2 if source[index] == "\\" else 1
+            index += 1
+            continue
+        if char in "([{":
+            stack.append((char, line))
+        elif char in pairs:
+            if not stack:
+                errors.append(f"line {line}: unmatched '{char}'")
+            elif stack[-1][0] != pairs[char]:
+                opener, opened = stack.pop()
+                errors.append(
+                    f"line {line}: '{char}' closes '{opener}' opened on line {opened}"
+                )
+            else:
+                stack.pop()
+                if (
+                    char == "}"
+                    and template_depths
+                    and template_depths[-1] == len(stack)
+                ):
+                    # Resume the template literal this interpolation interrupted.
+                    template_depths.pop()
+                    index += 1
+                    while index < length:
+                        if source[index] == "\\":
+                            index += 2
+                            continue
+                        if source[index] == "`":
+                            index += 1
+                            break
+                        if source[index : index + 2] == "${":
+                            template_depths.append(len(stack))
+                            stack.append(("{", line))
+                            index += 2
+                            break
+                        line += source[index] == "\n"
+                        index += 1
+                    prev = "`"
+                    continue
+        if not char.isspace():
+            prev = char
+        index += 1
+    errors.extend(f"line {opened}: unclosed '{opener}'" for opener, opened in stack)
+    return errors
+
+
 class FrontendContractTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -173,6 +278,132 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("printer-dashboard-grid", self.styles)
         self.assertIn("@media (max-width: 640px)", self.styles)
         self.assertIn("session_id=", self.javascript)
+
+    def test_bambu_history_is_capability_driven_and_supports_required_ranges(
+        self,
+    ) -> None:
+        for element_id in (
+            "printer-telemetry-chart",
+            "printer-telemetry-ranges",
+            "printer-telemetry-metrics",
+            "printer-telemetry-tier",
+        ):
+            self.assertIn(f'id="{element_id}"', self.template)
+        for range_key in ("1h", "6h", "24h", "7d"):
+            self.assertIn(f'data-range="{range_key}"', self.template)
+        for field in (
+            "ams_humidity",
+            "ams_temperature_c",
+            "chamber_temperature_c",
+        ):
+            self.assertIn(f'"{field}"', self.javascript)
+        self.assertIn("API.printerTelemetry", self.javascript)
+        self.assertIn("state.fieldDefinitions", self.javascript)
+        self.assertIn('source.sensor_type === "ams"', self.javascript)
+        self.assertIn("source.available_fields", self.javascript)
+        self.assertIn("offline", self.javascript)
+        self.assertNotIn("const AMS_1", self.javascript)
+        self.assertNotIn("ams_inventory_json", self.javascript)
+        self.assertNotIn("home_assistant", self.javascript.lower())
+
+    def test_dashboard_javascript_brackets_are_balanced(self) -> None:
+        """Guards against a parse error taking the whole dashboard down.
+
+        The Bambu telemetry axis builder shipped with one extra ``)``, which no
+        substring assertion could see and no JS runtime was present to catch.
+        """
+
+        self.assertEqual(_bracket_balance_errors(self.javascript), [])
+
+    def test_environment_chart_frame_is_not_matched_by_the_bambu_frame(self) -> None:
+        """The Bambu tab added a second .chart-frame-large to the document.
+
+        The environment chart's empty-state toggle must resolve its own frame
+        rather than whichever one happens to come first in the DOM.
+        """
+
+        self.assertEqual(self.template.count("chart-frame-large"), 2)
+        self.assertNotIn('querySelector(".chart-frame-large")', self.javascript)
+        self.assertIn(
+            'document.getElementById("history-chart").closest(".chart-frame-large")',
+            self.javascript,
+        )
+        self.assertIn('id="printer-telemetry-frame"', self.template)
+
+    def test_monitoring_graph_offers_bambu_sources_not_orphan_measurements(
+        self,
+    ) -> None:
+        """Reproduces the shipped Monitoring-tab defect.
+
+        The measurement picker unioned the *global* field catalog while the
+        source picker only ever read `latest.environment` and
+        `latest.air_quality`, so Bambu measurements appeared and then reported
+        themselves unavailable because no selectable source could provide them.
+        """
+
+        # The source picker must now build printer/AMS options from latest data.
+        self.assertIn("data.printer || []", self.javascript)
+        self.assertIn("data.ams || []", self.javascript)
+        self.assertIn("bambuFilterKey", self.javascript)
+        self.assertIn("...bambuSources", self.javascript)
+
+        # The measurement picker must derive choices per selected source and
+        # only from numerically graphable fields - not the raw global catalog.
+        self.assertIn(
+            "const available = new Set(applicableSources.flatMap(graphableFieldsFor));",
+            self.javascript,
+        )
+        self.assertNotIn(
+            "applicableSources.flatMap((source) => source.available_fields || [])",
+            self.javascript,
+        )
+        self.assertIn("numeric_aggregation === true", self.javascript)
+
+        # Graphability is decided by the capability catalog, never by name.
+        self.assertNotIn("external_spool_1", self.javascript)
+        self.assertNotIn("external_spool_2", self.javascript)
+        self.assertNotIn('=== "ams_1"', self.javascript)
+
+    def test_monitoring_graph_fetches_and_attributes_bambu_history(self) -> None:
+        # The graph composes the existing audited telemetry endpoint rather
+        # than a second storage or query system.
+        self.assertIn("printerTelemetryChartQuery", self.javascript)
+        self.assertIn("API.printerTelemetry", self.javascript)
+        self.assertIn("state.chartTelemetryData", self.javascript)
+        # A telemetry failure must not take the environmental graph down.
+        self.assertIn(".catch(() => null)", self.javascript)
+
+        # A dataset is only built where the source family really provides the
+        # field, so a printer never appears to supply AMS humidity.
+        self.assertIn(
+            "(definition.sensor_types || []).includes(item.sensor_type)",
+            self.javascript,
+        )
+        self.assertIn("chartSeriesMatchesFilter", self.javascript)
+        self.assertIn("chartSourceLabel", self.javascript)
+
+        # Bambu tier is reported honestly alongside the environmental tier.
+        self.assertIn('startsWith("durable_")', self.javascript)
+
+    def test_legacy_environmental_graph_behaviour_is_unchanged(self) -> None:
+        # Environment/air-quality options are still built exactly as before,
+        # independent of the capability catalog.
+        self.assertIn(
+            "const environmentNodes = (data.environment || [])", self.javascript
+        )
+        self.assertIn("const airStations = (data.air_quality || [])", self.javascript)
+        self.assertIn("`Node ${reading.node_id}`", self.javascript)
+        self.assertIn("SEN66 · ${formatLabel(reading.location)}", self.javascript)
+        # /api/readings keeps its environment/air-quality-only query params.
+        self.assertIn('params.set("sensor_type", "environment")', self.javascript)
+        self.assertIn('params.set("sensor_type", "air_quality")', self.javascript)
+        self.assertNotIn(
+            'params.set("sensor_type", "printer");\n    params.set("node_id"',
+            self.javascript,
+        )
+        # The dedicated Bambu tab graph is untouched.
+        self.assertIn("renderPrinterTelemetryChart", self.javascript)
+        self.assertIn('id="printer-telemetry-chart"', self.template)
 
     def test_tracked_print_time_is_a_first_class_qualified_usage_metric(self) -> None:
         self.assertIn('id="printer-usage"', self.template)

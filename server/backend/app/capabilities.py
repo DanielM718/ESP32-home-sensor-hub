@@ -6,8 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 from app.workflows import (
-    AIR_QUALITY_FIELDS,
-    ENVIRONMENT_FIELDS,
+    FIELDS_BY_SENSOR_TYPE,
     Source,
     WorkflowValidationError,
 )
@@ -16,13 +15,7 @@ from app.workflows import (
 def available_fields_for_entity(entity: Mapping[str, Any]) -> tuple[str, ...]:
     """Return fields actually observed for one latest-data entity."""
 
-    supported = (
-        ENVIRONMENT_FIELDS
-        if entity.get("sensor_type") == "environment"
-        else AIR_QUALITY_FIELDS
-        if entity.get("sensor_type") == "air_quality"
-        else ()
-    )
+    supported = FIELDS_BY_SENSOR_TYPE.get(str(entity.get("sensor_type")), ())
     advertised = entity.get("available_fields")
     if isinstance(advertised, list):
         return tuple(field for field in supported if field in advertised)
@@ -38,17 +31,20 @@ def capability_map(
     for sensor_type, collection in (
         ("environment", latest.get("environment", [])),
         ("air_quality", latest.get("air_quality", [])),
+        ("printer", latest.get("printer", [])),
+        ("ams", latest.get("ams", [])),
     ):
         if not isinstance(collection, list):
             continue
         for entity in collection:
             if not isinstance(entity, Mapping):
                 continue
-            identity = (
-                entity.get("node_id")
-                if sensor_type == "environment"
-                else entity.get("location")
-            )
+            identity = {
+                "environment": entity.get("node_id"),
+                "air_quality": entity.get("location"),
+                "printer": entity.get("printer_id") or entity.get("id"),
+                "ams": entity.get("source_id") or entity.get("id"),
+            }[sensor_type]
             if identity in (None, ""):
                 continue
             result[(sensor_type, str(identity))] = available_fields_for_entity(entity)
@@ -68,7 +64,7 @@ def validate_source_capabilities(
     ]
     if missing_sources:
         raise WorkflowValidationError(
-            "selected source is not present in current capability data: "
+            "selected source is not present in known capability data: "
             + ", ".join(missing_sources)
         )
 

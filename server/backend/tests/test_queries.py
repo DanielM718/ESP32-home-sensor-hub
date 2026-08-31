@@ -16,6 +16,7 @@ from app.battery_status import (
 from app.config import InfluxSettings
 from app.queries import (
     AIR_QUALITY_FIELDS,
+    SENSOR_TYPES,
     DurableInventoryCache,
     InfluxReadRepository,
     QueryValidationError,
@@ -32,6 +33,17 @@ from app.queries import (
     readings_query_from_params,
     readings_response,
 )
+from app.workflows import FIELDS_BY_SENSOR_TYPE, NUMERIC_FIELDS
+
+FIELDS_BY_SENSOR_TYPE_LOOKUP = {
+    field: tuple(
+        sensor_type
+        for sensor_type, fields in FIELDS_BY_SENSOR_TYPE.items()
+        if field in fields
+    )
+    for fields in FIELDS_BY_SENSOR_TYPE.values()
+    for field in fields
+}
 
 
 @dataclass(frozen=True)
@@ -67,6 +79,14 @@ class QueryHelpersTest(unittest.TestCase):
     def test_invalid_range_is_rejected(self) -> None:
         with self.assertRaises(QueryValidationError):
             readings_query_from_params({"range": "2y"})
+
+    def test_generic_readings_route_does_not_accept_printer_source_types(self) -> None:
+        for sensor_type in ("printer", "ams"):
+            with (
+                self.subTest(sensor_type=sensor_type),
+                self.assertRaises(QueryValidationError),
+            ):
+                readings_query_from_params({"sensor_type": sensor_type})
 
     def test_incompatible_filter_is_rejected(self) -> None:
         with self.assertRaises(QueryValidationError):
@@ -135,6 +155,65 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertIn("|> range(start: 0)", air_inventory)
         self.assertIn('r._measurement == "air_quality_15m"', air_inventory)
         self.assertIn('"co2_mean"', air_inventory)
+        self.assertIn("printerTelemetryInventory", flux)
+        self.assertIn('r._measurement == "printer_telemetry"', flux)
+
+    def test_printer_and_multiple_ams_sources_are_discovered_and_remain_stale(
+        self,
+    ) -> None:
+        records = [
+            FakeRecord(
+                "printer_telemetry",
+                "chamber_temperature_c",
+                31.5,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "printer",
+                    "component_id": "main",
+                    "source": "home_assistant",
+                },
+            ),
+            FakeRecord(
+                "printer_telemetry",
+                "ams_humidity",
+                22.0,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_1",
+                    "source": "home_assistant",
+                },
+            ),
+            FakeRecord(
+                "printer_telemetry",
+                "ams_humidity",
+                40.0,
+                datetime(2026, 8, 1, 12, tzinfo=timezone.utc),
+                {
+                    "printer_id": "x2d",
+                    "component_type": "ams",
+                    "component_id": "ams_2",
+                    "source": "home_assistant",
+                },
+            ),
+        ]
+        latest = latest_response(records)
+
+        self.assertEqual([item["id"] for item in latest["printer"]], ["x2d"])
+        self.assertEqual(
+            [item["id"] for item in latest["ams"]],
+            ["x2d/ams_1", "x2d/ams_2"],
+        )
+        self.assertEqual(latest["ams"][0]["available_fields"], ["ams_humidity"])
+
+        latest["generated_at"] = "2026-08-02T12:00:00Z"
+        nodes = nodes_response(latest, stale_after_seconds=60)["nodes"]
+        ams = [item for item in nodes if item["sensor_type"] == "ams"]
+        self.assertEqual(len(ams), 2)
+        self.assertTrue(all(item["status"] == "offline" for item in ams))
+        self.assertEqual(ams[0]["source_id"], "x2d/ams_1")
 
     def test_latest_query_never_scans_unbounded_history(self) -> None:
         flux = latest_flux("environment", "environment_live")
@@ -1504,3 +1583,144 @@ def _air_quality_records(now: datetime) -> list[FakeRecord]:
 
 if __name__ == "__main__":
     unittest.main()
+
+
+MONITORING_GRAPH_LATEST = {
+    "environment": [
+        {
+            "sensor_type": "environment",
+            "node_id": 1,
+            "id": "1",
+            "available_fields": ["temperature_c", "humidity", "battery_mv"],
+        }
+    ],
+    "air_quality": [
+        {
+            "sensor_type": "air_quality",
+            "location": "office",
+            "id": "office",
+            "available_fields": ["temperature_c", "co2", "pm25"],
+        }
+    ],
+    "printer": [
+        {
+            "sensor_type": "printer",
+            "printer_id": "x2d",
+            "id": "x2d",
+            "available_fields": [
+                "chamber_temperature_c",
+                "bed_temperature_c",
+                "online",
+                "printer_is_printing",
+            ],
+        }
+    ],
+    "ams": [
+        {
+            "sensor_type": "ams",
+            "printer_id": "x2d",
+            "ams_id": "ams_1",
+            "source_id": "x2d/ams_1",
+            "id": "x2d/ams_1",
+            "available_fields": [
+                "ams_humidity",
+                "ams_temperature_c",
+                "ams_active",
+            ],
+        },
+        {
+            "sensor_type": "ams",
+            "printer_id": "x2d",
+            "ams_id": "external_spool_1",
+            "source_id": "x2d/external_spool_1",
+            "id": "x2d/external_spool_1",
+            "available_fields": ["ams_active"],
+        },
+    ],
+}
+
+
+class MonitoringGraphCapabilityContractTest(unittest.TestCase):
+    """The shared Monitoring graph is driven entirely by backend capability data.
+
+    The shipped defect was a leak between two different sources of truth: the
+    measurement picker unioned the *global* field catalog while the source
+    picker only knew about environment/air-quality entities, so Bambu
+    measurements were offered and then reported unavailable. These tests pin
+    the per-source contract the graph must derive its choices from.
+    """
+
+    @staticmethod
+    def _graphable(entity):
+        """Mirror of the frontend rule: numeric-aggregatable fields only."""
+
+        return tuple(
+            field for field in entity["available_fields"] if field in NUMERIC_FIELDS
+        )
+
+    def test_case1_graphable_sources_span_all_four_families(self) -> None:
+        graphable = {
+            str(entity.get("id")): self._graphable(entity)
+            for family in ("environment", "air_quality", "printer", "ams")
+            for entity in MONITORING_GRAPH_LATEST[family]
+            if self._graphable(entity)
+        }
+        # environment, SEN66, printer and the real AMS all qualify...
+        self.assertEqual(sorted(graphable), ["1", "office", "x2d", "x2d/ams_1"])
+        # ...and identities never collide across families.
+        self.assertEqual(len(graphable), 4)
+
+    def test_case2_ams_humidity_is_selectable_for_the_ams_source(self) -> None:
+        ams = MONITORING_GRAPH_LATEST["ams"][0]
+        self.assertIn("ams_humidity", self._graphable(ams))
+        self.assertIn("ams_temperature_c", self._graphable(ams))
+        # Selectable means the catalog really attributes it to this family.
+        self.assertIn("ams", FIELDS_BY_SENSOR_TYPE_LOOKUP["ams_humidity"])
+
+    def test_case3_chamber_temperature_is_selectable_for_the_printer(self) -> None:
+        printer = MONITORING_GRAPH_LATEST["printer"][0]
+        self.assertIn("chamber_temperature_c", self._graphable(printer))
+        self.assertIn("printer", FIELDS_BY_SENSOR_TYPE_LOOKUP["chamber_temperature_c"])
+
+    def test_case4_cross_family_selection_keeps_identities_distinct(self) -> None:
+        selected = [
+            MONITORING_GRAPH_LATEST["environment"][0],
+            MONITORING_GRAPH_LATEST["printer"][0],
+            MONITORING_GRAPH_LATEST["ams"][0],
+        ]
+        ids = [str(entity["id"]) for entity in selected]
+        self.assertEqual(len(set(ids)), 3, f"source-id collision in {ids}")
+        # Every selected source contributes at least one graphable measurement.
+        for entity in selected:
+            self.assertTrue(self._graphable(entity), entity["id"])
+        # A shared unit (degC) is legitimately provided by more than one family.
+        degc = {
+            family
+            for family, fields in FIELDS_BY_SENSOR_TYPE.items()
+            if "temperature_c" in fields
+        }
+        self.assertIn("environment", degc)
+
+    def test_case5_fields_are_not_attributed_across_families(self) -> None:
+        # This is the exact leak that produced a false "unavailable".
+        self.assertNotIn("ams_humidity", FIELDS_BY_SENSOR_TYPE["printer"])
+        self.assertNotIn("chamber_temperature_c", FIELDS_BY_SENSOR_TYPE["ams"])
+        self.assertNotIn("ams_humidity", FIELDS_BY_SENSOR_TYPE["environment"])
+        self.assertNotIn("co2", FIELDS_BY_SENSOR_TYPE["ams"])
+
+    def test_case6_external_spool_offers_no_graphable_measurement(self) -> None:
+        spool = MONITORING_GRAPH_LATEST["ams"][1]
+        self.assertEqual(self._graphable(spool), ())
+        # It stays a real, discoverable source - it is only hidden from the graph.
+        self.assertEqual(spool["available_fields"], ["ams_active"])
+        self.assertIn("ams_active", FIELDS_BY_SENSOR_TYPE["ams"])
+        self.assertNotIn("ams_active", NUMERIC_FIELDS)
+
+    def test_case7_readings_contract_remains_environment_and_air_quality(self) -> None:
+        # /api/readings must keep its legacy semantics: no printer/ams source
+        # types accepted, so existing consumers see an unchanged response.
+        self.assertEqual(SENSOR_TYPES, {"all", "environment", "air_quality"})
+        with self.assertRaises(QueryValidationError):
+            readings_query_from_params({"sensor_type": "printer"})
+        with self.assertRaises(QueryValidationError):
+            readings_query_from_params({"sensor_type": "ams"})

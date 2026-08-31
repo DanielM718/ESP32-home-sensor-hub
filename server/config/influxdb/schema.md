@@ -4,9 +4,11 @@ Target: InfluxDB OSS v2 organization `home`.
 
 ## Retention
 
-- `environment_live`: 72-hour retention for high-resolution SEN66 samples.
+- `environment_live`: 72-hour retention for high-resolution SEN66 samples and
+  normal-poll Bambu printer/AMS telemetry.
 - `environment`: retention `0` (infinite) for environmental-node readings,
-  15-minute SEN66 aggregates, sparse SEN66 events, and legacy SEN66 raw data.
+  15-minute SEN66 aggregates, sparse SEN66 events, durable five-minute Bambu
+  telemetry, and legacy SEN66 raw data.
 
 The split is additive: setup does not change the existing `environment` bucket's
 retention or rewrite its history. See
@@ -106,6 +108,51 @@ The optional read-only X2D observer adds:
   permanent sample.
 - `print_session` in `environment`: idempotent logical session records.
 
+Whole-printer state and session measurements retain their existing schema and
+history. `ams_inventory_json` remains a field on the state measurements for
+tray and material detail; it is not queried as time-series telemetry.
+
+### `printer_telemetry` (`environment_live` and `environment`)
+
+The read-only observer writes the same sensor-oriented measurement to both
+storage tiers. Normal successful observations go to `environment_live`; the
+existing permanent-sample cadence writes a durable copy to `environment`.
+Missing or malformed source values are omitted, never converted to zero.
+
+Stable, low-cardinality tags:
+
+- `printer_id`: configured stable printer identifier, for example `x2d`
+- `component_type`: `printer` or `ams`
+- `component_id`: `main` for the printer or the normalized stable AMS ID
+- `source`: the stable normalized provider (`home_assistant`)
+
+Printer fields:
+
+- thermal: `chamber_temperature_c`, `chamber_target_c`, `bed_temperature_c`,
+  `bed_target_c`, `nozzle_1_temperature_c`, `nozzle_1_target_c`,
+  `nozzle_2_temperature_c`, `nozzle_2_target_c`
+- cooling/connectivity: `cooling_fan_percent`, `auxiliary_fan_percent`,
+  `chamber_fan_percent`, `heatbreak_fan_percent`, `wifi_signal_dbm`
+- print context: `print_progress_percent`, `remaining_print_seconds`
+- status booleans: `online`, `printer_is_printing`, `session_active`
+
+AMS-unit fields:
+
+- climate: `ams_humidity`, `ams_temperature_c`
+- state/context: `ams_humidity_index`, `ams_drying`,
+  `ams_remaining_drying_seconds`, `ams_active`
+
+Conceptual line protocol shapes:
+
+```text
+printer_telemetry,printer_id=x2d,component_type=printer,component_id=main,source=home_assistant chamber_temperature_c=31.2,bed_temperature_c=55.0,bed_target_c=55.0,nozzle_1_temperature_c=220.1,nozzle_1_target_c=220.0,cooling_fan_percent=80.0,wifi_signal_dbm=-46.0,print_progress_percent=42.0,remaining_print_seconds=2100i,online=true,printer_is_printing=true,session_active=true
+printer_telemetry,printer_id=x2d,component_type=ams,component_id=ams_1,source=home_assistant ams_humidity=22.0,ams_temperature_c=25.1,ams_humidity_index=3i,ams_drying=false,ams_remaining_drying_seconds=0i,ams_active=true
+```
+
+The bucket is the tier boundary; a separate measurement is not created per AMS
+or per retention tier. This lets another AMS appear as one bounded set of field
+series under a new stable `component_id`, without schema changes.
+
 State tags are only `printer_id`, `printer_model`, and `source`. Session tags
 are only `printer_id` and `source`. Session UUID, job ID/name, material,
 provenance, stage, state text, timestamps, layers, progress, and temperatures
@@ -120,6 +167,10 @@ Keep tags low-cardinality:
 - bad tags: sequence numbers, timestamps, raw status text, battery voltage
 - printer filenames, job IDs, session UUIDs, and material labels are fields,
   never tags
+- AMS IDs are stable component tags; AMS ID is never embedded in measurement or
+  field names
+- filament name/color, gcode/job identity, firmware, tray labels, Home Assistant
+  entity IDs, errors, and timestamps are never `printer_telemetry` tags
 
 Additional sensor types should add new measurements or fields without changing
 the existing MQTT payload contract. Sequence numbers, boot IDs, timestamps,

@@ -16,7 +16,10 @@ from app.config import AppSettings, ConfigError, configure_logging, load_setting
 from app.export_queries import InfluxExportQueryRepository
 from app.persistence import MonitoringExportStore
 from app.printer_intelligence import PrinterIntelligenceError
-from app.printer_queries import PrinterReadRepository
+from app.printer_queries import (
+    PrinterReadRepository,
+    printer_telemetry_query_from_params,
+)
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
@@ -103,7 +106,8 @@ def create_app(
     store.initialize()
     app.config["MONITORING_STORE"] = store
     export_queries = export_query_repository or InfluxExportQueryRepository(
-        settings.influx
+        settings.influx,
+        raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
     )
     current_clock = clock or utc_now
     export_service = ExportService(
@@ -248,6 +252,11 @@ def register_routes(app: Flask) -> None:
         if not 1 <= limit <= 500:
             raise QueryValidationError("limit must be between 1 and 500")
         return jsonify(current_app.config["PRINTER_REPOSITORY"].history(limit=limit))
+
+    @app.get("/api/printer/telemetry")
+    def printer_telemetry() -> Any:
+        query = printer_telemetry_query_from_params(request.args)
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].telemetry(query))
 
     @app.get("/api/printer/usage")
     def printer_usage() -> Any:

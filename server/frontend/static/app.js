@@ -10,6 +10,7 @@ const API = {
   status: "/api/status",
   printer: "/api/printer",
   printerHistory: "/api/printer/history",
+  printerTelemetry: "/api/printer/telemetry",
   printerMaintenance: "/api/printer/maintenance",
   printerEnvironment: "/api/printer/environment-summary",
 };
@@ -96,10 +97,19 @@ const state = {
   statusInFlight: false,
   printerInFlight: false,
   printerDashboardInFlight: false,
+  printerTelemetryInFlight: false,
   printerCurrent: null,
   selectedPrinterHistoryId: null,
+  printerTelemetryRange: "24h",
+  printerTelemetryData: null,
+  selectedPrinterTelemetryFields: new Set([
+    "ams_humidity",
+    "ams_temperature_c",
+    "chamber_temperature_c",
+  ]),
   serverOffsetMs: 0,
   selectedChartFields: new Set(["temperature_c", "humidity"]),
+  chartTelemetryData: null,
   ready: false,
 };
 
@@ -109,6 +119,7 @@ document.addEventListener("DOMContentLoaded", () => {
   setupRangeButtons();
   setupNodeFilter();
   setupPrinterActions();
+  setupPrinterTelemetryControls();
   document.getElementById("refresh-button").addEventListener("click", () => refreshActiveTab(true));
 
   if (window.Chart) {
@@ -216,19 +227,28 @@ async function refreshAll() {
   setStatus("Loading", "loading");
   try {
     const readingsUrl = `${API.readings}?${readingsQueryParams().toString()}`;
-    const [latest, readings] = await Promise.all([
+    const telemetryUrl = printerTelemetryChartQuery();
+    const [latest, readings, telemetry] = await Promise.all([
       fetchJson(API.latest),
       fetchJson(readingsUrl),
+      // Bambu history is optional here: a telemetry failure must never take
+      // the environmental graph down with it.
+      telemetryUrl ? fetchJson(telemetryUrl).catch(() => null) : Promise.resolve(null),
     ]);
     const nodes = await nodesForLatest(latest);
 
     state.latestData = latest;
     state.readingsData = readings;
+    state.chartTelemetryData = telemetry;
     state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
     renderLatest(latest);
     renderChartMetricSelector();
+    if (state.printerTelemetryData) {
+      renderPrinterTelemetrySelector(state.printerTelemetryData);
+      renderPrinterTelemetryChart(state.printerTelemetryData);
+    }
     renderCharts(readings);
     setLastUpdated(latest.generated_at || readings.generated_at || nodes.generated_at);
     setStatus("Online", "ok");
@@ -367,8 +387,10 @@ async function refreshPrinterDashboard(force = false) {
       fetchJson(API.printer),
       fetchJson(`${API.printerHistory}?limit=100`),
       fetchJson(API.printerMaintenance),
+      fetchJson(`${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`),
+      fetchJson(API.nodes),
     ]);
-    const [current, history, maintenance] = requests;
+    const [current, history, maintenance, telemetry, nodes] = requests;
     if (current.status === "fulfilled") {
       state.printerCurrent = current.value;
       renderPrinter(current.value);
@@ -391,6 +413,17 @@ async function refreshPrinterDashboard(force = false) {
       renderMaintenance(maintenance.value);
     } else {
       renderPrinterSectionError("printer-maintenance", "Maintenance records are temporarily unavailable.");
+    }
+    if (nodes.status === "fulfilled") {
+      state.nodesData = nodes.value;
+      updateWorkflowSources(nodes.value.nodes || []);
+    }
+    if (telemetry.status === "fulfilled") {
+      state.printerTelemetryData = telemetry.value;
+      renderPrinterTelemetrySelector(telemetry.value);
+      renderPrinterTelemetryChart(telemetry.value);
+    } else {
+      renderPrinterTelemetryError("Historical printer telemetry is temporarily unavailable.");
     }
     const failures = requests.filter((result) => result.status === "rejected").length;
     setStatus(failures ? `Printer partial (${failures})` : "Online", failures ? "loading" : "ok");
@@ -644,6 +677,169 @@ function setupPrinterActions() {
   });
 }
 
+function setupPrinterTelemetryControls() {
+  for (const button of document.querySelectorAll(".printer-range-button")) {
+    button.addEventListener("click", async () => {
+      state.printerTelemetryRange = button.dataset.range;
+      for (const item of document.querySelectorAll(".printer-range-button")) {
+        item.classList.toggle("is-active", item === button);
+      }
+      await refreshPrinterTelemetry();
+    });
+  }
+}
+
+async function refreshPrinterTelemetry() {
+  if (state.printerTelemetryInFlight) return;
+  state.printerTelemetryInFlight = true;
+  try {
+    const data = await fetchJson(
+      `${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`,
+    );
+    state.printerTelemetryData = data;
+    renderPrinterTelemetrySelector(data);
+    renderPrinterTelemetryChart(data);
+  } catch (error) {
+    renderPrinterTelemetryError(error.message || "Historical printer telemetry is temporarily unavailable.");
+  } finally {
+    state.printerTelemetryInFlight = false;
+  }
+}
+
+function renderPrinterTelemetrySelector(data) {
+  const container = document.getElementById("printer-telemetry-metrics");
+  const sources = Array.from(state.knownSources.values())
+    .filter((source) => source.sensor_type === "printer" || source.sensor_type === "ams");
+  const providers = new Map();
+  for (const source of sources) {
+    for (const field of source.available_fields || []) {
+      const labels = providers.get(field) || [];
+      labels.push(`${source.label}${source.status && source.status !== "online" ? ` (${source.status})` : ""}`);
+      providers.set(field, labels);
+    }
+  }
+  for (const series of data.series || []) {
+    for (const field of series.available_fields || []) {
+      const labels = providers.get(field) || [];
+      const label = series.label || series.source_id;
+      if (!labels.includes(label)) labels.push(label);
+      providers.set(field, labels);
+    }
+  }
+  const definitions = Array.from(state.fieldDefinitions.values())
+    .filter((definition) => (
+      definition.sensor_types?.some((type) => type === "printer" || type === "ams")
+      && providers.has(definition.name)
+    ));
+  if (!definitions.length) {
+    container.innerHTML = '<p class="empty-state">No known printer telemetry capabilities yet.</p>';
+    return;
+  }
+  const groups = new Map();
+  for (const definition of definitions) {
+    const fields = groups.get(definition.group || "Measurements") || [];
+    fields.push(definition);
+    groups.set(definition.group || "Measurements", fields);
+  }
+  container.replaceChildren(...Array.from(groups, ([group, definitionsInGroup]) => {
+    const section = document.createElement("section");
+    section.className = "field-group";
+    const heading = document.createElement("h4");
+    heading.textContent = group;
+    const grid = document.createElement("div");
+    grid.className = "check-grid";
+    for (const definition of definitionsInGroup) {
+      const option = document.createElement("label");
+      option.className = "check-option capability-option";
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = definition.name;
+      input.checked = state.selectedPrinterTelemetryFields.has(definition.name);
+      input.addEventListener("change", () => {
+        if (input.checked) state.selectedPrinterTelemetryFields.add(input.value);
+        else state.selectedPrinterTelemetryFields.delete(input.value);
+        renderPrinterTelemetryChart(state.printerTelemetryData || { series: [] });
+      });
+      const text = document.createElement("span");
+      const sourceLabels = providers.get(definition.name) || [];
+      text.innerHTML = `<strong>${escapeHtml(definition.label)}</strong><small>${escapeHtml(sourceLabels.join(", "))}</small>`;
+      option.append(input, text);
+      grid.append(option);
+    }
+    section.append(heading, grid);
+    return section;
+  }));
+}
+
+function renderPrinterTelemetryChart(data) {
+  const chart = state.charts.printerTelemetry;
+  if (!chart) return;
+  const selectedFields = Array.from(state.selectedPrinterTelemetryFields);
+  const units = Array.from(new Set(selectedFields
+    .map((field) => state.fieldDefinitions.get(field)?.unit)
+    .filter(Boolean)));
+  const axisForUnit = new Map(units.map((unit, index) => [unit, `y${index}`]));
+  const datasets = [];
+  for (const source of data.series || []) {
+    const sourceLabel = source.label || source.source_id;
+    for (const field of selectedFields) {
+      const definition = state.fieldDefinitions.get(field);
+      if (!definition || !definition.sensor_types?.includes(source.sensor_type)) continue;
+      const points = (source.points || [])
+        .filter((point) => point[field] !== undefined && point[field] !== null)
+        .map((point) => ({
+          time: point.time,
+          value: typeof point[field] === "boolean" ? (point[field] ? 1 : 0) : point[field],
+        }));
+      if (!points.length) continue;
+      const color = chartPalette[datasets.length % chartPalette.length];
+      datasets.push({
+        label: `${sourceLabel} · ${definition.label}`,
+        sourceLabel,
+        measurementLabel: definition.label,
+        displayUnit: definition.display_unit || "",
+        valueKind: definition.unit === "boolean" ? "boolean" : "numeric",
+        data: points,
+        borderColor: color,
+        backgroundColor: color,
+        yAxisID: axisForUnit.get(definition.unit) || "y0",
+        showLine: true,
+        spanGaps: true,
+      });
+    }
+  }
+  chart.options.scales = {
+    x: chart.options.scales.x,
+    ...Object.fromEntries(units.map((unit, index) => [`y${index}`, {
+      type: "linear",
+      beginAtZero: unit === "boolean",
+      min: unit === "boolean" ? 0 : undefined,
+      max: unit === "boolean" ? 1 : undefined,
+      position: index === 0 ? "left" : "right",
+      offset: index > 1,
+      title: { display: true, text: state.fieldDefinitions.size
+        ? Array.from(state.fieldDefinitions.values()).find((field) => field.unit === unit)?.display_unit || unit
+        : unit },
+      grid: index === 0 ? { color: "#edf2ef" } : { drawOnChartArea: false },
+    }])),
+  };
+  updateChart(chart, datasets, state.printerTelemetryRange);
+  const tier = data.data_tier || "unknown";
+  document.getElementById("printer-telemetry-tier").textContent = tier.startsWith("durable_5m")
+    ? "7-day view: permanent five-minute Bambu samples, downsampled for display"
+    : "Short-range view: high-resolution live Bambu telemetry, downsampled for display";
+  document.getElementById("printer-telemetry-series-count").textContent = `${datasets.length} ${datasets.length === 1 ? "series" : "series"}`;
+  document.getElementById("printer-telemetry-empty").hidden = datasets.length > 0;
+  document.getElementById("printer-telemetry-frame").hidden = datasets.length === 0;
+}
+
+function renderPrinterTelemetryError(message) {
+  document.getElementById("printer-telemetry-tier").textContent = message;
+  document.getElementById("printer-telemetry-empty").textContent = message;
+  document.getElementById("printer-telemetry-empty").hidden = false;
+  document.getElementById("printer-telemetry-frame").hidden = true;
+}
+
 function printerTemperatureSummary(printer) {
   const parts = [];
   for (const [name, value, target] of [
@@ -827,7 +1023,16 @@ async function refreshWorkflowOptions() {
     }
     renderWorkflowFieldSelector("monitoring");
     renderWorkflowFieldSelector("export");
+    // Bambu source visibility depends on these field definitions, so rebuild
+    // the Monitoring source picker once the capability catalog has arrived.
+    if (state.latestData) {
+      updateNodeFilterOptions(state.latestData);
+    }
     renderChartMetricSelector();
+    if (state.printerTelemetryData) {
+      renderPrinterTelemetrySelector(state.printerTelemetryData);
+      renderPrinterTelemetryChart(state.printerTelemetryData);
+    }
     updateResolutionAvailability("monitoring");
     updateResolutionAvailability("export");
   } catch (_error) {
@@ -865,9 +1070,13 @@ function renderWorkflowFieldSelector(prefix) {
   }
 
   const providers = new Map();
-  const capabilitySources = prefix === "export"
-      && document.getElementById("export-resolution").value === "15m"
-    ? selectedSources.filter((source) => source.sensor_type === "air_quality")
+  const resolution = document.getElementById(`${prefix}-resolution`).value;
+  const capabilitySources = prefix === "export" && resolution === "15m"
+    ? selectedSources.filter((source) => (
+      source.sensor_type === "air_quality"
+      || source.sensor_type === "printer"
+      || source.sensor_type === "ams"
+    ))
     : selectedSources;
   for (const source of capabilitySources) {
     for (const field of source.available_fields || []) {
@@ -878,7 +1087,10 @@ function renderWorkflowFieldSelector(prefix) {
   }
   const selectedFields = state.workflowSelectedFields[prefix];
   const definitions = Array.from(state.fieldDefinitions.values())
-    .filter((definition) => providers.has(definition.name));
+    .filter((definition) => (
+      providers.has(definition.name)
+      && (resolution === "raw" || definition.numeric_aggregation === true)
+    ));
   if (!definitions.length) {
     container.innerHTML = '<p class="empty-state">No measurements were discovered for these sources.</p>';
     help.textContent = "Capabilities are derived from fields actually recorded for each source.";
@@ -939,9 +1151,26 @@ function updateWorkflowSources(nodes) {
         location: String(node.location),
         label: `Air quality · ${formatLabel(node.location)}`,
       };
+    } else if (node.sensor_type === "printer" && node.printer_id) {
+      source = {
+        key: `printer:${node.printer_id}`,
+        sensor_type: "printer",
+        printer_id: String(node.printer_id),
+        label: node.label || `Printer · ${formatLabel(node.printer_id)}`,
+      };
+    } else if (node.sensor_type === "ams" && node.printer_id && node.ams_id) {
+      source = {
+        key: `ams:${node.printer_id}/${node.ams_id}`,
+        sensor_type: "ams",
+        printer_id: String(node.printer_id),
+        ams_id: String(node.ams_id),
+        label: node.label || `${formatLabel(node.printer_id)} · ${formatLabel(node.ams_id)}`,
+      };
     }
     if (source) {
       source.available_fields = Array.isArray(node.available_fields) ? node.available_fields : [];
+      source.status = node.status || "unknown";
+      source.last_seen = node.last_seen || null;
       const previous = state.knownSources.get(source.key);
       if (!previous || JSON.stringify(previous) !== JSON.stringify(source)) {
         state.knownSources.set(source.key, source);
@@ -977,7 +1206,7 @@ function renderSourceSelectors() {
       input.value = source.key;
       input.checked = selected.has(source.key);
       const text = document.createElement("span");
-      text.textContent = source.label;
+      text.innerHTML = `<strong>${escapeHtml(source.label)}</strong><small>${escapeHtml(formatLabel(source.status || "unknown"))}${source.last_seen ? ` · ${escapeHtml(relativeTime(source.last_seen))}` : ""}</small>`;
       label.append(input, text);
       return label;
     }));
@@ -999,11 +1228,15 @@ function updateResolutionAvailability(prefix) {
       .filter(Boolean);
     const stored = Array.from(select.options).find((option) => option.value === "15m");
     if (stored) {
-      const hasAirQuality = sources.some((source) => source.sensor_type === "air_quality");
-      stored.disabled = sources.length > 0 && !hasAirQuality;
+      const hasDurableTier = sources.some((source) => (
+        source.sensor_type === "air_quality"
+        || source.sensor_type === "printer"
+        || source.sensor_type === "ams"
+      ));
+      stored.disabled = sources.length > 0 && !hasDurableTier;
       stored.title = stored.disabled
-        ? "Stored 15-minute data exists only for SEN66 air-quality sources."
-        : "Uses the permanent stored SEN66 15-minute mean tier.";
+        ? "A permanent 15-minute-capable tier is unavailable for these sources."
+        : "Uses permanent SEN66 summaries and/or durable five-minute Bambu samples.";
       if (stored.disabled && select.value === "15m") {
         select.value = "raw";
       }
@@ -1025,12 +1258,12 @@ function updateResolutionHelp(prefix) {
       .filter(Boolean);
     const hasEnvironment = sources.some((source) => source.sensor_type === "environment");
     help.textContent = hasEnvironment
-      ? "Uses stored SEN66 15-minute means; selected environment nodes contribute no rows at this tier."
-      : "Uses the permanent stored SEN66 15-minute mean tier.";
+      ? "Uses permanent SEN66 means and durable Bambu samples; selected environment nodes contribute no rows at this tier."
+      : "Uses permanent SEN66 means and durable five-minute Bambu samples, with the tier labeled in CSV output.";
   } else if (selected?.value === "raw") {
     help.textContent = "Exports retained individual samples without numeric aggregation.";
   } else if (selected) {
-    help.textContent = "Calculates arithmetic means from retained raw samples. Status flags are not averaged.";
+    help.textContent = "Calculates arithmetic means from retained numeric samples. Boolean/status measurements are raw-only.";
   } else {
     help.textContent = "Resolution options are provided by the backend.";
   }
@@ -1469,9 +1702,20 @@ function sourceFromKey(key) {
   if (!source) {
     throw new Error(`Unknown source selection: ${key}`);
   }
-  return source.sensor_type === "environment"
-    ? { sensor_type: "environment", node_id: source.node_id }
-    : { sensor_type: "air_quality", location: source.location };
+  if (source.sensor_type === "environment") {
+    return { sensor_type: "environment", node_id: source.node_id };
+  }
+  if (source.sensor_type === "air_quality") {
+    return { sensor_type: "air_quality", location: source.location };
+  }
+  if (source.sensor_type === "printer") {
+    return { sensor_type: "printer", printer_id: source.printer_id };
+  }
+  return {
+    sensor_type: "ams",
+    printer_id: source.printer_id,
+    ams_id: source.ams_id,
+  };
 }
 
 function setWorkflowMessage(id, message, success = false) {
@@ -1521,11 +1765,12 @@ function workflowFieldLabel(field) {
 }
 
 function sourceSummary(sources) {
-  return (sources || []).map((source) => (
-    source.sensor_type === "environment"
-      ? `Node ${source.node_id}`
-      : formatLabel(source.location)
-  )).join(", ");
+  return (sources || []).map((source) => {
+    if (source.sensor_type === "environment") return `Node ${source.node_id}`;
+    if (source.sensor_type === "air_quality") return formatLabel(source.location);
+    if (source.sensor_type === "printer") return `Printer ${formatLabel(source.printer_id)}`;
+    return `${formatLabel(source.printer_id)} · ${formatLabel(source.ams_id)}`;
+  }).join(", ");
 }
 
 function formatDateTime(value) {
@@ -1573,6 +1818,75 @@ function setTextIfPresent(id, value) {
   }
 }
 
+// The shared Monitoring graph plots numeric lines. A field is graphable there
+// only if the backend capability catalog marks it as numerically aggregatable,
+// which is what keeps boolean status fields (and therefore an `ams_active`-only
+// external spool) out of the pickers without naming any source or field here.
+function graphableFieldsFor(entity) {
+  const advertised = entity && Array.isArray(entity.available_fields) ? entity.available_fields : [];
+  return advertised.filter((name) => state.fieldDefinitions.get(name)?.numeric_aggregation === true);
+}
+
+function isBambuSensorType(sensorType) {
+  return sensorType === "printer" || sensorType === "ams";
+}
+
+function bambuFilterKey(entity) {
+  return entity.sensor_type === "printer"
+    ? `printer:${entity.printer_id}`
+    : `ams:${entity.printer_id}/${entity.ams_id}`;
+}
+
+function bambuFilterLabel(entity) {
+  return entity.sensor_type === "printer"
+    ? `Printer · ${formatLabel(entity.printer_id)}`
+    : `AMS · ${formatLabel(entity.printer_id)} · ${formatLabel(entity.ams_id)}`;
+}
+
+// Telemetry query for the current source filter, or null when the selection
+// cannot contain Bambu data (an environment/air-quality node, or no graphable
+// Bambu source discovered yet).
+function printerTelemetryChartQuery() {
+  const filter = state.nodeFilter;
+  if (filter.startsWith("environment:") || filter.startsWith("air_quality:")) {
+    return null;
+  }
+  const params = new URLSearchParams({ range: state.range });
+  if (filter.startsWith("printer:")) {
+    params.set("sensor_type", "printer");
+    params.set("printer_id", filter.slice("printer:".length));
+  } else if (filter.startsWith("ams:")) {
+    const [printerId, amsId] = filter.slice("ams:".length).split("/", 2);
+    if (!printerId || !amsId) return null;
+    params.set("sensor_type", "ams");
+    params.set("printer_id", printerId);
+    params.set("ams_id", amsId);
+  } else if (!Array.from(state.knownSources.values())
+    .some((source) => isBambuSensorType(source.sensor_type) && graphableFieldsFor(source).length)) {
+    return null;
+  }
+  return `${API.printerTelemetry}?${params.toString()}`;
+}
+
+function chartSeriesMatchesFilter(item) {
+  const filter = state.nodeFilter;
+  if (filter === "all") return true;
+  const separator = filter.indexOf(":");
+  const type = filter.slice(0, separator);
+  const identity = filter.slice(separator + 1);
+  if (type === "environment") return item.sensor_type === "environment" && String(item.node_id) === identity;
+  if (type === "air_quality") return item.sensor_type === "air_quality" && String(item.location ?? item.id) === identity;
+  if (type === "printer") return item.sensor_type === "printer" && String(item.printer_id) === identity;
+  if (type === "ams") return item.sensor_type === "ams" && String(item.source_id ?? item.id) === identity;
+  return true;
+}
+
+function chartSourceLabel(item) {
+  if (item.sensor_type === "environment") return `Node ${item.node_id}`;
+  if (isBambuSensorType(item.sensor_type)) return item.label || item.source_id || item.id;
+  return formatLabel(item.location || item.id);
+}
+
 function updateNodeFilterOptions(data) {
   const select = document.getElementById("node-filter");
   const environmentNodes = (data.environment || [])
@@ -1587,7 +1901,13 @@ function updateNodeFilterOptions(data) {
       value: `air_quality:${reading.location}`,
       label: `SEN66 · ${formatLabel(reading.location)}`,
     }));
-  const sensorOptions = [...environmentNodes, ...airStations];
+  // Printer/AMS are first-class historical sources too. Only those with at
+  // least one graphable numeric field are offered here; the rest stay in the
+  // shared source catalog for Active Monitoring and exports.
+  const bambuSources = [...(data.printer || []), ...(data.ams || [])]
+    .filter((entity) => entity.printer_id && graphableFieldsFor(entity).length > 0)
+    .map((entity) => ({ value: bambuFilterKey(entity), label: bambuFilterLabel(entity) }));
+  const sensorOptions = [...environmentNodes, ...airStations, ...bambuSources];
 
   const options = [
     { value: "all", label: "All sensors" },
@@ -1616,6 +1936,7 @@ function updateNodeFilterOptions(data) {
 
 function initializeCharts() {
   state.charts.history = createLineChart("history-chart");
+  state.charts.printerTelemetry = createLineChart("printer-telemetry-chart");
 }
 
 function createLineChart(canvasId) {
@@ -1655,7 +1976,10 @@ function createLineChart(canvasId) {
             label(context) {
               const dataset = context.dataset;
               const value = context.parsed.y;
-              return `${dataset.sourceLabel} · ${dataset.measurementLabel}: ${value} ${dataset.displayUnit}`.trim();
+              const formatted = dataset.valueKind === "boolean"
+                ? (value === 1 ? "On" : "Off")
+                : `${value} ${dataset.displayUnit}`.trim();
+              return `${dataset.sourceLabel} · ${dataset.measurementLabel}: ${formatted}`;
             },
           },
         },
@@ -1699,9 +2023,7 @@ function renderChartMetricSelector() {
   const applicableSources = state.nodeFilter === "all"
     ? Array.from(state.knownSources.values())
     : [state.knownSources.get(state.nodeFilter)].filter(Boolean);
-  const available = new Set(
-    applicableSources.flatMap((source) => source.available_fields || []),
-  );
+  const available = new Set(applicableSources.flatMap(graphableFieldsFor));
   const definitions = Array.from(state.fieldDefinitions.values())
     .filter((definition) => available.has(definition.name));
   if (!definitions.length) {
@@ -2060,7 +2382,7 @@ function renderNodes(data) {
     const row = document.createElement("tr");
     const label = node.sensor_type === "environment"
       ? `Node ${node.node_id}`
-      : formatLabel(node.location || node.id);
+      : node.label || formatLabel(node.location || node.id);
     const statusClass = nodeStatusClass(node);
     const availableFields = Array.isArray(node.available_fields) ? node.available_fields : [];
     const hasBattery = availableFields.includes("battery_mv");
@@ -2220,11 +2542,20 @@ function renderCharts(data) {
   if (!state.charts.history) {
     return;
   }
-  const series = data.series || [];
+  const telemetry = state.chartTelemetryData;
+  const series = [...(data.series || []), ...((telemetry && telemetry.series) || [])]
+    .filter(chartSeriesMatchesFilter);
   const tier = data.data_tier === "live_1m"
     ? "Short range: 1-minute means from bounded high-resolution live samples"
     : "Long range: persistent 15-minute means (aggregate statistics hidden)";
-  document.getElementById("history-tier").textContent = tier;
+  // Bambu telemetry has its own tier; report it rather than implying the
+  // environmental tier covers it.
+  const bambuTier = telemetry && telemetry.data_tier
+    ? ` · Bambu: ${String(telemetry.data_tier).startsWith("durable_")
+        ? "permanent five-minute samples"
+        : "high-resolution live telemetry"}`
+    : "";
+  document.getElementById("history-tier").textContent = `${tier}${bambuTier}`;
   const selectedFields = Array.from(state.selectedChartFields);
   const units = Array.from(new Set(selectedFields
     .map((field) => state.fieldDefinitions.get(field)?.unit)
@@ -2232,12 +2563,12 @@ function renderCharts(data) {
   const axisForUnit = new Map(units.map((unit, index) => [unit, `y${index}`]));
   const datasets = [];
   for (const item of series) {
-    const sourceLabel = item.sensor_type === "environment"
-      ? `Node ${item.node_id}`
-      : formatLabel(item.location || item.id);
+    const sourceLabel = chartSourceLabel(item);
     for (const field of selectedFields) {
       const definition = state.fieldDefinitions.get(field);
-      if (!definition) {
+      // Only build a dataset when this source family actually provides the
+      // field, so a printer never appears to supply AMS humidity, or vice versa.
+      if (!definition || !(definition.sensor_types || []).includes(item.sensor_type)) {
         continue;
       }
       const points = (item.points || [])
@@ -2281,12 +2612,13 @@ function renderCharts(data) {
   document.getElementById("chart-series-count").textContent =
     `${datasets.length} ${datasets.length === 1 ? "series" : "series"}`;
   document.getElementById("chart-empty").hidden = datasets.length > 0;
-  document.querySelector(".chart-frame-large").hidden = datasets.length === 0;
+  // Scoped to this canvas: the Bambu tab also renders a .chart-frame-large.
+  document.getElementById("history-chart").closest(".chart-frame-large").hidden = datasets.length === 0;
 }
 
-function updateChart(chart, datasets) {
+function updateChart(chart, datasets, rangeKey = state.range) {
   const labels = sortedUniqueTimes(datasets);
-  chart.data.labels = labels.map(formatChartTime);
+  chart.data.labels = labels.map((value) => formatChartTime(value, rangeKey));
   chart.data.datasets = datasets.map((dataset) => {
     const valueByTime = new Map(dataset.data.map((point) => [point.time, point.value]));
     return {
@@ -2304,6 +2636,7 @@ function updateChart(chart, datasets) {
       sourceLabel: dataset.sourceLabel,
       measurementLabel: dataset.measurementLabel,
       displayUnit: dataset.displayUnit,
+      valueKind: dataset.valueKind,
     };
   });
   chart.update();
@@ -2349,14 +2682,14 @@ function clearError() {
   banner.hidden = true;
 }
 
-function formatChartTime(value) {
+function formatChartTime(value, rangeKey = state.range) {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
     return value;
   }
   return new Intl.DateTimeFormat(undefined, {
-    month: state.range === "30d" ? "short" : undefined,
-    day: state.range === "7d" || state.range === "30d" ? "numeric" : undefined,
+    month: rangeKey === "30d" ? "short" : undefined,
+    day: rangeKey === "7d" || rangeKey === "30d" ? "numeric" : undefined,
     hour: "2-digit",
     minute: "2-digit",
   }).format(date);

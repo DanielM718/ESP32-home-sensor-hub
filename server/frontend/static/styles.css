@@ -1291,6 +1291,16 @@ tbody tr:last-child td {
   margin-bottom: 20px;
 }
 
+.printer-telemetry-controls {
+  display: grid;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+.printer-telemetry-range {
+  justify-self: start;
+}
+
 .printer-panel {
   padding: 18px;
   background: var(--panel);

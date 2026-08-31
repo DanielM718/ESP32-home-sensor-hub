@@ -33,8 +33,9 @@ Returns process health:
 
 ### `GET /api/latest`
 
-Returns the most recent field values per environment node and air-quality
-station from the last 30 days of InfluxDB data.
+Returns the most recent field values per environment node, air-quality station,
+printer, and AMS unit. Recent live values are merged with the permanent source
+inventory so temporarily offline sources do not disappear.
 
 Response shape:
 
@@ -203,6 +204,13 @@ credentials or raw Home Assistant attributes:
 
 - `GET /api/printer`: normalized current state, or explicit `not_configured` /
   unavailable state.
+- `GET /api/printer/telemetry?range=24h`: first-class structured printer and
+  AMS history. `range` is allowlisted to `1h`, `6h`, `24h`, or `7d`; optional
+  filters are `sensor_type=printer|ams|all`, stable `printer_id`, stable
+  `ams_id`, and a comma-separated allowlisted `fields` list. The response
+  identifies each series with `source_id`, `printer_id`, component type/ID,
+  field capabilities, and typed points. Short ranges report live-derived
+  display windows; `7d` reports durable-five-minute-derived data.
 - `GET /api/printer/sessions?limit=20`: newest sessions; `limit` is restricted
   to `1..100`.
 - `GET /api/printer/sessions/<id>`: one canonical local/cloud history item.
