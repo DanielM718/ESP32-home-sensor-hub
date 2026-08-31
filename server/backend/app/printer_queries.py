@@ -36,6 +36,9 @@ PRINTER_TELEMETRY_RANGES = {
     "6h": ("-6h", "5m", "live_raw_downsampled_5m"),
     "24h": ("-24h", "15m", "live_raw_downsampled_15m"),
     "7d": ("-7d", "30m", "durable_5m_downsampled_30m"),
+    # The shared Monitoring graph also offers 30d. Like 7d it reads the durable
+    # bucket, so the tier stays honestly labelled as five-minute permanent data.
+    "30d": ("-30d", "3h", "durable_5m_downsampled_3h"),
 }
 STABLE_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -194,8 +197,12 @@ class PrinterReadRepository:
         return self.intelligence.history_item(history_id)
 
     def telemetry(self, query: PrinterTelemetryQuery) -> dict[str, Any]:
+        # Drive the bucket from the tier the response will advertise, so a new
+        # range can never read live data while labelling itself durable.
         bucket = (
-            self.influx.bucket if query.range_key == "7d" else self.influx.live_bucket
+            self.influx.bucket
+            if query.data_tier.startswith("durable_")
+            else self.influx.live_bucket
         )
         records = self._query(printer_telemetry_flux(bucket, query))
         return printer_telemetry_response(records, query)

@@ -876,7 +876,7 @@ def test_printer_telemetry_query_is_allowlisted_and_uses_field_type_aggregation(
 @pytest.mark.parametrize(
     "params",
     [
-        {"range": "30d"},
+        {"range": "90d"},
         {"sensor_type": "printer", "ams_id": "ams_1", "printer_id": "x2d"},
         {"sensor_type": "printer", "fields": "ams_humidity"},
         {"sensor_type": "ams", "fields": "chamber_temperature_c"},
@@ -1113,7 +1113,9 @@ def test_printer_api_is_bounded_and_read_only(tmp_path: Path) -> None:
     assert telemetry.status_code == 200
     assert telemetry.get_json()["range"] == "7d"
     assert telemetry.get_json()["series"][0]["source_id"] == "x2d/ams_1"
-    assert client.get("/api/printer/telemetry?range=30d").status_code == 400
+    # 30d is supported for the shared Monitoring graph; 90d is not.
+    assert client.get("/api/printer/telemetry?range=30d").status_code == 200
+    assert client.get("/api/printer/telemetry?range=90d").status_code == 400
     assert (
         client.get("/api/printer/telemetry?fields=ams_inventory_json").status_code
         == 400
@@ -1358,3 +1360,58 @@ def test_external_spools_report_only_presence_without_fabricating_climate() -> N
     validate_source_capabilities(spool, ["ams_active"], latest)
     with pytest.raises(WorkflowValidationError):
         validate_source_capabilities(spool, ["ams_humidity"], latest)
+
+
+def test_monitoring_graph_ranges_map_to_the_correct_storage_tier() -> None:
+    """Every telemetry range must read the bucket its tier label advertises.
+
+    The shared Monitoring graph also offers 30d, so the range table gained an
+    entry. Bucket choice is derived from the tier string rather than a hard-coded
+    range key, which is what stops a new range from silently reading the
+    72-hour live bucket while calling itself durable.
+    """
+
+    from app.printer_queries import (
+        PRINTER_TELEMETRY_RANGES,
+        PrinterReadRepository,
+        printer_telemetry_query_from_params,
+    )
+
+    # The Monitoring tab's own ranges must all be answerable.
+    for range_key in ("1h", "24h", "7d", "30d"):
+        assert range_key in PRINTER_TELEMETRY_RANGES
+
+    captured: list[str] = []
+
+    class Repo(PrinterReadRepository):
+        def __init__(self) -> None:  # deliberately skips the Influx client
+            self.influx = SimpleNamespace(
+                bucket="environment", live_bucket="environment_live"
+            )
+
+        def _query(self, flux: str):
+            captured.append(flux)
+            return ()
+
+    repo = Repo()
+    for range_key, (_start, _window, tier) in PRINTER_TELEMETRY_RANGES.items():
+        captured.clear()
+        query = printer_telemetry_query_from_params({"range": range_key})
+        assert query.data_tier == tier
+        repo.telemetry(query)
+        flux = captured[0]
+        expected = "environment" if tier.startswith("durable_") else "environment_live"
+        assert f'from(bucket: "{expected}")' in flux, (range_key, tier, flux[:120])
+        if expected == "environment":
+            assert 'from(bucket: "environment_live")' not in flux, range_key
+
+
+def test_thirty_day_range_uses_durable_samples_and_labels_them_honestly() -> None:
+    from app.printer_queries import printer_telemetry_query_from_params
+
+    query = printer_telemetry_query_from_params({"range": "30d"})
+    assert query.flux_start == "-30d"
+    assert query.data_tier == "durable_5m_downsampled_3h"
+    assert query.window_every == "3h"
+    # Never described as raw: the 30-day window is far outside live retention.
+    assert "raw" not in query.data_tier
