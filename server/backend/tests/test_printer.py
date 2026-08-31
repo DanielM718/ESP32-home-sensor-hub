@@ -6,6 +6,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from app.capabilities import validate_source_capabilities
 from app.config import (
     AirQualitySettings,
     AppSettings,
@@ -45,6 +46,7 @@ from app.printer_queries import (
 from app.printer_worker import persist_observation
 from app.queries import QueryValidationError
 from app.web import create_app
+from app.workflows import WorkflowValidationError, validate_sources
 
 NOW = datetime(2026, 8, 11, 12, tzinfo=timezone.utc)
 
@@ -1271,3 +1273,88 @@ def test_printer_failure_does_not_break_sensor_api(tmp_path: Path) -> None:
     response = client.get("/api/latest")
     assert response.status_code == 200
     assert response.get_json()["environment"] == []
+
+
+def test_external_spools_report_only_presence_without_fabricating_climate() -> None:
+    """Mirrors the live X2D: one real AMS plus two external spools.
+
+    Home Assistant reports external spools with `active` set but every climate
+    reading null. They must still resolve to their own bounded series so the
+    spool is discoverable, while advertising only the capability they actually
+    have -- never a zero-filled humidity that would look like a dry spool.
+    """
+
+    state = PrinterState(
+        printer_id="x2d",
+        printer_model="X2D",
+        online=True,
+        normalized_state=NormalizedPrinterState.PRINTING,
+        source="home_assistant",
+        source_timestamp=NOW,
+        observed_at=NOW,
+        chamber_temperature=41.0,
+        ams_units=(
+            AmsUnitState(
+                ams_id="ams_1",
+                model="AMS 2 Pro",
+                active=True,
+                humidity_percent=19.0,
+                humidity_index=2,
+                temperature=38.4,
+                drying=False,
+                remaining_drying_seconds=0,
+            ),
+            AmsUnitState(
+                ams_id="external_spool_1", model="External Spool", active=False
+            ),
+            AmsUnitState(
+                ams_id="external_spool_2", model="External Spool", active=False
+            ),
+        ),
+    )
+
+    points = printer_telemetry_points(state)
+    by_component = {point.tags["component_id"]: point for point in points}
+
+    assert sorted(by_component) == [
+        "ams_1",
+        "external_spool_1",
+        "external_spool_2",
+        "main",
+    ]
+    for point in points:
+        assert set(point.tags) == {
+            "printer_id",
+            "component_type",
+            "component_id",
+            "source",
+        }
+        assert not any(value is None for value in point.fields.values())
+
+    # The spools carry presence only; no climate field is invented for them.
+    for spool in ("external_spool_1", "external_spool_2"):
+        assert by_component[spool].fields == {"ams_active": False}
+
+    assert by_component["ams_1"].fields["ams_humidity"] == 19.0
+
+    # Capability discovery keeps the spools visible but refuses climate on them.
+    latest = {
+        "ams": [
+            {
+                "sensor_type": "ams",
+                "printer_id": "x2d",
+                "ams_id": component_id,
+                "source_id": f"x2d/{component_id}",
+                "id": f"x2d/{component_id}",
+                "available_fields": sorted(point.fields),
+            }
+            for component_id, point in by_component.items()
+            if point.tags["component_type"] == "ams"
+        ]
+    }
+    spool = validate_sources(
+        [{"sensor_type": "ams", "printer_id": "x2d", "ams_id": "external_spool_1"}]
+    )
+    validate_source_capabilities(spool, ["ams_active"], latest)
+    with pytest.raises(WorkflowValidationError):
+        validate_source_capabilities(spool, ["ams_humidity"], latest)
