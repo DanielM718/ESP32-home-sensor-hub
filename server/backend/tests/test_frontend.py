@@ -330,6 +330,81 @@ class FrontendContractTest(unittest.TestCase):
         )
         self.assertIn('id="printer-telemetry-frame"', self.template)
 
+    def test_monitoring_graph_offers_bambu_sources_not_orphan_measurements(
+        self,
+    ) -> None:
+        """Reproduces the shipped Monitoring-tab defect.
+
+        The measurement picker unioned the *global* field catalog while the
+        source picker only ever read `latest.environment` and
+        `latest.air_quality`, so Bambu measurements appeared and then reported
+        themselves unavailable because no selectable source could provide them.
+        """
+
+        # The source picker must now build printer/AMS options from latest data.
+        self.assertIn("data.printer || []", self.javascript)
+        self.assertIn("data.ams || []", self.javascript)
+        self.assertIn("bambuFilterKey", self.javascript)
+        self.assertIn("...bambuSources", self.javascript)
+
+        # The measurement picker must derive choices per selected source and
+        # only from numerically graphable fields - not the raw global catalog.
+        self.assertIn(
+            "const available = new Set(applicableSources.flatMap(graphableFieldsFor));",
+            self.javascript,
+        )
+        self.assertNotIn(
+            "applicableSources.flatMap((source) => source.available_fields || [])",
+            self.javascript,
+        )
+        self.assertIn("numeric_aggregation === true", self.javascript)
+
+        # Graphability is decided by the capability catalog, never by name.
+        self.assertNotIn("external_spool_1", self.javascript)
+        self.assertNotIn("external_spool_2", self.javascript)
+        self.assertNotIn('=== "ams_1"', self.javascript)
+
+    def test_monitoring_graph_fetches_and_attributes_bambu_history(self) -> None:
+        # The graph composes the existing audited telemetry endpoint rather
+        # than a second storage or query system.
+        self.assertIn("printerTelemetryChartQuery", self.javascript)
+        self.assertIn("API.printerTelemetry", self.javascript)
+        self.assertIn("state.chartTelemetryData", self.javascript)
+        # A telemetry failure must not take the environmental graph down.
+        self.assertIn(".catch(() => null)", self.javascript)
+
+        # A dataset is only built where the source family really provides the
+        # field, so a printer never appears to supply AMS humidity.
+        self.assertIn(
+            "(definition.sensor_types || []).includes(item.sensor_type)",
+            self.javascript,
+        )
+        self.assertIn("chartSeriesMatchesFilter", self.javascript)
+        self.assertIn("chartSourceLabel", self.javascript)
+
+        # Bambu tier is reported honestly alongside the environmental tier.
+        self.assertIn('startsWith("durable_")', self.javascript)
+
+    def test_legacy_environmental_graph_behaviour_is_unchanged(self) -> None:
+        # Environment/air-quality options are still built exactly as before,
+        # independent of the capability catalog.
+        self.assertIn(
+            "const environmentNodes = (data.environment || [])", self.javascript
+        )
+        self.assertIn("const airStations = (data.air_quality || [])", self.javascript)
+        self.assertIn("`Node ${reading.node_id}`", self.javascript)
+        self.assertIn("SEN66 · ${formatLabel(reading.location)}", self.javascript)
+        # /api/readings keeps its environment/air-quality-only query params.
+        self.assertIn('params.set("sensor_type", "environment")', self.javascript)
+        self.assertIn('params.set("sensor_type", "air_quality")', self.javascript)
+        self.assertNotIn(
+            'params.set("sensor_type", "printer");\n    params.set("node_id"',
+            self.javascript,
+        )
+        # The dedicated Bambu tab graph is untouched.
+        self.assertIn("renderPrinterTelemetryChart", self.javascript)
+        self.assertIn('id="printer-telemetry-chart"', self.template)
+
     def test_tracked_print_time_is_a_first_class_qualified_usage_metric(self) -> None:
         self.assertIn('id="printer-usage"', self.template)
         self.assertIn("Printer Usage", self.template)

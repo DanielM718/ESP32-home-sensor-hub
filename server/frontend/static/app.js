@@ -109,6 +109,7 @@ const state = {
   ]),
   serverOffsetMs: 0,
   selectedChartFields: new Set(["temperature_c", "humidity"]),
+  chartTelemetryData: null,
   ready: false,
 };
 
@@ -226,14 +227,19 @@ async function refreshAll() {
   setStatus("Loading", "loading");
   try {
     const readingsUrl = `${API.readings}?${readingsQueryParams().toString()}`;
-    const [latest, readings] = await Promise.all([
+    const telemetryUrl = printerTelemetryChartQuery();
+    const [latest, readings, telemetry] = await Promise.all([
       fetchJson(API.latest),
       fetchJson(readingsUrl),
+      // Bambu history is optional here: a telemetry failure must never take
+      // the environmental graph down with it.
+      telemetryUrl ? fetchJson(telemetryUrl).catch(() => null) : Promise.resolve(null),
     ]);
     const nodes = await nodesForLatest(latest);
 
     state.latestData = latest;
     state.readingsData = readings;
+    state.chartTelemetryData = telemetry;
     state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     updateNodeFilterOptions(latest);
@@ -1017,6 +1023,11 @@ async function refreshWorkflowOptions() {
     }
     renderWorkflowFieldSelector("monitoring");
     renderWorkflowFieldSelector("export");
+    // Bambu source visibility depends on these field definitions, so rebuild
+    // the Monitoring source picker once the capability catalog has arrived.
+    if (state.latestData) {
+      updateNodeFilterOptions(state.latestData);
+    }
     renderChartMetricSelector();
     if (state.printerTelemetryData) {
       renderPrinterTelemetrySelector(state.printerTelemetryData);
@@ -1807,6 +1818,75 @@ function setTextIfPresent(id, value) {
   }
 }
 
+// The shared Monitoring graph plots numeric lines. A field is graphable there
+// only if the backend capability catalog marks it as numerically aggregatable,
+// which is what keeps boolean status fields (and therefore an `ams_active`-only
+// external spool) out of the pickers without naming any source or field here.
+function graphableFieldsFor(entity) {
+  const advertised = entity && Array.isArray(entity.available_fields) ? entity.available_fields : [];
+  return advertised.filter((name) => state.fieldDefinitions.get(name)?.numeric_aggregation === true);
+}
+
+function isBambuSensorType(sensorType) {
+  return sensorType === "printer" || sensorType === "ams";
+}
+
+function bambuFilterKey(entity) {
+  return entity.sensor_type === "printer"
+    ? `printer:${entity.printer_id}`
+    : `ams:${entity.printer_id}/${entity.ams_id}`;
+}
+
+function bambuFilterLabel(entity) {
+  return entity.sensor_type === "printer"
+    ? `Printer · ${formatLabel(entity.printer_id)}`
+    : `AMS · ${formatLabel(entity.printer_id)} · ${formatLabel(entity.ams_id)}`;
+}
+
+// Telemetry query for the current source filter, or null when the selection
+// cannot contain Bambu data (an environment/air-quality node, or no graphable
+// Bambu source discovered yet).
+function printerTelemetryChartQuery() {
+  const filter = state.nodeFilter;
+  if (filter.startsWith("environment:") || filter.startsWith("air_quality:")) {
+    return null;
+  }
+  const params = new URLSearchParams({ range: state.range });
+  if (filter.startsWith("printer:")) {
+    params.set("sensor_type", "printer");
+    params.set("printer_id", filter.slice("printer:".length));
+  } else if (filter.startsWith("ams:")) {
+    const [printerId, amsId] = filter.slice("ams:".length).split("/", 2);
+    if (!printerId || !amsId) return null;
+    params.set("sensor_type", "ams");
+    params.set("printer_id", printerId);
+    params.set("ams_id", amsId);
+  } else if (!Array.from(state.knownSources.values())
+    .some((source) => isBambuSensorType(source.sensor_type) && graphableFieldsFor(source).length)) {
+    return null;
+  }
+  return `${API.printerTelemetry}?${params.toString()}`;
+}
+
+function chartSeriesMatchesFilter(item) {
+  const filter = state.nodeFilter;
+  if (filter === "all") return true;
+  const separator = filter.indexOf(":");
+  const type = filter.slice(0, separator);
+  const identity = filter.slice(separator + 1);
+  if (type === "environment") return item.sensor_type === "environment" && String(item.node_id) === identity;
+  if (type === "air_quality") return item.sensor_type === "air_quality" && String(item.location ?? item.id) === identity;
+  if (type === "printer") return item.sensor_type === "printer" && String(item.printer_id) === identity;
+  if (type === "ams") return item.sensor_type === "ams" && String(item.source_id ?? item.id) === identity;
+  return true;
+}
+
+function chartSourceLabel(item) {
+  if (item.sensor_type === "environment") return `Node ${item.node_id}`;
+  if (isBambuSensorType(item.sensor_type)) return item.label || item.source_id || item.id;
+  return formatLabel(item.location || item.id);
+}
+
 function updateNodeFilterOptions(data) {
   const select = document.getElementById("node-filter");
   const environmentNodes = (data.environment || [])
@@ -1821,7 +1901,13 @@ function updateNodeFilterOptions(data) {
       value: `air_quality:${reading.location}`,
       label: `SEN66 · ${formatLabel(reading.location)}`,
     }));
-  const sensorOptions = [...environmentNodes, ...airStations];
+  // Printer/AMS are first-class historical sources too. Only those with at
+  // least one graphable numeric field are offered here; the rest stay in the
+  // shared source catalog for Active Monitoring and exports.
+  const bambuSources = [...(data.printer || []), ...(data.ams || [])]
+    .filter((entity) => entity.printer_id && graphableFieldsFor(entity).length > 0)
+    .map((entity) => ({ value: bambuFilterKey(entity), label: bambuFilterLabel(entity) }));
+  const sensorOptions = [...environmentNodes, ...airStations, ...bambuSources];
 
   const options = [
     { value: "all", label: "All sensors" },
@@ -1937,9 +2023,7 @@ function renderChartMetricSelector() {
   const applicableSources = state.nodeFilter === "all"
     ? Array.from(state.knownSources.values())
     : [state.knownSources.get(state.nodeFilter)].filter(Boolean);
-  const available = new Set(
-    applicableSources.flatMap((source) => source.available_fields || []),
-  );
+  const available = new Set(applicableSources.flatMap(graphableFieldsFor));
   const definitions = Array.from(state.fieldDefinitions.values())
     .filter((definition) => available.has(definition.name));
   if (!definitions.length) {
@@ -2458,11 +2542,20 @@ function renderCharts(data) {
   if (!state.charts.history) {
     return;
   }
-  const series = data.series || [];
+  const telemetry = state.chartTelemetryData;
+  const series = [...(data.series || []), ...((telemetry && telemetry.series) || [])]
+    .filter(chartSeriesMatchesFilter);
   const tier = data.data_tier === "live_1m"
     ? "Short range: 1-minute means from bounded high-resolution live samples"
     : "Long range: persistent 15-minute means (aggregate statistics hidden)";
-  document.getElementById("history-tier").textContent = tier;
+  // Bambu telemetry has its own tier; report it rather than implying the
+  // environmental tier covers it.
+  const bambuTier = telemetry && telemetry.data_tier
+    ? ` · Bambu: ${String(telemetry.data_tier).startsWith("durable_")
+        ? "permanent five-minute samples"
+        : "high-resolution live telemetry"}`
+    : "";
+  document.getElementById("history-tier").textContent = `${tier}${bambuTier}`;
   const selectedFields = Array.from(state.selectedChartFields);
   const units = Array.from(new Set(selectedFields
     .map((field) => state.fieldDefinitions.get(field)?.unit)
@@ -2470,12 +2563,12 @@ function renderCharts(data) {
   const axisForUnit = new Map(units.map((unit, index) => [unit, `y${index}`]));
   const datasets = [];
   for (const item of series) {
-    const sourceLabel = item.sensor_type === "environment"
-      ? `Node ${item.node_id}`
-      : formatLabel(item.location || item.id);
+    const sourceLabel = chartSourceLabel(item);
     for (const field of selectedFields) {
       const definition = state.fieldDefinitions.get(field);
-      if (!definition) {
+      // Only build a dataset when this source family actually provides the
+      // field, so a printer never appears to supply AMS humidity, or vice versa.
+      if (!definition || !(definition.sensor_types || []).includes(item.sensor_type)) {
         continue;
       }
       const points = (item.points || [])
