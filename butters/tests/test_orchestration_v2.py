@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
 from butters.assistant import create_assistant
 from butters.assistant_config import load_assistant_settings
 from butters.cloud.general import GeneralCloudTurn
@@ -303,8 +304,12 @@ def test_unknown_or_action_tool_requested_by_cloud_is_locally_denied(
             "Do you think this print is causing the VOC increase?",
         )
         assert response.route == "local_fallback"
-        assert response.stopping_reason and response.stopping_reason.startswith(
-            "tool_policy_"
+        # Either refusal is correct. A name outside the offered list is stopped
+        # at the provider boundary before the policy layer sees it; anything the
+        # provider was legitimately handed is stopped by the policy.
+        assert response.stopping_reason and (
+            response.stopping_reason.startswith("tool_policy_")
+            or response.stopping_reason == "tool_not_offered"
         )
 
 
@@ -329,9 +334,12 @@ def test_repeated_tool_call_and_provider_timeout_stop_cleanly(tmp_path: Path) ->
         ),
     ]
     repeated = _service(tmp_path / "repeat", Reasoner(turns))
+    # The prompt has to select summarize_sensor_window, otherwise the provider
+    # is never handed it and the call is refused at the boundary before the
+    # repeat detector this test exists to exercise can run.
     response = repeated.handle_text(
         repeated.sessions.create(),
-        "Do you think this print is causing the VOC increase?",
+        "Do you think there is a correlation between this print and the VOC increase?",
     )
     assert response.stopping_reason == "repeated_tool_call"
 
@@ -342,3 +350,82 @@ def test_repeated_tool_call_and_provider_timeout_stop_cleanly(tmp_path: Path) ->
     )
     assert failure.route == "local_fallback"
     assert failure.stopping_reason == "timeout"
+
+
+# --- the derived catalog is the provider boundary in both directions -------
+
+UNROUTABLE = "Do you think there is a correlation between this print and the VOC increase?"
+
+
+def _cloud_response(tmp_path: Path, tool: ToolRequest, prompt: str = UNROUTABLE):
+    reasoner = Reasoner(
+        [
+            GeneralCloudTurn(
+                "gpt-5.6-terra", "high", 0.01, response_id="r1", tool_request=tool
+            )
+        ]
+    )
+    service = _service(tmp_path, reasoner)
+    return service.handle_text(service.sessions.create(), prompt)
+
+
+@pytest.mark.parametrize(
+    "skill",
+    [
+        # Registered, enabled, read-only, and excluded from the model catalog on
+        # privacy or administrator-audience grounds. _relevant_skill_tools
+        # refuses to build a schema for these; execution has to refuse them too.
+        "get_butters_host_status",
+        "get_storage_status",
+        "get_network_service_health",
+        "get_nas_status",
+        "get_environment_control_status",
+        "wait_for_desktop_reachability",
+    ],
+)
+def test_a_provider_cannot_run_a_tool_it_was_never_handed(
+    tmp_path: Path, skill: str
+) -> None:
+    response = _cloud_response(
+        tmp_path / skill, ToolRequest("call-1", skill, {})
+    )
+
+    assert response.stopping_reason == "tool_not_offered"
+    assert response.route == "local_fallback"
+
+
+def test_a_provider_cannot_run_a_tool_the_prompt_did_not_select(
+    tmp_path: Path,
+) -> None:
+    """Narrowing by prompt is the boundary, not merely a prompt-size saving.
+
+    get_printer_status is a perfectly ordinary catalogued read, but this prompt
+    never selects it, so the provider was never told it existed.
+    """
+
+    response = _cloud_response(
+        tmp_path, ToolRequest("call-1", "get_printer_status", {"entity": "x2d"})
+    )
+
+    assert response.stopping_reason == "tool_not_offered"
+
+
+def test_a_tool_the_prompt_did_select_still_runs(tmp_path: Path) -> None:
+    """The boundary must not close the cloud tool path it is guarding."""
+
+    response = _cloud_response(
+        tmp_path,
+        ToolRequest(
+            "call-1",
+            "summarize_sensor_window",
+            {
+                "entity": "printer_room",
+                "metrics": ["voc_index"],
+                "start": None,
+                "end": None,
+                "lookback": "1h",
+            },
+        ),
+    )
+
+    assert response.stopping_reason != "tool_not_offered"
