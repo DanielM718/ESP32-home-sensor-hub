@@ -95,3 +95,20 @@ paths. Download serves only a completed `.csv`, never a `.part`. User-facing
 attachment names are sanitized and text cells receive spreadsheet-formula
 protection. These routes inherit the existing LAN/Tailscale-only deployment
 assumption; do not publish them through Funnel or router port forwarding.
+
+## Cross-Origin State Changes
+
+The dashboard has no login. The trust boundary is the LAN/Tailscale deployment
+above, which covers a trusted user calling the API directly but not a page in
+that user's browser calling it for them.
+
+Every `POST`, `PUT`, `PATCH` and `DELETE` is therefore refused with `403` when
+the request carries an `Origin` header naming a different origin than the
+dashboard itself. A request with no `Origin` is allowed, so `curl`, the CLI and
+the `verify_*.sh` scripts keep working; only a browser acting for a third-party
+page is refused.
+
+This is a guard against drive-by requests, not a substitute for the deployment
+assumption. It does not authenticate anyone: any host that can reach port 8080
+can still call these routes directly, which is why the Tailscale ACL above
+remains the control that matters.

@@ -138,10 +138,53 @@ def create_app(
         capability_resolver=read_repository.latest,
     )
 
+    register_origin_guard(app)
     register_routes(app)
     register_workflow_routes(app)
     register_error_handlers(app)
     return app
+
+
+#: Methods that change server state and therefore need the origin check.
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def register_origin_guard(app: Flask) -> None:
+    """Reject cross-origin state changes.
+
+    This dashboard has no login by design: SECURITY.md places the trust
+    boundary at the LAN/Tailscale deployment and says these routes must not be
+    published through Funnel or port forwarding. That assumption covers a
+    trusted user reaching the API directly. It does not cover a page in that
+    user's browser driving the API for them, which is a different actor.
+
+    Today that is blocked only incidentally -- every mutating route reads a
+    JSON body, so a form post cannot reach one and a cross-origin fetch needs a
+    preflight this app never approves. That is an accident of the body parser,
+    not a guarantee, and it would evaporate the first time a route accepted
+    form encoding. Check the origin explicitly instead.
+
+    A request with no Origin header is allowed: curl, the CLI and the verify
+    scripts send none, and the documented model permits them. Only a browser
+    that names a different origin is refused.
+    """
+
+    @app.before_request
+    def deny_cross_origin_mutations() -> Any:
+        if request.method not in UNSAFE_METHODS:
+            return None
+        origin = request.headers.get("Origin")
+        if origin is None or origin == request.host_url.rstrip("/"):
+            return None
+        LOGGER.warning(
+            "rejected a cross-origin %s to %s", request.method, request.path
+        )
+        return jsonify(
+            {
+                "error": "forbidden",
+                "message": "cross-origin state changes are not accepted",
+            }
+        ), 403
 
 
 def register_routes(app: Flask) -> None:
