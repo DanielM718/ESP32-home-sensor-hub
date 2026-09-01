@@ -1352,7 +1352,12 @@ def _node_status(
             status = "stale"
         else:
             status = "offline"
+    # A printer that is reachable and reporting "I am off" is offline, but it is
+    # not silent. Keep the override and remember that freshness alone would have
+    # called it online, so the reason below can say which of the two it was.
+    reported_offline = False
     if item.get("sensor_type") == SENSOR_TYPE_PRINTER and item.get("online") is False:
+        reported_offline = status == "online"
         status = "offline"
 
     result = {
@@ -1385,11 +1390,17 @@ def _node_status(
             result[key] = item[key]
 
     if status in {"stale", "offline"}:
-        result["stale_reason"] = (
-            "battery_shutdown"
-            if item.get("battery_shutdown") is True
-            else "no_recent_reading"
-        )
+        if reported_offline:
+            # The observer polled seconds ago and the printer itself said it was
+            # off. Reporting "no_recent_reading" here asserted the opposite of
+            # what happened and made a healthy observer look like a broken one.
+            result["stale_reason"] = "reported_offline"
+        else:
+            result["stale_reason"] = (
+                "battery_shutdown"
+                if item.get("battery_shutdown") is True
+                else "no_recent_reading"
+            )
     else:
         result["stale_reason"] = None
 

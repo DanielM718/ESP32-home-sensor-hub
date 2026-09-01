@@ -712,6 +712,99 @@ class QueryHelpersTest(unittest.TestCase):
         self.assertEqual(node["status"], "offline")
         self.assertEqual(node["stale_reason"], "no_recent_reading")
 
+    def test_a_printer_reporting_itself_off_is_not_called_silent(self) -> None:
+        """Regression from a live incident: offline next to a 3-second reading.
+
+        The observer polls Home Assistant continuously, so a printer that has
+        been switched off keeps producing fresh observations that say
+        ``online=false``. The status override is right -- the printer is
+        offline -- but the reason said ``no_recent_reading``, which asserted
+        the opposite of what happened and made a healthy observer look like a
+        broken ingest path. The AMS entities carried by the same poll stayed
+        ``online``, which is what made the contradiction visible.
+        """
+
+        latest = {
+            "generated_at": "2026-01-01T12:00:03Z",
+            "printer": [
+                {
+                    "id": "x2d",
+                    "sensor_type": "printer",
+                    "printer_id": "x2d",
+                    "source_id": "x2d",
+                    "component_id": "main",
+                    "last_seen": "2026-01-01T12:00:00Z",
+                    "online": False,
+                }
+            ],
+            "ams": [
+                {
+                    "id": "x2d/ams_1",
+                    "sensor_type": "ams",
+                    "printer_id": "x2d",
+                    "source_id": "x2d",
+                    "component_id": "ams_1",
+                    "last_seen": "2026-01-01T12:00:00Z",
+                }
+            ],
+        }
+
+        nodes = {
+            node["id"]: node
+            for node in nodes_response(latest, stale_after_seconds=1800)["nodes"]
+        }
+
+        printer = nodes["x2d"]
+        self.assertEqual(printer["age_seconds"], 3)
+        self.assertEqual(printer["status"], "offline")
+        self.assertEqual(printer["stale_reason"], "reported_offline")
+        # The sibling carried by the same poll is unaffected.
+        self.assertEqual(nodes["x2d/ams_1"]["status"], "online")
+
+    def test_a_printer_that_is_genuinely_silent_still_reads_as_silent(self) -> None:
+        """The new reason must not mask a real ingest outage."""
+
+        latest = {
+            "generated_at": "2026-01-01T12:00:00Z",
+            "printer": [
+                {
+                    "id": "x2d",
+                    "sensor_type": "printer",
+                    "printer_id": "x2d",
+                    "source_id": "x2d",
+                    "component_id": "main",
+                    "last_seen": "2026-01-01T04:00:00Z",
+                    "online": False,
+                }
+            ],
+        }
+
+        node = nodes_response(latest, stale_after_seconds=1800)["nodes"][0]
+
+        self.assertEqual(node["status"], "offline")
+        self.assertEqual(node["stale_reason"], "no_recent_reading")
+
+    def test_a_fresh_printer_reporting_online_keeps_no_reason(self) -> None:
+        latest = {
+            "generated_at": "2026-01-01T12:00:03Z",
+            "printer": [
+                {
+                    "id": "x2d",
+                    "sensor_type": "printer",
+                    "printer_id": "x2d",
+                    "source_id": "x2d",
+                    "component_id": "main",
+                    "last_seen": "2026-01-01T12:00:00Z",
+                    "online": True,
+                }
+            ],
+        }
+
+        node = nodes_response(latest, stale_after_seconds=1800)["nodes"][0]
+
+        self.assertEqual(node["status"], "online")
+        self.assertIsNone(node["stale_reason"])
+
     def test_nodes_response_preserves_confirmed_shutdown_while_stale(self) -> None:
         latest = {
             "generated_at": "2026-01-01T12:30:00Z",
