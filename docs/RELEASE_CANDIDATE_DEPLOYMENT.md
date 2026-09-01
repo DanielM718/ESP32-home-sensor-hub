@@ -142,8 +142,19 @@ is required by it; it uses only the standard library.
 
 ## 8. Unit installation
 
-No unit file changed in this candidate. Skip `daemon-reload` unless step 3 shows
-drift between the installed units and the branch.
+One unit changed: `butters-action-broker.service` gains `MemoryMax=256M` and
+`TasksMax=64`. It is the only Butters unit that ran as root without a cgroup
+bound, while `butters-web` and `butters-live` have carried one all along.
+
+`install-action-broker` rewrites the unit, so run it and reload:
+
+```sh
+sudo ./butters/scripts/install-action-broker
+systemctl show butters-action-broker.service -p MemoryMax,TasksMax
+```
+
+The bound applies to the next activation. The broker is socket-activated, so
+stopping the service (step 10) is enough; the socket must stay up.
 
 ## 9. Enablement decision
 

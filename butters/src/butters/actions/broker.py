@@ -14,6 +14,8 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -417,6 +419,7 @@ class FixedBrokerOperations:
         opener: Callable[..., Any] = _HOME_ASSISTANT_OPENER,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
+        home_assistant_deadline_seconds: float = HOME_ASSISTANT_DEADLINE_SECONDS,
     ) -> None:
         self.config = config
         self.runner = runner
@@ -426,6 +429,12 @@ class FixedBrokerOperations:
         # deadline and interval themselves stay fixed module constants.
         self.sleeper = sleeper
         self.monotonic = monotonic
+        # One worker for every Home Assistant exchange, created on first use and
+        # never joined; see _bounded_exchange.
+        self.home_assistant_deadline_seconds = float(home_assistant_deadline_seconds)
+        self._exchange_lock = threading.Lock()
+        self._exchange_worker: ThreadPoolExecutor | None = None
+        self._exchange_pending: Any = None
 
     def handlers(self) -> dict[BrokerOperation, Callable[[], dict[str, object]]]:
         candidates = {
@@ -580,14 +589,18 @@ class FixedBrokerOperations:
                 **({"Content-Type": "application/json"} if encoded is not None else {}),
             },
         )
-        deadline = self.monotonic() + HOME_ASSISTANT_DEADLINE_SECONDS
-        try:
+        deadline = self.monotonic() + self.home_assistant_deadline_seconds
+
+        def exchange() -> bytes:
             with self.opener(request, timeout=5.0) as response:
                 if getattr(response, "status", 200) not in {200, 201}:
                     raise BrokerError(
                         "home_assistant_failed", "Home Assistant request failed"
                     )
-                raw = _read_bounded(response, deadline, self.monotonic)
+                return _read_bounded(response, deadline, self.monotonic)
+
+        try:
+            raw = self._bounded_exchange(exchange)
         except HTTPError as exc:
             if exc.code in {401, 403}:
                 raise BrokerError(
@@ -610,6 +623,50 @@ class FixedBrokerOperations:
         except (UnicodeDecodeError, json.JSONDecodeError):
             raise BrokerError(
                 "home_assistant_failed", "Home Assistant returned malformed JSON"
+            ) from None
+
+    def _bounded_exchange(self, exchange: Callable[[], bytes]) -> bytes:
+        """Give the whole Home Assistant exchange one real wall-clock bound.
+
+        urlopen's ``timeout`` is per socket operation, not a deadline. A peer
+        that drips one byte of the status line or headers just inside every
+        window holds the call open for as long as it likes -- measured at 106
+        seconds for a 2s-per-byte drip against a 5s timeout, and unbounded if it
+        never stops. _read_bounded only covers the body, which is reached after
+        that phase, so it cannot help here. The broker answers connections
+        serially, so one such call blocks every other privileged operation,
+        including host.reboot, on a unit with Restart=no and no watchdog.
+
+        Python's blocking socket API offers no absolute deadline, so the
+        exchange runs on one long-lived worker and is abandoned rather than
+        waited on when the bound expires. The guarantee is that the *broker*
+        returns, not that the socket closed. A still-stuck exchange makes every
+        later Home Assistant request fail immediately instead of queueing behind
+        it, which both caps abandoned work at one thread and keeps the wake,
+        SSH and host operations responsive while Home Assistant misbehaves.
+
+        The bound is deliberately real time, not self.monotonic: the injected
+        clock exists so the settling tests can advance a 20s deadline instantly,
+        and supervising a thread with a clock that jumps would be meaningless.
+        """
+
+        with self._exchange_lock:
+            pending = self._exchange_pending
+            if pending is not None and not pending.done():
+                raise BrokerError(
+                    "home_assistant_unavailable", "Home Assistant is unavailable"
+                )
+            if self._exchange_worker is None:
+                self._exchange_worker = ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="butters-ha"
+                )
+            future = self._exchange_worker.submit(exchange)
+            self._exchange_pending = future
+        try:
+            return future.result(timeout=self.home_assistant_deadline_seconds)
+        except FutureTimeout:
+            raise BrokerError(
+                "home_assistant_unavailable", "Home Assistant is unavailable"
             ) from None
 
     def nas_wake(self) -> dict[str, object]:

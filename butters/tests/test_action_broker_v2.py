@@ -4,6 +4,7 @@ import json
 import os
 import struct
 import threading
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
@@ -1103,3 +1104,139 @@ def test_a_default_urllib_opener_would_have_leaked_the_token(tmp_path) -> None:
     off_host = [item for item in seen if "192.0.2." in item[0]]
     assert off_host, "the redirect was not followed; this test no longer proves anything"
     assert off_host[0][1] == "Bearer LONG_LIVED_TOKEN"
+
+
+# --- the whole Home Assistant exchange is bounded, not just the body -------
+
+
+def test_a_slow_response_header_cannot_hold_the_serial_broker(tmp_path) -> None:
+    """Regression: urlopen's timeout is per socket operation, not a deadline.
+
+    A peer dripping one byte of the status line or headers just inside every
+    window held urlopen open for a measured 106 seconds against a 5s timeout,
+    and indefinitely if it never stops. _read_bounded covers only the body,
+    which is reached after that phase. The broker answers connections serially,
+    so one such call blocks every other privileged operation.
+    """
+
+    import threading
+
+    release = threading.Event()
+
+    class NeverReturnsHeaders:
+        status = 200
+
+        def __enter__(self):
+            # Stands in for the status-line/header phase inside urlopen, which
+            # completes before any body read and is not covered by _read_bounded.
+            release.wait(30)
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return b"{}"
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: NeverReturnsHeaders(),
+        home_assistant_deadline_seconds=0.2,
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(BrokerError) as failure:
+            operations.desktop_monitors_off()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    assert elapsed < 5.0, f"the broker was held for {elapsed:.1f}s"
+
+
+def test_a_wedged_home_assistant_fails_later_requests_immediately(
+    tmp_path,
+) -> None:
+    """A stuck exchange must not queue every later request behind it.
+
+    Abandoning the worker is what keeps the broker responsive; refusing to start
+    a second one is what stops an abandoned thread accumulating per request.
+    """
+
+    import threading
+
+    release = threading.Event()
+    starts = []
+
+    class Hanging:
+        status = 200
+
+        def __enter__(self):
+            starts.append(1)
+            release.wait(30)
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return b"{}"
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Hanging(),
+        home_assistant_deadline_seconds=0.2,
+    )
+
+    try:
+        with pytest.raises(BrokerError):
+            operations.desktop_monitors_off()
+        second = time.monotonic()
+        with pytest.raises(BrokerError) as failure:
+            operations.desktop_monitors_off()
+        immediate = time.monotonic() - second
+    finally:
+        release.set()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    assert immediate < 0.1, f"the second request waited {immediate:.2f}s"
+    assert len(starts) == 1, "a second exchange was started behind a stuck one"
+
+
+def test_a_healthy_exchange_is_unaffected_by_the_supervision(tmp_path) -> None:
+    """The bound must not close the path it guards."""
+
+    class Fine:
+        status = 200
+
+        def __init__(self) -> None:
+            self.payload = json.dumps({"state": "off"}).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Fine(),
+    )
+
+    assert operations._monitor_states() == {
+        "switch.desktop_gigabyte": "off",
+        "switch.desktop_oled": "off",
+    }
+    # Still usable after a completed exchange: the worker is reused, not retired.
+    assert operations._monitor_states()["switch.desktop_oled"] == "off"

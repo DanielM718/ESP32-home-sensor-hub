@@ -25,3 +25,14 @@ LockPersonality=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
 UMask=0077
+# The broker reads the Windows helper's stdout with capture_output, which bounds
+# time but not size: the 16 KiB schema cap is applied only after the whole reply
+# has been buffered, so a host that streams for the full 25s subprocess timeout
+# is limited by RAM alone. Unbounded, that lets the kernel's OOM killer pick a
+# victim anywhere on the Pi. A cgroup bound keeps the blast radius inside the
+# broker, which socket activation then restarts on the next request. Generous
+# against a measured footprint of one task and tens of megabytes; butters-web
+# and butters-live have carried the same kind of bound all along and this, the
+# one unit running as root, did not.
+MemoryMax=256M
+TasksMax=64
