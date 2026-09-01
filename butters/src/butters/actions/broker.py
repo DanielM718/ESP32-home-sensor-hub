@@ -19,7 +19,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from butters.assistant_config import BrokerSettings
 
@@ -42,6 +42,38 @@ DEFAULT_PEER_TIMEOUT_SECONDS = 5.0
 # them.
 MONITOR_SETTLE_DEADLINE_SECONDS = 20.0
 MONITOR_SETTLE_POLL_SECONDS = 0.5
+
+# urlopen's timeout is per socket operation, not a wall-clock bound, so a peer
+# that sends one byte just inside every timeout window holds a single read open
+# for as long as it likes. The broker answers connections serially, so that one
+# read would block every other privileged operation, including host.reboot,
+# with no watchdog and Restart=no to recover it. Bound the whole exchange.
+HOME_ASSISTANT_DEADLINE_SECONDS = 10.0
+HOME_ASSISTANT_READ_CHUNK_BYTES = 8192
+HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
+
+
+class _NoRedirect(HTTPRedirectHandler):
+    """Refuse every redirect on the Home Assistant client.
+
+    urllib copies all request headers except content-length/content-type onto a
+    redirect target, on any host and any scheme -- so a single 302 from Home
+    Assistant would make this root process re-send the long-lived
+    ``Authorization: Bearer`` token to an address the redirect chose. Home
+    Assistant is a separate trust domain that loads third-party integrations,
+    and broker_main only validates the *configured* URL, not a redirect target,
+    so the loopback restriction there does not cover this.
+
+    Returning None makes urllib fall through to HTTPDefaultErrorHandler, which
+    raises HTTPError for the 3xx. _home_assistant_request already maps that to
+    a bounded BrokerError, so the operation fails closed.
+    """
+
+    def redirect_request(self, *_arguments: Any, **_keywords: Any) -> None:
+        return None
+
+
+_HOME_ASSISTANT_OPENER = build_opener(_NoRedirect).open
 
 # Only broker-local literals are ever logged, never peer-supplied text.
 _CODE_PATTERN = re.compile(r"\A[a-z][a-z_]{0,47}\Z")
@@ -273,12 +305,19 @@ class BrokerServer:
             response = _response(
                 self.protocol_version, request_id, False, {}, "operation_failed"
             )
-        encoded = _encoded(response)
+        encoded = _render(response)
         if len(encoded) > self.max_message_bytes:
+            # The outcome is already decided. Drop the oversized detail but keep
+            # the decision, so a mutation that ran is never reported as failed
+            # and retried.
             response = _response(
-                self.protocol_version, request_id, False, {}, "result_too_large"
+                self.protocol_version,
+                request_id,
+                bool(response["ok"]),
+                {},
+                response["error_code"] if response["ok"] is False else "result_too_large",
             )
-            encoded = _encoded(response)
+            encoded = _render(response)
         self._audit(
             peer_uid=peer_uid,
             peer_pid=peer_pid,
@@ -375,7 +414,7 @@ class FixedBrokerOperations:
         *,
         runner: Callable[..., Any] = subprocess.run,
         home_assistant_token: str = "",
-        opener: Callable[..., Any] = urlopen,
+        opener: Callable[..., Any] = _HOME_ASSISTANT_OPENER,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -541,13 +580,14 @@ class FixedBrokerOperations:
                 **({"Content-Type": "application/json"} if encoded is not None else {}),
             },
         )
+        deadline = self.monotonic() + HOME_ASSISTANT_DEADLINE_SECONDS
         try:
             with self.opener(request, timeout=5.0) as response:
                 if getattr(response, "status", 200) not in {200, 201}:
                     raise BrokerError(
                         "home_assistant_failed", "Home Assistant request failed"
                     )
-                raw = response.read(65537)
+                raw = _read_bounded(response, deadline, self.monotonic)
         except HTTPError as exc:
             if exc.code in {401, 403}:
                 raise BrokerError(
@@ -561,7 +601,7 @@ class FixedBrokerOperations:
             raise BrokerError(
                 "home_assistant_unavailable", "Home Assistant is unavailable"
             ) from None
-        if len(raw) > 65536:
+        if len(raw) > HOME_ASSISTANT_MAX_RESPONSE_BYTES:
             raise BrokerError(
                 "home_assistant_failed", "Home Assistant response exceeded its limit"
             )
@@ -781,6 +821,31 @@ def _desktop_control_result(
     return dict(payload)
 
 
+def _read_bounded(
+    response: Any, deadline: float, clock: Callable[[], float]
+) -> bytes:
+    """Read a bounded body under a wall-clock deadline.
+
+    Each chunk is still covered by the socket timeout; the deadline is what
+    stops an arbitrarily long sequence of individually-timely chunks. One byte
+    over the cap is read deliberately so the caller can still distinguish an
+    oversized body from an exactly-sized one.
+    """
+
+    limit = HOME_ASSISTANT_MAX_RESPONSE_BYTES + 1
+    raw = bytearray()
+    while len(raw) < limit:
+        if clock() > deadline:
+            raise BrokerError(
+                "home_assistant_unavailable", "Home Assistant is unavailable"
+            )
+        chunk = response.read(min(HOME_ASSISTANT_READ_CHUNK_BYTES, limit - len(raw)))
+        if not chunk:
+            break
+        raw.extend(chunk)
+    return bytes(raw)
+
+
 def _parse_request(raw: bytes, version: int) -> dict[str, object]:
     try:
         value = json.loads(raw)
@@ -863,6 +928,26 @@ def _response(
 
 def _encoded(response: dict[str, object]) -> bytes:
     return json.dumps(response, separators=(",", ":")).encode() + b"\n"
+
+
+def _render(response: dict[str, object]) -> bytes:
+    """Encode a decided response, never raising past the privilege boundary.
+
+    Encoding sits after handle()'s except clauses, so a status a future handler
+    made unserializable would escape as an unhandled exception: the operation
+    would have already run, the peer would get nothing, and no audit line would
+    be written. Substitute an empty status instead and preserve ``ok``, because
+    reporting a mutation that succeeded as a failure invites the caller to
+    retry it.
+    """
+
+    try:
+        return _encoded(response)
+    except (TypeError, ValueError):
+        response["status"] = {}
+        if response["ok"] is False and response["error_code"] is None:
+            response["error_code"] = "malformed_result"
+        return _encoded(response)
 
 
 def _identifier(value: str) -> bool:
