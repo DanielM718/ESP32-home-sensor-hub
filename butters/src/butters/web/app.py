@@ -221,11 +221,27 @@ def create_app(
         return JSONResponse({"status": "ok", "service": "butters", "version": "beta1"})
 
     async def ready(_request: Request) -> Response:
+        """Readiness that actually exercises what it reports.
+
+        ``configuration`` and ``deterministic_router`` used to be the string
+        literal "ready", so the endpoint returned 200 for a process whose
+        registries were empty or whose router raised on every request, and it
+        was barely distinguishable from the static /healthz beside it.
+
+        Gating checks are the ones that make the service unable to answer:
+        a state directory it cannot write, an empty registry, a router that
+        raises, or an unset production origin. The broker and the optional
+        cloud and speech capabilities are reported but never gate, because a
+        Butters install is supported without them and a beta install
+        deliberately does not provision the broker.
+        """
+
         origin_ready = configured.web.production_origin_configured
         checks = {
-            "configuration": "ready",
-            "state_directory": "ready" if runtime.state_dir.is_dir() else "unavailable",
-            "deterministic_router": "ready",
+            "configuration": _configuration_check(runtime),
+            "state_directory": _state_directory_check(runtime.state_dir),
+            "deterministic_router": _router_check(runtime),
+            "action_broker": _broker_check(configured),
             "cloud_optional": "ready"
             if runtime.general_reasoner.available
             else "disabled",
@@ -238,7 +254,8 @@ def create_app(
                 else "warming"
             ),
         }
-        healthy = checks["state_directory"] == "ready" and origin_ready
+        gating = ("configuration", "state_directory", "deterministic_router")
+        healthy = all(checks[name] == "ready" for name in gating) and origin_ready
         status = 200 if healthy else 503
         return JSONResponse(
             {"status": "ready" if healthy else "not_ready", "checks": checks},
@@ -1631,6 +1648,69 @@ def _new_stt_engine():
         sherpa_endpoint_enabled=False,
         max_utterance_seconds=settings.max_utterance_seconds,
     )
+
+
+def _state_directory_check(state_dir: Path) -> str:
+    """Writability, not existence.
+
+    Every ledger the service depends on is SQLite under this directory, so a
+    directory that exists but cannot be written to is not readiness.
+    """
+
+    if not state_dir.is_dir():
+        return "unavailable"
+    probe = state_dir / ".readyz-probe"
+    try:
+        probe.write_bytes(b"")
+        probe.unlink()
+    except OSError:
+        return "unavailable"
+    return "ready"
+
+
+def _configuration_check(runtime: BetaAssistantService) -> str:
+    """The configuration is only ready if it produced a usable system."""
+
+    try:
+        entities = runtime.assistant.router.entities.entities
+        skills = runtime.assistant.skills.skills
+    except Exception:  # noqa: BLE001 - readiness reports, it never raises
+        LOGGER.warning("readiness configuration check failed", exc_info=True)
+        return "unavailable"
+    return "ready" if entities and skills else "unavailable"
+
+
+def _router_check(runtime: BetaAssistantService) -> str:
+    """Drive the real router rather than asserting it exists.
+
+    A fixed phrase is enough: the point is that normalization, the entity
+    registry and the metric registry all resolve without raising. The intent it
+    produces is deliberately not asserted, so this stays valid when the
+    deployment's entity set changes.
+    """
+
+    try:
+        routed = runtime.assistant.preview_route("what is the temperature")
+    except Exception:  # noqa: BLE001 - readiness reports, it never raises
+        LOGGER.warning("readiness router check failed", exc_info=True)
+        return "unavailable"
+    return "ready" if routed is not None else "unavailable"
+
+
+def _broker_check(configured: AssistantSettings) -> str:
+    """Presence only. Connecting would activate a root service.
+
+    The socket is systemd-activated, so a connection from here would start the
+    privileged broker as a side effect of a readiness probe. Reported, never
+    gating: a beta install without the broker is a supported deployment.
+    """
+
+    if not configured.broker.enabled:
+        return "disabled"
+    try:
+        return "ready" if Path(configured.broker.socket_path).exists() else "unavailable"
+    except OSError:
+        return "unavailable"
 
 
 def _admin(request: Request, auth: AuthPolicy) -> str:
