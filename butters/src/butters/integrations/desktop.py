@@ -159,11 +159,23 @@ class DesktopWorkflow:
         self.clock = clock
 
     def status(self, machine: str) -> DesktopState:
+        """Reachability, plus Parsec readiness only when it is observable.
+
+        parsec_status_enabled gates get_parsec_status, so a deployment that
+        leaves it false has asked not to observe Parsec. This overview reached
+        the same desktop.parsec_status broker operation regardless, which made
+        the flag mean less than it says. Report parsec_ready as None -- not
+        observed -- instead. The remote-session workflow does not come through
+        here, so its readiness verification is untouched.
+        """
+
         self._require_machine(machine)
         deadline = self.clock() + self.settings.total_timeout_seconds
         ssh = self._ssh_ready(deadline)
         network = ssh or self._network_reachable(deadline)
         network = network or ssh
+        if not self.settings.parsec_status_enabled:
+            return DesktopState(machine, network, ssh, None)
         parsec = self._parsec_ready(deadline) if ssh else False
         return DesktopState(machine, network, ssh, parsec)
 

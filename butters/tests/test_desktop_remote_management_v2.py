@@ -558,3 +558,119 @@ def test_human_git_bash_launcher_cannot_change_automation_shell_semantics() -> N
     assert "& $bash '--login' '-i'" in launcher
     assert "& $bash '--login' '-c' $original" in launcher
     assert "DefaultShell" not in powershell_files
+
+
+# --- parsec_status_enabled governs every Parsec observation ---------------
+
+
+def test_the_desktop_overview_does_not_observe_parsec_when_it_is_disabled() -> None:
+    """The flag that gates get_parsec_status must gate this overview too.
+
+    get_desktop_status is model-visible and unconditional, and it reached the
+    same desktop.parsec_status broker operation, so a deployment that had
+    deliberately left parsec_status_enabled false still observed Parsec.
+    """
+
+    import dataclasses
+
+    from butters.assistant_config import DesktopSettings
+    from butters.integrations.desktop import DesktopWorkflow
+
+    class Operations:
+        def __init__(self) -> None:
+            self.parsec_calls = 0
+
+        def network_reachable(self, _timeout: float) -> bool:
+            return True
+
+        def ssh_ready(self, _timeout: float) -> bool:
+            return True
+
+        def parsec_ready(self, _timeout: float) -> bool | None:
+            self.parsec_calls += 1
+            return True
+
+        def parsec_status(self, _timeout: float) -> dict[str, object] | None:
+            self.parsec_calls += 1
+            return {}
+
+        def send_wake(self, _timeout: float) -> bool:
+            return True
+
+        def ensure_parsec_running(self, _timeout: float) -> bool:
+            return True
+
+        def request_headless_mode(self, _timeout: float) -> bool:
+            return True
+
+    base = DesktopSettings(enabled=True, machine="desktop", host="192.0.2.1")
+
+    disabled = Operations()
+    state = DesktopWorkflow(
+        dataclasses.replace(base, parsec_status_enabled=False), disabled
+    ).status("desktop")
+    assert state.parsec_ready is None
+    assert disabled.parsec_calls == 0
+
+    enabled = Operations()
+    state = DesktopWorkflow(
+        dataclasses.replace(base, parsec_status_enabled=True), enabled
+    ).status("desktop")
+    assert state.parsec_ready is True
+    assert enabled.parsec_calls == 1
+
+
+def test_disabling_parsec_observation_does_not_touch_session_verification() -> None:
+    """start_remote_session must still verify readiness after ensure.
+
+    That verification is the validated live acceptance behaviour; it is gated by
+    parsec_ensure_enabled at registration, not by the observation flag.
+    """
+
+    from butters.assistant_config import DesktopSettings
+    from butters.integrations.desktop import DesktopWorkflow
+
+    class Operations:
+        def __init__(self) -> None:
+            self.ensured = False
+            self.parsec_checks = 0
+            self.headless = False
+
+        def network_reachable(self, _timeout: float) -> bool:
+            return True
+
+        def ssh_ready(self, _timeout: float) -> bool:
+            return True
+
+        def parsec_ready(self, _timeout: float) -> bool | None:
+            self.parsec_checks += 1
+            return self.ensured
+
+        def parsec_status(self, _timeout: float) -> dict[str, object] | None:
+            return {}
+
+        def send_wake(self, _timeout: float) -> bool:
+            return True
+
+        def ensure_parsec_running(self, _timeout: float) -> bool:
+            self.ensured = True
+            return True
+
+        def request_headless_mode(self, _timeout: float) -> bool:
+            self.headless = True
+            return True
+
+    operations = Operations()
+    settings = DesktopSettings(
+        enabled=True,
+        machine="desktop",
+        host="192.0.2.1",
+        parsec_status_enabled=False,
+    )
+
+    result = DesktopWorkflow(settings, operations).start_remote_session("desktop")
+
+    assert result["verification_complete"] is True
+    assert result["parsec_ready"] is True
+    assert operations.parsec_checks >= 1
+    assert operations.headless is True
