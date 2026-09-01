@@ -50,15 +50,26 @@ def _cloud(**overrides: object) -> CloudSettings:
     return replace(CloudSettings(enabled=True, allow_paid_calls=True), **overrides).validated()
 
 
-def _request(*, depth: RequestDepth = RequestDepth.NORMAL, max_escalation: int = 3) -> DiagnosticRequest:
+def _request(
+    *,
+    depth: RequestDepth = RequestDepth.NORMAL,
+    max_escalation: int = 3,
+    domain: DiagnosticDomain = DiagnosticDomain.GRAFANA,
+) -> DiagnosticRequest:
     return DiagnosticRequest(
         "Diagnose the unexplained Grafana symptom",
-        DiagnosticDomain.GRAFANA,
+        domain,
         "printer_room",
         depth,
         allow_cloud=True,
         max_escalation=max_escalation,
     )
+
+
+# get_service_status belongs to the server domain, so a test that drives it has
+# to ask a server question. Sending it on a Grafana request now stops at the
+# provider boundary before the policy layer these tests are about.
+SERVER = DiagnosticDomain.SERVER
 
 
 def _assessment(*, contradictory: bool = True) -> DiagnosticAssessment:
@@ -168,7 +179,9 @@ def test_lower_confidence_can_escalate_terra_to_sol_once() -> None:
     escalator, ledger = _escalator(reasoner)
     local = _assessment(contradictory=False)
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert answer.cloud_used and answer.cloud_model == "gpt-5.6-sol"
     assert [record.model for record in ledger.records] == ["gpt-5.6-terra", "gpt-5.6-sol"]
@@ -177,7 +190,9 @@ def test_lower_confidence_can_escalate_terra_to_sol_once() -> None:
 @pytest.mark.parametrize(
     ("tool", "reason"),
     [
-        (ToolRequest("1", "restart_service", {"service": "grafana"}), "tool_policy_unknown_tool"),
+        # Never registered, so it is not in any domain's offered list and stops
+        # at the provider boundary before the policy layer is consulted.
+        (ToolRequest("1", "restart_service", {"service": "grafana"}), "tool_not_offered"),
         (ToolRequest("1", "get_service_status", {"service": "ssh"}), "tool_policy_policy_denied"),
         (ToolRequest("1", "get_service_status", {"service": "bridge", "command": "restart"}), "tool_policy_invalid_arguments"),
     ],
@@ -187,7 +202,9 @@ def test_unknown_malformed_or_invalid_cloud_tool_calls_fail_closed(tool: ToolReq
     escalator, _ledger = _escalator(reasoner)
     local = _assessment()
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert not answer.cloud_used
     assert answer.stopping_reason == reason
@@ -199,7 +216,9 @@ def test_repeated_identical_tool_call_stops_loop() -> None:
     escalator, _ledger = _escalator(reasoner)
     local = _assessment()
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert answer.stopping_reason == "repeated_tool_call"
     assert reasoner.calls == 2
@@ -215,7 +234,9 @@ def test_total_tool_call_limit_stops_distinct_calls() -> None:
     escalator, _ledger = _escalator(reasoner, _cloud(max_total_tool_calls=1))
     local = _assessment()
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert answer.stopping_reason == "tool_call_limit"
     assert reasoner.calls == 2
@@ -228,7 +249,9 @@ def test_cloud_request_limit_stops_before_another_model_turn() -> None:
     escalator, _ledger = _escalator(reasoner, _cloud(max_cloud_requests_per_diagnostic=1))
     local = _assessment()
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert answer.stopping_reason == "cloud_request_limit"
     assert reasoner.calls == 1
@@ -239,7 +262,9 @@ def test_budget_denial_returns_best_local_result_without_calling_model() -> None
     escalator, _ledger = _escalator(reasoner, _cloud(max_estimated_cost_per_request_usd=0.0))
     local = _assessment()
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
     assert answer.stopping_reason == "cloud_budget_exceeded"
     assert reasoner.calls == 0
@@ -250,7 +275,9 @@ def test_cloud_timeout_and_unavailable_are_safe_local_fallbacks() -> None:
         reasoner = QueueReasoner([CloudReasonerError(code, "not secret")])
         escalator, ledger = _escalator(reasoner)
         local = _assessment()
-        answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+        answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
         assert answer.stopping_reason == code
         assert not answer.cloud_used
         assert ledger.records[-1].success is False
@@ -291,7 +318,9 @@ def test_openai_parser_rejects_malformed_calls_and_unsupported_evidence() -> Non
     reasoner = QueueReasoner([_turn(conclusion=replace(_conclusion(), evidence_ids=("made.up",)))])
     escalator, _ledger = _escalator(reasoner)
     local = _assessment()
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
     assert answer.stopping_reason == "unsupported_evidence_reference"
 
 
@@ -330,7 +359,151 @@ def test_injection_text_cannot_expand_tool_authority() -> None:
     reasoner = QueueReasoner([_turn(tool=ToolRequest("1", "restart_service", {"service": "grafana"}))])
     escalator, _ledger = _escalator(reasoner)
 
-    answer = escalator.escalate(_request(), local, DiagnosticSession("goal", evidence=local.evidence))
+    # Left on the Grafana domain, which is what the injected log line belongs
+    # to and what the operator actually asked about.
+    answer = escalator.escalate(
+        _request(), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
 
-    assert answer.stopping_reason == "tool_policy_unknown_tool"
+    # Refused one step earlier than before: an injected name is not in the
+    # domain's offered list, so it never reaches the policy layer at all.
+    assert answer.stopping_reason == "tool_not_offered"
+    assert not answer.cloud_used
+
+
+# --- the provider stays inside the question it was asked ------------------
+
+
+def test_a_provider_cannot_reach_a_tool_outside_the_asked_domain() -> None:
+    """The narrowing is the authorization boundary, not a prompt-size saving.
+
+    get_server_health is a real registered read-only diagnostic tool, and the
+    conversational catalog withholds it as "administrator-sensitive host and
+    stack observations". The Grafana domain does not offer it. If execution did
+    not re-check, a provider answering a Grafana question could name it and the
+    model-side exclusion would be reachable through the diagnostic surface.
+    """
+
+    reasoner = QueueReasoner(
+        [_turn(tool=ToolRequest("1", "get_server_health", {}))]
+    )
+    escalator, _ledger = _escalator(reasoner)
+    local = _assessment()
+
+    answer = escalator.escalate(
+        _request(), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
+
+    assert answer.stopping_reason == "tool_not_offered"
+    assert not answer.cloud_used
+
+
+def test_the_same_tool_is_reachable_when_the_operator_asked_for_it() -> None:
+    """The boundary follows the user's question, so it must not gut the feature.
+
+    The domain comes from DiagnosticPlanner reading the operator's text, never
+    from anything the provider said, so a server question legitimately reaches
+    the server tools.
+    """
+
+    reasoner = QueueReasoner(
+        [
+            _turn(tool=ToolRequest("1", "get_server_health", {}), response_id="one"),
+            # A second turn is only reached because the first tool was allowed
+            # to run, which is itself the assertion.
+            _turn(conclusion=_conclusion(), response_id="two"),
+        ]
+    )
+    escalator, _ledger = _escalator(reasoner)
+    local = _assessment()
+
+    answer = escalator.escalate(
+        _request(domain=SERVER), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
+
+    assert answer.stopping_reason != "tool_not_offered"
+    assert reasoner.calls == 2
+
+
+def test_the_offered_list_is_derived_only_from_the_request() -> None:
+    """Nothing the provider returns may widen the list it is offered next turn."""
+
+    seen: list[set[str]] = []
+
+    class Recorder(QueueReasoner):
+        def analyze(self, request, evidence, tools, context, budget):
+            seen.append({str(item["name"]) for item in tools})
+            return super().analyze(request, evidence, tools, context, budget)
+
+    reasoner = Recorder(
+        [
+            _turn(tool=ToolRequest("1", "get_grafana_health", {}), response_id="one"),
+            _turn(tool=ToolRequest("2", "get_server_health", {}), response_id="two"),
+        ]
+    )
+    escalator, _ledger = _escalator(reasoner)
+    local = _assessment()
+
+    escalator.escalate(
+        _request(), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
+
+    assert seen, "the reasoner was never consulted"
+    for offered in seen:
+        assert "get_server_health" not in offered
+
+
+def test_every_diagnostic_tool_is_read_only_and_individually_bounded() -> None:
+    """The registry refuses to hold anything else, so the surface cannot widen.
+
+    This is what makes the diagnostic path a different kind of capability from
+    the mutating skills: no ActionAuthorization exists for it because nothing in
+    it can mutate.
+    """
+
+    import pytest as _pytest
+    from butters.diagnostics.tools import DiagnosticToolRegistry, DiagnosticToolSpec
+    from butters.skills.model import ActionClass
+
+    registry = DiagnosticToolRegistry()
+    mutating = DiagnosticToolSpec(
+        name="restart_service",
+        description="mutating",
+        argument_type="none",
+        input_schema={},
+        output_schema={},
+        action_class=ActionClass.ACTION,
+        timeout_seconds=1.0,
+        max_output_bytes=1024,
+        parse_arguments=lambda arguments: arguments,
+        authorize=lambda _arguments: None,
+        implementation=lambda _arguments: {},
+    )
+    with _pytest.raises(ValueError, match="READ_ONLY"):
+        registry.register(mutating)
+
+    # And every tool the real registry does hold is read-only and bounded.
+    real = build_diagnostic_registry(load_assistant_settings(), runner=_active_runner)
+    for spec in real.tools:
+        assert spec.action_class is ActionClass.READ_ONLY, spec.name
+        assert spec.timeout_seconds > 0, spec.name
+        assert spec.max_output_bytes >= 256, spec.name
+
+
+def test_an_empty_provider_turn_falls_back_instead_of_raising() -> None:
+    """A turn with neither a conclusion nor a tool request is provider output.
+
+    Indexing tool_requests[0] raised IndexError straight out of escalate(),
+    where the equivalent path in the web service already falls back locally.
+    """
+
+    reasoner = QueueReasoner([_turn()])
+    escalator, _ledger = _escalator(reasoner)
+    local = _assessment()
+
+    answer = escalator.escalate(
+        _request(), local, DiagnosticSession("goal", evidence=local.evidence)
+    )
+
+    assert answer.stopping_reason == "cloud_no_tool_request"
     assert not answer.cloud_used

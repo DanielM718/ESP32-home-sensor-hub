@@ -99,11 +99,13 @@ class CloudDiagnosticEscalator:
                 if previous_response_id:
                     context["previous_response_id"] = previous_response_id
                     context["function_call_outputs"] = function_outputs
+                offered = _relevant_tools(self.tools, request)
+                offered_names = {str(tool.get("name", "")) for tool in offered}
                 try:
                     turn = self.reasoner.analyze(
                         request,
                         session.evidence,
-                        _relevant_tools(self.tools, request),
+                        offered,
                         context,
                         budget,
                     )
@@ -140,6 +142,14 @@ class CloudDiagnosticEscalator:
                     break
                 if round_index >= self.settings.max_tool_rounds:
                     return _local_fallback(request, local_assessment, session, "tool_round_limit")
+                if not turn.tool_requests:
+                    # A turn with neither a conclusion nor a tool request is a
+                    # provider response shape, not a program error. Indexing it
+                    # raised IndexError straight out of escalate(); the
+                    # equivalent path in the web service already falls back.
+                    return _local_fallback(
+                        request, local_assessment, session, "cloud_no_tool_request"
+                    )
                 tool_request = turn.tool_requests[0]
                 total_calls += 1
                 if total_calls > self.settings.max_total_tool_calls:
@@ -147,6 +157,17 @@ class CloudDiagnosticEscalator:
                 canonical = json.dumps(tool_request.arguments, sort_keys=True, separators=(",", ":"))
                 if not session.remember_tool(tool_request.name, canonical):
                     return _local_fallback(request, local_assessment, session, "repeated_tool_call")
+                if tool_request.name not in offered_names:
+                    # _relevant_tools narrows the registry to the domain the
+                    # user's own question established, and says it "never
+                    # exposes unrelated tools". A provider reply is untrusted
+                    # text, so that has to hold on execution too: otherwise the
+                    # provider picks the domain, and a Grafana question reaches
+                    # the host-resource tools the conversational catalog
+                    # deliberately withholds.
+                    return _local_fallback(
+                        request, local_assessment, session, "tool_not_offered"
+                    )
                 failure = self.tools.validate(tool_request.name, tool_request.arguments)
                 if failure is not None:
                     return _local_fallback(request, local_assessment, session, f"tool_policy_{failure}")
@@ -207,7 +228,10 @@ def _relevant_tools(
         "monitoring_stack": {"get_sensor_status", "get_mqtt_health", "get_bridge_health", "get_influx_health", "get_dashboard_health", "get_grafana_health", "get_service_status", "read_service_logs"},
     }
     relevant = by_domain.get(request.domain.value, set())
-    # Keep the provider prompt small and never expose unrelated tools.
+    # The authorization boundary, not just a prompt-size saving. The domain is
+    # derived from the user's text by DiagnosticPlanner, never from anything the
+    # provider said, so this is what keeps a provider inside the question it was
+    # asked. The caller enforces it again on execution.
     return tuple(spec.as_model_tool() for spec in registry.tools if spec.name in relevant)
 
 
