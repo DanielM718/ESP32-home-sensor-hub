@@ -28,6 +28,7 @@ from app.queries import (
     readings_query_from_params,
 )
 from app.service_status import SystemStatusProvider
+from app.system_health import SystemHealthProvider
 from app.workflow_routes import register_workflow_routes
 from app.workflow_services import ExportService, MonitoringService, utc_now
 from app.workflows import (
@@ -49,6 +50,7 @@ def create_app(
     clock: Any | None = None,
     status_provider: Any | None = None,
     printer_repository: Any | None = None,
+    health_provider: Any | None = None,
 ) -> Flask:
     """Create the Flask WSGI application."""
 
@@ -97,6 +99,16 @@ def create_app(
     app.config["STATUS_PROVIDER"] = status_provider or SystemStatusProvider()
     app.config["SEN66_EXPECTED_PUBLISH_SECONDS"] = (
         settings.air_quality.expected_publish_seconds
+    )
+    app.config["HEALTH_PROVIDER"] = health_provider or SystemHealthProvider(
+        status_provider=app.config["STATUS_PROVIDER"],
+        latest_resolver=read_repository.latest,
+        printer_resolver=app.config["PRINTER_REPOSITORY"].current,
+        node_stale_after_seconds=settings.node_stale_after_seconds,
+        air_quality_stale_after_seconds=settings.air_quality.stale_after_seconds,
+        printer_stale_after_seconds=int(
+            os.environ.get("PRINTER_STALE_AFTER_SECONDS", "300")
+        ),
     )
 
     store = monitoring_store or MonitoringExportStore(
@@ -208,6 +220,17 @@ def register_routes(app: Flask) -> None:
             "stored_air_quality_resolution_seconds": 15 * 60,
         }
         return jsonify(payload)
+
+    @app.get("/api/system-status")
+    def system_status() -> Any:
+        """Bounded dependency health.
+
+        This endpoint exists to describe outages, so it must not become one. It
+        returns 200 whatever the dependencies are doing; the payload carries the
+        verdict.
+        """
+
+        return jsonify(current_app.config["HEALTH_PROVIDER"].snapshot())
 
     @app.get("/api/printer")
     def printer() -> Any:
