@@ -1153,6 +1153,51 @@ tbody tr:last-child td {
 .service-failed { border-left-color: var(--danger); }
 .service-unavailable { border-left-color: var(--muted); }
 
+/* Dependency health reuses the service card shape so the two status sections
+   read as one surface. The state is carried by the text and the glyph in
+   .health-state as well as by the border colour, so nothing is encoded by
+   colour alone. */
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.health-card {
+  min-width: 0;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.health-healthy { border-left-color: var(--ok); }
+.health-degraded { border-left-color: var(--warning); }
+.health-unavailable { border-left-color: var(--danger); }
+.health-unknown { border-left-color: var(--muted); }
+
+.health-state {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--muted-strong, var(--muted));
+}
+
+.health-card p {
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+
+#health-build {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .service-heading {
   display: flex;
   align-items: flex-start;

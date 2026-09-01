@@ -311,6 +311,18 @@
       </section>
 
       <section id="panel-status" class="tab-panel" role="tabpanel" aria-labelledby="tab-status" hidden>
+        <section class="status-section" aria-labelledby="health-heading">
+          <div class="section-heading workflow-heading">
+            <div>
+              <h2 id="health-heading">Dependency Health</h2>
+              <p class="subtle">Whether each dependency is actually working, not just whether its unit is running.</p>
+            </div>
+            <span id="health-overall" class="workflow-poll-state">Not checked</span>
+          </div>
+          <div id="health-grid" class="health-grid" aria-live="polite"><p class="empty-state">Loading dependency health.</p></div>
+          <p id="health-build" class="subtle"></p>
+        </section>
+
         <section class="status-section" aria-labelledby="services-heading">
           <div class="section-heading workflow-heading">
             <div><h2 id="services-heading">System / Service Status</h2><p class="subtle">Read-only state from the Pi’s fixed project service list.</p></div>

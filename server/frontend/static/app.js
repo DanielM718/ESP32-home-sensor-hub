@@ -8,6 +8,7 @@ const API = {
   monitoringSessions: "/api/monitoring/sessions",
   exports: "/api/exports",
   status: "/api/status",
+  systemStatus: "/api/system-status",
   printer: "/api/printer",
   printerHistory: "/api/printer/history",
   printerTelemetry: "/api/printer/telemetry",
@@ -2287,14 +2288,18 @@ async function refreshStatusTab(force = false) {
   state.statusInFlight = true;
   setRefreshButtonBusy(true);
   try {
-    const [status, nodes] = await Promise.all([
+    const [status, nodes, health] = await Promise.all([
       fetchJson(API.status),
       fetchJson(API.nodes),
+      // The health endpoint reports outages, so a failure here must not blank
+      // the rest of the tab. Render what came back and say so.
+      fetchJson(API.systemStatus).catch(() => null),
     ]);
     state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     renderServiceStatus(status);
     renderNodes(nodes);
+    renderSystemHealth(health);
     renderDebugInformation(status);
     setLastUpdated(status.checked_at_utc || nodes.generated_at);
     setStatus("Online", "ok");
@@ -2306,6 +2311,93 @@ async function refreshStatusTab(force = false) {
     state.statusInFlight = false;
     setRefreshButtonBusy(false);
   }
+}
+
+const HEALTH_STATE_LABELS = {
+  healthy: "Healthy",
+  degraded: "Degraded",
+  unavailable: "Unavailable",
+  unknown: "Unknown",
+};
+
+// Every state is announced in words as well as colour, and the icon is a
+// redundant cue rather than the only one, so the grid stays readable to anyone
+// who cannot distinguish the state colours.
+const HEALTH_STATE_ICONS = {
+  healthy: "\u25CF",
+  degraded: "\u25D0",
+  unavailable: "\u25CB",
+  unknown: "?",
+};
+
+const HEALTH_BASIS_NOTES = {
+  process_and_data: "Unit state and data freshness were both checked.",
+  process_only: "Only the unit's state was checked; nothing verified end to end.",
+  data_only: "Observed only through the data it produces.",
+  none: "Nothing was observed for this dependency.",
+};
+
+function healthStateLabel(state) {
+  return HEALTH_STATE_LABELS[state] || "Unknown";
+}
+
+function renderSystemHealth(data) {
+  const overall = document.getElementById("health-overall");
+  const container = document.getElementById("health-grid");
+  const build = document.getElementById("health-build");
+  if (!overall || !container || !build) {
+    return;
+  }
+  if (!data) {
+    overall.textContent = "Unavailable";
+    overall.className = "workflow-poll-state health-unavailable";
+    container.innerHTML = '<p class="empty-state">Dependency health could not be read.</p>';
+    build.textContent = "";
+    return;
+  }
+
+  const state = data.overall_state || "unknown";
+  overall.textContent = healthStateLabel(state);
+  overall.className = `workflow-poll-state health-${escapeHtml(state)}`;
+  const dependencies = Array.isArray(data.dependencies) ? data.dependencies : [];
+  container.innerHTML = dependencies.length
+    ? dependencies.map((item) => {
+      const itemState = item.state || "unknown";
+      const checks = Array.isArray(item.checks) ? item.checks : [];
+      return `
+        <article class="health-card health-${escapeHtml(itemState)}">
+          <div class="service-heading">
+            <h3>${escapeHtml(item.display_name || item.dependency_id)}</h3>
+            <span class="health-state">
+              <span aria-hidden="true">${escapeHtml(HEALTH_STATE_ICONS[itemState] || "?")}</span>
+              ${escapeHtml(healthStateLabel(itemState))}
+            </span>
+          </div>
+          <p>${escapeHtml(item.summary || "")}</p>
+          ${item.core === false ? '<p class="subtle">Not required for sensor ingest.</p>' : ""}
+          <p class="subtle">${escapeHtml(HEALTH_BASIS_NOTES[item.basis] || "")}</p>
+          ${checks.length
+            ? `<dl class="service-facts">${checks.map((check) => `
+                <div><dt>${escapeHtml(formatLabel(check.name))}</dt>
+                <dd>${escapeHtml(healthStateLabel(check.state))}</dd></div>`).join("")}</dl>`
+            : ""}
+        </article>`;
+    }).join("")
+    : '<p class="empty-state">No dependencies were reported.</p>';
+
+  const service = data.service || {};
+  const probe = data.probe || {};
+  const parts = [];
+  if (service.source_revision) {
+    parts.push(`Deployed revision ${service.source_revision} (${service.source_revision_origin || "unknown"})`);
+  }
+  if (typeof service.process_uptime_seconds === "number") {
+    parts.push(`process up ${formatDurationLong(service.process_uptime_seconds)}`);
+  }
+  if (Array.isArray(probe.timed_out) && probe.timed_out.length) {
+    parts.push(`checks that did not finish in time: ${probe.timed_out.join(", ")}`);
+  }
+  build.textContent = parts.join(" \u00B7 ");
 }
 
 function renderServiceStatus(data) {

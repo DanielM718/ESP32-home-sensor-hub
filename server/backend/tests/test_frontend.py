@@ -306,6 +306,50 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("ams_inventory_json", self.javascript)
         self.assertNotIn("home_assistant", self.javascript.lower())
 
+    def test_dependency_health_is_rendered_with_every_state(self) -> None:
+        for state in ("healthy", "degraded", "unavailable", "unknown"):
+            with self.subTest(state=state):
+                self.assertIn(f"health-{state}", self.styles)
+                self.assertIn(f'{state}: "', self.javascript)
+
+    def test_dependency_health_state_is_not_encoded_by_colour_alone(self) -> None:
+        """Each card carries the state in words and a redundant glyph."""
+
+        self.assertIn("HEALTH_STATE_LABELS", self.javascript)
+        self.assertIn("HEALTH_STATE_ICONS", self.javascript)
+        self.assertIn('<span aria-hidden="true">', self.javascript)
+        self.assertIn("healthStateLabel(itemState)", self.javascript)
+
+    def test_dependency_health_says_what_was_actually_checked(self) -> None:
+        """A process-only verdict must not read as end-to-end verification."""
+
+        self.assertIn("HEALTH_BASIS_NOTES", self.javascript)
+        self.assertIn("Only the unit's state was checked", self.javascript)
+        self.assertIn("Not required for sensor ingest.", self.javascript)
+
+    def test_a_health_outage_does_not_blank_the_status_tab(self) -> None:
+        """The endpoint that reports outages must not take the tab down."""
+
+        self.assertIn("fetchJson(API.systemStatus).catch(() => null)", self.javascript)
+        self.assertIn("Dependency health could not be read.", self.javascript)
+
+    def test_deployed_revision_and_uptime_are_surfaced(self) -> None:
+        self.assertIn("source_revision", self.javascript)
+        self.assertIn("process_uptime_seconds", self.javascript)
+        self.assertIn("checks that did not finish in time", self.javascript)
+        self.assertIn('id="health-build"', self.template)
+
+    def test_dependency_health_section_is_labelled_and_live(self) -> None:
+        self.assertIn('aria-labelledby="health-heading"', self.template)
+        self.assertIn('id="health-heading"', self.template)
+        self.assertIn('id="health-grid" class="health-grid" aria-live="polite"', self.template)
+
+    def test_dependency_health_grid_collapses_on_a_phone(self) -> None:
+        """Same auto-fit track as the services grid, so 390px is one column."""
+
+        health = self.styles[self.styles.index(".health-grid {") :]
+        self.assertIn("repeat(auto-fit, minmax(260px, 1fr))", health[:200])
+
     def test_dashboard_javascript_brackets_are_balanced(self) -> None:
         """Guards against a parse error taking the whole dashboard down.
 
