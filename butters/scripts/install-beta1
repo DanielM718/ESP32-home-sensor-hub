@@ -169,6 +169,25 @@ if grep -Eq '^[[:space:]]*development_mode[[:space:]]*=[[:space:]]*true' \
   exit 2
 fi
 
+# config/audio.local.toml is machine-specific and gitignored, and it is rsynced
+# into the deployed tree, where butters-live.service points BUTTERS_AUDIO_CONFIG
+# at it. Deploying the example file's placeholder would install a listener that
+# cannot open a capture device. The file is optional because the listener is
+# opt-in and never enabled by this installer, so an absent file is a note rather
+# than a refusal; a placeholder is a refusal.
+if [[ -f "${butters_dir}/config/audio.local.toml" ]]; then
+  if grep -q 'CHANGE_ME' "${butters_dir}/config/audio.local.toml"; then
+    echo "Refusing to install: config/audio.local.toml still contains the" >&2
+    echo "example placeholder CHANGE_ME. Name the real capture device, e.g." >&2
+    echo "  arecord -L    # then set device = \"plughw:CARD=<name>,DEV=0\"" >&2
+    exit 2
+  fi
+else
+  echo "Note: config/audio.local.toml is absent, so ${listener_unit_name} has no"
+  echo "audio configuration. The web assistant is unaffected; provide the file"
+  echo "before enabling the listener."
+fi
+
 if ! getent group butters >/dev/null; then
   groupadd --system butters
 fi
