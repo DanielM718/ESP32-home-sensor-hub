@@ -1,0 +1,642 @@
+{
+  "after_evidence": {
+    "clock_correction_event": {
+      "event_data": {
+        "CmosTime": "2026-08-31T21:44:48.5000000Z",
+        "NewTime": "2026-09-01T01:44:48.5000000Z",
+        "OldTime": "2026-09-01T01:44:36.7748870Z",
+        "ProcessID": "4",
+        "ProcessName": "",
+        "RealTimeIsUniversal": "false",
+        "Reason": "2",
+        "SystemInCmosMode": "false",
+        "TimeDeltaInMs": "11725",
+        "TimeZoneBias": "240"
+      },
+      "event_id": 1,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system time has changed to ?2026?-?09?-?01T01:44:48.500000000Z from ?2026?-?09?-?01T01:44:36.774887000Z.\r\nTime Delta: 11725 ms\r\n\r\nChange Reason: System time synchronized with the hardware clock.\r\nProcess: '' (PID 4).\r\n\r\nRTC time: ?2026?-?08?-?31T21:44:48.500000000Z\r\nCurrent time zone bias: 240\r\nRTC time is in UTC: false\r\nSystem time was based on RTC time: false",
+      "provider": "Microsoft-Windows-Kernel-General",
+      "record_id": 46392,
+      "time_created": "2026-08-31T21:44:48.5002305-04:00",
+      "time_created_utc": "2026-09-01T01:44:48.5002305Z"
+    },
+    "collection_time": "2026-08-31T21:45:05.3212872-04:00",
+    "collection_time_utc": "2026-09-01T01:45:05.3228472Z",
+    "current_boot_time_utc": "2026-09-01T00:56:33.5000000Z",
+    "device_errors": [],
+    "effective_state": "5",
+    "enter_event": {
+      "event_data": {
+        "EffectiveState": "5",
+        "Flags": "0",
+        "Reason": "4",
+        "TargetState": "4",
+        "TransitionsToOn": "4"
+      },
+      "event_id": 42,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system is entering sleep.\r\n\r\nSleep Reason: Application API",
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "record_id": 46388,
+      "time_created": "2026-08-31T21:44:33.9498409-04:00",
+      "time_created_utc": "2026-09-01T01:44:33.9498409Z"
+    },
+    "entered_s3": true,
+    "fixed_adapter": {
+      "driver_date": "2025-10-03",
+      "driver_file_name": "rt640x64.sys",
+      "driver_version": "10.79.50.1003",
+      "expected_mac_match": true,
+      "interface_description": "Realtek PCIe 5GbE Family Controller",
+      "link_speed": "2.5 Gbps",
+      "mac_address": "34-5A-60-D7-4C-2C",
+      "name": "Ethernet 2",
+      "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+      "pnp_problem": 0,
+      "pnp_status": "OK",
+      "power_management": {
+        "AllowComputerToTurnOffDevice": 2,
+        "ArpOffload": 2,
+        "D0PacketCoalescing": 0,
+        "DeviceSleepOnDisconnect": 0,
+        "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+        "NSOffload": 2,
+        "Name": "Ethernet 2",
+        "RsnRekeyOffload": 0,
+        "SelectiveSuspend": 2,
+        "WakeOnMagicPacket": 2,
+        "WakeOnPattern": 1
+      },
+      "power_management_error": null,
+      "status": "Up"
+    },
+    "hiber_pages_written": "446874",
+    "hostname": "DESKTOP-G4CFVL1",
+    "hybrid_sleep_observed": true,
+    "last_wake": {
+      "arguments": [
+        "/lastwake"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 0"
+      ]
+    },
+    "marker": {
+      "boot_time_utc": "2026-09-01T00:56:33.5000000Z",
+      "fixed_adapter": {
+        "driver_date": "2025-10-03",
+        "driver_file_name": "rt640x64.sys",
+        "driver_version": "10.79.50.1003",
+        "expected_mac_match": true,
+        "interface_description": "Realtek PCIe 5GbE Family Controller",
+        "link_speed": "2.5 Gbps",
+        "mac_address": "34-5A-60-D7-4C-2C",
+        "name": "Ethernet 2",
+        "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+        "pnp_problem": 0,
+        "pnp_status": "OK",
+        "power_management": {
+          "AllowComputerToTurnOffDevice": 2,
+          "ArpOffload": 2,
+          "D0PacketCoalescing": 0,
+          "DeviceSleepOnDisconnect": 0,
+          "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+          "NSOffload": 2,
+          "Name": "Ethernet 2",
+          "RsnRekeyOffload": 0,
+          "SelectiveSuspend": 2,
+          "WakeOnMagicPacket": 2,
+          "WakeOnPattern": 1
+        },
+        "power_management_error": null,
+        "status": "Up"
+      },
+      "hostname": "DESKTOP-G4CFVL1",
+      "marker_time": "2026-08-31T21:44:25.8842927-04:00",
+      "marker_time_utc": "2026-09-01T01:44:25.8856862Z",
+      "phase": "before",
+      "power_requests": {
+        "arguments": [
+          "/requests"
+        ],
+        "exit_code": 0,
+        "output": [
+          "DISPLAY:",
+          "None.",
+          "",
+          "SYSTEM:",
+          "None.",
+          "",
+          "AWAYMODE:",
+          "None.",
+          "",
+          "EXECUTION:",
+          "None.",
+          "",
+          "PERFBOOST:",
+          "None.",
+          "",
+          "ACTIVELOCKSCREEN:",
+          "None.",
+          ""
+        ]
+      },
+      "schema_version": 1,
+      "system_record_id": 46379,
+      "task_scheduler_record_id": 0,
+      "wake_armed": {
+        "arguments": [
+          "/devicequery",
+          "wake_armed"
+        ],
+        "exit_code": 0,
+        "output": [
+          "Realtek PCIe 5GbE Family Controller",
+          ""
+        ]
+      },
+      "wake_timers": {
+        "arguments": [
+          "/waketimers"
+        ],
+        "exit_code": 0,
+        "output": [
+          "There are no active wake timers in the system."
+        ]
+      },
+      "windows_update_record_id": 1363
+    },
+    "ndis_errors": [],
+    "phase": "after",
+    "power_requests": {
+      "arguments": [
+        "/requests"
+      ],
+      "exit_code": 0,
+      "output": [
+        "DISPLAY:",
+        "None.",
+        "",
+        "SYSTEM:",
+        "None.",
+        "",
+        "AWAYMODE:",
+        "None.",
+        "",
+        "EXECUTION:",
+        "None.",
+        "",
+        "PERFBOOST:",
+        "[DRIVER] Legacy Kernel Caller",
+        "Power Manager",
+        "",
+        "ACTIVELOCKSCREEN:",
+        "None.",
+        ""
+      ]
+    },
+    "power_troubleshooter_event": {
+      "event_data": {
+        "Attributes": "1979728129",
+        "BiosInitDuration": "4212",
+        "CheckpointDuration": "97",
+        "DriverInitDuration": "4150",
+        "EffectiveState": "5",
+        "HiberPagesWritten": "446874",
+        "HiberReadDuration": "0",
+        "HiberWriteDuration": "1281",
+        "NoMultiStageResumeReason": "0",
+        "SleepDuration": "3567",
+        "SleepTime": "2026-09-01T01:44:30.8768806Z",
+        "TargetState": "4",
+        "WakeDuration": "4238",
+        "WakeSourceText": "",
+        "WakeSourceTextLength": "0",
+        "WakeSourceType": "0",
+        "WakeTime": "2026-09-01T01:44:52.7393452Z",
+        "WakeTimerContext": "",
+        "WakeTimerContextLength": "0",
+        "WakeTimerOwner": "",
+        "WakeTimerOwnerLength": "0"
+      },
+      "event_id": 1,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system has returned from a low power state.\r\n\r\nSleep Time: ?2026?-?09?-?01T01:44:30.876880600Z\r\nWake Time: ?2026?-?09?-?01T01:44:52.739345200Z\r\n\r\nWake Source: Unknown",
+      "provider": "Microsoft-Windows-Power-Troubleshooter",
+      "record_id": 46400,
+      "time_created": "2026-08-31T21:44:53.7040937-04:00",
+      "time_created_utc": "2026-09-01T01:44:53.7040937Z"
+    },
+    "realtek_errors": [],
+    "rebooted_instead": false,
+    "resume_event": {
+      "event_data": {
+        "EffectiveState": "5",
+        "ProgrammedWakeTimeAc": "1601-01-01T00:00:00.0000000Z",
+        "ProgrammedWakeTimeDc": "1601-01-01T00:00:00.0000000Z",
+        "TargetState": "4",
+        "WakeFromState": "4",
+        "WakeRequesterTypeAc": "0",
+        "WakeRequesterTypeDc": "0"
+      },
+      "event_id": 107,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system has resumed from sleep.",
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "record_id": 46391,
+      "time_created": "2026-08-31T21:44:36.7751416-04:00",
+      "time_created_utc": "2026-09-01T01:44:36.7751416Z"
+    },
+    "resume_initiation_time_utc": "2026-09-01T01:44:48.5000000Z",
+    "schema_version": 1,
+    "system_events": [
+      {
+        "event_data": {
+          "Attributes": "1979728129",
+          "BiosInitDuration": "4212",
+          "CheckpointDuration": "97",
+          "DriverInitDuration": "4150",
+          "EffectiveState": "5",
+          "HiberPagesWritten": "446874",
+          "HiberReadDuration": "0",
+          "HiberWriteDuration": "1281",
+          "NoMultiStageResumeReason": "0",
+          "SleepDuration": "3567",
+          "SleepTime": "2026-09-01T01:44:30.8768806Z",
+          "TargetState": "4",
+          "WakeDuration": "4238",
+          "WakeSourceText": "",
+          "WakeSourceTextLength": "0",
+          "WakeSourceType": "0",
+          "WakeTime": "2026-09-01T01:44:52.7393452Z",
+          "WakeTimerContext": "",
+          "WakeTimerContextLength": "0",
+          "WakeTimerOwner": "",
+          "WakeTimerOwnerLength": "0"
+        },
+        "event_id": 1,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system has returned from a low power state.\r\n\r\nSleep Time: ?2026?-?09?-?01T01:44:30.876880600Z\r\nWake Time: ?2026?-?09?-?01T01:44:52.739345200Z\r\n\r\nWake Source: Unknown",
+        "provider": "Microsoft-Windows-Power-Troubleshooter",
+        "record_id": 46400,
+        "time_created": "2026-08-31T21:44:53.7040937-04:00",
+        "time_created_utc": "2026-09-01T01:44:53.7040937Z"
+      },
+      {
+        "event_data": {
+          "BootId": "208",
+          "MonitorReason": "1",
+          "NextSessionId": "16",
+          "NextSessionType": "0",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "104556",
+          "PreviousSessionId": "14",
+          "PreviousSessionType": "1",
+          "Reason": "1"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 14 to 16.\r\n\r\nReason Unknown \r\n\r\nBootId: 208",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46399,
+        "time_created": "2026-08-31T21:44:52.7566173-04:00",
+        "time_created_utc": "2026-09-01T01:44:52.7566173Z"
+      },
+      {
+        "event_data": {
+          "BootId": "208",
+          "MonitorReason": "20",
+          "NextSessionId": "14",
+          "NextSessionType": "1",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "21773443",
+          "PreviousSessionId": "13",
+          "PreviousSessionType": "3",
+          "Reason": "20"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 13 to 14.\r\n\r\nReason SxTransition \r\n\r\nBootId: 208",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46398,
+        "time_created": "2026-08-31T21:44:52.6518900-04:00",
+        "time_created_utc": "2026-09-01T01:44:52.6518900Z"
+      },
+      {
+        "event_data": {
+          "index_0": ""
+        },
+        "event_id": 18,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Windows cannot store Bluetooth authentication codes (link keys) on the local adapter. Bluetooth keyboards might not work in the system BIOS during startup.",
+        "provider": "BTHUSB",
+        "record_id": 46397,
+        "time_created": "2026-08-31T21:44:50.9782205-04:00",
+        "time_created_utc": "2026-09-01T01:44:50.9782205Z"
+      },
+      {
+        "event_data": {
+          "SuspendEnd": "2920089",
+          "SuspendStart": "2920059"
+        },
+        "event_id": 130,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Firmware S3 times. SuspendStart: 2920059, SuspendEnd: 2920089",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46394,
+        "time_created": "2026-08-31T21:44:48.5002411-04:00",
+        "time_created_utc": "2026-09-01T01:44:48.5002411Z"
+      },
+      {
+        "event_data": {
+          "AverageResume": "3955",
+          "FullResume": "3988",
+          "ResumeCount": "4"
+        },
+        "event_id": 131,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Firmware S3 times. ResumeCount: 4, FullResume: 3988, AverageResume: 3955",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46393,
+        "time_created": "2026-08-31T21:44:48.5002408-04:00",
+        "time_created_utc": "2026-09-01T01:44:48.5002408Z"
+      },
+      {
+        "event_data": {
+          "CmosTime": "2026-08-31T21:44:48.5000000Z",
+          "NewTime": "2026-09-01T01:44:48.5000000Z",
+          "OldTime": "2026-09-01T01:44:36.7748870Z",
+          "ProcessID": "4",
+          "ProcessName": "",
+          "RealTimeIsUniversal": "false",
+          "Reason": "2",
+          "SystemInCmosMode": "false",
+          "TimeDeltaInMs": "11725",
+          "TimeZoneBias": "240"
+        },
+        "event_id": 1,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system time has changed to ?2026?-?09?-?01T01:44:48.500000000Z from ?2026?-?09?-?01T01:44:36.774887000Z.\r\nTime Delta: 11725 ms\r\n\r\nChange Reason: System time synchronized with the hardware clock.\r\nProcess: '' (PID 4).\r\n\r\nRTC time: ?2026?-?08?-?31T21:44:48.500000000Z\r\nCurrent time zone bias: 240\r\nRTC time is in UTC: false\r\nSystem time was based on RTC time: false",
+        "provider": "Microsoft-Windows-Kernel-General",
+        "record_id": 46392,
+        "time_created": "2026-08-31T21:44:48.5002305-04:00",
+        "time_created_utc": "2026-09-01T01:44:48.5002305Z"
+      },
+      {
+        "event_data": {
+          "EffectiveState": "5",
+          "ProgrammedWakeTimeAc": "1601-01-01T00:00:00.0000000Z",
+          "ProgrammedWakeTimeDc": "1601-01-01T00:00:00.0000000Z",
+          "TargetState": "4",
+          "WakeFromState": "4",
+          "WakeRequesterTypeAc": "0",
+          "WakeRequesterTypeDc": "0"
+        },
+        "event_id": 107,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system has resumed from sleep.",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46391,
+        "time_created": "2026-08-31T21:44:36.7751416-04:00",
+        "time_created_utc": "2026-09-01T01:44:36.7751416Z"
+      },
+      {
+        "event_data": {
+          "EffectiveState": "5",
+          "Flags": "0",
+          "Reason": "4",
+          "TargetState": "4",
+          "TransitionsToOn": "4"
+        },
+        "event_id": 42,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system is entering sleep.\r\n\r\nSleep Reason: Application API",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46388,
+        "time_created": "2026-08-31T21:44:33.9498409-04:00",
+        "time_created_utc": "2026-09-01T01:44:33.9498409Z"
+      },
+      {
+        "event_data": {
+          "BootId": "208",
+          "MonitorReason": "1",
+          "NextSessionId": "13",
+          "NextSessionType": "3",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "202150669",
+          "PreviousSessionId": "12",
+          "PreviousSessionType": "0",
+          "Reason": "1"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 12 to 13.\r\n\r\nReason Unknown \r\n\r\nBootId: 208",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46381,
+        "time_created": "2026-08-31T21:44:30.8784588-04:00",
+        "time_created_utc": "2026-09-01T01:44:30.8784588Z"
+      },
+      {
+        "event_data": {
+          "ApiCallerName": "\\Device\\HarddiskVolume5\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "ApiCallerNameLength": "78",
+          "LightestSystemState": "2",
+          "SystemAction": "2"
+        },
+        "event_id": 187,
+        "level": "Information",
+        "log_name": "System",
+        "message": "User-mode process attempted to change the system state by calling SetSuspendState or SetSystemPowerState APIs.",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46380,
+        "time_created": "2026-08-31T21:44:30.8781140-04:00",
+        "time_created_utc": "2026-09-01T01:44:30.8781140Z"
+      }
+    ],
+    "target_state": "4",
+    "task_scheduler_events": [],
+    "task_scheduler_log_state": "disabled",
+    "usb_errors": [],
+    "wake_armed": {
+      "arguments": [
+        "/devicequery",
+        "wake_armed"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Realtek PCIe 5GbE Family Controller",
+        ""
+      ]
+    },
+    "wake_from_state": "4",
+    "wake_source": "Unknown",
+    "wake_timers": {
+      "arguments": [
+        "/waketimers"
+      ],
+      "exit_code": 0,
+      "output": [
+        "There are no active wake timers in the system."
+      ]
+    },
+    "windows_resume_time_utc": "2026-09-01T01:44:52.7393452Z",
+    "windows_sleep_time_utc": "2026-09-01T01:44:30.8768806Z",
+    "windows_update_events": [],
+    "windows_update_log_state": "enabled"
+  },
+  "before_evidence": {
+    "boot_time_utc": "2026-09-01T00:56:33.5000000Z",
+    "fixed_adapter": {
+      "driver_date": "2025-10-03",
+      "driver_file_name": "rt640x64.sys",
+      "driver_version": "10.79.50.1003",
+      "expected_mac_match": true,
+      "interface_description": "Realtek PCIe 5GbE Family Controller",
+      "link_speed": "2.5 Gbps",
+      "mac_address": "34-5A-60-D7-4C-2C",
+      "name": "Ethernet 2",
+      "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+      "pnp_problem": 0,
+      "pnp_status": "OK",
+      "power_management": {
+        "AllowComputerToTurnOffDevice": 2,
+        "ArpOffload": 2,
+        "D0PacketCoalescing": 0,
+        "DeviceSleepOnDisconnect": 0,
+        "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+        "NSOffload": 2,
+        "Name": "Ethernet 2",
+        "RsnRekeyOffload": 0,
+        "SelectiveSuspend": 2,
+        "WakeOnMagicPacket": 2,
+        "WakeOnPattern": 1
+      },
+      "power_management_error": null,
+      "status": "Up"
+    },
+    "hostname": "DESKTOP-G4CFVL1",
+    "marker_time": "2026-08-31T21:44:25.8842927-04:00",
+    "marker_time_utc": "2026-09-01T01:44:25.8856862Z",
+    "phase": "before",
+    "power_requests": {
+      "arguments": [
+        "/requests"
+      ],
+      "exit_code": 0,
+      "output": [
+        "DISPLAY:",
+        "None.",
+        "",
+        "SYSTEM:",
+        "None.",
+        "",
+        "AWAYMODE:",
+        "None.",
+        "",
+        "EXECUTION:",
+        "None.",
+        "",
+        "PERFBOOST:",
+        "None.",
+        "",
+        "ACTIVELOCKSCREEN:",
+        "None.",
+        ""
+      ]
+    },
+    "schema_version": 1,
+    "system_record_id": 46379,
+    "task_scheduler_record_id": 0,
+    "wake_armed": {
+      "arguments": [
+        "/devicequery",
+        "wake_armed"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Realtek PCIe 5GbE Family Controller",
+        ""
+      ]
+    },
+    "wake_timers": {
+      "arguments": [
+        "/waketimers"
+      ],
+      "exit_code": 0,
+      "output": [
+        "There are no active wake timers in the system."
+      ]
+    },
+    "windows_update_record_id": 1363
+  },
+  "clean_cycle": false,
+  "configuration_change": "disable_varmilo_keyboard_wake_all_interfaces",
+  "confirmed_offline_time": "2026-09-01T01:44:41.527Z",
+  "cycle_id": "verification-20260901T014427Z-01",
+  "cycle_index": 1,
+  "cycle_started_time": "2026-09-01T01:44:27.411Z",
+  "device_error": false,
+  "entered_s3": true,
+  "experiment_stage": "verification",
+  "hybrid_sleep_observed": true,
+  "last_observed_online_time": "2026-09-01T01:44:36.500Z",
+  "ndis_error": false,
+  "network_healthy": true,
+  "network_latency": null,
+  "network_return_time": "2026-09-01T01:45:06.556Z",
+  "nic_wake_armed": true,
+  "notes": "",
+  "pure_s3": false,
+  "quiet_window_observed_seconds": 24.011,
+  "quiet_window_seconds": 300,
+  "rebooted_instead": false,
+  "resume_initiation_time": "2026-09-01T01:44:48.5000000Z",
+  "rt640x64_error": false,
+  "scheduled_task_correlation": "unavailable_log_disabled",
+  "schema_version": 1,
+  "sleep_request_ack_time": "2026-09-01T01:44:30.475Z",
+  "sleep_request_time": "2026-09-01T01:44:29.715Z",
+  "spontaneous_resume": true,
+  "spontaneous_resume_time": "2026-09-01T01:45:06.556Z",
+  "ssh_healthy": true,
+  "ssh_latency": null,
+  "ssh_return_time": "2026-09-01T01:45:07.136Z",
+  "stop_reason": "spontaneous_non_wol_resume",
+  "usb_error": false,
+  "wake_source": "Unknown",
+  "windows_resume_time": "2026-09-01T01:44:52.7393452Z",
+  "wol_causal_evidence": "no_wol_sent",
+  "wol_count": 0,
+  "wol_sent": false,
+  "wol_time": null
+}

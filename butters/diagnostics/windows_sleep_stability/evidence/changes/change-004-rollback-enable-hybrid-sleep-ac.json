@@ -1,0 +1,50 @@
+﻿{
+    "schema_version":  1,
+    "change_time":  "2026-08-31T21:49:13.4358768-04:00",
+    "change_time_utc":  "2026-09-01T01:49:13.4369095Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "setting":  "Allow hybrid sleep (AC)",
+    "old_value":  0,
+    "new_value":  1,
+    "dc_value_unchanged":  1,
+    "command":  "powercfg /setacvalueindex SCHEME_CURRENT 238c9fa8-0aad-41ed-83f4-97be242c8f20 94ac6d29-73ce-41a6-809f-6363ba21b47e 1",
+    "activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "rollback_command":  "powercfg /setacvalueindex SCHEME_CURRENT 238c9fa8-0aad-41ed-83f4-97be242c8f20 94ac6d29-73ce-41a6-809f-6363ba21b47e 0",
+    "rollback_activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "set_output":  [
+
+                   ],
+    "activation_output":  [
+
+                          ],
+    "query_before":  [
+                         "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                         "  GUID Alias: SCHEME_MIN",
+                         "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+                         "    GUID Alias: SUB_SLEEP",
+                         "    Power Setting GUID: 94ac6d29-73ce-41a6-809f-6363ba21b47e  (Allow hybrid sleep)",
+                         "      GUID Alias: HYBRIDSLEEP",
+                         "      Possible Setting Index: 000",
+                         "      Possible Setting Friendly Name: Off",
+                         "      Possible Setting Index: 001",
+                         "      Possible Setting Friendly Name: On",
+                         "    Current AC Power Setting Index: 0x00000000",
+                         "    Current DC Power Setting Index: 0x00000001",
+                         ""
+                     ],
+    "query_after":  [
+                        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                        "  GUID Alias: SCHEME_MIN",
+                        "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+                        "    GUID Alias: SUB_SLEEP",
+                        "    Power Setting GUID: 94ac6d29-73ce-41a6-809f-6363ba21b47e  (Allow hybrid sleep)",
+                        "      GUID Alias: HYBRIDSLEEP",
+                        "      Possible Setting Index: 000",
+                        "      Possible Setting Friendly Name: Off",
+                        "      Possible Setting Index: 001",
+                        "      Possible Setting Friendly Name: On",
+                        "    Current AC Power Setting Index: 0x00000001",
+                        "    Current DC Power Setting Index: 0x00000001",
+                        ""
+                    ]
+}

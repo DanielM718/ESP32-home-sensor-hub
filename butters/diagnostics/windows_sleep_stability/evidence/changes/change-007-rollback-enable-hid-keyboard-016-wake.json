@@ -1,0 +1,23 @@
+﻿{
+    "schema_version":  1,
+    "change_time":  "2026-08-31T22:00:34.9653925-04:00",
+    "change_time_utc":  "2026-09-01T02:00:34.9667725Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "device":  "HID Keyboard Device (016)",
+    "old_state":  "wake_not_armed",
+    "new_state":  "wake_armed",
+    "command":  "powercfg /deviceenablewake \"HID Keyboard Device (016)\"",
+    "rollback_command":  "powercfg /devicedisablewake \"HID Keyboard Device (016)\"",
+    "command_output":  [
+
+                       ],
+    "wake_armed_before":  [
+                              "Realtek PCIe 5GbE Family Controller",
+                              ""
+                          ],
+    "wake_armed_after":  [
+                             "Realtek PCIe 5GbE Family Controller",
+                             "HID Keyboard Device (016)",
+                             ""
+                         ]
+}

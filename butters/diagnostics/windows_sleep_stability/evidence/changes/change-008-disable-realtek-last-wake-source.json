@@ -1,0 +1,19 @@
+﻿{
+    "schema_version":  1,
+    "change_time":  "2026-08-31T21:58:06.2110750-04:00",
+    "change_time_utc":  "2026-09-01T01:58:06.2141589Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "device":  "Realtek PCIe 5GbE Family Controller",
+    "old_state":  "wake_armed",
+    "new_state":  "wake_not_armed",
+    "command":  "powercfg /devicedisablewake \"Realtek PCIe 5GbE Family Controller\"",
+    "rollback_command":  "powercfg /deviceenablewake \"Realtek PCIe 5GbE Family Controller\"",
+    "command_output":  [
+
+                       ],
+    "wake_armed_before":  [
+                              "Realtek PCIe 5GbE Family Controller",
+                              ""
+                          ],
+    "wake_armed_after":  "NONE"
+}

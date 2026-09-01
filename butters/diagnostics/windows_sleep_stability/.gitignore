@@ -1,0 +1,4 @@
+# Full six-hour channel exports remain local diagnostic artifacts.  The compact
+# cycle logs, amendments, controller states, and engineering log are versioned.
+evidence/baseline/low-level-wake-evidence.json
+evidence/baseline/low-level-wake-evidence-post-restart.json

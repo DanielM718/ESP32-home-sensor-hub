@@ -1,0 +1,111 @@
+﻿{
+    "schema_version":  1,
+    "collection_time":  "2026-08-31T22:20:09.6876347-04:00",
+    "collection_time_utc":  "2026-09-01T02:20:09.6892084Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "boot_time_utc":  "2026-09-01T02:16:33.5000000Z",
+    "installed_relevant_software":  [
+                                        {
+                                            "DisplayName":  "AMD Chipset Software",
+                                            "DisplayVersion":  "7.11.26.2142",
+                                            "Publisher":  "Advanced Micro Devices, Inc.",
+                                            "InstallDate":  null,
+                                            "UninstallString":  "\"C:\\Program Files (x86)\\AMD\\Chipset_Software\\QT_Dependencies\\Setup.exe\" /U {a2c5e97a-dd0d-4a8c-b1fc-dfcaf9a0a4a2}"
+                                        },
+                                        {
+                                            "DisplayName":  "AMD_Chipset_Drivers",
+                                            "DisplayVersion":  "7.11.26.2142",
+                                            "Publisher":  "Advanced Micro Devices, Inc.",
+                                            "InstallDate":  "20251218",
+                                            "UninstallString":  "MsiExec.exe /X{a2c5e97a-dd0d-4a8c-b1fc-dfcaf9a0a4a2}"
+                                        },
+                                        {
+                                            "DisplayName":  "Realtek Ethernet Controller Driver",
+                                            "DisplayVersion":  "10.79.50.1003",
+                                            "Publisher":  "Realtek",
+                                            "InstallDate":  "20251206",
+                                            "UninstallString":  "\"C:\\Program Files (x86)\\InstallShield Installation Information\\{8833FFB6-5B0C-4764-81AA-06DFEED9A476}\\setup.exe\" -runfromtemp -removeonly"
+                                        }
+                                    ],
+    "relevant_signed_drivers":  [
+                                    {
+                                        "device_name":  "USB xHCI Compliant Host Controller",
+                                        "device_id":  "PCI\\VEN_1022\u0026DEV_15B6\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260341",
+                                        "device_class":  "USB",
+                                        "driver_provider":  "Microsoft",
+                                        "driver_version":  "10.0.26100.8972",
+                                        "driver_date":  "07/21/2026 20:00:00",
+                                        "inf_name":  "usbxhci.inf",
+                                        "manufacturer":  "Generic USB xHCI Host Controller",
+                                        "is_signed":  true,
+                                        "signer":  "Microsoft Windows"
+                                    },
+                                    {
+                                        "device_name":  "USB xHCI Compliant Host Controller",
+                                        "device_id":  "PCI\\VEN_1022\u0026DEV_15B7\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260441",
+                                        "device_class":  "USB",
+                                        "driver_provider":  "Microsoft",
+                                        "driver_version":  "10.0.26100.8972",
+                                        "driver_date":  "07/21/2026 20:00:00",
+                                        "inf_name":  "usbxhci.inf",
+                                        "manufacturer":  "Generic USB xHCI Host Controller",
+                                        "is_signed":  true,
+                                        "signer":  "Microsoft Windows"
+                                    },
+                                    {
+                                        "device_name":  "USB xHCI Compliant Host Controller",
+                                        "device_id":  "PCI\\VEN_1022\u0026DEV_15B8\u0026SUBSYS_7E701462\u0026REV_00\\4\u00265D6807C\u00260\u00260043",
+                                        "device_class":  "USB",
+                                        "driver_provider":  "Microsoft",
+                                        "driver_version":  "10.0.26100.8972",
+                                        "driver_date":  "07/21/2026 20:00:00",
+                                        "inf_name":  "usbxhci.inf",
+                                        "manufacturer":  "Generic USB xHCI Host Controller",
+                                        "is_signed":  true,
+                                        "signer":  "Microsoft Windows"
+                                    },
+                                    {
+                                        "device_name":  "USB xHCI Compliant Host Controller",
+                                        "device_id":  "PCI\\VEN_1022\u0026DEV_43FD\u0026SUBSYS_11421B21\u0026REV_01\\8\u0026E99A29B\u00260\u0026006000400011",
+                                        "device_class":  "USB",
+                                        "driver_provider":  "Microsoft",
+                                        "driver_version":  "10.0.26100.8972",
+                                        "driver_date":  "07/21/2026 20:00:00",
+                                        "inf_name":  "usbxhci.inf",
+                                        "manufacturer":  "Generic USB xHCI Host Controller",
+                                        "is_signed":  true,
+                                        "signer":  "Microsoft Windows"
+                                    },
+                                    {
+                                        "device_name":  "Realtek PCIe 5GbE Family Controller",
+                                        "device_id":  "PCI\\VEN_10EC\u0026DEV_8126\u0026SUBSYS_7E701462\u0026REV_01\\01000000684CE00000",
+                                        "device_class":  "NET",
+                                        "driver_provider":  "Realtek",
+                                        "driver_version":  "10.79.50.1003",
+                                        "driver_date":  "10/02/2025 20:00:00",
+                                        "inf_name":  "oem16.inf",
+                                        "manufacturer":  "Realtek",
+                                        "is_signed":  true,
+                                        "signer":  "Microsoft Windows Hardware Compatibility Publisher"
+                                    }
+                                ],
+    "available_windows_update_drivers":  [
+                                             {
+                                                 "title":  "Dell Inc. - Monitor - 5/28/2018 12:00:00 AM - 1.0.0.1",
+                                                 "description":  "Dell Inc. Monitor  driver update released in  May 2018",
+                                                 "driver_class":  "OtherHardware",
+                                                 "driver_hardware_id":  "monitor\\delf10d",
+                                                 "driver_manufacturer":  "Dell Inc.",
+                                                 "driver_model":  "Dell SE2719H (HDMI)",
+                                                 "driver_version_date":  "2018-05-28T00:00:00.0000000",
+                                                 "is_downloaded":  false,
+                                                 "is_mandatory":  false
+                                             }
+                                         ],
+    "windows_update_search_error":  null,
+    "reboot_flags":  {
+                         "component_based_servicing":  false,
+                         "windows_update":  false,
+                         "pending_file_rename":  true
+                     }
+}

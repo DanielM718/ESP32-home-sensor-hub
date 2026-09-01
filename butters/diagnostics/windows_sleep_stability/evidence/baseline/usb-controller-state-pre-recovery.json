@@ -1,0 +1,77 @@
+﻿{
+    "schema_version":  1,
+    "collection_time":  "2026-08-31T22:14:11.3385157-04:00",
+    "collection_time_utc":  "2026-09-01T02:14:11.3398986Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "boot_time_utc":  "2026-09-01T00:56:33.5000000Z",
+    "controllers":  [
+                        {
+                            "instance_id":  "PCI\\VEN_1022\u0026DEV_15B6\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260341",
+                            "found":  true,
+                            "class":  "USB",
+                            "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+                            "status":  "Error",
+                            "problem":  24,
+                            "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002641",
+                            "bus_reported_description":  "Universal Serial Bus (USB) Controller",
+                            "driver_date":  "07/21/2026 20:00:00",
+                            "driver_version":  "10.0.26100.8972",
+                            "driver_provider":  "Microsoft",
+                            "inf_name":  "usbxhci.inf",
+                            "children":  {
+
+                                         }
+                        },
+                        {
+                            "instance_id":  "PCI\\VEN_1022\u0026DEV_15B7\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260441",
+                            "found":  true,
+                            "class":  "USB",
+                            "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+                            "status":  "Error",
+                            "problem":  24,
+                            "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002641",
+                            "bus_reported_description":  "Universal Serial Bus (USB) Controller",
+                            "driver_date":  "07/21/2026 20:00:00",
+                            "driver_version":  "10.0.26100.8972",
+                            "driver_provider":  "Microsoft",
+                            "inf_name":  "usbxhci.inf",
+                            "children":  {
+
+                                         }
+                        },
+                        {
+                            "instance_id":  "PCI\\VEN_1022\u0026DEV_15B8\u0026SUBSYS_7E701462\u0026REV_00\\4\u00265D6807C\u00260\u00260043",
+                            "found":  true,
+                            "class":  "USB",
+                            "friendly_name":  "AMD USB 2.0 eXtensible Host Controller - 1.20 (Microsoft)",
+                            "status":  "Error",
+                            "problem":  24,
+                            "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002643",
+                            "bus_reported_description":  "Universal Serial Bus (USB) Controller",
+                            "driver_date":  "07/21/2026 20:00:00",
+                            "driver_version":  "10.0.26100.8972",
+                            "driver_provider":  "Microsoft",
+                            "inf_name":  "usbxhci.inf",
+                            "children":  {
+
+                                         }
+                        },
+                        {
+                            "instance_id":  "PCI\\VEN_1022\u0026DEV_43FD\u0026SUBSYS_11421B21\u0026REV_01\\8\u0026E99A29B\u00260\u0026006000400011",
+                            "found":  true,
+                            "class":  "USB",
+                            "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.10 (Microsoft)",
+                            "status":  "Error",
+                            "problem":  24,
+                            "parent":  "PCI\\VEN_1022\u0026DEV_43F5\u0026SUBSYS_33281B21\u0026REV_01\\7\u00262a80eed7\u00260\u00266000400011",
+                            "bus_reported_description":  "Universal Serial Bus (USB) Controller",
+                            "driver_date":  "07/21/2026 20:00:00",
+                            "driver_version":  "10.0.26100.8972",
+                            "driver_provider":  "Microsoft",
+                            "inf_name":  "usbxhci.inf",
+                            "children":  {
+
+                                         }
+                        }
+                    ]
+}
