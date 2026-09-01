@@ -13,6 +13,12 @@ $ExpectedMac = '34-5A-60-D7-4C-2C'
 $OutputRoot = 'C:\ProgramData\Butters\sleep-diagnostic'
 $MarkerPath = Join-Path $OutputRoot 'cycle-marker.json'
 $LatestEvidencePath = Join-Path $OutputRoot 'cycle-evidence-latest.json'
+$ControllerIds = @(
+    'PCI\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\4&2B49E1C6&0&0341',
+    'PCI\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\4&2B49E1C6&0&0441',
+    'PCI\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\4&5D6807C&0&0043',
+    'PCI\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\8&E99A29B&0&006000400011'
+)
 
 if ($env:COMPUTERNAME -ne $TargetHostname) {
     throw "Refusing to run on unexpected host: $($env:COMPUTERNAME)"
@@ -103,11 +109,99 @@ function Get-BootTimeUtc {
     (Get-CimInstance Win32_OperatingSystem).LastBootUpTime.ToUniversalTime().ToString('o')
 }
 
+function Get-PnpPropertyValue {
+    param(
+        [Parameter(Mandatory = $true)][string]$InstanceId,
+        [Parameter(Mandatory = $true)][string]$KeyName
+    )
+    $property = Get-PnpDeviceProperty -InstanceId $InstanceId -KeyName $KeyName -ErrorAction SilentlyContinue
+    if ($property) { return $property.Data }
+    return $null
+}
+
+function Get-XhciTopologyState {
+    $present = @(Get-PnpDevice -PresentOnly -ErrorAction SilentlyContinue)
+    $parentMap = @{}
+    foreach ($device in $present) {
+        $instanceId = [string]$device.InstanceId
+        $parent = Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_Parent'
+        if ($parent) {
+            $key = [string]$parent
+            if (-not $parentMap.ContainsKey($key)) {
+                $parentMap[$key] = [System.Collections.Generic.List[object]]::new()
+            }
+            $parentMap[$key].Add([ordered]@{
+                class = [string]$device.Class
+                friendly_name = [string]$device.FriendlyName
+                instance_id = $instanceId
+                status = [string]$device.Status
+                problem = [int]$device.Problem
+                parent = $key
+                location_info = Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_LocationInfo'
+                location_paths = @(Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_LocationPaths')
+            })
+        }
+    }
+    function Get-TopologyChildren {
+        param(
+            [Parameter(Mandatory = $true)][string]$ParentId,
+            [int]$Depth = 0
+        )
+        if ($Depth -gt 8 -or -not $parentMap.ContainsKey($ParentId)) { return @() }
+        @(
+            $parentMap[$ParentId] | Sort-Object instance_id | ForEach-Object {
+                [ordered]@{
+                    device = $_
+                    children = @(Get-TopologyChildren ([string]$_.instance_id) ($Depth + 1))
+                }
+            }
+        )
+    }
+    $controllers = @(
+        foreach ($instanceId in $ControllerIds) {
+            $device = Get-PnpDevice -InstanceId $instanceId -ErrorAction SilentlyContinue
+            [ordered]@{
+                instance_id = $instanceId
+                found = [bool]$device
+                friendly_name = if ($device) { [string]$device.FriendlyName } else { $null }
+                status = if ($device) { [string]$device.Status } else { $null }
+                problem = if ($device) { [int]$device.Problem } else { $null }
+                parent = Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_Parent'
+                location_info = Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_LocationInfo'
+                location_paths = @(Get-PnpPropertyValue $instanceId 'DEVPKEY_Device_LocationPaths')
+                direct_children = if ($parentMap.ContainsKey($instanceId)) { @($parentMap[$instanceId]) } else { @() }
+                children_tree = @(Get-TopologyChildren $instanceId)
+            }
+        }
+    )
+    [ordered]@{
+        present_pnp_count = $present.Count
+        unhealthy_devices = @($present | Where-Object { $_.Status -ne 'OK' -or [int]$_.Problem -ne 0 } |
+            ForEach-Object {
+                [ordered]@{
+                    class = [string]$_.Class
+                    friendly_name = [string]$_.FriendlyName
+                    instance_id = [string]$_.InstanceId
+                    status = [string]$_.Status
+                    problem = [int]$_.Problem
+                }
+            })
+        controllers = $controllers
+    }
+}
+
 function Get-MaxRecordId {
     param([Parameter(Mandatory = $true)][string]$LogName)
 
-    $event = Get-WinEvent -LogName $LogName -MaxEvents 1 -ErrorAction SilentlyContinue
-    if ($event) { return [int64]$event.RecordId }
+    try {
+        $event = Get-WinEvent -LogName $LogName -MaxEvents 1 -ErrorAction Stop
+        if ($event) { return [int64]$event.RecordId }
+    }
+    catch {
+        # Analytical/debug channels require -Oldest and are filtered by marker time
+        # during collection. Avoid streaming the entire channel merely to find its tail.
+        return [int64]0
+    }
     return [int64]0
 }
 
@@ -135,11 +229,20 @@ if ($Phase -eq 'Before') {
             pnp_device_management = Get-MaxRecordId 'Microsoft-Windows-Kernel-PnP/Device Management'
             pnp_driver_watchdog = Get-MaxRecordId 'Microsoft-Windows-Kernel-PnP/Driver Watchdog'
             task_maintenance = Get-MaxRecordId 'Microsoft-Windows-TaskScheduler/Maintenance'
+            kernel_power_diagnostic = Get-MaxRecordId 'Microsoft-Windows-Kernel-Power/Diagnostic'
+            kernel_power_thermal = Get-MaxRecordId 'Microsoft-Windows-Kernel-Power/Thermal-Operational'
+            kernel_pnp_configuration = Get-MaxRecordId 'Microsoft-Windows-Kernel-PnP/Configuration'
+            user_pnp_device_install = Get-MaxRecordId 'Microsoft-Windows-UserPnp/DeviceInstall'
+            driver_frameworks = Get-MaxRecordId 'Microsoft-Windows-DriverFrameworks-UserMode/Operational'
+            usb_ucx = Get-MaxRecordId 'Microsoft-Windows-USB-UCX/Operational'
         }
         fixed_adapter = Get-FixedAdapterState
+        xhci_topology = Get-XhciTopologyState
         wake_armed = Invoke-PowerCfg @('/devicequery', 'wake_armed')
         wake_timers = Invoke-PowerCfg @('/waketimers')
         power_requests = Invoke-PowerCfg @('/requests')
+        usb_selective_suspend_policy = Invoke-PowerCfg @('/query', 'SCHEME_CURRENT', '2a737441-1930-4402-8d77-b2bebba308a3', '48e6b7a6-50f5-4782-a5d4-53bb8f07e226')
+        wake_timer_policy = Invoke-PowerCfg @('/query', 'SCHEME_CURRENT', '238c9fa8-0aad-41ed-83f4-97be242c8f20', 'bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d')
     }
     $marker | ConvertTo-Json -Depth 14 | Set-Content -Path $MarkerPath -Encoding UTF8
     Write-CompactResult $marker
@@ -151,7 +254,7 @@ $marker = Get-Content -Path $MarkerPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $markerTime = [datetime]$marker.marker_time
 $markerSystemRecord = [int64]$marker.system_record_id
 
-$providerPattern = '(?i)Kernel-Power|Power-Troubleshooter|Kernel-General|UserModePowerService|Kernel-PnP|rt640x64|NDIS|USB|USBHUB|USBXHCI|BTHUSB|TaskScheduler|WindowsUpdate|Maintenance'
+$providerPattern = '(?i)ACPI|Kernel-Power|Power-Troubleshooter|Kernel-General|UserModePowerService|Kernel-PnP|UserPnp|PCI|rt640x64|NDIS|USB|USBHUB|USBXHCI|UCX|BTHUSB|DriverFrameworks|TaskScheduler|WindowsUpdate|Maintenance'
 $systemRaw = @(
     Get-WinEvent -FilterHashtable @{ LogName = 'System'; StartTime = $markerTime.AddSeconds(-5) } -ErrorAction SilentlyContinue |
         Where-Object {
@@ -242,6 +345,12 @@ $channelDefinitions = [ordered]@{
     pnp_device_management = 'Microsoft-Windows-Kernel-PnP/Device Management'
     pnp_driver_watchdog = 'Microsoft-Windows-Kernel-PnP/Driver Watchdog'
     task_maintenance = 'Microsoft-Windows-TaskScheduler/Maintenance'
+    kernel_power_diagnostic = 'Microsoft-Windows-Kernel-Power/Diagnostic'
+    kernel_power_thermal = 'Microsoft-Windows-Kernel-Power/Thermal-Operational'
+    kernel_pnp_configuration = 'Microsoft-Windows-Kernel-PnP/Configuration'
+    user_pnp_device_install = 'Microsoft-Windows-UserPnp/DeviceInstall'
+    driver_frameworks = 'Microsoft-Windows-DriverFrameworks-UserMode/Operational'
+    usb_ucx = 'Microsoft-Windows-USB-UCX/Operational'
 }
 $additionalChannels = [ordered]@{}
 foreach ($key in $channelDefinitions.Keys) {
@@ -255,8 +364,20 @@ foreach ($key in $channelDefinitions.Keys) {
             $property = $marker.channel_record_ids.PSObject.Properties[$key]
             if ($property) { $recordId = [int64]$property.Value }
         }
+        try {
+            $rawChannelEvents = @(Get-WinEvent -FilterHashtable @{
+                LogName = $logName
+                StartTime = $markerTime.AddSeconds(-5)
+            } -ErrorAction Stop)
+        }
+        catch {
+            $rawChannelEvents = @(Get-WinEvent -FilterHashtable @{
+                LogName = $logName
+                StartTime = $markerTime.AddSeconds(-5)
+            } -Oldest -ErrorAction SilentlyContinue)
+        }
         $events = @(
-            Get-WinEvent -FilterHashtable @{ LogName = $logName; StartTime = $markerTime.AddSeconds(-5) } -ErrorAction SilentlyContinue |
+            $rawChannelEvents |
                 Where-Object { $_.RecordId -gt $recordId } |
                 Select-Object -First 1000 |
                 ForEach-Object { Convert-EventRecord $_ }
@@ -277,13 +398,20 @@ $ndisErrors = @(
 )
 $usbErrors = @(
     @($systemEvents | Where-Object { $_.provider -match '(?i)USB|BTHUSB' -and $_.level -in @('Error', 'Critical') }) +
-    @($additionalChannels.usb_xhci.events | Where-Object { $_.level -in @('Error', 'Critical') })
+    @($additionalChannels.usb_xhci.events | Where-Object { $_.level -in @('Error', 'Critical') }) +
+    @($additionalChannels.usb_ucx.events | Where-Object { $_.level -in @('Error', 'Critical') })
 )
 $deviceErrors = @(@($systemEvents | Where-Object {
-    $_.provider -match '(?i)Kernel-PnP|nvlddmkm|amdkmdag|Display' -and
+    $_.provider -match '(?i)Kernel-PnP|UserPnp|DriverFrameworks|nvlddmkm|amdkmdag|Display' -and
     $_.level -in @('Error', 'Critical')
 }) + @($additionalChannels.pnp_device_management.events | Where-Object {
     $_.level -in @('Error', 'Critical') -or $_.event_id -eq 1011
+}) + @($additionalChannels.kernel_pnp_configuration.events | Where-Object {
+    $_.level -in @('Error', 'Critical')
+}) + @($additionalChannels.user_pnp_device_install.events | Where-Object {
+    $_.level -in @('Error', 'Critical')
+}) + @($additionalChannels.driver_frameworks.events | Where-Object {
+    $_.level -in @('Error', 'Critical')
 }))
 
 $result = [ordered]@{
@@ -296,10 +424,13 @@ $result = [ordered]@{
     current_boot_time_utc = $currentBootTime
     rebooted_instead = ($currentBootTime -ne [string]$marker.boot_time_utc)
     fixed_adapter = Get-FixedAdapterState
+    xhci_topology = Get-XhciTopologyState
     wake_armed = Invoke-PowerCfg @('/devicequery', 'wake_armed')
     last_wake = Invoke-PowerCfg @('/lastwake')
     wake_timers = Invoke-PowerCfg @('/waketimers')
     power_requests = Invoke-PowerCfg @('/requests')
+    usb_selective_suspend_policy = Invoke-PowerCfg @('/query', 'SCHEME_CURRENT', '2a737441-1930-4402-8d77-b2bebba308a3', '48e6b7a6-50f5-4782-a5d4-53bb8f07e226')
+    wake_timer_policy = Invoke-PowerCfg @('/query', 'SCHEME_CURRENT', '238c9fa8-0aad-41ed-83f4-97be242c8f20', 'bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d')
     entered_s3 = ($targetState -eq '4' -and $wakeFromState -eq '4')
     target_state = $targetState
     effective_state = if ($enterConverted) { [string]$enterConverted.event_data.EffectiveState } else { $null }

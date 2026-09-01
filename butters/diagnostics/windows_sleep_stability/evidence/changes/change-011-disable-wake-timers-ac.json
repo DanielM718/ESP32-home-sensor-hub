@@ -1,0 +1,54 @@
+﻿{
+    "schema_version":  1,
+    "change_time":  "2026-09-01T09:01:32.9010060-04:00",
+    "change_time_utc":  "2026-09-01T13:01:32.9020120Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "setting":  "Allow wake timers (AC)",
+    "old_value":  1,
+    "new_value":  0,
+    "dc_value_unchanged":  1,
+    "command":  "powercfg /setacvalueindex SCHEME_CURRENT 238c9fa8-0aad-41ed-83f4-97be242c8f20 bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d 0",
+    "activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "rollback_command":  "powercfg /setacvalueindex SCHEME_CURRENT 238c9fa8-0aad-41ed-83f4-97be242c8f20 bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d 1",
+    "rollback_activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "set_output":  [
+
+                   ],
+    "activation_output":  [
+
+                          ],
+    "query_before":  [
+                         "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                         "  GUID Alias: SCHEME_MIN",
+                         "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+                         "    GUID Alias: SUB_SLEEP",
+                         "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+                         "      GUID Alias: RTCWAKE",
+                         "      Possible Setting Index: 000",
+                         "      Possible Setting Friendly Name: Disable",
+                         "      Possible Setting Index: 001",
+                         "      Possible Setting Friendly Name: Enable",
+                         "      Possible Setting Index: 002",
+                         "      Possible Setting Friendly Name: Important Wake Timers Only",
+                         "    Current AC Power Setting Index: 0x00000001",
+                         "    Current DC Power Setting Index: 0x00000001",
+                         ""
+                     ],
+    "query_after":  [
+                        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                        "  GUID Alias: SCHEME_MIN",
+                        "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+                        "    GUID Alias: SUB_SLEEP",
+                        "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+                        "      GUID Alias: RTCWAKE",
+                        "      Possible Setting Index: 000",
+                        "      Possible Setting Friendly Name: Disable",
+                        "      Possible Setting Index: 001",
+                        "      Possible Setting Friendly Name: Enable",
+                        "      Possible Setting Index: 002",
+                        "      Possible Setting Friendly Name: Important Wake Timers Only",
+                        "    Current AC Power Setting Index: 0x00000000",
+                        "    Current DC Power Setting Index: 0x00000001",
+                        ""
+                    ]
+}

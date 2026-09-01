@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "collection_date": "2026-09-01",
+  "motherboard": "MSI PRO X870E-P WIFI (MS-7E70)",
+  "bios": {
+    "installed": {
+      "version": "2.A20",
+      "archive": "7E70v2A2.zip",
+      "binary_release_date": "2025-06-18",
+      "official_release_date": "2025-06-24",
+      "agesa": "PI-1.2.0.3e",
+      "source": "https://download.msi.com/bos_exe/mb/7E70v2A2.zip"
+    },
+    "intervening_releases": [
+      {
+        "version": "2.A30",
+        "archive": "7E70v2A3.zip",
+        "release_date": "2025-08-27",
+        "notes": [
+          "Improve memory compatibility",
+          "Optimized Secure Erase mechanism"
+        ],
+        "source": "https://download.msi.com/bos_exe/mb/7E70v2A3.zip"
+      },
+      {
+        "version": "2.A40",
+        "archive": "7E70v2A4.zip",
+        "release_date": "2026-01-27",
+        "agesa": "PI pre-1.3.0.0",
+        "notes": [
+          "Enable BIOS UEFI/CSM Mode option"
+        ],
+        "source": "https://download.msi.com/bos_exe/mb/7E70v2A4.zip"
+      },
+      {
+        "version": "2.A50",
+        "archive": "7E70v2A5.zip",
+        "release_date": "2026-06-16",
+        "agesa": "ComboAm5 1.3.0.1",
+        "notes": [
+          "Fixed system auto power-on when pressing the power button during POST after Wake-on-LAN",
+          "Better compatibility with some older graphics cards",
+          "AMD EXPO Ultra Low Latency support"
+        ],
+        "source": "https://download.msi.com/bos_exe/mb/7E70v2A5.zip"
+      }
+    ],
+    "later_interim_archive": {
+      "version": "2.A52",
+      "archive": "7E70v2A52.zip",
+      "release_date_in_archive": "2026-06-26",
+      "official_archive_last_modified": "2026-06-30",
+      "agesa": "PI-1.3.0.1b Patch A",
+      "notes": [
+        "TSME enabling with Ryzen 9000 series CPU"
+      ],
+      "selection": "Not selected as the stable physical-update candidate",
+      "source": "https://download.msi.com/bos_exe/mb/7E70v2A52.zip"
+    },
+    "stable_candidate": "2.A50",
+    "relevance": "AGESA advances from 1.2.0.3e to 1.3.0.1 and the current failures span ACPI/PCI/xHCI/HDA resume, although MSI does not explicitly claim an S3 or xHCI fix."
+  },
+  "amd_chipset": {
+    "installed_package": "7.11.26.2142",
+    "current_official_package": "8.08.12.551",
+    "release_date": "2026-08-14",
+    "installed_component_examples": {
+      "AMD GPIO2": "2.2.0.134",
+      "AMD I2C": "1.2.0.126",
+      "AMD PSP signed driver": "5.42.0.0",
+      "AMD PPM Provisioning": "8.0.0.60"
+    },
+    "current_package_component_examples": {
+      "AMD GPIO2": "2.2.0.137",
+      "AMD I2C": "1.2.0.131",
+      "AMD PSP": "5.46.0.0",
+      "AMD PPM Provisioning": "8.0.0.65",
+      "AMD PCI Device": "1.0.0.90",
+      "AMD Interface Driver": "2.0.0.29"
+    },
+    "windows_11_usb_filter": "Not Applicable",
+    "xhci_owner": "Microsoft usbxhci.inf 10.0.26100.8972",
+    "source": "https://www.amd.com/en/resources/support-articles/release-notes/RN-RYZEN-CHIPSET-8-08-12-551.html",
+    "relevance": "Rational later controlled platform-driver experiment, but it will not directly replace the failing Microsoft xHCI driver."
+  },
+  "national_instruments": {
+    "installed_driver": "nipcibrd.sys 25.8.0f188",
+    "service": "Boot-start System Bus Extender",
+    "observed_event_count_last_24h": 405,
+    "observed_correlation": "PCI bridge warnings bracket every captured S3 transition but also occur outside sleep",
+    "official_issue_source": "https://knowledge.ni.com/KnowledgeArticleDetails?id=kA03q0000019l42CAA",
+    "relevance": "Strong physical-presence isolation candidate because NI documents Windows 11 PCI bridge driver failures; do not rename or remotely disable the boot-start driver."
+  }
+}

@@ -1,0 +1,46 @@
+﻿{
+    "schema_version":  1,
+    "change_time":  "2026-09-01T08:47:42.3646296-04:00",
+    "change_time_utc":  "2026-09-01T12:47:42.3665970Z",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "setting":  "USB selective suspend (AC)",
+    "old_value":  1,
+    "new_value":  0,
+    "dc_value_unchanged":  1,
+    "command":  "powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 0",
+    "activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "rollback_command":  "powercfg /setacvalueindex SCHEME_CURRENT 2a737441-1930-4402-8d77-b2bebba308a3 48e6b7a6-50f5-4782-a5d4-53bb8f07e226 1",
+    "rollback_activation_command":  "powercfg /setactive SCHEME_CURRENT",
+    "set_output":  [
+
+                   ],
+    "activation_output":  [
+
+                          ],
+    "query_before":  [
+                         "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                         "  GUID Alias: SCHEME_MIN",
+                         "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+                         "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+                         "      Possible Setting Index: 000",
+                         "      Possible Setting Friendly Name: Disabled",
+                         "      Possible Setting Index: 001",
+                         "      Possible Setting Friendly Name: Enabled",
+                         "    Current AC Power Setting Index: 0x00000001",
+                         "    Current DC Power Setting Index: 0x00000001",
+                         ""
+                     ],
+    "query_after":  [
+                        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                        "  GUID Alias: SCHEME_MIN",
+                        "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+                        "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+                        "      Possible Setting Index: 000",
+                        "      Possible Setting Friendly Name: Disabled",
+                        "      Possible Setting Index: 001",
+                        "      Possible Setting Friendly Name: Enabled",
+                        "    Current AC Power Setting Index: 0x00000000",
+                        "    Current DC Power Setting Index: 0x00000001",
+                        ""
+                    ]
+}

@@ -1,0 +1,2654 @@
+{
+  "after_evidence": {
+    "additional_channels": {
+      "driver_frameworks": {
+        "events": [],
+        "log_name": "Microsoft-Windows-DriverFrameworks-UserMode/Operational",
+        "state": "disabled"
+      },
+      "kernel_pnp_configuration": {
+        "events": [],
+        "log_name": "Microsoft-Windows-Kernel-PnP/Configuration",
+        "state": "enabled"
+      },
+      "kernel_power_diagnostic": {
+        "events": [],
+        "log_name": "Microsoft-Windows-Kernel-Power/Diagnostic",
+        "state": "disabled"
+      },
+      "kernel_power_thermal": {
+        "events": [],
+        "log_name": "Microsoft-Windows-Kernel-Power/Thermal-Operational",
+        "state": "enabled"
+      },
+      "ndis": {
+        "events": [],
+        "log_name": "Microsoft-Windows-NDIS/Operational",
+        "state": "disabled"
+      },
+      "pci": {
+        "events": [],
+        "log_name": "Microsoft-Windows-PCI/Operational",
+        "state": "enabled"
+      },
+      "pnp_device_management": {
+        "events": [
+          {
+            "event_data": {
+              "DeviceCount": "8",
+              "DeviceInstanceId": "USB\\VID_3142&PID_0C33\\20190808"
+            },
+            "event_id": 1010,
+            "level": "Information",
+            "log_name": "Microsoft-Windows-Kernel-PnP/Device Management",
+            "message": "Device USB\\VID_3142&PID_0C33\\20190808 has been surprise removed as it is reported as missing on the bus.\r\nCount of devices removed: 8",
+            "provider": "Microsoft-Windows-Kernel-PnP",
+            "record_id": 1763,
+            "time_created": "2026-09-01T08:58:14.9088562-04:00",
+            "time_created_utc": "2026-09-01T12:58:14.9088562Z"
+          },
+          {
+            "event_data": {
+              "DeviceCount": "1",
+              "DeviceInstanceId": "SWD\\MMDEVAPI\\{0.0.0.00000000}.{86888a63-f6f8-459c-b9a3-67d9c7063af7}"
+            },
+            "event_id": 1010,
+            "level": "Information",
+            "log_name": "Microsoft-Windows-Kernel-PnP/Device Management",
+            "message": "Device SWD\\MMDEVAPI\\{0.0.0.00000000}.{86888a63-f6f8-459c-b9a3-67d9c7063af7} has been surprise removed as it is reported as missing on the bus.\r\nCount of devices removed: 1",
+            "provider": "Microsoft-Windows-Kernel-PnP",
+            "record_id": 1762,
+            "time_created": "2026-09-01T08:58:14.4081285-04:00",
+            "time_created_utc": "2026-09-01T12:58:14.4081285Z"
+          }
+        ],
+        "log_name": "Microsoft-Windows-Kernel-PnP/Device Management",
+        "state": "enabled"
+      },
+      "pnp_driver_watchdog": {
+        "events": [],
+        "log_name": "Microsoft-Windows-Kernel-PnP/Driver Watchdog",
+        "state": "enabled"
+      },
+      "task_maintenance": {
+        "events": [
+          {
+            "event_data": {
+              "LastRunDateTime": "?9/?1/?2026 8:58 AM",
+              "hc_stateid": "1"
+            },
+            "event_id": 800,
+            "level": "Information",
+            "log_name": "Microsoft-Windows-TaskScheduler/Maintenance",
+            "message": "Maintenance state changed to 1 (Last Run: ?9/?1/?2026 8:58 AM).",
+            "provider": "Microsoft-Windows-TaskScheduler",
+            "record_id": 687,
+            "time_created": "2026-09-01T08:58:14.8588415-04:00",
+            "time_created_utc": "2026-09-01T12:58:14.8588415Z"
+          },
+          {
+            "event_data": {
+              "LastRunDateTime": "?9/?1/?2026 8:57 AM",
+              "hc_stateid": "3"
+            },
+            "event_id": 800,
+            "level": "Information",
+            "log_name": "Microsoft-Windows-TaskScheduler/Maintenance",
+            "message": "Maintenance state changed to 3 (Last Run: ?9/?1/?2026 8:57 AM).",
+            "provider": "Microsoft-Windows-TaskScheduler",
+            "record_id": 686,
+            "time_created": "2026-09-01T08:57:13.5449301-04:00",
+            "time_created_utc": "2026-09-01T12:57:13.5449301Z"
+          },
+          {
+            "event_data": {
+              "LastRunDateTime": "?9/?1/?2026 8:57 AM",
+              "hc_stateid": "1"
+            },
+            "event_id": 800,
+            "level": "Information",
+            "log_name": "Microsoft-Windows-TaskScheduler/Maintenance",
+            "message": "Maintenance state changed to 1 (Last Run: ?9/?1/?2026 8:57 AM).",
+            "provider": "Microsoft-Windows-TaskScheduler",
+            "record_id": 685,
+            "time_created": "2026-09-01T08:57:12.5312889-04:00",
+            "time_created_utc": "2026-09-01T12:57:12.5312889Z"
+          }
+        ],
+        "log_name": "Microsoft-Windows-TaskScheduler/Maintenance",
+        "state": "enabled"
+      },
+      "usb_ucx": {
+        "events": [],
+        "log_name": "Microsoft-Windows-USB-UCX/Operational",
+        "state": "not_found"
+      },
+      "usb_xhci": {
+        "events": [],
+        "log_name": "Microsoft-Windows-USB-USBXHCI-Operational",
+        "state": "enabled"
+      },
+      "user_pnp_device_install": {
+        "events": [],
+        "log_name": "Microsoft-Windows-UserPnp/DeviceInstall",
+        "state": "enabled"
+      }
+    },
+    "clock_correction_event": {
+      "event_data": {
+        "CmosTime": "2026-09-01T08:58:06.5000000Z",
+        "NewTime": "2026-09-01T12:58:06.5000000Z",
+        "OldTime": "2026-09-01T12:57:54.6709418Z",
+        "ProcessID": "4",
+        "ProcessName": "",
+        "RealTimeIsUniversal": "false",
+        "Reason": "2",
+        "SystemInCmosMode": "false",
+        "TimeDeltaInMs": "11829",
+        "TimeZoneBias": "240"
+      },
+      "event_id": 1,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system time has changed to ?2026?-?09?-?01T12:58:06.500000000Z from ?2026?-?09?-?01T12:57:54.670941800Z.\r\nTime Delta: 11829 ms\r\n\r\nChange Reason: System time synchronized with the hardware clock.\r\nProcess: '' (PID 4).\r\n\r\nRTC time: ?2026?-?09?-?01T08:58:06.500000000Z\r\nCurrent time zone bias: 240\r\nRTC time is in UTC: false\r\nSystem time was based on RTC time: false",
+      "provider": "Microsoft-Windows-Kernel-General",
+      "record_id": 46919,
+      "time_created": "2026-09-01T08:58:06.5002417-04:00",
+      "time_created_utc": "2026-09-01T12:58:06.5002417Z"
+    },
+    "collection_time": "2026-09-01T08:58:22.7637108-04:00",
+    "collection_time_utc": "2026-09-01T12:58:22.7652450Z",
+    "current_boot_time_utc": "2026-09-01T12:30:29.5000000Z",
+    "device_errors": [],
+    "effective_state": "5",
+    "enter_event": {
+      "event_data": {
+        "EffectiveState": "5",
+        "Flags": "0",
+        "Reason": "4",
+        "TargetState": "4",
+        "TransitionsToOn": "1"
+      },
+      "event_id": 42,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system is entering sleep.\r\n\r\nSleep Reason: Application API",
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "record_id": 46915,
+      "time_created": "2026-09-01T08:57:51.5376039-04:00",
+      "time_created_utc": "2026-09-01T12:57:51.5376039Z"
+    },
+    "entered_s3": true,
+    "fixed_adapter": {
+      "driver_date": "2025-10-03",
+      "driver_file_name": "rt640x64.sys",
+      "driver_version": "10.79.50.1003",
+      "expected_mac_match": true,
+      "interface_description": "Realtek PCIe 5GbE Family Controller",
+      "link_speed": "2.5 Gbps",
+      "mac_address": "34-5A-60-D7-4C-2C",
+      "name": "Ethernet 2",
+      "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+      "pnp_problem": 0,
+      "pnp_status": "OK",
+      "power_management": {
+        "AllowComputerToTurnOffDevice": 2,
+        "ArpOffload": 2,
+        "D0PacketCoalescing": 0,
+        "DeviceSleepOnDisconnect": 0,
+        "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+        "NSOffload": 2,
+        "Name": "Ethernet 2",
+        "RsnRekeyOffload": 0,
+        "SelectiveSuspend": 2,
+        "WakeOnMagicPacket": 2,
+        "WakeOnPattern": 1
+      },
+      "power_management_error": null,
+      "status": "Up"
+    },
+    "hiber_pages_written": "493279",
+    "hostname": "DESKTOP-G4CFVL1",
+    "hybrid_sleep_observed": true,
+    "last_wake": {
+      "arguments": [
+        "/lastwake"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 0"
+      ]
+    },
+    "marker": {
+      "boot_time_utc": "2026-09-01T12:30:29.5000000Z",
+      "channel_record_ids": {
+        "driver_frameworks": 0,
+        "kernel_pnp_configuration": 2821,
+        "kernel_power_diagnostic": 0,
+        "kernel_power_thermal": 0,
+        "ndis": 0,
+        "pci": 40473,
+        "pnp_device_management": 1761,
+        "pnp_driver_watchdog": 76,
+        "task_maintenance": 684,
+        "usb_ucx": 0,
+        "usb_xhci": 42,
+        "user_pnp_device_install": 831
+      },
+      "fixed_adapter": {
+        "driver_date": "2025-10-03",
+        "driver_file_name": "rt640x64.sys",
+        "driver_version": "10.79.50.1003",
+        "expected_mac_match": true,
+        "interface_description": "Realtek PCIe 5GbE Family Controller",
+        "link_speed": "2.5 Gbps",
+        "mac_address": "34-5A-60-D7-4C-2C",
+        "name": "Ethernet 2",
+        "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+        "pnp_problem": 0,
+        "pnp_status": "OK",
+        "power_management": {
+          "AllowComputerToTurnOffDevice": 2,
+          "ArpOffload": 2,
+          "D0PacketCoalescing": 0,
+          "DeviceSleepOnDisconnect": 0,
+          "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+          "NSOffload": 2,
+          "Name": "Ethernet 2",
+          "RsnRekeyOffload": 0,
+          "SelectiveSuspend": 2,
+          "WakeOnMagicPacket": 2,
+          "WakeOnPattern": 1
+        },
+        "power_management_error": null,
+        "status": "Up"
+      },
+      "hostname": "DESKTOP-G4CFVL1",
+      "marker_time": "2026-09-01T08:56:33.1621013-04:00",
+      "marker_time_utc": "2026-09-01T12:56:33.1636417Z",
+      "phase": "before",
+      "power_requests": {
+        "arguments": [
+          "/requests"
+        ],
+        "exit_code": 0,
+        "output": [
+          "DISPLAY:",
+          "None.",
+          "",
+          "SYSTEM:",
+          "[DRIVER] USB Audio Device (USB\\VID_3142&PID_0C33&MI_00\\7&2525abcb&0&0000)",
+          "An audio stream is currently in use.",
+          "[DRIVER] Legacy Kernel Caller",
+          "",
+          "AWAYMODE:",
+          "None.",
+          "",
+          "EXECUTION:",
+          "[PROCESS] \\Device\\HarddiskVolume5\\Windows\\System32\\WinSAT.exe",
+          "WinSAT Execution",
+          "",
+          "PERFBOOST:",
+          "None.",
+          "",
+          "ACTIVELOCKSCREEN:",
+          "None.",
+          ""
+        ]
+      },
+      "schema_version": 1,
+      "system_record_id": 46911,
+      "task_scheduler_record_id": 0,
+      "usb_selective_suspend_policy": {
+        "arguments": [
+          "/query",
+          "SCHEME_CURRENT",
+          "2a737441-1930-4402-8d77-b2bebba308a3",
+          "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+        ],
+        "exit_code": 0,
+        "output": [
+          "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+          "  GUID Alias: SCHEME_MIN",
+          "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+          "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+          "      Possible Setting Index: 000",
+          "      Possible Setting Friendly Name: Disabled",
+          "      Possible Setting Index: 001",
+          "      Possible Setting Friendly Name: Enabled",
+          "    Current AC Power Setting Index: 0x00000000",
+          "    Current DC Power Setting Index: 0x00000001",
+          ""
+        ]
+      },
+      "wake_armed": {
+        "arguments": [
+          "/devicequery",
+          "wake_armed"
+        ],
+        "exit_code": 0,
+        "output": [
+          "Realtek PCIe 5GbE Family Controller",
+          "HID Keyboard Device (005)",
+          "HID Keyboard Device (016)",
+          ""
+        ]
+      },
+      "wake_timer_policy": {
+        "arguments": [
+          "/query",
+          "SCHEME_CURRENT",
+          "238c9fa8-0aad-41ed-83f4-97be242c8f20",
+          "bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d"
+        ],
+        "exit_code": 0,
+        "output": [
+          "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+          "  GUID Alias: SCHEME_MIN",
+          "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+          "    GUID Alias: SUB_SLEEP",
+          "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+          "      GUID Alias: RTCWAKE",
+          "      Possible Setting Index: 000",
+          "      Possible Setting Friendly Name: Disable",
+          "      Possible Setting Index: 001",
+          "      Possible Setting Friendly Name: Enable",
+          "      Possible Setting Index: 002",
+          "      Possible Setting Friendly Name: Important Wake Timers Only",
+          "    Current AC Power Setting Index: 0x00000001",
+          "    Current DC Power Setting Index: 0x00000001",
+          ""
+        ]
+      },
+      "wake_timers": {
+        "arguments": [
+          "/waketimers"
+        ],
+        "exit_code": 0,
+        "output": [
+          "There are no active wake timers in the system."
+        ]
+      },
+      "windows_update_record_id": 1372,
+      "xhci_topology": {
+        "controllers": [
+          {
+            "children_tree": [
+              {
+                "children": [],
+                "device": {
+                  "class": "USB",
+                  "friendly_name": "USB Root Hub (USB 3.0)",
+                  "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+                  "location_info": null,
+                  "location_paths": [
+                    "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                    "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+                  ],
+                  "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+                  "problem": 0,
+                  "status": "OK"
+                }
+              }
+            ],
+            "direct_children": {
+              "class": "USB",
+              "friendly_name": "USB Root Hub (USB 3.0)",
+              "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+              "location_info": null,
+              "location_paths": [
+                "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+              ],
+              "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+              "problem": 0,
+              "status": "OK"
+            },
+            "found": true,
+            "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+            "instance_id": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0341",
+            "location_info": "PCI bus 122, device 0, function 3",
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0003)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+            "problem": 0,
+            "status": "OK"
+          },
+          {
+            "children_tree": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT06",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT05",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "Mouse",
+                              "friendly_name": "HID-compliant mouse",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_00\\8&1556576B&0&0000",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_00\\7&3aa1cdfc&0&0000",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          }
+                        ],
+                        "device": {
+                          "class": "HIDClass",
+                          "friendly_name": "USB Input Device",
+                          "instance_id": "USB\\VID_046D&PID_C547&MI_00\\7&3AA1CDFC&0&0000",
+                          "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                          "location_paths": [
+                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(0)",
+                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USB(2)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(0)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USB(2)"
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "HIDClass",
+                              "friendly_name": "HID-compliant vendor-defined device",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL02\\8&32582419&0&0001",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          },
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "HIDClass",
+                              "friendly_name": "HID-compliant vendor-defined device",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL01\\8&32582419&0&0000",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          }
+                        ],
+                        "device": {
+                          "class": "HIDClass",
+                          "friendly_name": "USB Input Device",
+                          "instance_id": "USB\\VID_046D&PID_C547&MI_02\\7&3AA1CDFC&0&0002",
+                          "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                          "location_paths": [
+                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(2)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(2)"
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "Keyboard",
+                              "friendly_name": "HID Keyboard Device",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL01\\8&E80E657&0&0000",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          },
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "HIDClass",
+                              "friendly_name": "HID-compliant consumer control device",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL02\\8&E80E657&0&0001",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          },
+                          {
+                            "children": [],
+                            "device": {
+                              "class": "HIDClass",
+                              "friendly_name": "HID-compliant system controller",
+                              "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL03\\8&E80E657&0&0002",
+                              "location_info": null,
+                              "location_paths": [
+                                null
+                              ],
+                              "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                              "problem": 0,
+                              "status": "OK"
+                            }
+                          }
+                        ],
+                        "device": {
+                          "class": "HIDClass",
+                          "friendly_name": "USB Input Device",
+                          "instance_id": "USB\\VID_046D&PID_C547&MI_01\\7&3AA1CDFC&0&0001",
+                          "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                          "location_paths": [
+                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(1)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(1)"
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT01",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT00",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT02",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT04",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      },
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "",
+                          "friendly_name": "LIGHTSPEED Receiver",
+                          "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT03",
+                          "location_info": "LampArray Support Virtual Device",
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      }
+                    ],
+                    "device": {
+                      "class": "USB",
+                      "friendly_name": "LIGHTSPEED Receiver",
+                      "instance_id": "USB\\VID_046D&PID_C547\\6&1DF6E647&0&2",
+                      "location_info": "Port_#0002.Hub_#0006",
+                      "location_paths": [
+                        "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)",
+                        "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)"
+                      ],
+                      "parent": "USB\\ROOT_HUB30\\5&379e5d68&0&0",
+                      "problem": 0,
+                      "status": "OK"
+                    }
+                  }
+                ],
+                "device": {
+                  "class": "USB",
+                  "friendly_name": "USB Root Hub (USB 3.0)",
+                  "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+                  "location_info": null,
+                  "location_paths": [
+                    "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                    "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+                  ],
+                  "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+                  "problem": 0,
+                  "status": "OK"
+                }
+              }
+            ],
+            "direct_children": {
+              "class": "USB",
+              "friendly_name": "USB Root Hub (USB 3.0)",
+              "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+              "location_info": null,
+              "location_paths": [
+                "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+              ],
+              "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+              "problem": 0,
+              "status": "OK"
+            },
+            "found": true,
+            "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+            "instance_id": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0441",
+            "location_info": "PCI bus 122, device 0, function 4",
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0004)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+            "problem": 0,
+            "status": "OK"
+          },
+          {
+            "children_tree": [
+              {
+                "children": [],
+                "device": {
+                  "class": "USB",
+                  "friendly_name": "USB Root Hub (USB 3.0)",
+                  "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+                  "location_info": null,
+                  "location_paths": [
+                    "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                    "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+                  ],
+                  "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+                  "problem": 0,
+                  "status": "OK"
+                }
+              }
+            ],
+            "direct_children": {
+              "class": "USB",
+              "friendly_name": "USB Root Hub (USB 3.0)",
+              "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+              "location_info": null,
+              "location_paths": [
+                "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+              ],
+              "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+              "problem": 0,
+              "status": "OK"
+            },
+            "found": true,
+            "friendly_name": "AMD USB 2.0 eXtensible Host Controller - 1.20 (Microsoft)",
+            "instance_id": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5D6807C&0&0043",
+            "location_info": "PCI bus 123, device 0, function 0",
+            "location_paths": [
+              "PCIROOT(0)#PCI(0803)#PCI(0000)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&43",
+            "problem": 0,
+            "status": "OK"
+          },
+          {
+            "children_tree": [
+              {
+                "children": [
+                  {
+                    "children": [
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "HIDClass",
+                          "friendly_name": "HID-compliant vendor-defined device",
+                          "instance_id": "HID\\VID_0DB0&PID_0076\\B&24677F26&0&0000",
+                          "location_info": null,
+                          "location_paths": [
+                            null
+                          ],
+                          "parent": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      }
+                    ],
+                    "device": {
+                      "class": "HIDClass",
+                      "friendly_name": "USB Input Device",
+                      "instance_id": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                      "location_info": "Port_#0013.Hub_#0003",
+                      "location_paths": [
+                        "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(13)",
+                        "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(13)"
+                      ],
+                      "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                      "problem": 0,
+                      "status": "OK"
+                    }
+                  },
+                  {
+                    "children": [
+                      {
+                        "children": [],
+                        "device": {
+                          "class": "Ports",
+                          "friendly_name": "USB Serial Device (COM3)",
+                          "instance_id": "USB\\VID_1D6B&PID_0112&MI_00\\B&201CBBE&0&0000",
+                          "location_info": "0012.0000.0000.015.000.000.000.000.000",
+                          "location_paths": [
+                            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USBMI(0)",
+                            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USB(15)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USBMI(0)",
+                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USB(15)"
+                          ],
+                          "parent": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                          "problem": 0,
+                          "status": "OK"
+                        }
+                      }
+                    ],
+                    "device": {
+                      "class": "USB",
+                      "friendly_name": "USB Composite Device",
+                      "instance_id": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                      "location_info": "Port_#0015.Hub_#0003",
+                      "location_paths": [
+                        "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)",
+                        "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)"
+                      ],
+                      "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                      "problem": 0,
+                      "status": "OK"
+                    }
+                  }
+                ],
+                "device": {
+                  "class": "USB",
+                  "friendly_name": "USB Root Hub (USB 3.0)",
+                  "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+                  "location_info": null,
+                  "location_paths": [
+                    "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                    "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+                  ],
+                  "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+                  "problem": 0,
+                  "status": "OK"
+                }
+              }
+            ],
+            "direct_children": {
+              "class": "USB",
+              "friendly_name": "USB Root Hub (USB 3.0)",
+              "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+              "location_info": null,
+              "location_paths": [
+                "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+              ],
+              "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+              "problem": 0,
+              "status": "OK"
+            },
+            "found": true,
+            "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.10 (Microsoft)",
+            "instance_id": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&E99A29B&0&006000400011",
+            "location_info": "PCI bus 18, device 0, function 0",
+            "location_paths": [
+              "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_43F5&SUBSYS_33281B21&REV_01\\7&2a80eed7&0&6000400011",
+            "problem": 0,
+            "status": "OK"
+          }
+        ],
+        "present_pnp_count": 304,
+        "unhealthy_devices": []
+      }
+    },
+    "ndis_errors": [],
+    "phase": "after",
+    "power_requests": {
+      "arguments": [
+        "/requests"
+      ],
+      "exit_code": 0,
+      "output": [
+        "DISPLAY:",
+        "None.",
+        "",
+        "SYSTEM:",
+        "None.",
+        "",
+        "AWAYMODE:",
+        "None.",
+        "",
+        "EXECUTION:",
+        "None.",
+        "",
+        "PERFBOOST:",
+        "[DRIVER] Legacy Kernel Caller",
+        "Power Manager",
+        "",
+        "ACTIVELOCKSCREEN:",
+        "None.",
+        ""
+      ]
+    },
+    "power_troubleshooter_event": {
+      "event_data": {
+        "Attributes": "1979728129",
+        "BiosInitDuration": "4173",
+        "CheckpointDuration": "56",
+        "DriverInitDuration": "7827",
+        "EffectiveState": "5",
+        "HiberPagesWritten": "493279",
+        "HiberReadDuration": "0",
+        "HiberWriteDuration": "1401",
+        "NoMultiStageResumeReason": "0",
+        "SleepDuration": "2540",
+        "SleepTime": "2026-09-01T12:57:49.6578788Z",
+        "TargetState": "4",
+        "WakeDuration": "8148",
+        "WakeSourceText": "",
+        "WakeSourceTextLength": "0",
+        "WakeSourceType": "0",
+        "WakeTime": "2026-09-01T12:58:14.6485212Z",
+        "WakeTimerContext": "",
+        "WakeTimerContextLength": "0",
+        "WakeTimerOwner": "",
+        "WakeTimerOwnerLength": "0"
+      },
+      "event_id": 1,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system has returned from a low power state.\r\n\r\nSleep Time: ?2026?-?09?-?01T12:57:49.657878800Z\r\nWake Time: ?2026?-?09?-?01T12:58:14.648521200Z\r\n\r\nWake Source: Unknown",
+      "provider": "Microsoft-Windows-Power-Troubleshooter",
+      "record_id": 46932,
+      "time_created": "2026-09-01T08:58:15.3524568-04:00",
+      "time_created_utc": "2026-09-01T12:58:15.3524568Z"
+    },
+    "realtek_errors": [],
+    "rebooted_instead": false,
+    "resume_event": {
+      "event_data": {
+        "EffectiveState": "5",
+        "ProgrammedWakeTimeAc": "1601-01-01T00:00:00.0000000Z",
+        "ProgrammedWakeTimeDc": "1601-01-01T00:00:00.0000000Z",
+        "TargetState": "4",
+        "WakeFromState": "4",
+        "WakeRequesterTypeAc": "0",
+        "WakeRequesterTypeDc": "0"
+      },
+      "event_id": 107,
+      "level": "Information",
+      "log_name": "System",
+      "message": "The system has resumed from sleep.",
+      "provider": "Microsoft-Windows-Kernel-Power",
+      "record_id": 46918,
+      "time_created": "2026-09-01T08:57:54.6713821-04:00",
+      "time_created_utc": "2026-09-01T12:57:54.6713821Z"
+    },
+    "resume_initiation_time_utc": "2026-09-01T12:58:06.5000000Z",
+    "schema_version": 1,
+    "system_events": [
+      {
+        "event_data": {
+          "Attributes": "1979728129",
+          "BiosInitDuration": "4173",
+          "CheckpointDuration": "56",
+          "DriverInitDuration": "7827",
+          "EffectiveState": "5",
+          "HiberPagesWritten": "493279",
+          "HiberReadDuration": "0",
+          "HiberWriteDuration": "1401",
+          "NoMultiStageResumeReason": "0",
+          "SleepDuration": "2540",
+          "SleepTime": "2026-09-01T12:57:49.6578788Z",
+          "TargetState": "4",
+          "WakeDuration": "8148",
+          "WakeSourceText": "",
+          "WakeSourceTextLength": "0",
+          "WakeSourceType": "0",
+          "WakeTime": "2026-09-01T12:58:14.6485212Z",
+          "WakeTimerContext": "",
+          "WakeTimerContextLength": "0",
+          "WakeTimerOwner": "",
+          "WakeTimerOwnerLength": "0"
+        },
+        "event_id": 1,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system has returned from a low power state.\r\n\r\nSleep Time: ?2026?-?09?-?01T12:57:49.657878800Z\r\nWake Time: ?2026?-?09?-?01T12:58:14.648521200Z\r\n\r\nWake Source: Unknown",
+        "provider": "Microsoft-Windows-Power-Troubleshooter",
+        "record_id": 46932,
+        "time_created": "2026-09-01T08:58:15.3524568-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.3524568Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,3,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46931,
+        "time_created": "2026-09-01T08:58:15.2503768-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.2503768Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,2,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46930,
+        "time_created": "2026-09-01T08:58:15.2503768-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.2503768Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,1,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46929,
+        "time_created": "2026-09-01T08:58:15.2503768-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.2503768Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,0,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46928,
+        "time_created": "2026-09-01T08:58:15.2503768-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.2503768Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (22,0,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46927,
+        "time_created": "2026-09-01T08:58:15.2426293-04:00",
+        "time_created_utc": "2026-09-01T12:58:15.2426293Z"
+      },
+      {
+        "event_data": {
+          "BootId": "210",
+          "MonitorReason": "1",
+          "NextSessionId": "4",
+          "NextSessionType": "0",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "404698",
+          "PreviousSessionId": "2",
+          "PreviousSessionType": "1",
+          "Reason": "1"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 2 to 4.\r\n\r\nReason Unknown \r\n\r\nBootId: 210",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46926,
+        "time_created": "2026-09-01T08:58:14.7335967-04:00",
+        "time_created_utc": "2026-09-01T12:58:14.7335967Z"
+      },
+      {
+        "event_data": {
+          "BootId": "210",
+          "MonitorReason": "20",
+          "NextSessionId": "2",
+          "NextSessionType": "1",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "24670584",
+          "PreviousSessionId": "1",
+          "PreviousSessionType": "3",
+          "Reason": "20"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 1 to 2.\r\n\r\nReason SxTransition \r\n\r\nBootId: 210",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46925,
+        "time_created": "2026-09-01T08:58:14.3286931-04:00",
+        "time_created_utc": "2026-09-01T12:58:14.3286931Z"
+      },
+      {
+        "event_data": {
+          "index_0": ""
+        },
+        "event_id": 18,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Windows cannot store Bluetooth authentication codes (link keys) on the local adapter. Bluetooth keyboards might not work in the system BIOS during startup.",
+        "provider": "BTHUSB",
+        "record_id": 46924,
+        "time_created": "2026-09-01T08:58:10.1434119-04:00",
+        "time_created_utc": "2026-09-01T12:58:10.1434119Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,3,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46923,
+        "time_created": "2026-09-01T08:58:06.9937780-04:00",
+        "time_created_utc": "2026-09-01T12:58:06.9937780Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (22,0,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46922,
+        "time_created": "2026-09-01T08:58:06.6419104-04:00",
+        "time_created_utc": "2026-09-01T12:58:06.6419104Z"
+      },
+      {
+        "event_data": {
+          "SuspendEnd": "1716944",
+          "SuspendStart": "1716943"
+        },
+        "event_id": 130,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Firmware S3 times. SuspendStart: 1716943, SuspendEnd: 1716944",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46921,
+        "time_created": "2026-09-01T08:58:06.5002583-04:00",
+        "time_created_utc": "2026-09-01T12:58:06.5002583Z"
+      },
+      {
+        "event_data": {
+          "AverageResume": "3950",
+          "FullResume": "3950",
+          "ResumeCount": "1"
+        },
+        "event_id": 131,
+        "level": "Information",
+        "log_name": "System",
+        "message": "Firmware S3 times. ResumeCount: 1, FullResume: 3950, AverageResume: 3950",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46920,
+        "time_created": "2026-09-01T08:58:06.5002575-04:00",
+        "time_created_utc": "2026-09-01T12:58:06.5002575Z"
+      },
+      {
+        "event_data": {
+          "CmosTime": "2026-09-01T08:58:06.5000000Z",
+          "NewTime": "2026-09-01T12:58:06.5000000Z",
+          "OldTime": "2026-09-01T12:57:54.6709418Z",
+          "ProcessID": "4",
+          "ProcessName": "",
+          "RealTimeIsUniversal": "false",
+          "Reason": "2",
+          "SystemInCmosMode": "false",
+          "TimeDeltaInMs": "11829",
+          "TimeZoneBias": "240"
+        },
+        "event_id": 1,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system time has changed to ?2026?-?09?-?01T12:58:06.500000000Z from ?2026?-?09?-?01T12:57:54.670941800Z.\r\nTime Delta: 11829 ms\r\n\r\nChange Reason: System time synchronized with the hardware clock.\r\nProcess: '' (PID 4).\r\n\r\nRTC time: ?2026?-?09?-?01T08:58:06.500000000Z\r\nCurrent time zone bias: 240\r\nRTC time is in UTC: false\r\nSystem time was based on RTC time: false",
+        "provider": "Microsoft-Windows-Kernel-General",
+        "record_id": 46919,
+        "time_created": "2026-09-01T08:58:06.5002417-04:00",
+        "time_created_utc": "2026-09-01T12:58:06.5002417Z"
+      },
+      {
+        "event_data": {
+          "EffectiveState": "5",
+          "ProgrammedWakeTimeAc": "1601-01-01T00:00:00.0000000Z",
+          "ProgrammedWakeTimeDc": "1601-01-01T00:00:00.0000000Z",
+          "TargetState": "4",
+          "WakeFromState": "4",
+          "WakeRequesterTypeAc": "0",
+          "WakeRequesterTypeDc": "0"
+        },
+        "event_id": 107,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system has resumed from sleep.",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46918,
+        "time_created": "2026-09-01T08:57:54.6713821-04:00",
+        "time_created_utc": "2026-09-01T12:57:54.6713821Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,1,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46917,
+        "time_created": "2026-09-01T08:57:52.5907274-04:00",
+        "time_created_utc": "2026-09-01T12:57:52.5907274Z"
+      },
+      {
+        "event_data": {
+          "index_0": "",
+          "index_1": "",
+          "index_2": "",
+          "index_3": ""
+        },
+        "event_id": 8198,
+        "level": "Warning",
+        "log_name": "System",
+        "message": " Found an unknown bridge with advanced resource distribution enabled. (23,0,0) status = 0",
+        "provider": "nipcibrd",
+        "record_id": 46916,
+        "time_created": "2026-09-01T08:57:52.4524266-04:00",
+        "time_created_utc": "2026-09-01T12:57:52.4524266Z"
+      },
+      {
+        "event_data": {
+          "EffectiveState": "5",
+          "Flags": "0",
+          "Reason": "4",
+          "TargetState": "4",
+          "TransitionsToOn": "1"
+        },
+        "event_id": 42,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system is entering sleep.\r\n\r\nSleep Reason: Application API",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46915,
+        "time_created": "2026-09-01T08:57:51.5376039-04:00",
+        "time_created_utc": "2026-09-01T12:57:51.5376039Z"
+      },
+      {
+        "event_data": {
+          "BootId": "210",
+          "MonitorReason": "17",
+          "NextSessionId": "1",
+          "NextSessionType": "3",
+          "PowerStateAc": "true",
+          "PreviousEnergyCapacityAtEnd": "0",
+          "PreviousEnergyCapacityAtStart": "0",
+          "PreviousFullEnergyCapacityAtEnd": "0",
+          "PreviousFullEnergyCapacityAtStart": "0",
+          "PreviousSessionDurationInUs": "1640158177",
+          "PreviousSessionId": "0",
+          "PreviousSessionType": "0",
+          "Reason": "17"
+        },
+        "event_id": 566,
+        "level": "Information",
+        "log_name": "System",
+        "message": "The system session has transitioned from 0 to 1.\r\n\r\nReason ScreenOffGracePeriod \r\n\r\nBootId: 210",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46913,
+        "time_created": "2026-09-01T08:57:49.6581236-04:00",
+        "time_created_utc": "2026-09-01T12:57:49.6581236Z"
+      },
+      {
+        "event_data": {
+          "ApiCallerName": "\\Device\\HarddiskVolume5\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+          "ApiCallerNameLength": "78",
+          "LightestSystemState": "2",
+          "SystemAction": "2"
+        },
+        "event_id": 187,
+        "level": "Information",
+        "log_name": "System",
+        "message": "User-mode process attempted to change the system state by calling SetSuspendState or SetSystemPowerState APIs.",
+        "provider": "Microsoft-Windows-Kernel-Power",
+        "record_id": 46912,
+        "time_created": "2026-09-01T08:57:49.6577599-04:00",
+        "time_created_utc": "2026-09-01T12:57:49.6577599Z"
+      }
+    ],
+    "target_state": "4",
+    "task_scheduler_events": [],
+    "task_scheduler_log_state": "disabled",
+    "usb_errors": [],
+    "usb_selective_suspend_policy": {
+      "arguments": [
+        "/query",
+        "SCHEME_CURRENT",
+        "2a737441-1930-4402-8d77-b2bebba308a3",
+        "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+        "  GUID Alias: SCHEME_MIN",
+        "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+        "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+        "      Possible Setting Index: 000",
+        "      Possible Setting Friendly Name: Disabled",
+        "      Possible Setting Index: 001",
+        "      Possible Setting Friendly Name: Enabled",
+        "    Current AC Power Setting Index: 0x00000000",
+        "    Current DC Power Setting Index: 0x00000001",
+        ""
+      ]
+    },
+    "wake_armed": {
+      "arguments": [
+        "/devicequery",
+        "wake_armed"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Realtek PCIe 5GbE Family Controller",
+        "HID Keyboard Device (005)",
+        "HID Keyboard Device (016)",
+        ""
+      ]
+    },
+    "wake_from_state": "4",
+    "wake_source": "Unknown",
+    "wake_timer_policy": {
+      "arguments": [
+        "/query",
+        "SCHEME_CURRENT",
+        "238c9fa8-0aad-41ed-83f4-97be242c8f20",
+        "bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+        "  GUID Alias: SCHEME_MIN",
+        "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+        "    GUID Alias: SUB_SLEEP",
+        "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+        "      GUID Alias: RTCWAKE",
+        "      Possible Setting Index: 000",
+        "      Possible Setting Friendly Name: Disable",
+        "      Possible Setting Index: 001",
+        "      Possible Setting Friendly Name: Enable",
+        "      Possible Setting Index: 002",
+        "      Possible Setting Friendly Name: Important Wake Timers Only",
+        "    Current AC Power Setting Index: 0x00000001",
+        "    Current DC Power Setting Index: 0x00000001",
+        ""
+      ]
+    },
+    "wake_timers": {
+      "arguments": [
+        "/waketimers"
+      ],
+      "exit_code": 0,
+      "output": [
+        "There are no active wake timers in the system."
+      ]
+    },
+    "windows_resume_time_utc": "2026-09-01T12:58:14.6485212Z",
+    "windows_sleep_time_utc": "2026-09-01T12:57:49.6578788Z",
+    "windows_update_events": [],
+    "windows_update_log_state": "enabled",
+    "xhci_topology": {
+      "controllers": [
+        {
+          "children_tree": [
+            {
+              "children": [],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0341",
+          "location_info": "PCI bus 122, device 0, function 3",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0801)#PCI(0003)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT06",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT05",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "Mouse",
+                            "friendly_name": "HID-compliant mouse",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_00\\8&1556576B&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_00\\7&3aa1cdfc&0&0000",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_00\\7&3AA1CDFC&0&0000",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(0)",
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USB(2)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(0)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USB(2)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant vendor-defined device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL02\\8&32582419&0&0001",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant vendor-defined device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL01\\8&32582419&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_02\\7&3AA1CDFC&0&0002",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(2)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(2)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "Keyboard",
+                            "friendly_name": "HID Keyboard Device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL01\\8&E80E657&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant consumer control device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL02\\8&E80E657&0&0001",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant system controller",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL03\\8&E80E657&0&0002",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_01\\7&3AA1CDFC&0&0001",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(1)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(1)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT01",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT00",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT02",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT04",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT03",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "USB",
+                    "friendly_name": "LIGHTSPEED Receiver",
+                    "instance_id": "USB\\VID_046D&PID_C547\\6&1DF6E647&0&2",
+                    "location_info": "Port_#0002.Hub_#0006",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\5&379e5d68&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                }
+              ],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0441",
+          "location_info": "PCI bus 122, device 0, function 4",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0801)#PCI(0004)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 2.0 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5D6807C&0&0043",
+          "location_info": "PCI bus 123, device 0, function 0",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0803)#PCI(0000)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&43",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "HID-compliant vendor-defined device",
+                        "instance_id": "HID\\VID_0DB0&PID_0076\\B&24677F26&0&0000",
+                        "location_info": null,
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "HIDClass",
+                    "friendly_name": "USB Input Device",
+                    "instance_id": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                    "location_info": "Port_#0013.Hub_#0003",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(13)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(13)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "Ports",
+                        "friendly_name": "USB Serial Device (COM3)",
+                        "instance_id": "USB\\VID_1D6B&PID_0112&MI_00\\B&201CBBE&0&0000",
+                        "location_info": "0012.0000.0000.015.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USBMI(0)",
+                          "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USB(15)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USBMI(0)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USB(15)"
+                        ],
+                        "parent": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "USB",
+                    "friendly_name": "USB Composite Device",
+                    "instance_id": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                    "location_info": "Port_#0015.Hub_#0003",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                }
+              ],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.10 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&E99A29B&0&006000400011",
+          "location_info": "PCI bus 18, device 0, function 0",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_43F5&SUBSYS_33281B21&REV_01\\7&2a80eed7&0&6000400011",
+          "problem": 0,
+          "status": "OK"
+        }
+      ],
+      "present_pnp_count": 304,
+      "unhealthy_devices": []
+    }
+  },
+  "before_evidence": {
+    "boot_time_utc": "2026-09-01T12:30:29.5000000Z",
+    "channel_record_ids": {
+      "driver_frameworks": 0,
+      "kernel_pnp_configuration": 2821,
+      "kernel_power_diagnostic": 0,
+      "kernel_power_thermal": 0,
+      "ndis": 0,
+      "pci": 40473,
+      "pnp_device_management": 1761,
+      "pnp_driver_watchdog": 76,
+      "task_maintenance": 684,
+      "usb_ucx": 0,
+      "usb_xhci": 42,
+      "user_pnp_device_install": 831
+    },
+    "fixed_adapter": {
+      "driver_date": "2025-10-03",
+      "driver_file_name": "rt640x64.sys",
+      "driver_version": "10.79.50.1003",
+      "expected_mac_match": true,
+      "interface_description": "Realtek PCIe 5GbE Family Controller",
+      "link_speed": "2.5 Gbps",
+      "mac_address": "34-5A-60-D7-4C-2C",
+      "name": "Ethernet 2",
+      "pnp_device_id": "PCI\\VEN_10EC&DEV_8126&SUBSYS_7E701462&REV_01\\01000000684CE00000",
+      "pnp_problem": 0,
+      "pnp_status": "OK",
+      "power_management": {
+        "AllowComputerToTurnOffDevice": 2,
+        "ArpOffload": 2,
+        "D0PacketCoalescing": 0,
+        "DeviceSleepOnDisconnect": 0,
+        "InterfaceDescription": "Realtek PCIe 5GbE Family Controller",
+        "NSOffload": 2,
+        "Name": "Ethernet 2",
+        "RsnRekeyOffload": 0,
+        "SelectiveSuspend": 2,
+        "WakeOnMagicPacket": 2,
+        "WakeOnPattern": 1
+      },
+      "power_management_error": null,
+      "status": "Up"
+    },
+    "hostname": "DESKTOP-G4CFVL1",
+    "marker_time": "2026-09-01T08:56:33.1621013-04:00",
+    "marker_time_utc": "2026-09-01T12:56:33.1636417Z",
+    "phase": "before",
+    "power_requests": {
+      "arguments": [
+        "/requests"
+      ],
+      "exit_code": 0,
+      "output": [
+        "DISPLAY:",
+        "None.",
+        "",
+        "SYSTEM:",
+        "[DRIVER] USB Audio Device (USB\\VID_3142&PID_0C33&MI_00\\7&2525abcb&0&0000)",
+        "An audio stream is currently in use.",
+        "[DRIVER] Legacy Kernel Caller",
+        "",
+        "AWAYMODE:",
+        "None.",
+        "",
+        "EXECUTION:",
+        "[PROCESS] \\Device\\HarddiskVolume5\\Windows\\System32\\WinSAT.exe",
+        "WinSAT Execution",
+        "",
+        "PERFBOOST:",
+        "None.",
+        "",
+        "ACTIVELOCKSCREEN:",
+        "None.",
+        ""
+      ]
+    },
+    "schema_version": 1,
+    "system_record_id": 46911,
+    "task_scheduler_record_id": 0,
+    "usb_selective_suspend_policy": {
+      "arguments": [
+        "/query",
+        "SCHEME_CURRENT",
+        "2a737441-1930-4402-8d77-b2bebba308a3",
+        "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+        "  GUID Alias: SCHEME_MIN",
+        "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+        "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+        "      Possible Setting Index: 000",
+        "      Possible Setting Friendly Name: Disabled",
+        "      Possible Setting Index: 001",
+        "      Possible Setting Friendly Name: Enabled",
+        "    Current AC Power Setting Index: 0x00000000",
+        "    Current DC Power Setting Index: 0x00000001",
+        ""
+      ]
+    },
+    "wake_armed": {
+      "arguments": [
+        "/devicequery",
+        "wake_armed"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Realtek PCIe 5GbE Family Controller",
+        "HID Keyboard Device (005)",
+        "HID Keyboard Device (016)",
+        ""
+      ]
+    },
+    "wake_timer_policy": {
+      "arguments": [
+        "/query",
+        "SCHEME_CURRENT",
+        "238c9fa8-0aad-41ed-83f4-97be242c8f20",
+        "bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d"
+      ],
+      "exit_code": 0,
+      "output": [
+        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+        "  GUID Alias: SCHEME_MIN",
+        "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+        "    GUID Alias: SUB_SLEEP",
+        "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+        "      GUID Alias: RTCWAKE",
+        "      Possible Setting Index: 000",
+        "      Possible Setting Friendly Name: Disable",
+        "      Possible Setting Index: 001",
+        "      Possible Setting Friendly Name: Enable",
+        "      Possible Setting Index: 002",
+        "      Possible Setting Friendly Name: Important Wake Timers Only",
+        "    Current AC Power Setting Index: 0x00000001",
+        "    Current DC Power Setting Index: 0x00000001",
+        ""
+      ]
+    },
+    "wake_timers": {
+      "arguments": [
+        "/waketimers"
+      ],
+      "exit_code": 0,
+      "output": [
+        "There are no active wake timers in the system."
+      ]
+    },
+    "windows_update_record_id": 1372,
+    "xhci_topology": {
+      "controllers": [
+        {
+          "children_tree": [
+            {
+              "children": [],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&2DEA0A27&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0341",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B6&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0341",
+          "location_info": "PCI bus 122, device 0, function 3",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0801)#PCI(0003)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT06",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT05",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "Mouse",
+                            "friendly_name": "HID-compliant mouse",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_00\\8&1556576B&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_00\\7&3aa1cdfc&0&0000",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_00\\7&3AA1CDFC&0&0000",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(0)",
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USB(2)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(0)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USB(2)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant vendor-defined device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL02\\8&32582419&0&0001",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant vendor-defined device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_02&COL01\\8&32582419&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_02\\7&3aa1cdfc&0&0002",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_02\\7&3AA1CDFC&0&0002",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(2)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(2)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "Keyboard",
+                            "friendly_name": "HID Keyboard Device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL01\\8&E80E657&0&0000",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant consumer control device",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL02\\8&E80E657&0&0001",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        },
+                        {
+                          "children": [],
+                          "device": {
+                            "class": "HIDClass",
+                            "friendly_name": "HID-compliant system controller",
+                            "instance_id": "HID\\VID_046D&PID_C547&MI_01&COL03\\8&E80E657&0&0002",
+                            "location_info": null,
+                            "location_paths": [
+                              null
+                            ],
+                            "parent": "USB\\VID_046D&PID_C547&MI_01\\7&3aa1cdfc&0&0001",
+                            "problem": 0,
+                            "status": "OK"
+                          }
+                        }
+                      ],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "USB Input Device",
+                        "instance_id": "USB\\VID_046D&PID_C547&MI_01\\7&3AA1CDFC&0&0001",
+                        "location_info": "007a.0000.0004.002.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(1)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(1)"
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT01",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT00",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT02",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT04",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    },
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "",
+                        "friendly_name": "LIGHTSPEED Receiver",
+                        "instance_id": "USB\\VID_046D&PID_C547&LAMPARRAY\\7&3AA1CDFC&0&2_SLOT03",
+                        "location_info": "LampArray Support Virtual Device",
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_046D&PID_C547\\6&1df6e647&0&2",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "USB",
+                    "friendly_name": "LIGHTSPEED Receiver",
+                    "instance_id": "USB\\VID_046D&PID_C547\\6&1DF6E647&0&2",
+                    "location_info": "Port_#0002.Hub_#0006",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\5&379e5d68&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                }
+              ],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&379E5D68&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2b49e1c6&0&0441",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B7&SUBSYS_7E701462&REV_00\\4&2B49E1C6&0&0441",
+          "location_info": "PCI bus 122, device 0, function 4",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0801)#PCI(0004)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&41",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\5&BFD7108&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5d6807c&0&0043",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 2.0 eXtensible Host Controller - 1.20 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_15B8&SUBSYS_7E701462&REV_00\\4&5D6807C&0&0043",
+          "location_info": "PCI bus 123, device 0, function 0",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0803)#PCI(0000)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_14DD&SUBSYS_14627E70&REV_00\\3&11583659&0&43",
+          "problem": 0,
+          "status": "OK"
+        },
+        {
+          "children_tree": [
+            {
+              "children": [
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "HIDClass",
+                        "friendly_name": "HID-compliant vendor-defined device",
+                        "instance_id": "HID\\VID_0DB0&PID_0076\\B&24677F26&0&0000",
+                        "location_info": null,
+                        "location_paths": [
+                          null
+                        ],
+                        "parent": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "HIDClass",
+                    "friendly_name": "USB Input Device",
+                    "instance_id": "USB\\VID_0DB0&PID_0076\\7E7025010901",
+                    "location_info": "Port_#0013.Hub_#0003",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(13)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(13)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                },
+                {
+                  "children": [
+                    {
+                      "children": [],
+                      "device": {
+                        "class": "Ports",
+                        "friendly_name": "USB Serial Device (COM3)",
+                        "instance_id": "USB\\VID_1D6B&PID_0112&MI_00\\B&201CBBE&0&0000",
+                        "location_info": "0012.0000.0000.015.000.000.000.000.000",
+                        "location_paths": [
+                          "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USBMI(0)",
+                          "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USB(15)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USBMI(0)",
+                          "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USB(15)"
+                        ],
+                        "parent": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                        "problem": 0,
+                        "status": "OK"
+                      }
+                    }
+                  ],
+                  "device": {
+                    "class": "USB",
+                    "friendly_name": "USB Composite Device",
+                    "instance_id": "USB\\VID_1D6B&PID_0112\\0123456789ABCDEF",
+                    "location_info": "Port_#0015.Hub_#0003",
+                    "location_paths": [
+                      "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)",
+                      "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)"
+                    ],
+                    "parent": "USB\\ROOT_HUB30\\9&2ec1b4c8&0&0",
+                    "problem": 0,
+                    "status": "OK"
+                  }
+                }
+              ],
+              "device": {
+                "class": "USB",
+                "friendly_name": "USB Root Hub (USB 3.0)",
+                "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+                "location_info": null,
+                "location_paths": [
+                  "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+                ],
+                "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+                "problem": 0,
+                "status": "OK"
+              }
+            }
+          ],
+          "direct_children": {
+            "class": "USB",
+            "friendly_name": "USB Root Hub (USB 3.0)",
+            "instance_id": "USB\\ROOT_HUB30\\9&2EC1B4C8&0&0",
+            "location_info": null,
+            "location_paths": [
+              "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+              "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+            ],
+            "parent": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&e99a29b&0&006000400011",
+            "problem": 0,
+            "status": "OK"
+          },
+          "found": true,
+          "friendly_name": "AMD USB 3.10 eXtensible Host Controller - 1.10 (Microsoft)",
+          "instance_id": "PCI\\VEN_1022&DEV_43FD&SUBSYS_11421B21&REV_01\\8&E99A29B&0&006000400011",
+          "location_info": "PCI bus 18, device 0, function 0",
+          "location_paths": [
+            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)",
+            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)"
+          ],
+          "parent": "PCI\\VEN_1022&DEV_43F5&SUBSYS_33281B21&REV_01\\7&2a80eed7&0&6000400011",
+          "problem": 0,
+          "status": "OK"
+        }
+      ],
+      "present_pnp_count": 304,
+      "unhealthy_devices": []
+    }
+  },
+  "clean_cycle": false,
+  "configuration_change": "usb_selective_suspend_ac_disabled",
+  "confirmed_offline_time": "2026-09-01T12:57:58.533Z",
+  "cycle_id": "usb_selective_suspend_isolation-20260901T124757Z-01",
+  "cycle_index": 1,
+  "cycle_started_time": "2026-09-01T12:47:57.613Z",
+  "device_error": false,
+  "entered_s3": true,
+  "experiment_stage": "usb_selective_suspend_isolation",
+  "hybrid_sleep_observed": true,
+  "last_observed_online_time": "2026-09-01T12:57:53.504Z",
+  "ndis_error": false,
+  "network_healthy": true,
+  "network_latency": null,
+  "network_return_time": "2026-09-01T12:58:23.563Z",
+  "nic_wake_armed": true,
+  "notes": "",
+  "physical_wake_request_time": null,
+  "post_sleep_network_silence_seconds": 0.0,
+  "pure_s3": false,
+  "quiet_window_observed_seconds": 24.01,
+  "quiet_window_seconds": 300,
+  "rebooted_instead": false,
+  "resume_initiation_time": "2026-09-01T12:58:06.5000000Z",
+  "rt640x64_error": false,
+  "scheduled_task_correlation": "unavailable_log_disabled",
+  "schema_version": 1,
+  "sleep_request_ack_time": "2026-09-01T12:57:49.456Z",
+  "sleep_request_time": "2026-09-01T12:57:48.663Z",
+  "spontaneous_resume": true,
+  "spontaneous_resume_time": "2026-09-01T12:58:23.563Z",
+  "ssh_healthy": true,
+  "ssh_latency": null,
+  "ssh_return_time": "2026-09-01T12:58:24.150Z",
+  "stop_reason": "spontaneous_non_wol_resume",
+  "usb_error": false,
+  "wake_source": "Unknown",
+  "windows_resume_time": "2026-09-01T12:58:14.6485212Z",
+  "wol_causal_evidence": "no_wol_sent",
+  "wol_count": 0,
+  "wol_sent": false,
+  "wol_time": null
+}

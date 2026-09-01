@@ -66,6 +66,8 @@ MODE_PROFILES: dict[str, tuple[int, ...]] = {
     "no_wol_isolation": (300,),
     "no_wake_sources_isolation": (300,),
     "silent_network_isolation": (300,),
+    "usb_selective_suspend_isolation": (300,),
+    "wake_timer_policy_isolation": (300,),
 }
 
 PHYSICAL_RECOVERY_MODES = {
@@ -257,7 +259,7 @@ def sleep_until(deadline: float) -> None:
 
 
 def collect_before() -> dict[str, Any]:
-    result = ssh(BEFORE_COMMAND, timeout=30.0)
+    result = ssh(BEFORE_COMMAND, timeout=180.0)
     if result.returncode != 0:
         raise RuntimeError(f"before collector failed: {result.stderr.strip()[:500]}")
     return parse_json_output(result.stdout)
@@ -267,7 +269,7 @@ def collect_after() -> dict[str, Any]:
     # A real cycle produced a 63-second display-driver resume while networking
     # and authenticated SSH were already available.  Give Windows time to finish
     # logging that failure rather than killing the evidence collector mid-resume.
-    result = ssh(AFTER_COMMAND, timeout=120.0)
+    result = ssh(AFTER_COMMAND, timeout=240.0)
     if result.returncode != 0:
         raise RuntimeError(f"after collector failed: {result.stderr.strip()[:500]}")
     return parse_json_output(result.stdout)
