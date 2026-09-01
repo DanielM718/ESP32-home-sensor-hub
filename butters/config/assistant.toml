@@ -25,6 +25,11 @@ wake_enabled = true
 # switches. The root broker retains a separate, default-off gate for each.
 headless_enabled = true
 monitors_enabled = true
+# Fixed Parsec support is present in source but remains disabled until the
+# reviewed feature branch and Windows helper are deployed together.
+parsec_status_enabled = false
+parsec_ensure_enabled = false
+parsec_restart_enabled = false
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false

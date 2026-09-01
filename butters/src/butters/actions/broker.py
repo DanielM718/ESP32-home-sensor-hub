@@ -51,6 +51,9 @@ class BrokerOperation(str, Enum):
     DESKTOP_WAKE = "desktop.wake"
     DESKTOP_MONITORS_OFF = "desktop.monitors_off"
     DESKTOP_MONITORS_ON = "desktop.monitors_on"
+    DESKTOP_PARSEC_STATUS = "desktop.parsec_status"
+    DESKTOP_PARSEC_ENSURE = "desktop.parsec_ensure"
+    DESKTOP_PARSEC_RESTART = "desktop.parsec_restart"
     DESKTOP_LOCK = "desktop.lock"
     DESKTOP_SLEEP = "desktop.sleep"
     DESKTOP_RESTART = "desktop.restart"
@@ -65,6 +68,16 @@ class BrokerOperation(str, Enum):
     DEHUMIDIFIER_OFF = "environment.dehumidifier_off"
     VENTILATION_ON = "environment.ventilation_on"
     VENTILATION_OFF = "environment.ventilation_off"
+
+
+class _DesktopControlOperation(str, Enum):
+    PARSEC_STATUS = "ParsecStatus"
+    PARSEC_ENSURE = "ParsecEnsure"
+    PARSEC_RESTART = "ParsecRestart"
+    LOCK = "Lock"
+    SLEEP = "Sleep"
+    RESTART = "Restart"
+    SHUTDOWN = "Shutdown"
 
 
 class BrokerError(RuntimeError):
@@ -87,9 +100,11 @@ class BrokerClient:
         settings: BrokerSettings,
         *,
         connector: Callable[..., socket.socket] = socket.socket,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self.connector = connector
+        self.monotonic = monotonic
 
     def request(
         self,
@@ -97,6 +112,7 @@ class BrokerClient:
         *,
         request_id: str,
         cancel_event: threading.Event | None = None,
+        timeout_seconds: float | None = None,
     ) -> BrokerResult:
         if not self.settings.enabled:
             raise BrokerError("broker_unconfigured", "action broker is not enabled")
@@ -104,6 +120,13 @@ class BrokerClient:
             raise BrokerError("invalid_request_id", "broker request ID is invalid")
         if cancel_event is not None and cancel_event.is_set():
             raise BrokerError("cancelled", "action was cancelled")
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise BrokerError("request_timeout", "broker request timed out")
+        deadline = (
+            None
+            if timeout_seconds is None
+            else self.monotonic() + timeout_seconds
+        )
         request = {
             "version": self.settings.protocol_version,
             "request_id": request_id,
@@ -114,11 +137,24 @@ class BrokerClient:
             raise BrokerError("request_too_large", "broker request exceeds its limit")
         connection = self.connector(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            connection.settimeout(self.settings.connect_timeout_seconds)
+            connection.settimeout(
+                self._remaining_timeout(
+                    self.settings.connect_timeout_seconds, deadline
+                )
+            )
             connection.connect(str(self.settings.socket_path))
-            connection.settimeout(self.settings.request_timeout_seconds)
+            connection.settimeout(
+                self._remaining_timeout(
+                    self.settings.request_timeout_seconds, deadline
+                )
+            )
             connection.sendall(encoded)
-            raw = _read_line(connection, self.settings.max_message_bytes)
+            raw = _read_line(
+                connection,
+                self.settings.max_message_bytes,
+                deadline=deadline,
+                clock=self.monotonic,
+            )
         except (OSError, TimeoutError) as exc:
             raise BrokerError(
                 "broker_unavailable", "action broker is unavailable"
@@ -150,6 +186,16 @@ class BrokerClient:
         if error_code is not None and not isinstance(error_code, str):
             raise BrokerError("malformed_response", "broker error code is invalid")
         return BrokerResult(operation, value["ok"], value["status"], error_code)
+
+    def _remaining_timeout(
+        self, configured_timeout: float, deadline: float | None
+    ) -> float:
+        if deadline is None:
+            return configured_timeout
+        remaining = deadline - self.monotonic()
+        if remaining <= 0:
+            raise BrokerError("request_timeout", "broker request timed out")
+        return min(configured_timeout, remaining)
 
 
 class BrokerServer:
@@ -347,18 +393,13 @@ class FixedBrokerOperations:
             BrokerOperation.DESKTOP_WAKE: self.desktop_wake,
             BrokerOperation.DESKTOP_MONITORS_OFF: self.desktop_monitors_off,
             BrokerOperation.DESKTOP_MONITORS_ON: self.desktop_monitors_on,
-            BrokerOperation.DESKTOP_LOCK: lambda: self._desktop_fixed(
-                "rundll32.exe user32.dll,LockWorkStation"
-            ),
-            BrokerOperation.DESKTOP_SLEEP: lambda: self._desktop_fixed(
-                "shutdown.exe /h"
-            ),
-            BrokerOperation.DESKTOP_RESTART: lambda: self._desktop_fixed(
-                "shutdown.exe /r /t 0"
-            ),
-            BrokerOperation.DESKTOP_SHUTDOWN: lambda: self._desktop_fixed(
-                "shutdown.exe /s /t 0"
-            ),
+            BrokerOperation.DESKTOP_PARSEC_STATUS: self.desktop_parsec_status,
+            BrokerOperation.DESKTOP_PARSEC_ENSURE: self.desktop_parsec_ensure,
+            BrokerOperation.DESKTOP_PARSEC_RESTART: self.desktop_parsec_restart,
+            BrokerOperation.DESKTOP_LOCK: self.desktop_lock,
+            BrokerOperation.DESKTOP_SLEEP: self.desktop_sleep,
+            BrokerOperation.DESKTOP_RESTART: self.desktop_restart,
+            BrokerOperation.DESKTOP_SHUTDOWN: self.desktop_shutdown,
             BrokerOperation.HOST_RESTART_BUTTERS: self.restart_butters,
             BrokerOperation.HOST_REBOOT: lambda: self._run(
                 ["/usr/bin/systemctl", "reboot"], 5
@@ -391,6 +432,27 @@ class FixedBrokerOperations:
 
     def desktop_monitors_on(self) -> dict[str, object]:
         return self._set_desktop_monitors("on")
+
+    def desktop_parsec_status(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.PARSEC_STATUS)
+
+    def desktop_parsec_ensure(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.PARSEC_ENSURE)
+
+    def desktop_parsec_restart(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.PARSEC_RESTART)
+
+    def desktop_lock(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.LOCK)
+
+    def desktop_sleep(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SLEEP)
+
+    def desktop_restart(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.RESTART)
+
+    def desktop_shutdown(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SHUTDOWN)
 
     def _set_desktop_monitors(self, desired_state: str) -> dict[str, object]:
         """Set and verify only the two reviewed monitor outlets through HA."""
@@ -536,39 +598,82 @@ class FixedBrokerOperations:
             15,
         )
 
-    def _desktop_fixed(self, command: str) -> dict[str, object]:
-        return self._run(
-            [
-                "/usr/bin/ssh",
-                # No PTY, no forwarding, one credential, and a pinned host key.
-                # The unit runs with ProtectHome, so an implicit ~/.ssh lookup
-                # would silently have no known_hosts to consult at all.
-                "-T",
-                "-i",
-                str(self.config.desktop_key),
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "IdentitiesOnly=yes",
-                "-o",
-                "PreferredAuthentications=publickey",
-                "-o",
-                "ClearAllForwardings=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                # The pin is a root-owned provisioned file, so the client must
-                # never learn or write additional host keys into it. OpenSSH
-                # already implies this when UserKnownHostsFile is overridden;
-                # stating it keeps the pin immune to a default change.
-                "-o",
-                "UpdateHostKeys=no",
-                "-o",
-                f"UserKnownHostsFile={self.config.desktop_known_hosts}",
-                f"{self.config.desktop_user}@{self.config.desktop_host}",
-                command,
-            ],
-            20,
+    def _desktop_control(
+        self, operation: _DesktopControlOperation
+    ) -> dict[str, object]:
+        """Invoke one fixed Windows helper operation and validate its safe result.
+
+        ``operation`` is an internal enum selected only by the handler table.
+        The socket request has no argument field, and no caller value can reach
+        the host, account, path, executable, service, task, or command line.
+        """
+
+        command = (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass "
+            "-File C:\\ProgramData\\Butters\\desktop-control.ps1 "
+            f"-Operation {operation.value}"
         )
+        argv = [
+            "/usr/bin/ssh",
+            # No PTY, no forwarding, one credential, and a pinned host key.
+            # The unit runs with ProtectHome, so an implicit ~/.ssh lookup
+            # would silently have no known_hosts to consult at all.
+            "-T",
+            "-i",
+            str(self.config.desktop_key),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "UpdateHostKeys=no",
+            "-o",
+            f"UserKnownHostsFile={self.config.desktop_known_hosts}",
+            f"{self.config.desktop_user}@{self.config.desktop_host}",
+            command,
+        ]
+        try:
+            result = self.runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=25,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BrokerError("operation_failed", "fixed operation failed") from exc
+        if int(getattr(result, "returncode", 1)) != 0:
+            raise BrokerError("operation_failed", "fixed operation failed")
+        raw = str(getattr(result, "stdout", ""))
+        if len(raw.encode("utf-8")) > 16384:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise BrokerError(
+                "malformed_result", "fixed operation result is invalid"
+            ) from exc
+        status = _desktop_control_result(operation, payload)
+        if status.get("accepted") is False:
+            code = status.get("error_code")
+            allowed = {
+                "parsec_not_installed",
+                "parsec_start_timeout",
+                "parsec_restart_timeout",
+            }
+            raise BrokerError(
+                str(code) if code in allowed else "operation_failed",
+                "fixed operation failed",
+            )
+        return status
 
     def _run(self, argv: list[str], timeout: float) -> dict[str, object]:
         try:
@@ -585,6 +690,95 @@ class FixedBrokerOperations:
         if int(getattr(result, "returncode", 1)) != 0:
             raise BrokerError("operation_failed", "fixed operation failed")
         return {"accepted": True}
+
+
+_PARSEC_STATE_KEYS = frozenset(
+    {
+        "installed",
+        "installation_type",
+        "service_present",
+        "service_running",
+        "service_startup",
+        "service_process_present",
+        "host_process_present",
+        "system_host_process_present",
+        "user_host_process_present",
+        "plausibly_ready",
+    }
+)
+
+
+def _desktop_control_result(
+    operation: _DesktopControlOperation, payload: object
+) -> dict[str, object]:
+    """Validate the helper's bounded public schema before crossing the broker."""
+
+    if not isinstance(payload, dict) or not all(
+        isinstance(key, str) for key in payload
+    ):
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+    if operation in {
+        _DesktopControlOperation.PARSEC_STATUS,
+        _DesktopControlOperation.PARSEC_ENSURE,
+        _DesktopControlOperation.PARSEC_RESTART,
+    }:
+        extras = (
+            frozenset()
+            if operation is _DesktopControlOperation.PARSEC_STATUS
+            else frozenset({"accepted", "error_code", "elapsed_ms"})
+            | (
+                frozenset({"already_running"})
+                if operation is _DesktopControlOperation.PARSEC_ENSURE
+                else frozenset()
+            )
+        )
+        if set(payload) != _PARSEC_STATE_KEYS | extras:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        for key in _PARSEC_STATE_KEYS - {"installation_type", "service_startup"}:
+            if not isinstance(payload[key], bool):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+        if payload["installation_type"] not in {"machine", "absent"}:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if payload["service_startup"] not in {
+            "auto",
+            "manual",
+            "disabled",
+            "absent",
+        }:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if extras:
+            if not isinstance(payload["accepted"], bool) or not isinstance(
+                payload["elapsed_ms"], int
+            ):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+            error = payload["error_code"]
+            if error is not None and not isinstance(error, str):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+        if "already_running" in extras and not isinstance(
+            payload["already_running"], bool
+        ):
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        return dict(payload)
+
+    expected_transition = {
+        _DesktopControlOperation.LOCK: "lock",
+        _DesktopControlOperation.SLEEP: "sleep",
+        _DesktopControlOperation.RESTART: "restart",
+        _DesktopControlOperation.SHUTDOWN: "shutdown",
+    }[operation]
+    if set(payload) != {"accepted", "transition", "scheduled"} or (
+        payload.get("accepted") is not True
+        or payload.get("scheduled") is not True
+        or payload.get("transition") != expected_transition
+    ):
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+    return dict(payload)
 
 
 def _parse_request(raw: bytes, version: int) -> dict[str, object]:
@@ -620,12 +814,16 @@ def _peer_credentials(connection: socket.socket) -> tuple[int, int]:
 
 
 def _read_line(
-    connection: socket.socket, maximum: int, *, deadline: float | None = None
+    connection: socket.socket,
+    maximum: int,
+    *,
+    deadline: float | None = None,
+    clock: Callable[[], float] = time.monotonic,
 ) -> bytes:
     chunks = bytearray()
     while len(chunks) <= maximum:
         if deadline is not None:
-            remaining = deadline - time.monotonic()
+            remaining = deadline - clock()
             if remaining <= 0:
                 raise BrokerError("request_timeout", "broker request timed out")
             # Re-armed per recv against one shared deadline so a peer that drips

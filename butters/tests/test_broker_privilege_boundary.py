@@ -32,6 +32,7 @@ from pathlib import Path
 
 import pytest
 import tomllib
+
 from butters.actions.broker import (
     DEFAULT_PEER_TIMEOUT_SECONDS,
     BrokerOperation,
@@ -622,6 +623,9 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
 
     class Result:
         returncode = 0
+        stdout = json.dumps(
+            {"accepted": True, "transition": "lock", "scheduled": True}
+        )
 
     config = FixedBrokerConfig(
         "fixed-desktop",
@@ -655,6 +659,7 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
     } <= options
     assert "-T" in argv, "no PTY is allocated"
     assert "-i" in argv and str(config.desktop_key) in argv
+    assert argv[-1].endswith("-Operation Lock")
     # Nothing relaxes host-key verification or opens a forwarding channel.
     assert not any(
         item.startswith(
@@ -674,10 +679,15 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
     assert not any(
         item in {"-A", "-X", "-Y", "-R", "-L", "-D", "-t", "-W"} for item in argv
     )
-    # One fixed remote command, still the final argument, and no shell.
+    # One fixed explicit PowerShell helper command remains the final argument;
+    # neither the peer nor the default OpenSSH shell chooses its semantics.
     assert argv[-2:] == [
         "fixed-user@fixed-desktop",
-        "rundll32.exe user32.dll,LockWorkStation",
+        (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass -File "
+            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Lock"
+        ),
     ]
 
 

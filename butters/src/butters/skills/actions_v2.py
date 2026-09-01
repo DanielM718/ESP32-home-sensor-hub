@@ -105,6 +105,12 @@ class ActionSkillImplementations:
         )
         return StructuredSkillResult("desktop_monitors", result)
 
+    def ensure_parsec_running(self, _arguments: SkillArguments) -> SkillResult:
+        return self.broker_action(BrokerOperation.DESKTOP_PARSEC_ENSURE)
+
+    def restart_parsec(self, _arguments: SkillArguments) -> SkillResult:
+        return self.broker_action(BrokerOperation.DESKTOP_PARSEC_RESTART)
+
     def lock_desktop(self, _arguments: SkillArguments) -> SkillResult:
         return self.broker_action(BrokerOperation.DESKTOP_LOCK)
 
@@ -284,10 +290,24 @@ def register_action_skills(
         local_console=True,
     )
     action(
+        "ensure_parsec_running",
+        "Idempotently make the fixed desktop's reviewed Parsec service plausibly ready.",
+        impl.ensure_parsec_running,
+        authentication=AuthenticationLevel.FRESH,
+        available=desktop.parsec_ensure_enabled,
+    )
+    action(
+        "restart_parsec",
+        "Restart only the fixed desktop's reviewed Parsec service.",
+        impl.restart_parsec,
+        authentication=AuthenticationLevel.FRESH,
+        available=desktop.parsec_restart_enabled,
+    )
+    action(
         "lock_desktop",
         "Lock the configured desktop session.",
         impl.lock_desktop,
-        authentication=AuthenticationLevel.ELEVATED,
+        authentication=AuthenticationLevel.FRESH,
         available=desktop.lock_enabled,
     )
     action(

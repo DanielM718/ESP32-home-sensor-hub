@@ -15,6 +15,9 @@ from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.assistant_config import BrokerSettings, DesktopSettings
 from butters.integrations.model import IntegrationError
 
+NETWORK_ATTEMPT_TIMEOUT_SECONDS = 2.0
+SSH_ATTEMPT_TIMEOUT_SECONDS = 1.0
+
 
 @dataclass(frozen=True, slots=True)
 class DesktopState:
@@ -35,15 +38,19 @@ class DesktopState:
 
 
 class DesktopOperations(Protocol):
-    def network_reachable(self) -> bool: ...
+    def network_reachable(self, timeout_seconds: float) -> bool: ...
 
-    def ssh_ready(self) -> bool: ...
+    def ssh_ready(self, timeout_seconds: float) -> bool: ...
 
-    def parsec_ready(self) -> bool | None: ...
+    def parsec_ready(self, timeout_seconds: float) -> bool | None: ...
 
-    def send_wake(self) -> bool: ...
+    def parsec_status(self, timeout_seconds: float) -> dict[str, object] | None: ...
 
-    def request_headless_mode(self) -> bool: ...
+    def send_wake(self, timeout_seconds: float) -> bool: ...
+
+    def ensure_parsec_running(self, timeout_seconds: float) -> bool: ...
+
+    def request_headless_mode(self, timeout_seconds: float) -> bool: ...
 
 
 class BrokerDesktopOperations:
@@ -62,24 +69,30 @@ class BrokerDesktopOperations:
         self.ping = ping
         self.connector = connector
 
-    def network_reachable(self) -> bool:
+    def network_reachable(self, timeout_seconds: float) -> bool:
+        attempt_timeout = min(NETWORK_ATTEMPT_TIMEOUT_SECONDS, timeout_seconds)
+        if attempt_timeout <= 0:
+            return False
         try:
             result = self.ping(
                 ["/usr/bin/ping", "-c", "1", "-W", "1", self.settings.host],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=2,
+                timeout=attempt_timeout,
                 check=False,
             )
         except (OSError, subprocess.SubprocessError):
             return False
         return int(getattr(result, "returncode", 1)) == 0
 
-    def ssh_ready(self) -> bool:
+    def ssh_ready(self, timeout_seconds: float) -> bool:
+        attempt_timeout = min(SSH_ATTEMPT_TIMEOUT_SECONDS, timeout_seconds)
+        if attempt_timeout <= 0:
+            return False
         try:
             connection = self.connector(
-                (self.settings.host, self.settings.ssh_port), timeout=1.0
+                (self.settings.host, self.settings.ssh_port), timeout=attempt_timeout
             )
         except (OSError, TimeoutError):
             return False
@@ -91,22 +104,37 @@ class BrokerDesktopOperations:
             pass
         return True
 
-    def parsec_ready(self) -> bool | None:
-        # The inspected scripts expose no read-only Parsec process/status probe.
-        # Unknown is safer than treating ping or SSH as application readiness.
-        return None
+    def parsec_ready(self, timeout_seconds: float) -> bool | None:
+        status = self.parsec_status(timeout_seconds)
+        ready = None if status is None else status.get("plausibly_ready")
+        return ready if isinstance(ready, bool) else None
 
-    def send_wake(self) -> bool:
-        return self._broker(BrokerOperation.DESKTOP_WAKE)
+    def parsec_status(self, timeout_seconds: float) -> dict[str, object] | None:
+        try:
+            result = self.broker.request(
+                BrokerOperation.DESKTOP_PARSEC_STATUS,
+                request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
+            )
+        except BrokerError:
+            return None
+        return dict(result.status) if result.ok else None
 
-    def request_headless_mode(self) -> bool:
-        return self._broker(BrokerOperation.DESKTOP_MONITORS_OFF)
+    def send_wake(self, timeout_seconds: float) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_WAKE, timeout_seconds)
 
-    def _broker(self, operation: BrokerOperation) -> bool:
+    def ensure_parsec_running(self, timeout_seconds: float) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_PARSEC_ENSURE, timeout_seconds)
+
+    def request_headless_mode(self, timeout_seconds: float) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_MONITORS_OFF, timeout_seconds)
+
+    def _broker(self, operation: BrokerOperation, timeout_seconds: float) -> bool:
         try:
             result = self.broker.request(
                 operation,
                 request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
             )
         except BrokerError:
             return False
@@ -132,11 +160,45 @@ class DesktopWorkflow:
 
     def status(self, machine: str) -> DesktopState:
         self._require_machine(machine)
-        network = self.operations.network_reachable()
-        ssh = self.operations.ssh_ready()
+        deadline = self.clock() + self.settings.total_timeout_seconds
+        ssh = self._ssh_ready(deadline)
+        network = ssh or self._network_reachable(deadline)
         network = network or ssh
-        parsec = self.operations.parsec_ready() if ssh else False
+        parsec = self._parsec_ready(deadline) if ssh else False
         return DesktopState(machine, network, ssh, parsec)
+
+    def parsec_status(self, machine: str) -> dict[str, object]:
+        """Return only bounded user-relevant state for the fixed Parsec host."""
+
+        self._require_machine(machine)
+        deadline = self.clock() + self.settings.total_timeout_seconds
+        ssh = self._ssh_ready(deadline)
+        network = ssh or self._network_reachable(deadline)
+        network = network or ssh
+        status = (
+            self.operations.parsec_status(self._remaining(deadline))
+            if ssh and self._remaining(deadline) > 0
+            else None
+        )
+        result: dict[str, object] = {
+            "machine": machine,
+            "desktop_reachable": network,
+            "ssh_reachable": ssh,
+            "installed": None,
+            "installation_type": "unknown",
+            "service_present": None,
+            "service_running": None,
+            "service_startup": "unknown",
+            "service_process_present": None,
+            "host_process_present": None,
+            "system_host_process_present": None,
+            "user_host_process_present": None,
+            "plausibly_ready": False,
+            "observed": status is not None,
+        }
+        if status is not None:
+            result.update(status)
+        return result
 
     def wait_for_reachability(
         self, machine: str, *, cancel_event: threading.Event | None = None
@@ -157,16 +219,16 @@ class DesktopWorkflow:
         )
         observed = {"network": False, "ssh": False}
 
-        def reachable() -> bool:
-            ssh = self.operations.ssh_ready()
-            network = self.operations.network_reachable() or ssh
+        def reachable(_remaining: float) -> bool:
+            ssh = self._ssh_ready(deadline)
+            network = ssh or self._network_reachable(deadline)
             observed["network"] = network
             observed["ssh"] = ssh
             return network
 
         ready = self._wait_for(reachable, deadline, event)
         cancelled = event.is_set()
-        parsec = self.operations.parsec_ready() if ready and observed["ssh"] else False
+        parsec = self._parsec_ready(deadline) if ready and observed["ssh"] else False
         return {
             "machine": machine,
             "network_reachable": bool(ready and observed["network"]),
@@ -189,6 +251,7 @@ class DesktopWorkflow:
             "wake_sent": False,
             "network_reachable": False,
             "ssh_ready": False,
+            "parsec_ensure_succeeded": False,
             "headless_mode_requested": False,
             "parsec_ready": None,
             "verification_complete": False,
@@ -210,19 +273,23 @@ class DesktopWorkflow:
         if self.clock() >= deadline:
             return finish("total_timeout", "workflow deadline expired")
 
-        network = self.operations.network_reachable()
-        ssh = self.operations.ssh_ready()
-        network = network or ssh
+        ssh = self._ssh_ready(deadline)
+        network = ssh or self._network_reachable(deadline)
         result["network_reachable"] = network
         if not network:
-            if not self.operations.send_wake():
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                return finish("total_timeout", "workflow deadline expired")
+            if not self.operations.send_wake(remaining):
                 return finish("wake_sent", "fixed wake operation failed")
             result["wake_sent"] = True
             network_deadline = min(
                 deadline, self.clock() + self.settings.network_timeout_seconds
             )
             network = self._wait_for(
-                self.operations.network_reachable, network_deadline, event
+                lambda _remaining: self._network_reachable(network_deadline),
+                network_deadline,
+                event,
             )
             result["network_reachable"] = network
             if not network:
@@ -236,7 +303,9 @@ class DesktopWorkflow:
 
         ssh_deadline = min(deadline, self.clock() + self.settings.ssh_timeout_seconds)
         if not ssh:
-            ssh = self._wait_for(self.operations.ssh_ready, ssh_deadline, event)
+            ssh = self._wait_for(
+                lambda _remaining: self._ssh_ready(ssh_deadline), ssh_deadline, event
+            )
         result["ssh_ready"] = ssh
         if not ssh:
             if event.is_set():
@@ -245,52 +314,78 @@ class DesktopWorkflow:
                 return finish("total_timeout", "workflow deadline expired")
             return finish("ssh_ready", "desktop remote-management readiness timed out")
 
-        ready = self.operations.parsec_ready()
-        result["parsec_ready"] = ready
         if event.is_set():
             return finish("cancelled", "workflow cancelled")
-        if self.clock() >= deadline:
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
             return finish("total_timeout", "workflow deadline expired")
-        if not self.operations.request_headless_mode():
+        if not self.operations.ensure_parsec_running(remaining):
+            return finish("parsec_ensure", "fixed on-demand Parsec operation failed")
+        result["parsec_ensure_succeeded"] = True
+
+        last_parsec_state: bool | None = None
+
+        def parsec_ready(_remaining: float) -> bool:
+            nonlocal last_parsec_state
+            last_parsec_state = self._parsec_ready(deadline)
+            return last_parsec_state is True
+
+        ready = self._wait_for(parsec_ready, deadline, event)
+        result["parsec_ready"] = True if ready else last_parsec_state
+        if not ready:
+            if event.is_set():
+                return finish("cancelled", "workflow cancelled")
+            if self.clock() >= deadline:
+                return finish("total_timeout", "workflow deadline expired")
+            return finish("parsec_ready", "Parsec readiness verification failed")
+
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            return finish("total_timeout", "workflow deadline expired")
+        if not self.operations.request_headless_mode(remaining):
             return finish(
                 "headless_mode_requested", "monitor power-off operation failed"
             )
         result["headless_mode_requested"] = True
-
-        if ready is True:
-            result["verification_complete"] = True
-            return finish()
-
-        if event.is_set():
-            return finish("cancelled", "workflow cancelled")
-        if self.clock() >= deadline:
-            return finish("total_timeout", "workflow deadline expired")
-        verified = self.operations.parsec_ready()
-        result["parsec_ready"] = verified
-        if verified is False:
-            return finish("verification", "remote workflow verification failed")
-        # None is an explicit UNKNOWN: there is no independent Parsec process
-        # probe. Monitor power was accepted, but application readiness is not
-        # overstated.
-        result["verification_complete"] = verified is True
-        if verified is None:
-            result["verification_note"] = (
-                "physical monitors were powered off; Parsec readiness is not independently observable"
-            )
+        result["verification_complete"] = True
         return finish()
 
     def _wait_for(
         self,
-        predicate: Callable[[], bool],
+        predicate: Callable[[float], bool],
         deadline: float,
         event: threading.Event,
     ) -> bool:
         while not self._cancelled(event, deadline):
-            if predicate():
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                return False
+            if predicate(remaining):
                 return True
-            remaining = deadline - self.clock()
+            remaining = self._remaining(deadline)
             event.wait(min(self.settings.poll_interval_seconds, max(0.0, remaining)))
         return False
+
+    def _network_reachable(self, deadline: float) -> bool:
+        remaining = self._remaining(deadline)
+        return remaining > 0 and self.operations.network_reachable(
+            min(NETWORK_ATTEMPT_TIMEOUT_SECONDS, remaining)
+        )
+
+    def _ssh_ready(self, deadline: float) -> bool:
+        remaining = self._remaining(deadline)
+        return remaining > 0 and self.operations.ssh_ready(
+            min(SSH_ATTEMPT_TIMEOUT_SECONDS, remaining)
+        )
+
+    def _parsec_ready(self, deadline: float) -> bool | None:
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            return None
+        return self.operations.parsec_ready(remaining)
+
+    def _remaining(self, deadline: float) -> float:
+        return max(0.0, deadline - self.clock())
 
     def _cancelled(self, event: threading.Event, deadline: float) -> bool:
         return event.is_set() or self.clock() >= deadline

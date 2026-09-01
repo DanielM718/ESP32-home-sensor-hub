@@ -8,6 +8,7 @@ from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
+
 from butters.actions.broker import (
     BrokerClient,
     BrokerError,
@@ -341,9 +342,10 @@ class ClientConnection:
     def __init__(self, response: bytes = b"", failure: Exception | None = None) -> None:
         self.response = bytearray(response)
         self.failure = failure
+        self.timeouts: list[float] = []
 
-    def settimeout(self, _timeout):
-        return None
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
 
     def connect(self, _path):
         if self.failure:
@@ -419,6 +421,35 @@ def test_broker_client_fails_closed_on_unavailable_timeout_and_bad_response(
     assert protocol.value.code == "protocol_mismatch"
 
 
+def test_broker_client_clips_every_socket_phase_to_one_absolute_deadline(
+    tmp_path,
+) -> None:
+    request_id = "request_identifier_deadline"
+    payload = {
+        "version": 1,
+        "request_id": request_id,
+        "ok": True,
+        "status": {"accepted": True},
+        "error_code": None,
+    }
+    connection = ClientConnection(json.dumps(payload).encode() + b"\n")
+    readings = iter((0.0, 0.2, 0.6, 0.8))
+    client = BrokerClient(
+        BrokerSettings(enabled=True, socket_path=tmp_path / "broker.sock"),
+        connector=lambda *_args: connection,
+        monotonic=lambda: next(readings),
+    )
+
+    result = client.request(
+        BrokerOperation.DESKTOP_WAKE,
+        request_id=request_id,
+        timeout_seconds=1.0,
+    )
+
+    assert result.ok is True
+    assert connection.timeouts == pytest.approx((0.8, 0.4, 0.2))
+
+
 def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     tmp_path,
 ) -> None:
@@ -432,6 +463,9 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
 
     class Result:
         returncode = 0
+        stdout = json.dumps(
+            {"accepted": True, "transition": "restart", "scheduled": True}
+        )
 
     config = FixedBrokerConfig(
         "192.168.1.209",
@@ -457,7 +491,14 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     assert "UpdateHostKeys=no" in options
     assert "-T" in argv
     assert not any(item.startswith("StrictHostKeyChecking=no") for item in options)
-    assert argv[-2:] == ["Daniel@192.168.1.209", "shutdown.exe /r /t 0"]
+    assert argv[-2:] == [
+        "Daniel@192.168.1.209",
+        (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass -File "
+            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Restart"
+        ),
+    ]
     assert argv[argv.index("-i") + 1].endswith("windows_remote_mode")
 
 
