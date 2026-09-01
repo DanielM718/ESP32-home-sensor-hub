@@ -86,10 +86,17 @@ sudo chmod -R go= /root/butters-rc-backup-$STAMP
 completion history and the notification ledger. Losing it loses the maintenance
 baselines; nothing in this candidate rebuilds them.
 
-## 5. Model preservation
+## 5. Gitignored checkout state the installer depends on
+
+Two of `install-beta1`'s pre-flight guards inspect files that exist only in the
+working checkout, so both are worth checking before starting rather than
+discovering mid-deployment. Each one aborts before anything is staged or
+replaced, so an abort here is safe.
+
+### Models
 
 `install-beta1` re-sources models from the checkout on every install and
-destroys the previously deployed copy in the swap. Before deploying Butters:
+destroys the previously deployed copy in the swap.
 
 ```sh
 ls -la /home/dmejiame/ESP32-home-sensor-hub/butters/models
@@ -99,6 +106,23 @@ ls -la /home/dmejiame/ESP32-home-sensor-hub/butters/models
 the working checkout. If they are absent the installer aborts at its own guard,
 which is the correct behaviour — restore them before proceeding rather than
 working around it.
+
+### Wake-listener audio device
+
+New in this release: the installer refuses to deploy an
+`audio.local.toml` that still contains the example placeholder, because that
+file is rsynced into the deployed tree and `butters-live.service` points
+`BUTTERS_AUDIO_CONFIG` at it.
+
+```sh
+grep -c CHANGE_ME /home/dmejiame/ESP32-home-sensor-hub/butters/config/audio.local.toml
+```
+
+Expect `0`, or no such file. A count above zero aborts the install with exit 2;
+name the real capture device (`arecord -L`) first. An **absent** file is not an
+error — the installer prints a note and continues, because the wake listener is
+opt-in and this installer never enables it, so the web assistant deploys
+normally without one.
 
 ## 6. Migration
 
