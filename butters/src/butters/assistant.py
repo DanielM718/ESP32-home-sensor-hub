@@ -95,6 +95,9 @@ class DeterministicAssistant:
         self.vocabulary = vocabulary
         self.language_model = language_model
         self.llm_tools = llm_tools
+        # A proposal is untrusted text. The catalog decides what the model may
+        # see; this decides what it may run, so the two cannot drift apart.
+        self.llm_tool_names = frozenset(tool.name for tool in llm_tools)
         self.llm_context = llm_context
         self.diagnostic_planner = diagnostic_planner
         self.diagnostic_engine = diagnostic_engine
@@ -281,6 +284,30 @@ class DeterministicAssistant:
                 routing_path="llm_fallback",
                 llm_result=result,
                 policy_status="invalid_proposal",
+            )
+
+        if proposal.skill not in self.llm_tool_names:
+            # The model named something outside the catalog it was offered.
+            # Mutating skills are already refused by the action policy, but a
+            # read-only skill excluded on privacy or administrator-audience
+            # grounds would otherwise run purely because the model said its
+            # name -- exactly the visibility/execution drift the model tool
+            # policy exists to prevent.
+            route = RoutedIntent(
+                "unsupported",
+                normalized,
+                message="I can't answer that request with the local skills currently enabled.",
+            )
+            return AssistantResponse(
+                raw_text,
+                normalized,
+                route,
+                route.message
+                or "I can't answer that request with the local skills currently enabled.",
+                time.perf_counter() - started,
+                routing_path="llm_fallback",
+                llm_result=result,
+                policy_status="tool_not_offered",
             )
 
         execution = self.skills.execute(proposal.skill, proposal.arguments)
