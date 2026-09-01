@@ -1,3 +1,12 @@
 #!/bin/sh
 set -eu
-exec "$(dirname "$0")/../.venv/bin/python" -m butters.auth_cli "$@"
+
+# The venv is built from requirements.txt and there is no pyproject.toml, so the
+# butters package is not installed into it -- every wrapper has to put src on the
+# path. Without this the documented passkey bootstrap
+# (`/opt/butters/scripts/butters-passkey bootstrap`) fails with
+# ModuleNotFoundError, which is how the first credential gets enrolled.
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+butters_dir=$(dirname -- "$script_dir")
+export PYTHONPATH="$butters_dir/src${PYTHONPATH:+:$PYTHONPATH}"
+exec "$butters_dir/.venv/bin/python" -m butters.auth_cli "$@"

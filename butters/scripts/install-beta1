@@ -9,6 +9,9 @@ butters_dir="$(dirname "${script_dir}")"
 install_dir="/opt/butters"
 staging_dir="/opt/butters.staging.$$"
 previous_dir="/opt/butters.previous"
+# Holds the N-2 tree only for the duration of a swap, so the rollback copy is
+# never absent while ${install_dir} is being replaced.
+superseded_dir="/opt/butters.superseded"
 state_dir="/var/lib/butters"
 config_dir="/etc/butters"
 unit_name="butters-web.service"
@@ -55,6 +58,29 @@ build_runtime_venv() {
   "${root}/.venv/bin/python" -m pip install \
       --no-input --disable-pip-version-check --quiet -r "${root}/requirements.txt" \
     || { echo "Declared runtime dependencies failed to install." >&2; return 3; }
+}
+
+# venv writes the absolute path it was built at into every console script's
+# shebang and into pyvenv.cfg. The tree is built under the staging path and then
+# renamed, so without this every console script in the published venv points at
+# /opt/butters.staging.<pid>/.venv/bin/python -- a directory that no longer
+# exists. `pip`, `uvicorn` and friends then fail with "bad interpreter".
+#
+# The units are unaffected because they invoke the interpreter directly
+# (`python -m butters.web`), and bin/python itself is a symlink rather than a
+# script, so retargeting only touches the text wrappers. Doing it here, after
+# pip has finished and before the tree is sealed, keeps the swap publishing an
+# already-correct tree.
+retarget_runtime_venv() {
+  local root="$1" final="$2" entry
+  for entry in "${root}"/.venv/bin/*; do
+    [[ -f "${entry}" && ! -L "${entry}" ]] || continue
+    head -c 2 "${entry}" 2>/dev/null | grep -q '^#!' || continue
+    sed -i "1s|^#!${root}/|#!${final}/|" "${entry}"
+  done
+  if [[ -f "${root}/.venv/pyvenv.cfg" ]]; then
+    sed -i "s|${root}/|${final}/|g" "${root}/.venv/pyvenv.cfg"
+  fi
 }
 
 # Every pinned requirement must be present at exactly its pinned version. This
@@ -153,7 +179,15 @@ fi
 install -d -m 0700 -o butters -g butters "${state_dir}" "${state_dir}/codex-jobs"
 install -d -m 0750 -o root -g butters "${config_dir}"
 
-# 1. Stage a complete tree next to the target.
+# 1. Stage a complete tree next to the target. A run killed outside its EXIT
+#    trap (SIGKILL, power loss) leaves a multi-hundred-megabyte staging tree
+#    behind on the same filesystem that must hold the install and the rollback,
+#    and nothing else ever removes one.
+for stale in /opt/butters.staging.*; do
+  [[ -d "${stale}" && "${stale}" != "${staging_dir}" ]] || continue
+  echo "Removing a stale staging tree from an interrupted run: ${stale}"
+  rm -rf "${stale}"
+done
 rm -rf "${staging_dir}"
 install -d -m 0755 -o root -g root "${staging_dir}"
 rsync -a --delete \
@@ -188,6 +222,9 @@ verify_runtime_dependencies \
 [[ -f "${staging_dir}/src/butters/web/app.py" ]] \
   || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
 
+# 2c. Point the venv's console scripts at the path they will actually live at.
+retarget_runtime_venv "${staging_dir}" "${install_dir}"
+
 # 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
 #    also covers the bytecode compileall just generated and establishes the final
 #    modes. It is the last write to the tree, so the swap below publishes an
@@ -195,13 +232,36 @@ verify_runtime_dependencies \
 #    service user.
 normalize_application_tree "${staging_dir}" root butters
 
-# 4. Swap. Renames are atomic, so no mixed tree is ever importable, and the
-#    replaced tree is kept for rollback.
+# 4. Swap. rename(2) cannot replace a non-empty directory, so publishing a new
+#    tree takes two renames and there is a brief moment with no ${install_dir}.
+#    Each rename is atomic, so no mixed tree is ever importable, but the
+#    sequence is not -- and the EXIT trap below would delete the staged tree if
+#    the script died inside that window, leaving production with no application
+#    tree at all and the old one parked under another name. So: disarm the trap
+#    across the window, keep the rollback copy until the swap has succeeded, and
+#    put the old tree back if the second rename fails.
+trap - EXIT
+retired=0
 if [[ -d "${install_dir}" ]]; then
-  rm -rf "${previous_dir}"
+  # Retire the N-2 generation rather than the rollback copy: deleting
+  # ${previous_dir} first would leave no rollback on disk during the window.
+  rm -rf "${superseded_dir}"
+  if [[ -d "${previous_dir}" ]]; then
+    mv "${previous_dir}" "${superseded_dir}"
+  fi
   mv "${install_dir}" "${previous_dir}"
+  retired=1
 fi
-mv "${staging_dir}" "${install_dir}"
+if ! mv "${staging_dir}" "${install_dir}"; then
+  if [[ "${retired}" == "1" ]]; then
+    mv "${previous_dir}" "${install_dir}"
+    [[ -d "${superseded_dir}" ]] && mv "${superseded_dir}" "${previous_dir}"
+  fi
+  echo "Publishing the staged tree failed; the previous tree was restored." >&2
+  exit 3
+fi
+rm -rf "${superseded_dir}"
+trap cleanup EXIT
 
 if [[ ! -e "${config_dir}/butters.env" ]]; then
   install -m 0640 -o root -g butters "${butters_dir}/config/butters.env.example" "${config_dir}/butters.env"
