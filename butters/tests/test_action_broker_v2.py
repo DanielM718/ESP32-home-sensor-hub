@@ -11,6 +11,8 @@ from urllib.error import HTTPError, URLError
 import pytest
 
 from butters.actions.broker import (
+    MONITOR_OPERATION_DEADLINE_SECONDS,
+    MONITOR_SETTLE_DEADLINE_SECONDS,
     BrokerClient,
     BrokerError,
     BrokerOperation,
@@ -1240,3 +1242,116 @@ def test_a_healthy_exchange_is_unaffected_by_the_supervision(tmp_path) -> None:
     }
     # Still usable after a completed exchange: the worker is reused, not retired.
     assert operations._monitor_states()["switch.desktop_oled"] == "off"
+
+
+def test_a_slow_home_assistant_cannot_multiply_the_monitor_operation_bound(
+    tmp_path,
+) -> None:
+    """Regression: the settle deadline was only checked between iterations.
+
+    Each iteration was then free to spend its own budget on top of it. Against a
+    Home Assistant that was merely slow -- 9s per request, never wedged, so no
+    per-exchange bound ever tripped -- one desktop.monitors_off took 63.5s
+    against a declared 20s, and well past the client's 30s request timeout, so
+    the caller gave up while this root process was still mutating.
+
+    This is the same shape as the reachability overrun DesktopWorkflow already
+    fixed, and it takes the same fix: one deadline for the operation, and every
+    sub-request clamped to what is left of it.
+    """
+
+    clock = FakeClock()
+    slow_seconds = 9.0
+
+    class Slow:
+        status = 200
+
+        def __init__(self, payload) -> None:
+            self.payload = json.dumps(payload).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            # Deliberately ignores the budget it was handed, so this measures
+            # deadline propagation rather than the worker join.
+            clock.now += slow_seconds
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    def opener(request, **_kwargs):
+        if request.method == "POST":
+            return Slow([])
+        return Slow({"state": "on"})  # never converges
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=opener,
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    with pytest.raises(BrokerError) as failure:
+        operations.desktop_monitors_off()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    # One overshoot by a callee that ignored its budget, never a multiple.
+    assert clock.now <= MONITOR_OPERATION_DEADLINE_SECONDS + slow_seconds
+    assert clock.now < 40.0
+
+
+def test_the_monitor_operation_bound_fits_inside_the_client_timeout() -> None:
+    """A caller must not give up while the root broker is still mutating."""
+
+    assert MONITOR_OPERATION_DEADLINE_SECONDS < BrokerSettings().request_timeout_seconds
+    assert MONITOR_SETTLE_DEADLINE_SECONDS <= MONITOR_OPERATION_DEADLINE_SECONDS
+
+
+def test_a_healthy_settle_still_returns_a_bounded_partial_result(tmp_path) -> None:
+    """The operation bound must not turn a normal non-convergence into an error."""
+
+    clock = FakeClock()
+
+    class Quick:
+        status = 200
+
+        def __init__(self, payload) -> None:
+            self.payload = json.dumps(payload).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            clock.now += 0.05
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    def opener(request, **_kwargs):
+        if request.method == "POST":
+            return Quick([])
+        return Quick({"state": "on"})
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=opener,
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is False
+    assert result["partial"] is False
+    assert clock.now < MONITOR_OPERATION_DEADLINE_SECONDS

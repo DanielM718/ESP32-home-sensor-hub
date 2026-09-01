@@ -45,6 +45,19 @@ DEFAULT_PEER_TIMEOUT_SECONDS = 5.0
 MONITOR_SETTLE_DEADLINE_SECONDS = 20.0
 MONITOR_SETTLE_POLL_SECONDS = 0.5
 
+# One bound for the whole monitor operation: the two reads before, the service
+# call, and every poll of the settling loop. The settle deadline alone was only
+# checked BETWEEN iterations, so each iteration was free to spend its own full
+# budget on top of it. Measured against a Home Assistant that was merely slow --
+# 9s per request, never wedged, so no per-exchange bound ever tripped -- one
+# operation took 63.5s against a declared 20s: the same shape as the
+# reachability overrun DesktopWorkflow already fixed, and the same fix.
+#
+# 25s keeps the whole operation inside the client's 30s request_timeout_seconds.
+# Beyond that the caller gives up while this root process is still mutating,
+# which is the state that invites a retry of an operation already in flight.
+MONITOR_OPERATION_DEADLINE_SECONDS = 25.0
+
 # urlopen's timeout is per socket operation, not a wall-clock bound, so a peer
 # that sends one byte just inside every timeout window holds a single read open
 # for as long as it likes. The broker answers connections serially, so that one
@@ -510,7 +523,8 @@ class FixedBrokerOperations:
                 "home_assistant_unconfigured",
                 "Home Assistant authentication is not configured",
             )
-        before = self._monitor_states()
+        deadline = self.monotonic() + MONITOR_OPERATION_DEADLINE_SECONDS
+        before = self._monitor_states(deadline)
         if all(before.get(entity) == desired_state for entity in self.MONITOR_ENTITIES):
             return {
                 "accepted": True,
@@ -524,8 +538,9 @@ class FixedBrokerOperations:
             f"/api/services/switch/turn_{desired_state}",
             method="POST",
             body={"entity_id": list(self.MONITOR_ENTITIES)},
+            deadline=deadline,
         )
-        after, matching = self._await_monitor_convergence(desired_state)
+        after, matching = self._await_monitor_convergence(desired_state, deadline)
         return {
             "accepted": matching == len(self.MONITOR_ENTITIES),
             "desired_state": desired_state,
@@ -535,7 +550,7 @@ class FixedBrokerOperations:
         }
 
     def _await_monitor_convergence(
-        self, desired_state: str
+        self, desired_state: str, operation_deadline: float
     ) -> tuple[dict[str, str], int]:
         """Poll the two fixed outlets until both settle, or the deadline expires.
 
@@ -549,9 +564,11 @@ class FixedBrokerOperations:
         as a bounded partial/failed result rather than blocking.
         """
 
-        deadline = self.monotonic() + MONITOR_SETTLE_DEADLINE_SECONDS
+        deadline = min(
+            self.monotonic() + MONITOR_SETTLE_DEADLINE_SECONDS, operation_deadline
+        )
         while True:
-            states = self._monitor_states()
+            states = self._monitor_states(deadline)
             matching = sum(
                 states.get(entity) == desired_state for entity in self.MONITOR_ENTITIES
             )
@@ -562,11 +579,18 @@ class FixedBrokerOperations:
                 return states, matching
             # Never overshoot the deadline just to complete a whole interval.
             self.sleeper(min(MONITOR_SETTLE_POLL_SECONDS, remaining))
+            if self.monotonic() >= deadline:
+                # Sleeping landed exactly on the deadline. Starting another read
+                # here would leave it no budget, turning a bounded partial
+                # result into an unavailable error.
+                return states, matching
 
-    def _monitor_states(self) -> dict[str, str]:
+    def _monitor_states(self, deadline: float | None = None) -> dict[str, str]:
         states: dict[str, str] = {}
         for entity in self.MONITOR_ENTITIES:
-            payload = self._home_assistant_request(f"/api/states/{entity}")
+            payload = self._home_assistant_request(
+                f"/api/states/{entity}", deadline=deadline
+            )
             state = payload.get("state") if isinstance(payload, dict) else None
             states[entity] = str(state) if state is not None else "unknown"
         return states
@@ -577,6 +601,7 @@ class FixedBrokerOperations:
         *,
         method: str = "GET",
         body: dict[str, object] | None = None,
+        deadline: float | None = None,
     ) -> object:
         encoded = None if body is None else json.dumps(body).encode("utf-8")
         request = Request(
@@ -589,7 +614,15 @@ class FixedBrokerOperations:
                 **({"Content-Type": "application/json"} if encoded is not None else {}),
             },
         )
-        deadline = self.monotonic() + self.home_assistant_deadline_seconds
+        budget = self.home_assistant_deadline_seconds
+        if deadline is not None:
+            # Never let one exchange spend more than the operation has left.
+            budget = min(budget, deadline - self.monotonic())
+            if budget <= 0:
+                raise BrokerError(
+                    "home_assistant_unavailable", "Home Assistant is unavailable"
+                )
+        read_deadline = self.monotonic() + budget
 
         def exchange() -> bytes:
             with self.opener(request, timeout=5.0) as response:
@@ -597,10 +630,10 @@ class FixedBrokerOperations:
                     raise BrokerError(
                         "home_assistant_failed", "Home Assistant request failed"
                     )
-                return _read_bounded(response, deadline, self.monotonic)
+                return _read_bounded(response, read_deadline, self.monotonic)
 
         try:
-            raw = self._bounded_exchange(exchange)
+            raw = self._bounded_exchange(exchange, budget)
         except HTTPError as exc:
             if exc.code in {401, 403}:
                 raise BrokerError(
@@ -625,7 +658,9 @@ class FixedBrokerOperations:
                 "home_assistant_failed", "Home Assistant returned malformed JSON"
             ) from None
 
-    def _bounded_exchange(self, exchange: Callable[[], bytes]) -> bytes:
+    def _bounded_exchange(
+        self, exchange: Callable[[], bytes], budget: float
+    ) -> bytes:
         """Give the whole Home Assistant exchange one real wall-clock bound.
 
         urlopen's ``timeout`` is per socket operation, not a deadline. A peer
@@ -663,7 +698,7 @@ class FixedBrokerOperations:
             future = self._exchange_worker.submit(exchange)
             self._exchange_pending = future
         try:
-            return future.result(timeout=self.home_assistant_deadline_seconds)
+            return future.result(timeout=max(0.0, budget))
         except FutureTimeout:
             raise BrokerError(
                 "home_assistant_unavailable", "Home Assistant is unavailable"
