@@ -1192,6 +1192,51 @@ tbody tr:last-child td {
   font-size: 0.82rem;
 }
 
+/* Filament totals reuse the tracked-print-time hero so the two read as one
+   pair of facts. The by-material list is a definition list rather than a table
+   so it collapses cleanly at phone widths without a horizontal scroller. */
+.filament-hero {
+  margin-top: 12px;
+}
+
+.filament-facts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+.filament-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.filament-row dt {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.filament-row dd {
+  margin: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.filament-heading dt {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.filament-unallocated dt {
+  font-weight: 500;
+  font-style: italic;
+}
+
 #health-build {
   margin-top: 10px;
   font-size: 0.78rem;

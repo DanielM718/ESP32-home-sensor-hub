@@ -26,6 +26,30 @@ const PRINTER_TELEMETRY_TIMEOUT_MS = 20000;
 // Named in the same order they are requested, so a refresh failure can say
 // which section is missing instead of blaming the printer.
 const PRINTER_SECTIONS = ["printer state", "print history", "maintenance", "telemetry chart", "sensor nodes"];
+
+// The API states are the scheduler's own vocabulary. "baseline_required" and
+// "advisory" describe why the dashboard cannot put a date on a task, which is
+// not something a reader should have to decode, so the dashboard answers the
+// question they actually have: do I need to do something?
+const MAINTENANCE_STATE_LABELS = {
+  ok: "OK",
+  due_soon: "Due soon",
+  due: "Due",
+  overdue: "Overdue",
+  baseline_required: "Maintenance history needed",
+  advisory: "Periodic inspection",
+};
+
+const MAINTENANCE_STATE_HELP = {
+  baseline_required:
+    "Bambu publishes an interval for this, but the dashboard has no record of when it was last done, so it cannot say when it is next due. Record the last service to start the schedule.",
+  advisory:
+    "Bambu recommends checking this, but publishes no print-hour or calendar interval for it, so no due date is invented.",
+};
+
+function maintenanceStateLabel(state) {
+  return MAINTENANCE_STATE_LABELS[state] || formatLabel(state || "unknown");
+}
 const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
 
 const AIR_QUALITY_METRIC_GROUPS = [
@@ -521,6 +545,55 @@ function renderPrinterUsage(printer) {
       <div><dt>History provenance</dt><dd>${escapeHtml((usage.tracked_history_provenance || []).map(formatLabel).join(", ") || "None")}</dd></div>
     </dl>
     <p class="subtle">History completeness: ${usage.tracked_history_complete ? "known complete" : "not known to be complete"}${Number(usage.tracked_unknown_interval_job_count || 0) ? ` · ${Number(usage.tracked_unknown_interval_job_count)} job(s) have no usable start/end interval and are excluded` : ""}. This is not a printer lifetime counter.</p>
+  </div>
+  ${renderFilamentUsage(usage)}`;
+}
+
+function formatFilamentMass(grams) {
+  const value = Number(grams);
+  if (!Number.isFinite(value)) return "Unknown";
+  return value >= 1000 ? `${(value / 1000).toFixed(2)} kg` : `${value.toFixed(0)} g`;
+}
+
+function renderFilamentUsage(usage) {
+  if (!Number.isFinite(Number(usage.tracked_filament_estimate_g))) {
+    return "";
+  }
+  const materials = usage.tracked_filament_by_material || [];
+  const unallocated = Number(usage.tracked_filament_unallocated_g || 0);
+  const incomplete = Number(usage.tracked_filament_incomplete_job_count || 0);
+  const unknown = Number(usage.tracked_filament_unknown_amount_job_count || 0);
+  const rows = materials.map((item) => `<div class="filament-row">
+      <dt>${escapeHtml(item.material)}</dt>
+      <dd>${escapeHtml(formatFilamentMass(item.grams))} <span class="subtle">${Number(item.job_count || 0)} print(s)</span></dd>
+    </div>`);
+  if (unallocated > 0) {
+    rows.push(`<div class="filament-row filament-unallocated">
+      <dt>Not broken down</dt>
+      <dd>${escapeHtml(formatFilamentMass(unallocated))} <span class="subtle">material split not reported</span></dd>
+    </div>`);
+  }
+  // Jobs the dashboard cannot put a number on stay visible rather than being
+  // quietly dropped, so the total is never mistaken for the whole story.
+  const caveats = [];
+  if (incomplete) {
+    caveats.push(`${incomplete} print(s) did not finish; Bambu only stores the amount planned for the whole job, so what they actually used is unknown`);
+  }
+  if (unknown) {
+    caveats.push(`${unknown} print(s) have no recorded amount`);
+  }
+  return `<div class="usage-hero filament-hero">
+    <div class="usage-headline">
+      <span class="usage-label">Tracked Filament</span>
+      <strong class="usage-value">${escapeHtml(formatFilamentMass(usage.tracked_filament_estimate_g))}</strong>
+      <span class="authority-label">Based on Bambu's per-print slicer estimate, not weighed consumption. Counts completed prints since ${usage.tracked_filament_first_job_at ? escapeHtml(formatDateTime(usage.tracked_filament_first_job_at)) : "the start of available history"}; earlier prints may be missing.</span>
+    </div>
+    ${rows.length ? `<dl class="printer-facts filament-facts"><div class="filament-heading"><dt>By material</dt><dd></dd></div>${rows.join("")}</dl>` : '<p class="subtle">No per-material breakdown is available yet.</p>'}
+    <dl class="printer-facts usage-facts">
+      <div><dt>Prints counted</dt><dd>${Number(usage.tracked_filament_job_count || 0)}</dd></div>
+      <div><dt>Filament length</dt><dd>${Number.isFinite(Number(usage.tracked_filament_length_m)) ? `${Number(usage.tracked_filament_length_m).toFixed(1)} m` : "Unknown"}</dd></div>
+    </dl>
+    ${caveats.length ? `<p class="subtle">Not included: ${escapeHtml(caveats.join("; "))}.</p>` : ""}
   </div>`;
 }
 
@@ -546,7 +619,7 @@ function renderMaintenanceSummary(payload) {
   }
   container.innerHTML = `<div class="maintenance-summary maintenance-${escapeHtml(summary.overall_state || "ok")}">
     <div class="air-station-heading">
-      <h3>Overall: ${escapeHtml(formatLabel(summary.overall_state || "ok"))}</h3>
+      <h3>Overall: ${escapeHtml(maintenanceStateLabel(summary.overall_state || "ok"))}</h3>
       <span class="status-pill ${maintenancePillClass(summary.overall_state)}">${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} mode</span>
     </div>
     <p>${next ? `Next: <strong>${escapeHtml(next.name)}</strong>${next.next_due_at ? ` · due ${escapeHtml(formatDateTime(next.next_due_at))}` : ""}${Number.isFinite(Number(next.remaining_days)) ? ` (${Number(next.remaining_days).toFixed(0)} days)` : ""}` : "No scheduled task is pending."}</p>
@@ -554,8 +627,8 @@ function renderMaintenanceSummary(payload) {
       <li>Due soon: ${Number(counts.due_soon || 0)}</li>
       <li>Due: ${Number(counts.due || 0)}</li>
       <li>Overdue: ${Number(counts.overdue || 0)}</li>
-      <li>Needs baseline: ${Number(counts.baseline_required || 0)}</li>
-      <li>Advisory: ${Number(counts.advisory || 0)}</li>
+      <li>${escapeHtml(MAINTENANCE_STATE_LABELS.baseline_required)}: ${Number(counts.baseline_required || 0)}</li>
+      <li>${escapeHtml(MAINTENANCE_STATE_LABELS.advisory)}: ${Number(counts.advisory || 0)}</li>
     </ul>
     <p class="subtle">Usage tier ${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} from ${summary.rolling_print_hours_per_day == null ? "unknown" : `${Number(summary.rolling_print_hours_per_day).toFixed(2)} h/day`} tracked printing (${escapeHtml(formatLabel(summary.maintenance_mode_reason || "unknown"))}).</p>
   </div>`;
@@ -576,15 +649,14 @@ function renderMaintenance(payload) {
     return;
   }
   container.innerHTML = tasks.map((task) => `<article class="maintenance-card maintenance-${escapeHtml(task.state)}">
-    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${maintenancePillClass(task.state)}">${escapeHtml(formatLabel(task.state))}</span></div>
+    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${maintenancePillClass(task.state)}">${escapeHtml(maintenanceStateLabel(task.state))}</span></div>
     <p>${escapeHtml(task.description || "No description")}</p>
     <p class="maintenance-cadence"><strong>Manufacturer cadence:</strong> ${escapeHtml(task.cadence || "Not published")}</p>
-    ${task.state === "baseline_required" ? '<p class="maintenance-baseline">Needs a baseline: record when this was last physically done before the dashboard can schedule it.</p>' : ""}
-    ${task.state === "advisory" ? '<p class="maintenance-baseline">Condition-based guidance. Bambu Lab publishes no numeric interval, so no due date is invented.</p>' : ""}
+    ${MAINTENANCE_STATE_HELP[task.state] ? `<p class="maintenance-baseline">${escapeHtml(MAINTENANCE_STATE_HELP[task.state])}</p>` : ""}
     <ul>${(task.triggers || []).map((trigger) => `<li>${escapeHtml(maintenanceTriggerText(trigger, task))}</li>`).join("")}</ul>
     <p class="subtle">Last complete: ${task.last_completed_at ? escapeHtml(formatDateTime(task.last_completed_at)) : "Never recorded"}${task.next_due_at ? ` · Next due: ${escapeHtml(formatDateTime(task.next_due_at))}` : ""} · Source: ${escapeHtml(formatLabel(task.provenance || "unknown"))}${task.manufacturer_source_url ? ` (<a href="${escapeHtml(task.manufacturer_source_url)}" rel="noreferrer noopener" target="_blank">Bambu Lab wiki</a>)` : ""}</p>
     ${(task.triggers || []).some((trigger) => Number(trigger.warning_threshold) > 0) ? '<p class="subtle">Local warning lead time only; the interval above is the manufacturer value.</p>' : ""}
-    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">${task.state === "baseline_required" ? "Mark completed today" : "Mark complete locally"}</button>
+    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">${task.state === "baseline_required" ? "Record last service" : "Mark done today"}</button>
   </article>`).join("");
 }
 

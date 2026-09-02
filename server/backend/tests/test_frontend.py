@@ -397,6 +397,50 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("formatLabel(printer.status", self.javascript)
         self.assertIn("Normalized state", self.javascript)
 
+    def test_filament_totals_are_rendered_with_a_material_breakdown(self) -> None:
+        self.assertIn("Tracked Filament", self.javascript)
+        self.assertIn("tracked_filament_by_material", self.javascript)
+        self.assertIn("tracked_filament_estimate_g", self.javascript)
+        self.assertIn(".filament-row", self.styles)
+
+    def test_filament_is_presented_as_an_estimate_not_a_measurement(self) -> None:
+        """The number is Bambu's slicer plan, and the card has to say so."""
+
+        self.assertIn("slicer estimate, not weighed consumption", self.javascript)
+
+    def test_prints_without_a_usable_amount_stay_visible(self) -> None:
+        """Silently dropping them would make the total look complete."""
+
+        self.assertIn("tracked_filament_incomplete_job_count", self.javascript)
+        self.assertIn("tracked_filament_unknown_amount_job_count", self.javascript)
+        self.assertIn("Not included:", self.javascript)
+        self.assertIn("Not broken down", self.javascript)
+
+    def test_the_dashboard_never_shows_the_scheduler_enum_names(self) -> None:
+        """baseline_required and advisory are internal vocabulary.
+
+        They describe why the scheduler cannot put a date on a task, which is
+        not something a reader should have to decode.
+        """
+
+        self.assertIn("MAINTENANCE_STATE_LABELS", self.javascript)
+        self.assertIn("Maintenance history needed", self.javascript)
+        self.assertIn("Periodic inspection", self.javascript)
+        # The raw enum must not reach a label. It may still appear as a state
+        # comparison or a CSS class, so check the rendering helpers instead.
+        self.assertNotIn("formatLabel(task.state)", self.javascript)
+        self.assertNotIn("Advisory: ${Number(counts.advisory", self.javascript)
+        self.assertNotIn("Needs baseline:", self.javascript)
+
+    def test_each_unschedulable_state_explains_itself_in_plain_words(self) -> None:
+        self.assertIn("MAINTENANCE_STATE_HELP", self.javascript)
+        self.assertIn("no record of when it was last done", self.javascript)
+        self.assertIn("publishes no print-hour or calendar interval", self.javascript)
+
+    def test_the_completion_button_says_what_it_will_do(self) -> None:
+        self.assertIn("Record last service", self.javascript)
+        self.assertIn("Mark done today", self.javascript)
+
     def test_dashboard_javascript_brackets_are_balanced(self) -> None:
         """Guards against a parse error taking the whole dashboard down.
 
@@ -529,10 +573,14 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("Mark all maintenance completed today", self.template)
         self.assertIn("renderMaintenanceSummary", self.javascript)
         self.assertIn("baseline_required", self.javascript)
-        self.assertIn("Needs a baseline", self.javascript)
+        # The state is still handled; it is the *label* that is now plain
+        # English rather than the scheduler's enum name.
+        self.assertIn("Maintenance history needed", self.javascript)
         self.assertIn("Manufacturer cadence:", self.javascript)
         self.assertIn("Local warning lead time only", self.javascript)
-        self.assertIn("Condition-based guidance", self.javascript)
+        # Same guarantee, now stated without the enum's vocabulary: an item
+        # Bambu gives no interval for must not acquire an invented due date.
+        self.assertIn("publishes no print-hour or calendar interval", self.javascript)
         self.assertIn("${API.printerMaintenance}/complete-all", self.javascript)
         self.assertIn("establishes the maintenance baseline", self.javascript)
         self.assertIn("does not send any command to the printer", self.javascript)
