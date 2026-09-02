@@ -20,6 +20,12 @@ const POLL_INTERVAL_MS = 7000;
 const WORKFLOW_POLL_INTERVAL_MS = 5000;
 const PREVIEW_POLL_INTERVAL_MS = 15000;
 const FETCH_TIMEOUT_MS = 8000;
+// The printer chart reads raw telemetry rather than a downsampled aggregate, so
+// the default 24h range is the slowest request the dashboard makes.
+const PRINTER_TELEMETRY_TIMEOUT_MS = 20000;
+// Named in the same order they are requested, so a refresh failure can say
+// which section is missing instead of blaming the printer.
+const PRINTER_SECTIONS = ["printer state", "print history", "maintenance", "telemetry chart", "sensor nodes"];
 const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
 
 const AIR_QUALITY_METRIC_GROUPS = [
@@ -384,11 +390,18 @@ async function refreshPrinterDashboard(force = false) {
   state.printerDashboardInFlight = true;
   setRefreshButtonBusy(true);
   try {
+    // The chart query reads raw telemetry and is by far the slowest of the five
+    // -- measured at ~4.9s for the default 24h range on an idle Pi, against the
+    // 8s default abort. It gets its own budget so ordinary slowness stops
+    // presenting itself as a printer fault.
     const requests = await Promise.allSettled([
       fetchJson(API.printer),
       fetchJson(`${API.printerHistory}?limit=100`),
       fetchJson(API.printerMaintenance),
-      fetchJson(`${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`),
+      fetchJson(
+        `${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`,
+        { timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS },
+      ),
       fetchJson(API.nodes),
     ]);
     const [current, history, maintenance, telemetry, nodes] = requests;
@@ -426,8 +439,20 @@ async function refreshPrinterDashboard(force = false) {
     } else {
       renderPrinterTelemetryError("Historical printer telemetry is temporarily unavailable.");
     }
-    const failures = requests.filter((result) => result.status === "rejected").length;
-    setStatus(failures ? `Printer partial (${failures})` : "Online", failures ? "loading" : "ok");
+    // This pill is the page's connection indicator, which every other tab uses
+    // for "Online" or "API error". Counting rejected fetches here and calling
+    // the result "Printer partial" attached a dashboard-refresh problem to the
+    // printer, so a healthy printer looked degraded whenever one section timed
+    // out. The printer's own state is rendered in its card, from printer.status.
+    const failed = PRINTER_SECTIONS.filter((_name, index) => requests[index].status === "rejected");
+    setStatus(
+      failed.length ? `${failed.length} of ${PRINTER_SECTIONS.length} sections unavailable` : "Online",
+      failed.length ? "loading" : "ok",
+    );
+    const pill = document.getElementById("connection-state");
+    if (pill) {
+      pill.title = failed.length ? `Could not load: ${failed.join(", ")}` : "";
+    }
   } finally {
     state.printerDashboardInFlight = false;
     setRefreshButtonBusy(false);
@@ -931,15 +956,19 @@ function readingsQueryParams() {
 
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const { timeoutMs, ...fetchOptions } = options;
+  const timeout = window.setTimeout(
+    () => controller.abort(),
+    Number.isFinite(timeoutMs) ? timeoutMs : FETCH_TIMEOUT_MS,
+  );
 
   try {
     const response = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       headers: {
         "Accept": "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-        ...(options.headers || {}),
+        ...(fetchOptions.body ? { "Content-Type": "application/json" } : {}),
+        ...(fetchOptions.headers || {}),
       },
       signal: controller.signal,
     });

@@ -350,6 +350,53 @@ class FrontendContractTest(unittest.TestCase):
         health = self.styles[self.styles.index(".health-grid {") :]
         self.assertIn("repeat(auto-fit, minmax(260px, 1fr))", health[:200])
 
+    def test_the_connection_pill_never_reports_a_printer_state(self) -> None:
+        """Regression: the printer "randomly" showed partial while working fine.
+
+        refreshPrinterDashboard issues five parallel fetches and counted the
+        rejected ones, then wrote "Printer partial (N)" into #connection-state --
+        the page's connection pill, which every other tab uses for Online or API
+        error. A dashboard-refresh problem was therefore presented as a printer
+        fault. The telemetry chart alone measured ~4.9s for its default 24h range
+        against an 8s abort, so ordinary slowness tripped it.
+        """
+
+        self.assertNotIn("Printer partial (", self.javascript)
+        self.assertIn("sections unavailable", self.javascript)
+        self.assertIn("PRINTER_SECTIONS", self.javascript)
+
+    def test_a_failed_refresh_names_the_section_rather_than_the_printer(self) -> None:
+        self.assertIn("Could not load:", self.javascript)
+        for section in (
+            "printer state",
+            "print history",
+            "maintenance",
+            "telemetry chart",
+            "sensor nodes",
+        ):
+            with self.subTest(section=section):
+                self.assertIn(f'"{section}"', self.javascript)
+
+    def test_the_slow_telemetry_query_has_its_own_budget(self) -> None:
+        """The chart reads raw telemetry, not a downsampled aggregate."""
+
+        self.assertIn("PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+        self.assertIn("timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+        # It must be a real increase over the shared default, not decoration.
+        default = int(
+            self.javascript.split("const FETCH_TIMEOUT_MS = ")[1].split(";")[0]
+        )
+        chart = int(
+            self.javascript.split("const PRINTER_TELEMETRY_TIMEOUT_MS = ")[1].split(";")[0]
+        )
+        self.assertGreater(chart, default)
+
+    def test_the_printer_card_still_shows_the_real_printer_state(self) -> None:
+        """The genuine state machine must keep its own, unrelated display."""
+
+        self.assertIn("formatLabel(printer.status", self.javascript)
+        self.assertIn("Normalized state", self.javascript)
+
     def test_dashboard_javascript_brackets_are_balanced(self) -> None:
         """Guards against a parse error taking the whole dashboard down.
 
