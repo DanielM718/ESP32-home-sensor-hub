@@ -1029,10 +1029,9 @@ function readingsQueryParams() {
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
   const { timeoutMs, ...fetchOptions } = options;
-  const timeout = window.setTimeout(
-    () => controller.abort(),
-    Number.isFinite(timeoutMs) ? timeoutMs : FETCH_TIMEOUT_MS,
-  );
+  // Held in one place so the abort and the message it produces cannot disagree.
+  const budgetMs = Number.isFinite(timeoutMs) ? timeoutMs : FETCH_TIMEOUT_MS;
+  const timeout = window.setTimeout(() => controller.abort(), budgetMs);
 
   try {
     const response = await fetch(url, {
@@ -1064,7 +1063,7 @@ async function fetchJson(url, options = {}) {
     return await response.json();
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error(`${url}: request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`);
+      throw new Error(`${url}: request timed out after ${budgetMs / 1000} seconds`);
     }
     throw error;
   } finally {

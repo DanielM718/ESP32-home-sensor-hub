@@ -377,6 +377,21 @@ class FrontendContractTest(unittest.TestCase):
             with self.subTest(section=section):
                 self.assertIn(f'"{section}"', self.javascript)
 
+    def test_a_timeout_message_states_the_budget_that_was_actually_used(self) -> None:
+        """A 20s telemetry abort must not claim it waited 8 seconds."""
+
+        self.assertIn("const budgetMs =", self.javascript)
+        self.assertIn("request timed out after ${budgetMs / 1000} seconds", self.javascript)
+        self.assertNotIn(
+            "request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds", self.javascript
+        )
+
+    def test_only_the_telemetry_fetch_overrides_the_shared_budget(self) -> None:
+        """The longer budget must not become every request's timeout."""
+
+        self.assertEqual(self.javascript.count("timeoutMs: "), 1)
+        self.assertIn("timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+
     def test_the_slow_telemetry_query_has_its_own_budget(self) -> None:
         """The chart reads raw telemetry, not a downsampled aggregate."""
 
