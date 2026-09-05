@@ -1,0 +1,214 @@
+{
+  "schema_version": 1,
+  "purpose": "download-only preservation of the exact approved pre-removal rollback set; no package installation",
+  "started_utc": "2026-09-05T22:14:39.6440763Z",
+  "ended_utc": "2026-09-05T22:14:42.0322959Z",
+  "hostname": "DESKTOP-G4CFVL1",
+  "command": "nipkg download --no-dependency-check --destination-dir=<diagnostic rollback directory> <approved 22-package set>",
+  "packages": [
+    "ni-apxipm2",
+    "ni-cabled-pcie",
+    "ni-controllerdriver",
+    "ni-dim",
+    "ni-mdbg",
+    "ni-mru",
+    "ni-mxdf",
+    "ni-mximanager",
+    "ni-orb",
+    "ni-pcibrd",
+    "ni-pxiplatformframework",
+    "ni-pxiplatformservices-expert",
+    "ni-pxiplatformservices-provider",
+    "ni-pxiplatformservices-runtime",
+    "ni-pxiplatformsoftware-errors",
+    "ni-roco",
+    "ni-roco-errors",
+    "ni-visa-c-examples",
+    "ni-visa-development-common",
+    "ni-visa-development-support-compatibility",
+    "ni-visa-driver-development-wizard",
+    "ni-xlator"
+  ],
+  "nipkg_exit_code": 0,
+  "archive_checks": [
+    {
+      "package": "ni-apxipm2",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-apxipm2_25.8.0.49337-0+f185_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "a7e5453a5848a084f25ae76e48332b9154e7bbed32e137587ab9e9c65e1ae3ee",
+      "actual_sha256": "a7e5453a5848a084f25ae76e48332b9154e7bbed32e137587ab9e9c65e1ae3ee",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-cabled-pcie",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-cabled-pcie_25.8.0.49346-0+f194_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "67e6d573001fa971835a1493a6d377cbe7558f9ed6b4224d86331d9202ee4983",
+      "actual_sha256": "67e6d573001fa971835a1493a6d377cbe7558f9ed6b4224d86331d9202ee4983",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-controllerdriver",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-controllerdriver_25.8.0.49346-0+f194_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "9ce0854eebe21a32180fe9b3ff7eed700b3f1f67724dc46ba22deae09850018a",
+      "actual_sha256": "9ce0854eebe21a32180fe9b3ff7eed700b3f1f67724dc46ba22deae09850018a",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-dim",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-dim_25.8.0.49302-0+f150_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "c8f23ca3b1717c9e01d998cb4d1c6affe52bf937f88909a702d80888134b033b",
+      "actual_sha256": "c8f23ca3b1717c9e01d998cb4d1c6affe52bf937f88909a702d80888134b033b",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-mdbg",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-mdbg_25.8.0.49291-0+f139_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "acac00af84520cd217069f0e51ab982781d9666373f49a6a13c8528e05793b5a",
+      "actual_sha256": "acac00af84520cd217069f0e51ab982781d9666373f49a6a13c8528e05793b5a",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-mru",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-mru_25.8.0.49302-0+f150_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "49d4e08ee9677f7f6cc764df28ec54252ccffa8bc17c5e08ca2b5c3de304fa12",
+      "actual_sha256": "49d4e08ee9677f7f6cc764df28ec54252ccffa8bc17c5e08ca2b5c3de304fa12",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-mxdf",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-mxdf_25.8.0.49291-0+f139_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "ea7a6f49ec95acfaaaf7a3a4eeadead160c64f54a9744521879f4ebb2e4eb7a1",
+      "actual_sha256": "ea7a6f49ec95acfaaaf7a3a4eeadead160c64f54a9744521879f4ebb2e4eb7a1",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-mximanager",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-mximanager_25.8.0.49343-0+f191_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "bf1e06fca919211cb8297300e149af2721d108c6a9c7d635fe4559c194bdfc0e",
+      "actual_sha256": "bf1e06fca919211cb8297300e149af2721d108c6a9c7d635fe4559c194bdfc0e",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-orb",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-orb_25.8.0.49291-0+f139_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "a1eb107f32d8fac3a8797f438d0ee42a02ab818ecff8d08734ed6f0ce578c454",
+      "actual_sha256": "a1eb107f32d8fac3a8797f438d0ee42a02ab818ecff8d08734ed6f0ce578c454",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pcibrd",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pcibrd_25.8.0.49340-0+f188_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "88aee97c33975aa5ff888d0153dee9d8be2d32f751ee84a37b324cf436b817c9",
+      "actual_sha256": "88aee97c33975aa5ff888d0153dee9d8be2d32f751ee84a37b324cf436b817c9",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pxiplatformframework",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pxiplatformframework_25.8.0.49346-0+f194_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "f6f6bae81e1dea077521d9802af2f0c35255ce757e8a7e0a1edc8c219cdab47b",
+      "actual_sha256": "f6f6bae81e1dea077521d9802af2f0c35255ce757e8a7e0a1edc8c219cdab47b",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pxiplatformservices-expert",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pxiplatformservices-expert_25.8.0.49347-0+f195_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "b790d90466c25252bcc31aab76c5a1661a8341cc882ce47062281f4e8a1a50ff",
+      "actual_sha256": "b790d90466c25252bcc31aab76c5a1661a8341cc882ce47062281f4e8a1a50ff",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pxiplatformservices-provider",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pxiplatformservices-provider_25.8.0.49347-0+f195_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "fccd5f0c6de131247000b8dc528538f58e6a7146784d9787021ca4585c1ffc8a",
+      "actual_sha256": "fccd5f0c6de131247000b8dc528538f58e6a7146784d9787021ca4585c1ffc8a",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pxiplatformservices-runtime",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pxiplatformservices-runtime_25.8.0.49347-0+f195_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "7676bc3f1d61cf09862eb50045f264236271ca216c2c949334b4004c9700f21b",
+      "actual_sha256": "7676bc3f1d61cf09862eb50045f264236271ca216c2c949334b4004c9700f21b",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-pxiplatformsoftware-errors",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-pxiplatformsoftware-errors_25.8.0.49335-0+f183_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "564762fd62e518774948c9db6fa2e1aff3cf1e09700028cbc75ae3ec4fd85590",
+      "actual_sha256": "564762fd62e518774948c9db6fa2e1aff3cf1e09700028cbc75ae3ec4fd85590",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-roco",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-roco_25.8.0.49301-0+f149_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "3e4d284972910ef714755f0da5981f1fb2a782e83c56092924daa8e154ad347e",
+      "actual_sha256": "3e4d284972910ef714755f0da5981f1fb2a782e83c56092924daa8e154ad347e",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-roco-errors",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-roco-errors_25.8.0.49299-0+f147_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "e9b84bb64f03a8324bd7331a5fca9cd3ab4cd54a214eef9859a06a509e706587",
+      "actual_sha256": "e9b84bb64f03a8324bd7331a5fca9cd3ab4cd54a214eef9859a06a509e706587",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-visa-c-examples",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-visa-c-examples_25.8.0.49275-0+f123_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "22b8dd5753a46c9abd118150575af01331d6282110a3fe824614ee24c7b230a9",
+      "actual_sha256": "22b8dd5753a46c9abd118150575af01331d6282110a3fe824614ee24c7b230a9",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-visa-development-common",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-visa-development-common_25.8.0.49275-0+f123_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "317acaefd9a3f46e58a073b54faea562ad66c6c5ec5d51e191f45df954292c7d",
+      "actual_sha256": "317acaefd9a3f46e58a073b54faea562ad66c6c5ec5d51e191f45df954292c7d",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-visa-development-support-compatibility",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-visa-development-support-compatibility_25.8.0.49273-0+f121_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "8cf72c5b104f5b0dfcbd90a097d4f21b328c37a60ec81f053d09d936bb002eda",
+      "actual_sha256": "8cf72c5b104f5b0dfcbd90a097d4f21b328c37a60ec81f053d09d936bb002eda",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-visa-driver-development-wizard",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-visa-driver-development-wizard_25.8.0.49276-0+f124_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "c5a5e706f33fd33aa91e22cc3d8152e1a6af94991a70120f4c9e2ec903fcc1be",
+      "actual_sha256": "c5a5e706f33fd33aa91e22cc3d8152e1a6af94991a70120f4c9e2ec903fcc1be",
+      "hash_matches": true
+    },
+    {
+      "package": "ni-xlator",
+      "archive": "C:\\ProgramData\\Butters\\sleep-diagnostic\\ni-rollback-20260905\\ni-xlator_25.8.0.49238-0+f86_windows_x64.nipkg",
+      "exists": true,
+      "expected_sha256": "c22a8b596a73c8f82e225c76a34df7fa1f4cbb6659988463ef04238d5d91c441",
+      "actual_sha256": "c22a8b596a73c8f82e225c76a34df7fa1f4cbb6659988463ef04238d5d91c441",
+      "hash_matches": true
+    }
+  ],
+  "all_archives_present_and_matching": true,
+  "nipkg_output_line_count": 1791,
+  "nipkg_nonprogress_output": []
+}

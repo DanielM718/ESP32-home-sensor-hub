@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "experiment": "NI PXI/MXI software-stack isolation",
+  "status": "three_cycle_prequalification_passed",
+  "hypothesis": "The unused NI PXI/MXI platform stack contributes to spontaneous S3 resume and may interact with resume instability.",
+  "single_material_variable": "Removed the user-approved 22-package NI PXI/MXI dependency set through NI Package Manager; Wake Up Event By remained OS and no BIOS, chipset, power-policy, device, or other driver setting changed.",
+  "scope_caution": "This isolates the NI PXI/MXI software stack and does not prove nipcibrd.sys alone is causal.",
+  "package_transaction": {
+    "command": "nipkg remove --allow-uninstall --yes ni-pcibrd",
+    "started_utc": "2026-09-05T22:00:27.2230979Z",
+    "ended_utc": "2026-09-05T22:02:31.4252349Z",
+    "exit_code": -125071,
+    "interpretation": "All 22 removals completed; NI Package Manager then required a reboot to complete the transaction.",
+    "removed_package_count": 22
+  },
+  "restart": {
+    "actual_restart_count": 1,
+    "failed_non_restart_invocation": "An initial shutdown.exe invocation displayed usage and scheduled no restart.",
+    "actual_restart_command": "Restart-Computer -Force",
+    "actual_restart_command_completed_by_utc": "2026-09-05T22:05:46.923886605Z",
+    "post_restart_windows_boot_time_utc": "2026-09-05T22:07:15.5000000Z",
+    "first_authenticated_ssh_probe_started_utc": "2026-09-05T22:08:17.140618266Z",
+    "wol_sent": false
+  },
+  "post_removal_state": {
+    "approved_packages_still_present": [],
+    "nipcibrd_service_present": false,
+    "nipcibrd_service_registry_present": false,
+    "nipcibrd_binary_present": false,
+    "required_core_visa_present": [
+      "ni-visa",
+      "ni-visa-runtime",
+      "ni-visa-passport-usb",
+      "ni-visa-passport-serial"
+    ],
+    "required_core_visa_missing": [],
+    "present_pnp_count_before_first_cycle": 304,
+    "unhealthy_pnp_devices_before_first_cycle": 0,
+    "realtek": "Up at 2.5 Gbps, fixed MAC matched, PnP OK/0, magic-packet wake enabled and wake-armed",
+    "wake_armed": [
+      "Realtek PCIe 5GbE Family Controller",
+      "HID Keyboard Device (003)",
+      "HID Keyboard Device (007)"
+    ],
+    "wake_timers": "none",
+    "power_requests": "Known post-boot USB Audio Device stream plus Legacy Kernel Caller pair; identical to the September 1 baseline condition, no Drive Optimizer or other maintenance request. No process was stopped because doing so would add a variable."
+  },
+  "rollback_preservation": {
+    "pre_removal_inventory_recorded": true,
+    "original_package_manager_cache_behavior": "NI Package Manager purged the 22 package archives during removal.",
+    "recovery_action": "Downloaded the exact registered 25.8 package builds into the diagnostic rollback directory without installing them.",
+    "archive_count": 22,
+    "all_sha256_match_pre_removal_metadata": true
+  },
+  "cycles": [
+    {
+      "cycle_id": "ni_pxi_mxi_stack_isolation-20260905T222150Z-01",
+      "sleep_request_utc": "2026-09-05T22:23:04.991Z",
+      "confirmed_offline_utc": "2026-09-05T22:23:16.818Z",
+      "dwell_seconds": 300.0,
+      "wol_utc": "2026-09-05T22:28:18.851Z",
+      "resume_initiation_utc": "2026-09-05T22:28:19.5000000Z",
+      "network_latency_seconds": 11.186,
+      "ssh_latency_seconds": 11.734,
+      "result": "clean"
+    },
+    {
+      "cycle_id": "ni_pxi_mxi_stack_confirmation-20260905T223155Z-01",
+      "sleep_request_utc": "2026-09-05T22:33:08.137Z",
+      "confirmed_offline_utc": "2026-09-05T22:33:19.910Z",
+      "dwell_seconds": 300.0,
+      "wol_utc": "2026-09-05T22:38:21.945Z",
+      "resume_initiation_utc": "2026-09-05T22:38:23.5000000Z",
+      "network_latency_seconds": 11.23,
+      "ssh_latency_seconds": 11.837,
+      "result": "clean"
+    },
+    {
+      "cycle_id": "ni_pxi_mxi_stack_confirmation-20260905T224007Z-02",
+      "sleep_request_utc": "2026-09-05T22:41:21.258Z",
+      "confirmed_offline_utc": "2026-09-05T22:41:33.060Z",
+      "dwell_seconds": 300.0,
+      "wol_utc": "2026-09-05T22:46:35.093Z",
+      "resume_initiation_utc": "2026-09-05T22:46:36.5000000Z",
+      "network_latency_seconds": 11.186,
+      "ssh_latency_seconds": 11.778,
+      "result": "clean"
+    }
+  ],
+  "cycle_health_common": {
+    "entered_genuine_s3": true,
+    "spontaneous_resume": false,
+    "wol_count_per_cycle": 1,
+    "wol_causal_evidence": "resume began after WOL in all three cycles",
+    "lastwake": "Fixed Feature / Power Button",
+    "realtek_healthy": true,
+    "tracked_xhci_and_root_hubs_healthy": true,
+    "unhealthy_pnp_devices": 0,
+    "usb_xhci_or_device_error_count": 0,
+    "realtek_or_ndis_error_count": 0,
+    "immediate_post_resume_pnp_count": 295,
+    "settled_post_resume_pnp_count": 304,
+    "pnp_interpretation": "Nine devices enumerate after the immediate collector snapshot; the full 304-device inventory returns before the next cycle with all six xHCI controllers and all seven root hubs OK, so this is not persistent device loss."
+  },
+  "confidence_update": {
+    "spontaneous_wake": "NI PXI/MXI stack involvement substantially strengthened, but formal 10-cycle qualification is required before identifying the root cause.",
+    "resume_corruption": "No corruption reproduced in these three cycles. This does not yet identify whether the NI stack contributes to the independent intermittent processor-side xHCI resume failure."
+  }
+}
