@@ -1,0 +1,701 @@
+﻿{
+    "schema_version":  1,
+    "phase":  "before",
+    "hostname":  "DESKTOP-G4CFVL1",
+    "marker_time":  "2026-09-05T17:40:19.5330158-04:00",
+    "marker_time_utc":  "2026-09-05T21:40:19.5345898Z",
+    "boot_time_utc":  "2026-09-05T21:38:00.5000000Z",
+    "system_record_id":  47601,
+    "task_scheduler_record_id":  0,
+    "windows_update_record_id":  1389,
+    "channel_record_ids":  {
+                               "usb_xhci":  45,
+                               "pci":  41061,
+                               "ndis":  0,
+                               "pnp_device_management":  1798,
+                               "pnp_driver_watchdog":  76,
+                               "task_maintenance":  711,
+                               "kernel_power_diagnostic":  0,
+                               "kernel_power_thermal":  0,
+                               "kernel_pnp_configuration":  2858,
+                               "user_pnp_device_install":  843,
+                               "driver_frameworks":  0,
+                               "usb_ucx":  0
+                           },
+    "fixed_adapter":  {
+                          "name":  "Ethernet 2",
+                          "interface_description":  "Realtek PCIe 5GbE Family Controller",
+                          "status":  "Up",
+                          "mac_address":  "34-5A-60-D7-4C-2C",
+                          "expected_mac_match":  true,
+                          "link_speed":  "2.5 Gbps",
+                          "driver_file_name":  "rt640x64.sys",
+                          "driver_version":  "10.79.50.1003",
+                          "driver_date":  "2025-10-03",
+                          "pnp_device_id":  "PCI\\VEN_10EC\u0026DEV_8126\u0026SUBSYS_7E701462\u0026REV_01\\01000000684CE00000",
+                          "pnp_status":  "OK",
+                          "pnp_problem":  0,
+                          "power_management":  {
+                                                   "Name":  "Ethernet 2",
+                                                   "InterfaceDescription":  "Realtek PCIe 5GbE Family Controller",
+                                                   "AllowComputerToTurnOffDevice":  2,
+                                                   "ArpOffload":  2,
+                                                   "D0PacketCoalescing":  0,
+                                                   "DeviceSleepOnDisconnect":  0,
+                                                   "NSOffload":  2,
+                                                   "RsnRekeyOffload":  0,
+                                                   "SelectiveSuspend":  2,
+                                                   "WakeOnMagicPacket":  2,
+                                                   "WakeOnPattern":  1
+                                               },
+                          "power_management_error":  null
+                      },
+    "xhci_topology":  {
+                          "present_pnp_count":  304,
+                          "unhealthy_devices":  [
+
+                                                ],
+                          "controllers":  [
+                                              {
+                                                  "instance_id":  "PCI\\VEN_1022\u0026DEV_15B6\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260341",
+                                                  "found":  true,
+                                                  "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+                                                  "status":  "OK",
+                                                  "problem":  0,
+                                                  "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002641",
+                                                  "location_info":  "PCI bus 122, device 0, function 3",
+                                                  "location_paths":  [
+                                                                         "PCIROOT(0)#PCI(0801)#PCI(0003)",
+                                                                         "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)"
+                                                                     ],
+                                                  "direct_children":  {
+                                                                          "class":  "USB",
+                                                                          "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                          "instance_id":  "USB\\ROOT_HUB30\\5\u00262DEA0A27\u00260\u00260",
+                                                                          "status":  "OK",
+                                                                          "problem":  0,
+                                                                          "parent":  "PCI\\VEN_1022\u0026DEV_15B6\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262b49e1c6\u00260\u00260341",
+                                                                          "location_info":  null,
+                                                                          "location_paths":  [
+                                                                                                 "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                                                                                                 "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+                                                                                             ]
+                                                                      },
+                                                  "children_tree":  [
+                                                                        {
+                                                                            "device":  {
+                                                                                           "class":  "USB",
+                                                                                           "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                                           "instance_id":  "USB\\ROOT_HUB30\\5\u00262DEA0A27\u00260\u00260",
+                                                                                           "status":  "OK",
+                                                                                           "problem":  0,
+                                                                                           "parent":  "PCI\\VEN_1022\u0026DEV_15B6\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262b49e1c6\u00260\u00260341",
+                                                                                           "location_info":  null,
+                                                                                           "location_paths":  [
+                                                                                                                  "PCIROOT(0)#PCI(0801)#PCI(0003)#USBROOT(0)",
+                                                                                                                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC0)#ACPI(RHUB)"
+                                                                                                              ]
+                                                                                       },
+                                                                            "children":  [
+
+                                                                                         ]
+                                                                        }
+                                                                    ]
+                                              },
+                                              {
+                                                  "instance_id":  "PCI\\VEN_1022\u0026DEV_15B7\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262B49E1C6\u00260\u00260441",
+                                                  "found":  true,
+                                                  "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.20 (Microsoft)",
+                                                  "status":  "OK",
+                                                  "problem":  0,
+                                                  "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002641",
+                                                  "location_info":  "PCI bus 122, device 0, function 4",
+                                                  "location_paths":  [
+                                                                         "PCIROOT(0)#PCI(0801)#PCI(0004)",
+                                                                         "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)"
+                                                                     ],
+                                                  "direct_children":  {
+                                                                          "class":  "USB",
+                                                                          "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                          "instance_id":  "USB\\ROOT_HUB30\\5\u0026379E5D68\u00260\u00260",
+                                                                          "status":  "OK",
+                                                                          "problem":  0,
+                                                                          "parent":  "PCI\\VEN_1022\u0026DEV_15B7\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262b49e1c6\u00260\u00260441",
+                                                                          "location_info":  null,
+                                                                          "location_paths":  [
+                                                                                                 "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                                                                                                 "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+                                                                                             ]
+                                                                      },
+                                                  "children_tree":  [
+                                                                        {
+                                                                            "device":  {
+                                                                                           "class":  "USB",
+                                                                                           "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                                           "instance_id":  "USB\\ROOT_HUB30\\5\u0026379E5D68\u00260\u00260",
+                                                                                           "status":  "OK",
+                                                                                           "problem":  0,
+                                                                                           "parent":  "PCI\\VEN_1022\u0026DEV_15B7\u0026SUBSYS_7E701462\u0026REV_00\\4\u00262b49e1c6\u00260\u00260441",
+                                                                                           "location_info":  null,
+                                                                                           "location_paths":  [
+                                                                                                                  "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)",
+                                                                                                                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)"
+                                                                                                              ]
+                                                                                       },
+                                                                            "children":  [
+                                                                                             {
+                                                                                                 "device":  {
+                                                                                                                "class":  "USB",
+                                                                                                                "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                "instance_id":  "USB\\VID_046D\u0026PID_C547\\6\u00261DF6E647\u00260\u00262",
+                                                                                                                "status":  "OK",
+                                                                                                                "problem":  0,
+                                                                                                                "parent":  "USB\\ROOT_HUB30\\5\u0026379e5d68\u00260\u00260",
+                                                                                                                "location_info":  "Port_#0002.Hub_#0002",
+                                                                                                                "location_paths":  [
+                                                                                                                                       "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)",
+                                                                                                                                       "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)"
+                                                                                                                                   ]
+                                                                                                            },
+                                                                                                 "children":  [
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT06",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT05",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "HIDClass",
+                                                                                                                                     "friendly_name":  "USB Input Device",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026MI_00\\7\u00263AA1CDFC\u00260\u00260000",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "007a.0000.0004.002.000.000.000.000.000",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(0)",
+                                                                                                                                                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USB(2)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(0)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USB(2)"
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "Mouse",
+                                                                                                                                                          "friendly_name":  "HID-compliant mouse",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_00\\8\u00261556576B\u00260\u00260000",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_00\\7\u00263aa1cdfc\u00260\u00260000",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       }
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "HIDClass",
+                                                                                                                                     "friendly_name":  "USB Input Device",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026MI_02\\7\u00263AA1CDFC\u00260\u00260002",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "007a.0000.0004.002.000.000.000.000.000",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(2)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(2)"
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "HIDClass",
+                                                                                                                                                          "friendly_name":  "HID-compliant vendor-defined device",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_02\u0026COL02\\8\u002632582419\u00260\u00260001",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_02\\7\u00263aa1cdfc\u00260\u00260002",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       },
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "HIDClass",
+                                                                                                                                                          "friendly_name":  "HID-compliant vendor-defined device",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_02\u0026COL01\\8\u002632582419\u00260\u00260000",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_02\\7\u00263aa1cdfc\u00260\u00260002",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       }
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "HIDClass",
+                                                                                                                                     "friendly_name":  "USB Input Device",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026MI_01\\7\u00263AA1CDFC\u00260\u00260001",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "007a.0000.0004.002.000.000.000.000.000",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            "PCIROOT(0)#PCI(0801)#PCI(0004)#USBROOT(0)#USB(2)#USBMI(1)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP17)#ACPI(XHC1)#ACPI(RHUB)#ACPI(PRT2)#USBMI(1)"
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "Keyboard",
+                                                                                                                                                          "friendly_name":  "HID Keyboard Device",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_01\u0026COL01\\8\u0026E80E657\u00260\u00260000",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_01\\7\u00263aa1cdfc\u00260\u00260001",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       },
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "HIDClass",
+                                                                                                                                                          "friendly_name":  "HID-compliant consumer control device",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_01\u0026COL02\\8\u0026E80E657\u00260\u00260001",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_01\\7\u00263aa1cdfc\u00260\u00260001",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       },
+                                                                                                                                       {
+                                                                                                                                           "device":  {
+                                                                                                                                                          "class":  "HIDClass",
+                                                                                                                                                          "friendly_name":  "HID-compliant system controller",
+                                                                                                                                                          "instance_id":  "HID\\VID_046D\u0026PID_C547\u0026MI_01\u0026COL03\\8\u0026E80E657\u00260\u00260002",
+                                                                                                                                                          "status":  "OK",
+                                                                                                                                                          "problem":  0,
+                                                                                                                                                          "parent":  "USB\\VID_046D\u0026PID_C547\u0026MI_01\\7\u00263aa1cdfc\u00260\u00260001",
+                                                                                                                                                          "location_info":  null,
+                                                                                                                                                          "location_paths":  [
+                                                                                                                                                                                 null
+                                                                                                                                                                             ]
+                                                                                                                                                      },
+                                                                                                                                           "children":  [
+
+                                                                                                                                                        ]
+                                                                                                                                       }
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT01",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT00",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT02",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT04",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  },
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "",
+                                                                                                                                     "friendly_name":  "LIGHTSPEED Receiver",
+                                                                                                                                     "instance_id":  "USB\\VID_046D\u0026PID_C547\u0026LAMPARRAY\\7\u00263AA1CDFC\u00260\u00262_SLOT03",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_046D\u0026PID_C547\\6\u00261df6e647\u00260\u00262",
+                                                                                                                                     "location_info":  "LampArray Support Virtual Device",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  }
+                                                                                                              ]
+                                                                                             }
+                                                                                         ]
+                                                                        }
+                                                                    ]
+                                              },
+                                              {
+                                                  "instance_id":  "PCI\\VEN_1022\u0026DEV_15B8\u0026SUBSYS_7E701462\u0026REV_00\\4\u00265D6807C\u00260\u00260043",
+                                                  "found":  true,
+                                                  "friendly_name":  "AMD USB 2.0 eXtensible Host Controller - 1.20 (Microsoft)",
+                                                  "status":  "OK",
+                                                  "problem":  0,
+                                                  "parent":  "PCI\\VEN_1022\u0026DEV_14DD\u0026SUBSYS_14627E70\u0026REV_00\\3\u002611583659\u00260\u002643",
+                                                  "location_info":  "PCI bus 123, device 0, function 0",
+                                                  "location_paths":  [
+                                                                         "PCIROOT(0)#PCI(0803)#PCI(0000)",
+                                                                         "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)"
+                                                                     ],
+                                                  "direct_children":  {
+                                                                          "class":  "USB",
+                                                                          "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                          "instance_id":  "USB\\ROOT_HUB30\\5\u0026BFD7108\u00260\u00260",
+                                                                          "status":  "OK",
+                                                                          "problem":  0,
+                                                                          "parent":  "PCI\\VEN_1022\u0026DEV_15B8\u0026SUBSYS_7E701462\u0026REV_00\\4\u00265d6807c\u00260\u00260043",
+                                                                          "location_info":  null,
+                                                                          "location_paths":  [
+                                                                                                 "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                                                                                                 "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+                                                                                             ]
+                                                                      },
+                                                  "children_tree":  [
+                                                                        {
+                                                                            "device":  {
+                                                                                           "class":  "USB",
+                                                                                           "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                                           "instance_id":  "USB\\ROOT_HUB30\\5\u0026BFD7108\u00260\u00260",
+                                                                                           "status":  "OK",
+                                                                                           "problem":  0,
+                                                                                           "parent":  "PCI\\VEN_1022\u0026DEV_15B8\u0026SUBSYS_7E701462\u0026REV_00\\4\u00265d6807c\u00260\u00260043",
+                                                                                           "location_info":  null,
+                                                                                           "location_paths":  [
+                                                                                                                  "PCIROOT(0)#PCI(0803)#PCI(0000)#USBROOT(0)",
+                                                                                                                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GP19)#ACPI(XHC2)#ACPI(RHUB)"
+                                                                                                              ]
+                                                                                       },
+                                                                            "children":  [
+
+                                                                                         ]
+                                                                        }
+                                                                    ]
+                                              },
+                                              {
+                                                  "instance_id":  "PCI\\VEN_1022\u0026DEV_43FD\u0026SUBSYS_11421B21\u0026REV_01\\8\u0026E99A29B\u00260\u0026006000400011",
+                                                  "found":  true,
+                                                  "friendly_name":  "AMD USB 3.10 eXtensible Host Controller - 1.10 (Microsoft)",
+                                                  "status":  "OK",
+                                                  "problem":  0,
+                                                  "parent":  "PCI\\VEN_1022\u0026DEV_43F5\u0026SUBSYS_33281B21\u0026REV_01\\7\u00262a80eed7\u00260\u00266000400011",
+                                                  "location_info":  "PCI bus 18, device 0, function 0",
+                                                  "location_paths":  [
+                                                                         "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)",
+                                                                         "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)"
+                                                                     ],
+                                                  "direct_children":  {
+                                                                          "class":  "USB",
+                                                                          "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                          "instance_id":  "USB\\ROOT_HUB30\\9\u00262EC1B4C8\u00260\u00260",
+                                                                          "status":  "OK",
+                                                                          "problem":  0,
+                                                                          "parent":  "PCI\\VEN_1022\u0026DEV_43FD\u0026SUBSYS_11421B21\u0026REV_01\\8\u0026e99a29b\u00260\u0026006000400011",
+                                                                          "location_info":  null,
+                                                                          "location_paths":  [
+                                                                                                 "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                                                                                                 "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+                                                                                             ]
+                                                                      },
+                                                  "children_tree":  [
+                                                                        {
+                                                                            "device":  {
+                                                                                           "class":  "USB",
+                                                                                           "friendly_name":  "USB Root Hub (USB 3.0)",
+                                                                                           "instance_id":  "USB\\ROOT_HUB30\\9\u00262EC1B4C8\u00260\u00260",
+                                                                                           "status":  "OK",
+                                                                                           "problem":  0,
+                                                                                           "parent":  "PCI\\VEN_1022\u0026DEV_43FD\u0026SUBSYS_11421B21\u0026REV_01\\8\u0026e99a29b\u00260\u0026006000400011",
+                                                                                           "location_info":  null,
+                                                                                           "location_paths":  [
+                                                                                                                  "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)",
+                                                                                                                  "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)"
+                                                                                                              ]
+                                                                                       },
+                                                                            "children":  [
+                                                                                             {
+                                                                                                 "device":  {
+                                                                                                                "class":  "HIDClass",
+                                                                                                                "friendly_name":  "USB Input Device",
+                                                                                                                "instance_id":  "USB\\VID_0DB0\u0026PID_0076\\7E7025010901",
+                                                                                                                "status":  "OK",
+                                                                                                                "problem":  0,
+                                                                                                                "parent":  "USB\\ROOT_HUB30\\9\u00262ec1b4c8\u00260\u00260",
+                                                                                                                "location_info":  "Port_#0013.Hub_#0006",
+                                                                                                                "location_paths":  [
+                                                                                                                                       "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(13)",
+                                                                                                                                       "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(13)"
+                                                                                                                                   ]
+                                                                                                            },
+                                                                                                 "children":  [
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "HIDClass",
+                                                                                                                                     "friendly_name":  "HID-compliant vendor-defined device",
+                                                                                                                                     "instance_id":  "HID\\VID_0DB0\u0026PID_0076\\B\u002624677F26\u00260\u00260000",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_0DB0\u0026PID_0076\\7E7025010901",
+                                                                                                                                     "location_info":  null,
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            null
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  }
+                                                                                                              ]
+                                                                                             },
+                                                                                             {
+                                                                                                 "device":  {
+                                                                                                                "class":  "USB",
+                                                                                                                "friendly_name":  "USB Composite Device",
+                                                                                                                "instance_id":  "USB\\VID_1D6B\u0026PID_0112\\0123456789ABCDEF",
+                                                                                                                "status":  "OK",
+                                                                                                                "problem":  0,
+                                                                                                                "parent":  "USB\\ROOT_HUB30\\9\u00262ec1b4c8\u00260\u00260",
+                                                                                                                "location_info":  "Port_#0015.Hub_#0006",
+                                                                                                                "location_paths":  [
+                                                                                                                                       "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)",
+                                                                                                                                       "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)"
+                                                                                                                                   ]
+                                                                                                            },
+                                                                                                 "children":  [
+                                                                                                                  {
+                                                                                                                      "device":  {
+                                                                                                                                     "class":  "Ports",
+                                                                                                                                     "friendly_name":  "USB Serial Device (COM3)",
+                                                                                                                                     "instance_id":  "USB\\VID_1D6B\u0026PID_0112\u0026MI_00\\B\u0026201CBBE\u00260\u00260000",
+                                                                                                                                     "status":  "OK",
+                                                                                                                                     "problem":  0,
+                                                                                                                                     "parent":  "USB\\VID_1D6B\u0026PID_0112\\0123456789ABCDEF",
+                                                                                                                                     "location_info":  "0012.0000.0000.015.000.000.000.000.000",
+                                                                                                                                     "location_paths":  [
+                                                                                                                                                            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USBMI(0)",
+                                                                                                                                                            "PCIROOT(0)#PCI(0201)#PCI(0000)#PCI(0800)#PCI(0000)#PCI(0C00)#PCI(0000)#USBROOT(0)#USB(15)#USB(15)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USBMI(0)",
+                                                                                                                                                            "ACPI(_SB_)#ACPI(PCI0)#ACPI(GPP7)#ACPI(UP00)#ACPI(DP40)#ACPI(UP00)#ACPI(DP60)#ACPI(XH00)#USBROOT(0)#USB(15)#USB(15)"
+                                                                                                                                                        ]
+                                                                                                                                 },
+                                                                                                                      "children":  [
+
+                                                                                                                                   ]
+                                                                                                                  }
+                                                                                                              ]
+                                                                                             }
+                                                                                         ]
+                                                                        }
+                                                                    ]
+                                              }
+                                          ]
+                      },
+    "wake_armed":  {
+                       "arguments":  [
+                                         "/devicequery",
+                                         "wake_armed"
+                                     ],
+                       "exit_code":  0,
+                       "output":  [
+                                      "Realtek PCIe 5GbE Family Controller",
+                                      "HID Keyboard Device (003)",
+                                      "HID Keyboard Device (007)",
+                                      ""
+                                  ]
+                   },
+    "wake_timers":  {
+                        "arguments":  [
+                                          "/waketimers"
+                                      ],
+                        "exit_code":  0,
+                        "output":  [
+                                       "There are no active wake timers in the system."
+                                   ]
+                    },
+    "power_requests":  {
+                           "arguments":  [
+                                             "/requests"
+                                         ],
+                           "exit_code":  0,
+                           "output":  [
+                                          "DISPLAY:",
+                                          "None.",
+                                          "",
+                                          "SYSTEM:",
+                                          "None.",
+                                          "",
+                                          "AWAYMODE:",
+                                          "None.",
+                                          "",
+                                          "EXECUTION:",
+                                          "None.",
+                                          "",
+                                          "PERFBOOST:",
+                                          "None.",
+                                          "",
+                                          "ACTIVELOCKSCREEN:",
+                                          "None.",
+                                          ""
+                                      ]
+                       },
+    "usb_selective_suspend_policy":  {
+                                         "arguments":  [
+                                                           "/query",
+                                                           "SCHEME_CURRENT",
+                                                           "2a737441-1930-4402-8d77-b2bebba308a3",
+                                                           "48e6b7a6-50f5-4782-a5d4-53bb8f07e226"
+                                                       ],
+                                         "exit_code":  0,
+                                         "output":  [
+                                                        "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                                                        "  GUID Alias: SCHEME_MIN",
+                                                        "  Subgroup GUID: 2a737441-1930-4402-8d77-b2bebba308a3  (USB settings)",
+                                                        "    Power Setting GUID: 48e6b7a6-50f5-4782-a5d4-53bb8f07e226  (USB selective suspend setting)",
+                                                        "      Possible Setting Index: 000",
+                                                        "      Possible Setting Friendly Name: Disabled",
+                                                        "      Possible Setting Index: 001",
+                                                        "      Possible Setting Friendly Name: Enabled",
+                                                        "    Current AC Power Setting Index: 0x00000001",
+                                                        "    Current DC Power Setting Index: 0x00000001",
+                                                        ""
+                                                    ]
+                                     },
+    "wake_timer_policy":  {
+                              "arguments":  [
+                                                "/query",
+                                                "SCHEME_CURRENT",
+                                                "238c9fa8-0aad-41ed-83f4-97be242c8f20",
+                                                "bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d"
+                                            ],
+                              "exit_code":  0,
+                              "output":  [
+                                             "Power Scheme GUID: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c  (High performance)",
+                                             "  GUID Alias: SCHEME_MIN",
+                                             "  Subgroup GUID: 238c9fa8-0aad-41ed-83f4-97be242c8f20  (Sleep)",
+                                             "    GUID Alias: SUB_SLEEP",
+                                             "    Power Setting GUID: bd3b718a-0680-4d9d-8ab2-e1d2b4ac806d  (Allow wake timers)",
+                                             "      GUID Alias: RTCWAKE",
+                                             "      Possible Setting Index: 000",
+                                             "      Possible Setting Friendly Name: Disable",
+                                             "      Possible Setting Index: 001",
+                                             "      Possible Setting Friendly Name: Enable",
+                                             "      Possible Setting Index: 002",
+                                             "      Possible Setting Friendly Name: Important Wake Timers Only",
+                                             "    Current AC Power Setting Index: 0x00000001",
+                                             "    Current DC Power Setting Index: 0x00000001",
+                                             ""
+                                         ]
+                          }
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "collection_date": "2026-09-05",
+  "status": "inspection_complete_no_removal_performed",
+  "nipm": {
+    "gui_version": "26.0.0.49283",
+    "cli_version": "26.0.0f131"
+  },
+  "driver": {
+    "service": "nipcibrd",
+    "path": "C:\\Windows\\System32\\drivers\\nipcibrd.sys",
+    "file_version": "25.8.0f188",
+    "state": "Running",
+    "start_mode": "Boot",
+    "service_group": "System Bus Extender",
+    "signature": "Valid, National Instruments Corporation"
+  },
+  "owning_package": {
+    "package": "ni-pcibrd",
+    "display_name": "NI-PCI Bridge Driver",
+    "version": "25.8.0.49340-0+f188",
+    "source_feed": "https://download.ni.com/support/nipkg/products/ni-v/ni-visa/25.8/released",
+    "cached_archive": "C:\\ProgramData\\National Instruments\\NI Package Manager\\Packages\\ni-pcibrd_25.8.0.49340-0+f188_windows_x64.nipkg",
+    "metadata_sha256": "88aee97c33975aa5ff888d0153dee9d8be2d32f751ee84a37b324cf436b817c9",
+    "cached_archive_sha256": "88aee97c33975aa5ff888d0153dee9d8be2d32f751ee84a37b324cf436b817c9",
+    "ownership_basis": "Package build f188 matches binary build f188; installed metadata identifies NI-PCI Bridge Driver and the exact matching cached archive."
+  },
+  "hardware_use": {
+    "present_ni_pxi_pci_devices": [],
+    "phantom_ni_pxi_pci_devices": [],
+    "pci_usb_vendor_history": [],
+    "conclusion": "No current or historical NI PCI/PXI hardware enumeration was found."
+  },
+  "direct_reverse_dependencies": [
+    "ni-mximanager 25.8.0.49343-0+f191",
+    "ni-pxiplatformservices-runtime 25.8.0.49347-0+f195"
+  ],
+  "direct_removal_simulation": {
+    "command": "nipkg remove --simulate ni-pcibrd",
+    "exit_code": -125067,
+    "result": "refused because ni-pxiplatformservices-runtime requires ni-pcibrd"
+  },
+  "dependency_safe_simulation": {
+    "command": "nipkg remove --simulate --allow-uninstall ni-pcibrd",
+    "exit_code": 0,
+    "package_count": 22,
+    "packages": [
+      "ni-apxipm2",
+      "ni-cabled-pcie",
+      "ni-controllerdriver",
+      "ni-dim",
+      "ni-mdbg",
+      "ni-mru",
+      "ni-mxdf",
+      "ni-mximanager",
+      "ni-orb",
+      "ni-pcibrd",
+      "ni-pxiplatformframework",
+      "ni-pxiplatformservices-expert",
+      "ni-pxiplatformservices-provider",
+      "ni-pxiplatformservices-runtime",
+      "ni-pxiplatformsoftware-errors",
+      "ni-roco",
+      "ni-roco-errors",
+      "ni-visa-c-examples",
+      "ni-visa-development-common",
+      "ni-visa-development-support-compatibility",
+      "ni-visa-driver-development-wizard",
+      "ni-xlator"
+    ]
+  },
+  "rollback_path": {
+    "archive_available": true,
+    "method": "Reinstall the same 25.8 PXI Platform Services/NI-PCI Bridge dependency set through NI Package Manager using the configured NI-VISA 2025 Q4 feed and verified local package cache, then restart once and verify inventory/PnP.",
+    "network_download_required_for_ni_pcibrd": false
+  },
+  "proposed_change": "If explicitly approved, remove the NI PCI Bridge/PXI dependency subset only through NI Package Manager, record before/after package inventories, restart once, verify PnP/network, then run one otherwise unchanged five-minute S3 cycle.",
+  "approval_required": true,
+  "approved": false,
+  "removal_performed": false
+}
