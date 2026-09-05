@@ -8,6 +8,7 @@ const API = {
   monitoringSessions: "/api/monitoring/sessions",
   exports: "/api/exports",
   status: "/api/status",
+  systemStatus: "/api/system-status",
   printer: "/api/printer",
   printerHistory: "/api/printer/history",
   printerTelemetry: "/api/printer/telemetry",
@@ -19,6 +20,36 @@ const POLL_INTERVAL_MS = 7000;
 const WORKFLOW_POLL_INTERVAL_MS = 5000;
 const PREVIEW_POLL_INTERVAL_MS = 15000;
 const FETCH_TIMEOUT_MS = 8000;
+// The printer chart reads raw telemetry rather than a downsampled aggregate, so
+// the default 24h range is the slowest request the dashboard makes.
+const PRINTER_TELEMETRY_TIMEOUT_MS = 20000;
+// Named in the same order they are requested, so a refresh failure can say
+// which section is missing instead of blaming the printer.
+const PRINTER_SECTIONS = ["printer state", "print history", "maintenance", "telemetry chart", "sensor nodes"];
+
+// The API states are the scheduler's own vocabulary. "baseline_required" and
+// "advisory" describe why the dashboard cannot put a date on a task, which is
+// not something a reader should have to decode, so the dashboard answers the
+// question they actually have: do I need to do something?
+const MAINTENANCE_STATE_LABELS = {
+  ok: "OK",
+  due_soon: "Due soon",
+  due: "Due",
+  overdue: "Overdue",
+  baseline_required: "Maintenance history needed",
+  advisory: "Periodic inspection",
+};
+
+const MAINTENANCE_STATE_HELP = {
+  baseline_required:
+    "Bambu publishes an interval for this, but the dashboard has no record of when it was last done, so it cannot say when it is next due. Record the last service to start the schedule.",
+  advisory:
+    "Bambu recommends checking this, but publishes no print-hour or calendar interval for it, so no due date is invented.",
+};
+
+function maintenanceStateLabel(state) {
+  return MAINTENANCE_STATE_LABELS[state] || formatLabel(state || "unknown");
+}
 const KNOWN_ENVIRONMENT_STATUS_MASK = 0x1f;
 
 const AIR_QUALITY_METRIC_GROUPS = [
@@ -383,11 +414,18 @@ async function refreshPrinterDashboard(force = false) {
   state.printerDashboardInFlight = true;
   setRefreshButtonBusy(true);
   try {
+    // The chart query reads raw telemetry and is by far the slowest of the five
+    // -- measured at ~4.9s for the default 24h range on an idle Pi, against the
+    // 8s default abort. It gets its own budget so ordinary slowness stops
+    // presenting itself as a printer fault.
     const requests = await Promise.allSettled([
       fetchJson(API.printer),
       fetchJson(`${API.printerHistory}?limit=100`),
       fetchJson(API.printerMaintenance),
-      fetchJson(`${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`),
+      fetchJson(
+        `${API.printerTelemetry}?range=${encodeURIComponent(state.printerTelemetryRange)}`,
+        { timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS },
+      ),
       fetchJson(API.nodes),
     ]);
     const [current, history, maintenance, telemetry, nodes] = requests;
@@ -425,8 +463,20 @@ async function refreshPrinterDashboard(force = false) {
     } else {
       renderPrinterTelemetryError("Historical printer telemetry is temporarily unavailable.");
     }
-    const failures = requests.filter((result) => result.status === "rejected").length;
-    setStatus(failures ? `Printer partial (${failures})` : "Online", failures ? "loading" : "ok");
+    // This pill is the page's connection indicator, which every other tab uses
+    // for "Online" or "API error". Counting rejected fetches here and calling
+    // the result "Printer partial" attached a dashboard-refresh problem to the
+    // printer, so a healthy printer looked degraded whenever one section timed
+    // out. The printer's own state is rendered in its card, from printer.status.
+    const failed = PRINTER_SECTIONS.filter((_name, index) => requests[index].status === "rejected");
+    setStatus(
+      failed.length ? `${failed.length} of ${PRINTER_SECTIONS.length} sections unavailable` : "Online",
+      failed.length ? "loading" : "ok",
+    );
+    const pill = document.getElementById("connection-state");
+    if (pill) {
+      pill.title = failed.length ? `Could not load: ${failed.join(", ")}` : "";
+    }
   } finally {
     state.printerDashboardInFlight = false;
     setRefreshButtonBusy(false);
@@ -495,6 +545,55 @@ function renderPrinterUsage(printer) {
       <div><dt>History provenance</dt><dd>${escapeHtml((usage.tracked_history_provenance || []).map(formatLabel).join(", ") || "None")}</dd></div>
     </dl>
     <p class="subtle">History completeness: ${usage.tracked_history_complete ? "known complete" : "not known to be complete"}${Number(usage.tracked_unknown_interval_job_count || 0) ? ` · ${Number(usage.tracked_unknown_interval_job_count)} job(s) have no usable start/end interval and are excluded` : ""}. This is not a printer lifetime counter.</p>
+  </div>
+  ${renderFilamentUsage(usage)}`;
+}
+
+function formatFilamentMass(grams) {
+  const value = Number(grams);
+  if (!Number.isFinite(value)) return "Unknown";
+  return value >= 1000 ? `${(value / 1000).toFixed(2)} kg` : `${value.toFixed(0)} g`;
+}
+
+function renderFilamentUsage(usage) {
+  if (!Number.isFinite(Number(usage.tracked_filament_estimate_g))) {
+    return "";
+  }
+  const materials = usage.tracked_filament_by_material || [];
+  const unallocated = Number(usage.tracked_filament_unallocated_g || 0);
+  const incomplete = Number(usage.tracked_filament_incomplete_job_count || 0);
+  const unknown = Number(usage.tracked_filament_unknown_amount_job_count || 0);
+  const rows = materials.map((item) => `<div class="filament-row">
+      <dt>${escapeHtml(item.material)}</dt>
+      <dd>${escapeHtml(formatFilamentMass(item.grams))} <span class="subtle">${Number(item.job_count || 0)} print(s)</span></dd>
+    </div>`);
+  if (unallocated > 0) {
+    rows.push(`<div class="filament-row filament-unallocated">
+      <dt>Not broken down</dt>
+      <dd>${escapeHtml(formatFilamentMass(unallocated))} <span class="subtle">material split not reported</span></dd>
+    </div>`);
+  }
+  // Jobs the dashboard cannot put a number on stay visible rather than being
+  // quietly dropped, so the total is never mistaken for the whole story.
+  const caveats = [];
+  if (incomplete) {
+    caveats.push(`${incomplete} print(s) did not finish; Bambu only stores the amount planned for the whole job, so what they actually used is unknown`);
+  }
+  if (unknown) {
+    caveats.push(`${unknown} print(s) have no recorded amount`);
+  }
+  return `<div class="usage-hero filament-hero">
+    <div class="usage-headline">
+      <span class="usage-label">Tracked Filament</span>
+      <strong class="usage-value">${escapeHtml(formatFilamentMass(usage.tracked_filament_estimate_g))}</strong>
+      <span class="authority-label">Based on Bambu's per-print slicer estimate, not weighed consumption. Counts completed prints since ${usage.tracked_filament_first_job_at ? escapeHtml(formatDateTime(usage.tracked_filament_first_job_at)) : "the start of available history"}; earlier prints may be missing.</span>
+    </div>
+    ${rows.length ? `<dl class="printer-facts filament-facts"><div class="filament-heading"><dt>By material</dt><dd></dd></div>${rows.join("")}</dl>` : '<p class="subtle">No per-material breakdown is available yet.</p>'}
+    <dl class="printer-facts usage-facts">
+      <div><dt>Prints counted</dt><dd>${Number(usage.tracked_filament_job_count || 0)}</dd></div>
+      <div><dt>Filament length</dt><dd>${Number.isFinite(Number(usage.tracked_filament_length_m)) ? `${Number(usage.tracked_filament_length_m).toFixed(1)} m` : "Unknown"}</dd></div>
+    </dl>
+    ${caveats.length ? `<p class="subtle">Not included: ${escapeHtml(caveats.join("; "))}.</p>` : ""}
   </div>`;
 }
 
@@ -520,7 +619,7 @@ function renderMaintenanceSummary(payload) {
   }
   container.innerHTML = `<div class="maintenance-summary maintenance-${escapeHtml(summary.overall_state || "ok")}">
     <div class="air-station-heading">
-      <h3>Overall: ${escapeHtml(formatLabel(summary.overall_state || "ok"))}</h3>
+      <h3>Overall: ${escapeHtml(maintenanceStateLabel(summary.overall_state || "ok"))}</h3>
       <span class="status-pill ${maintenancePillClass(summary.overall_state)}">${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} mode</span>
     </div>
     <p>${next ? `Next: <strong>${escapeHtml(next.name)}</strong>${next.next_due_at ? ` · due ${escapeHtml(formatDateTime(next.next_due_at))}` : ""}${Number.isFinite(Number(next.remaining_days)) ? ` (${Number(next.remaining_days).toFixed(0)} days)` : ""}` : "No scheduled task is pending."}</p>
@@ -528,8 +627,8 @@ function renderMaintenanceSummary(payload) {
       <li>Due soon: ${Number(counts.due_soon || 0)}</li>
       <li>Due: ${Number(counts.due || 0)}</li>
       <li>Overdue: ${Number(counts.overdue || 0)}</li>
-      <li>Needs baseline: ${Number(counts.baseline_required || 0)}</li>
-      <li>Advisory: ${Number(counts.advisory || 0)}</li>
+      <li>${escapeHtml(MAINTENANCE_STATE_LABELS.baseline_required)}: ${Number(counts.baseline_required || 0)}</li>
+      <li>${escapeHtml(MAINTENANCE_STATE_LABELS.advisory)}: ${Number(counts.advisory || 0)}</li>
     </ul>
     <p class="subtle">Usage tier ${escapeHtml(formatLabel(summary.maintenance_mode || "unknown"))} from ${summary.rolling_print_hours_per_day == null ? "unknown" : `${Number(summary.rolling_print_hours_per_day).toFixed(2)} h/day`} tracked printing (${escapeHtml(formatLabel(summary.maintenance_mode_reason || "unknown"))}).</p>
   </div>`;
@@ -550,15 +649,14 @@ function renderMaintenance(payload) {
     return;
   }
   container.innerHTML = tasks.map((task) => `<article class="maintenance-card maintenance-${escapeHtml(task.state)}">
-    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${maintenancePillClass(task.state)}">${escapeHtml(formatLabel(task.state))}</span></div>
+    <div class="air-station-heading"><h3>${escapeHtml(task.name)}</h3><span class="status-pill ${maintenancePillClass(task.state)}">${escapeHtml(maintenanceStateLabel(task.state))}</span></div>
     <p>${escapeHtml(task.description || "No description")}</p>
     <p class="maintenance-cadence"><strong>Manufacturer cadence:</strong> ${escapeHtml(task.cadence || "Not published")}</p>
-    ${task.state === "baseline_required" ? '<p class="maintenance-baseline">Needs a baseline: record when this was last physically done before the dashboard can schedule it.</p>' : ""}
-    ${task.state === "advisory" ? '<p class="maintenance-baseline">Condition-based guidance. Bambu Lab publishes no numeric interval, so no due date is invented.</p>' : ""}
+    ${MAINTENANCE_STATE_HELP[task.state] ? `<p class="maintenance-baseline">${escapeHtml(MAINTENANCE_STATE_HELP[task.state])}</p>` : ""}
     <ul>${(task.triggers || []).map((trigger) => `<li>${escapeHtml(maintenanceTriggerText(trigger, task))}</li>`).join("")}</ul>
     <p class="subtle">Last complete: ${task.last_completed_at ? escapeHtml(formatDateTime(task.last_completed_at)) : "Never recorded"}${task.next_due_at ? ` · Next due: ${escapeHtml(formatDateTime(task.next_due_at))}` : ""} · Source: ${escapeHtml(formatLabel(task.provenance || "unknown"))}${task.manufacturer_source_url ? ` (<a href="${escapeHtml(task.manufacturer_source_url)}" rel="noreferrer noopener" target="_blank">Bambu Lab wiki</a>)` : ""}</p>
     ${(task.triggers || []).some((trigger) => Number(trigger.warning_threshold) > 0) ? '<p class="subtle">Local warning lead time only; the interval above is the manufacturer value.</p>' : ""}
-    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">${task.state === "baseline_required" ? "Mark completed today" : "Mark complete locally"}</button>
+    <button class="secondary-button maintenance-complete" type="button" data-maintenance-task="${escapeHtml(task.maintenance_task_id)}">${task.state === "baseline_required" ? "Record last service" : "Mark done today"}</button>
   </article>`).join("");
 }
 
@@ -930,15 +1028,18 @@ function readingsQueryParams() {
 
 async function fetchJson(url, options = {}) {
   const controller = new AbortController();
-  const timeout = window.setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+  const { timeoutMs, ...fetchOptions } = options;
+  // Held in one place so the abort and the message it produces cannot disagree.
+  const budgetMs = Number.isFinite(timeoutMs) ? timeoutMs : FETCH_TIMEOUT_MS;
+  const timeout = window.setTimeout(() => controller.abort(), budgetMs);
 
   try {
     const response = await fetch(url, {
-      ...options,
+      ...fetchOptions,
       headers: {
         "Accept": "application/json",
-        ...(options.body ? { "Content-Type": "application/json" } : {}),
-        ...(options.headers || {}),
+        ...(fetchOptions.body ? { "Content-Type": "application/json" } : {}),
+        ...(fetchOptions.headers || {}),
       },
       signal: controller.signal,
     });
@@ -962,7 +1063,7 @@ async function fetchJson(url, options = {}) {
     return await response.json();
   } catch (error) {
     if (error.name === "AbortError") {
-      throw new Error(`${url}: request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds`);
+      throw new Error(`${url}: request timed out after ${budgetMs / 1000} seconds`);
     }
     throw error;
   } finally {
@@ -2287,14 +2388,18 @@ async function refreshStatusTab(force = false) {
   state.statusInFlight = true;
   setRefreshButtonBusy(true);
   try {
-    const [status, nodes] = await Promise.all([
+    const [status, nodes, health] = await Promise.all([
       fetchJson(API.status),
       fetchJson(API.nodes),
+      // The health endpoint reports outages, so a failure here must not blank
+      // the rest of the tab. Render what came back and say so.
+      fetchJson(API.systemStatus).catch(() => null),
     ]);
     state.nodesData = nodes;
     updateWorkflowSources(nodes.nodes || []);
     renderServiceStatus(status);
     renderNodes(nodes);
+    renderSystemHealth(health);
     renderDebugInformation(status);
     setLastUpdated(status.checked_at_utc || nodes.generated_at);
     setStatus("Online", "ok");
@@ -2306,6 +2411,93 @@ async function refreshStatusTab(force = false) {
     state.statusInFlight = false;
     setRefreshButtonBusy(false);
   }
+}
+
+const HEALTH_STATE_LABELS = {
+  healthy: "Healthy",
+  degraded: "Degraded",
+  unavailable: "Unavailable",
+  unknown: "Unknown",
+};
+
+// Every state is announced in words as well as colour, and the icon is a
+// redundant cue rather than the only one, so the grid stays readable to anyone
+// who cannot distinguish the state colours.
+const HEALTH_STATE_ICONS = {
+  healthy: "\u25CF",
+  degraded: "\u25D0",
+  unavailable: "\u25CB",
+  unknown: "?",
+};
+
+const HEALTH_BASIS_NOTES = {
+  process_and_data: "Unit state and data freshness were both checked.",
+  process_only: "Only the unit's state was checked; nothing verified end to end.",
+  data_only: "Observed only through the data it produces.",
+  none: "Nothing was observed for this dependency.",
+};
+
+function healthStateLabel(state) {
+  return HEALTH_STATE_LABELS[state] || "Unknown";
+}
+
+function renderSystemHealth(data) {
+  const overall = document.getElementById("health-overall");
+  const container = document.getElementById("health-grid");
+  const build = document.getElementById("health-build");
+  if (!overall || !container || !build) {
+    return;
+  }
+  if (!data) {
+    overall.textContent = "Unavailable";
+    overall.className = "workflow-poll-state health-unavailable";
+    container.innerHTML = '<p class="empty-state">Dependency health could not be read.</p>';
+    build.textContent = "";
+    return;
+  }
+
+  const state = data.overall_state || "unknown";
+  overall.textContent = healthStateLabel(state);
+  overall.className = `workflow-poll-state health-${escapeHtml(state)}`;
+  const dependencies = Array.isArray(data.dependencies) ? data.dependencies : [];
+  container.innerHTML = dependencies.length
+    ? dependencies.map((item) => {
+      const itemState = item.state || "unknown";
+      const checks = Array.isArray(item.checks) ? item.checks : [];
+      return `
+        <article class="health-card health-${escapeHtml(itemState)}">
+          <div class="service-heading">
+            <h3>${escapeHtml(item.display_name || item.dependency_id)}</h3>
+            <span class="health-state">
+              <span aria-hidden="true">${escapeHtml(HEALTH_STATE_ICONS[itemState] || "?")}</span>
+              ${escapeHtml(healthStateLabel(itemState))}
+            </span>
+          </div>
+          <p>${escapeHtml(item.summary || "")}</p>
+          ${item.core === false ? '<p class="subtle">Not required for sensor ingest.</p>' : ""}
+          <p class="subtle">${escapeHtml(HEALTH_BASIS_NOTES[item.basis] || "")}</p>
+          ${checks.length
+            ? `<dl class="service-facts">${checks.map((check) => `
+                <div><dt>${escapeHtml(formatLabel(check.name))}</dt>
+                <dd>${escapeHtml(healthStateLabel(check.state))}</dd></div>`).join("")}</dl>`
+            : ""}
+        </article>`;
+    }).join("")
+    : '<p class="empty-state">No dependencies were reported.</p>';
+
+  const service = data.service || {};
+  const probe = data.probe || {};
+  const parts = [];
+  if (service.source_revision) {
+    parts.push(`Deployed revision ${service.source_revision} (${service.source_revision_origin || "unknown"})`);
+  }
+  if (typeof service.process_uptime_seconds === "number") {
+    parts.push(`process up ${formatDurationLong(service.process_uptime_seconds)}`);
+  }
+  if (Array.isArray(probe.timed_out) && probe.timed_out.length) {
+    parts.push(`checks that did not finish in time: ${probe.timed_out.join(", ")}`);
+  }
+  build.textContent = parts.join(" \u00B7 ");
 }
 
 function renderServiceStatus(data) {

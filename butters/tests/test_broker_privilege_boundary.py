@@ -622,6 +622,9 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
 
     class Result:
         returncode = 0
+        stdout = json.dumps(
+            {"accepted": True, "transition": "lock", "scheduled": True}
+        )
 
     config = FixedBrokerConfig(
         "fixed-desktop",
@@ -655,6 +658,7 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
     } <= options
     assert "-T" in argv, "no PTY is allocated"
     assert "-i" in argv and str(config.desktop_key) in argv
+    assert argv[-1].endswith("-Operation Lock")
     # Nothing relaxes host-key verification or opens a forwarding channel.
     assert not any(
         item.startswith(
@@ -674,10 +678,15 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
     assert not any(
         item in {"-A", "-X", "-Y", "-R", "-L", "-D", "-t", "-W"} for item in argv
     )
-    # One fixed remote command, still the final argument, and no shell.
+    # One fixed explicit PowerShell helper command remains the final argument;
+    # neither the peer nor the default OpenSSH shell chooses its semantics.
     assert argv[-2:] == [
         "fixed-user@fixed-desktop",
-        "rundll32.exe user32.dll,LockWorkStation",
+        (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass -File "
+            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Lock"
+        ),
     ]
 
 
@@ -734,3 +743,119 @@ def test_enumerated_but_unimplemented_operations_have_no_handler(
         response = _reply(client_side)
     assert response["ok"] is False
     assert response["error_code"] == "operation_unavailable"
+
+
+# --- supervision and resource bounds --------------------------------------
+
+
+def test_the_root_broker_carries_the_same_kind_of_cgroup_bound_as_its_peers() -> None:
+    """The one unit running as root was the only one without a memory bound.
+
+    _desktop_control reads the Windows helper's reply with capture_output, which
+    bounds time but not size: the 16 KiB schema cap is applied only after the
+    whole reply is buffered, so a host that streams for the full 25s subprocess
+    timeout is limited by RAM alone. Unbounded, that lets the kernel's OOM killer
+    choose a victim anywhere on the Pi rather than confining the damage.
+    """
+
+    service = _directives(SERVICE_UNIT)
+    web = _directives(WEB_UNIT)
+
+    assert web["MemoryMax"], "the web unit's bound is the precedent for this"
+    assert service["MemoryMax"] == ["256M"]
+    assert service["TasksMax"] == ["64"]
+
+
+def test_the_broker_is_not_supervised_into_restarting_itself() -> None:
+    """Restart=no is deliberate, and measured against the alternatives.
+
+    On an isolated user-manager model of this exact shape (Accept=no socket,
+    Type=simple service), a service that fails to start takes the socket down
+    with it as service-start-limit-hit under Restart=no AND under
+    Restart=on-failure alike, so a restart policy buys no resilience for the
+    failure that actually locks the broker out. What it would buy is a root
+    process resident all the time instead of one that exists only while a
+    request is in flight.
+
+    Socket activation is the recovery path: the next connection starts a fresh
+    broker. Nothing here may grow into Restart=always without that trade being
+    re-argued.
+    """
+
+    service = _directives(SERVICE_UNIT)
+
+    assert "Restart" not in service
+    assert "RestartSec" not in service
+    assert service["Type"] == ["simple"]
+    assert service["Requires"] == ["butters-action-broker.socket"]
+
+
+def test_the_socket_hands_over_a_listener_rather_than_a_connection() -> None:
+    """Accept=no is what makes automatic restart unable to replay a mutation.
+
+    With Accept=no systemd passes the listening descriptor and never holds or
+    re-delivers request bytes, so a broker that dies mid-operation takes its
+    accepted connection with it. The client sees EOF and must decide for itself
+    whether to retry; systemd cannot replay the request on its behalf. An
+    Accept=yes socket would hand each connection to a fresh instance and put
+    that guarantee in systemd's hands instead.
+
+    Verified on an isolated user-manager model: a service that recorded a
+    mutation and then crashed executed exactly once under Restart=no,
+    Restart=on-failure and Restart=always.
+    """
+
+    socket_unit = _directives(SOCKET_UNIT)
+
+    assert socket_unit.get("Accept", ["no"]) == ["no"]
+    assert socket_unit["ListenStream"] == [SOCKET_PATH]
+
+
+def test_every_privileged_operation_declares_a_wall_clock_bound() -> None:
+    """No handler may reach an unbounded external call.
+
+    Each entry is the operation's own ceiling; the broker is serial, so this is
+    also the longest one request can keep every other request waiting.
+    """
+
+    import inspect
+
+    from butters.actions import broker as broker_module
+
+    source = inspect.getsource(broker_module)
+
+    # subprocess: wakeonlan/systemd-run/systemctl via _run, ssh via _desktop_control.
+    assert "timeout=timeout," in source          # _run takes it from the caller
+    assert "timeout=25," in source               # the fixed ssh bound
+    # Home Assistant: a real deadline around the whole exchange, not per read.
+    assert "HOME_ASSISTANT_DEADLINE_SECONDS = 10.0" in source
+    assert "_bounded_exchange" in source
+    assert "MONITOR_SETTLE_DEADLINE_SECONDS = 20.0" in source
+    # Peer I/O.
+    assert "DEFAULT_PEER_TIMEOUT_SECONDS = 5.0" in source
+
+    # Every _run call site passes an explicit bound.
+    for call in re.findall(r"self\._run\(\s*\[.*?\],\s*(\d+),?\s*\)", source, re.DOTALL):
+        assert 1 <= int(call) <= 30, call
+
+
+def test_the_environment_operations_have_no_handler_at_the_boundary() -> None:
+    """They are enumerated and gateable, but the broker cannot perform them.
+
+    Enabling one in the root config is inert rather than dangerous, and this
+    pins that so a handler cannot appear without the gap being noticed.
+    """
+
+    config = FixedBrokerConfig(
+        "192.0.2.1",
+        "user",
+        "00:00:00:00:00:00",
+        "192.0.2.255",
+        Path("/nonexistent/key"),
+        enabled_operations=frozenset(BrokerOperation),
+    )
+    handlers = FixedBrokerOperations(config, home_assistant_token="token").handlers()
+
+    for operation in BrokerOperation:
+        if operation.value.startswith("environment."):
+            assert operation not in handlers, operation

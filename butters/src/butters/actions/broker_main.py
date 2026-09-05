@@ -54,6 +54,9 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     if not key.is_absolute():
         raise ValueError("desktop credential path must be absolute")
     desktop_ssh_operations = {
+        BrokerOperation.DESKTOP_PARSEC_STATUS,
+        BrokerOperation.DESKTOP_PARSEC_ENSURE,
+        BrokerOperation.DESKTOP_PARSEC_RESTART,
         BrokerOperation.DESKTOP_LOCK,
         BrokerOperation.DESKTOP_SLEEP,
         BrokerOperation.DESKTOP_RESTART,

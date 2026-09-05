@@ -51,6 +51,9 @@ class DesktopSettings:
     wake_enabled: bool = True
     headless_enabled: bool = True
     monitors_enabled: bool = True
+    parsec_status_enabled: bool = False
+    parsec_ensure_enabled: bool = False
+    parsec_restart_enabled: bool = False
     lock_enabled: bool = False
     sleep_enabled: bool = False
     restart_enabled: bool = False
@@ -670,6 +673,15 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         wake_enabled=bool(desktop_table.get("wake_enabled", True)),
         headless_enabled=bool(desktop_table.get("headless_enabled", True)),
         monitors_enabled=bool(desktop_table.get("monitors_enabled", True)),
+        parsec_status_enabled=bool(
+            desktop_table.get("parsec_status_enabled", False)
+        ),
+        parsec_ensure_enabled=bool(
+            desktop_table.get("parsec_ensure_enabled", False)
+        ),
+        parsec_restart_enabled=bool(
+            desktop_table.get("parsec_restart_enabled", False)
+        ),
         lock_enabled=bool(desktop_table.get("lock_enabled", False)),
         sleep_enabled=bool(desktop_table.get("sleep_enabled", False)),
         restart_enabled=bool(desktop_table.get("restart_enabled", False)),

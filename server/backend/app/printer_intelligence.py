@@ -67,6 +67,13 @@ TRACKED_COMPLETENESS_REASONS = (
     "no_authoritative_printer_lifetime_counter_available",
 )
 
+FILAMENT_COMPLETENESS_REASONS = (
+    "bambu_cloud_history_retention_boundary_unknown",
+    "filament_amount_is_a_slicer_estimate_not_a_measurement",
+    "locally_observed_only_jobs_carry_no_filament_amount",
+)
+
+
 
 class PrinterIntelligenceError(RuntimeError):
     pass
@@ -695,6 +702,171 @@ class PrinterIntelligenceStore:
             },
         }
 
+    def _tracked_filament(
+        self, connection: sqlite3.Connection, printer_id: str | None
+    ) -> dict[str, Any]:
+        """Aggregate filament over the same canonical jobs as the runtime total.
+
+        Two source facts shape every decision here, both established from the
+        deployed history rather than from field names:
+
+        * ``weight_grams`` is the slicer's plan for the job, not measured
+          consumption. A job aborted after two seconds still reports 154.5 g.
+          Counting an aborted job's weight as filament used would therefore
+          overstate the total badly, so only completed jobs contribute and the
+          rest are counted as jobs whose real consumption is unknown.
+        * ``ams_mapping`` carries a per-slot ``filamentType`` and ``weight``
+          whose sum equals ``weight_grams`` exactly across every stored record,
+          so a multi-material job needs no guessing and no even division. A job
+          that has a weight but no usable mapping is tracked as unallocated
+          rather than being spread across the materials it listed.
+
+        Mass exists only on the cloud rows: the local observer records material
+        and AMS slot but no weight, so a locally-only job is a known print with
+        unknown filament. Deduplication is inherited from the same
+        ``reconciled_session_id`` join the runtime total uses, so a print seen
+        both locally and in the cloud is counted exactly once.
+        """
+
+        local_rows = connection.execute(
+            f"""SELECT session_id, result
+                FROM print_sessions
+                WHERE source IN ({",".join("?" * len(LOCAL_SOURCES))})
+                  AND (? IS NULL OR printer_id = ?)""",
+            (*sorted(LOCAL_SOURCES), printer_id, printer_id),
+        ).fetchall()
+        cloud_rows = connection.execute(
+            """SELECT history_id, result, started_at_utc, weight_grams,
+                      length_meters, materials_json, ams_mapping_json,
+                      reconciled_session_id
+               FROM cloud_print_history WHERE (? IS NULL OR printer_id = ?)""",
+            (printer_id, printer_id),
+        ).fetchall()
+
+        cloud_by_session = {
+            str(row["reconciled_session_id"]): row
+            for row in cloud_rows
+            if row["reconciled_session_id"]
+        }
+
+        jobs: list[dict[str, Any]] = []
+        for row in local_rows:
+            cloud = cloud_by_session.get(str(row["session_id"]))
+            jobs.append(
+                {
+                    "result": row["result"] or (cloud["result"] if cloud else None),
+                    "cloud": cloud,
+                }
+            )
+        for row in cloud_rows:
+            if row["reconciled_session_id"]:
+                continue
+            jobs.append({"result": row["result"], "cloud": row})
+
+        total_grams = 0.0
+        total_metres = 0.0
+        counted = 0
+        unallocated_grams = 0.0
+        by_material: dict[str, dict[str, Any]] = {}
+        unknown_amount_jobs = 0
+        incomplete_jobs = 0
+        first_at: str | None = None
+        for job in jobs:
+            completed = str(job["result"] or "") == "completed"
+            cloud = job["cloud"]
+            grams = None if cloud is None else cloud["weight_grams"]
+            if not completed:
+                # Real filament was used, but the stored number is the plan for
+                # the whole job, so the amount actually consumed is unknown.
+                incomplete_jobs += 1
+                continue
+            if grams is None or float(grams) <= 0:
+                unknown_amount_jobs += 1
+                continue
+            grams = float(grams)
+            total_grams += grams
+            counted += 1
+            if cloud["length_meters"] is not None:
+                total_metres += float(cloud["length_meters"])
+            started = cloud["started_at_utc"]
+            if started and (first_at is None or str(started) < first_at):
+                first_at = str(started)
+            allocated = 0.0
+            contributed: set[str] = set()
+            for entry in _json_list(cloud["ams_mapping_json"]):
+                if not isinstance(entry, Mapping):
+                    continue
+                weight = entry.get("weight")
+                try:
+                    weight = float(weight)
+                except (TypeError, ValueError):
+                    continue
+                if weight <= 0:
+                    # A slot that was mapped but contributed nothing.
+                    continue
+                material = _normalize_material(entry.get("filamentType"))
+                bucket = by_material.setdefault(
+                    material["material"],
+                    {
+                        "material": material["material"],
+                        "family": material["family"],
+                        "variant": material["variant"],
+                        "raw_names": [],
+                        "grams": 0.0,
+                        "job_count": 0,
+                    },
+                )
+                bucket["grams"] += weight
+                if material["raw"] and material["raw"] not in bucket["raw_names"]:
+                    bucket["raw_names"].append(material["raw"])
+                allocated += weight
+                contributed.add(material["material"])
+            if allocated <= 0:
+                # A weight with no usable per-slot breakdown. Dividing it across
+                # the materials the job listed would invent figures the source
+                # never gave, so it stays known-but-unallocated.
+                unallocated_grams += grams
+            for name in contributed:
+                # Once per job per material, not once per tray: a job can map
+                # the same filament into several slots.
+                by_material[name]["job_count"] += 1
+
+        materials = sorted(
+            (
+                {
+                    **bucket,
+                    "grams": round(bucket["grams"], 3),
+                    "kilograms": round(bucket["grams"] / 1000, 4),
+                }
+                for bucket in by_material.values()
+            ),
+            key=lambda item: (-item["grams"], item["material"]),
+        )
+        return {
+            "tracked_filament_estimate_g": round(total_grams, 3),
+            "tracked_filament_estimate_kg": round(total_grams / 1000, 4),
+            "tracked_filament_length_m": round(total_metres, 3),
+            "tracked_filament_job_count": counted,
+            "tracked_filament_unknown_amount_job_count": unknown_amount_jobs,
+            "tracked_filament_incomplete_job_count": incomplete_jobs,
+            "tracked_filament_unallocated_g": round(unallocated_grams, 3),
+            "tracked_filament_first_job_at": first_at,
+            "tracked_filament_history_complete": False,
+            "tracked_filament_history_completeness_reasons": list(
+                FILAMENT_COMPLETENESS_REASONS
+            ),
+            "tracked_filament_by_material": materials,
+            "tracked_filament_measured": False,
+            "tracked_filament_semantics": (
+                "sum of Bambu's per-job slicer filament estimate over completed "
+                "prints only, deduplicated by the same canonical reconciliation "
+                "as tracked print time. It is an estimate of planned filament, "
+                "not weighed consumption. Prints that did not complete are "
+                "counted separately because their stored weight is the plan for "
+                "the whole job rather than the part that printed."
+            ),
+        }
+
     def usage_summary(
         self, printer_id: str | None = None, *, now: datetime | None = None
     ) -> dict[str, Any]:
@@ -716,6 +888,7 @@ class PrinterIntelligenceStore:
                 (printer_id, printer_id),
             ).fetchone()
             tracked = self._tracked_runtime(connection, printer_id, now=now)
+            filament = self._tracked_filament(connection, printer_id)
         local_hours = stats["usage_seconds"] / 3600
         effective = local_hours
         effective_provenance = "locally_observed"
@@ -745,6 +918,7 @@ class PrinterIntelligenceStore:
                 )
         return {
             **tracked,
+            **filament,
             "printer_id": printer_id,
             "printer_reported_lifetime_hours": printer_latest,
             "printer_reported_lifetime_hours_available": printer_latest is not None,
@@ -1726,6 +1900,42 @@ def _interval_seconds(start: Any, end: Any) -> int | None:
         return None
     return max(0, round((end_time - start_time).total_seconds()))
 
+
+
+def _json_list(raw: Any) -> list[Any]:
+    """Decode a stored JSON array, treating anything unusable as empty."""
+
+    if isinstance(raw, (list, tuple)):
+        return list(raw)
+    if not raw:
+        return []
+    try:
+        value = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return value if isinstance(value, list) else []
+
+
+def _normalize_material(raw: Any) -> dict[str, str]:
+    """Split a filament name into family and variant without losing the name.
+
+    Bambu sends a free-form string, so nothing here may assume a fixed set.
+    PETG and PETG-ESD have to stay distinguishable, as do PLA and PLA-CF, so
+    the material key keeps the full designation and the family is offered
+    alongside it for grouping rather than instead of it.
+    """
+
+    text = str(raw or "").strip()
+    if not text:
+        return {"material": "unknown", "family": "unknown", "variant": "", "raw": ""}
+    designation = text.upper().replace("_", "-")
+    family, separator, variant = designation.partition("-")
+    return {
+        "material": designation,
+        "family": family if separator else designation,
+        "variant": variant,
+        "raw": text,
+    }
 
 def _iso(value: datetime | None) -> str | None:
     if value is None:

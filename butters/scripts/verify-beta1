@@ -1,20 +1,43 @@
 #!/usr/bin/env bash
+# Report what the deployment looks like, especially when it is broken. Every
+# probe is guarded: this script is run precisely when something is wrong, so an
+# early `set -e` abort would suppress the systemd and Tailscale output that
+# explains why.
 set -Eeuo pipefail
 
-echo "== /healthz =="
-curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8090/healthz
-echo
+failures=0
+
+probe() {
+  local label="$1"
+  shift
+  echo "== ${label} =="
+  if ! "$@"; then
+    echo "(${label} failed)" >&2
+    failures=$((failures + 1))
+  fi
+  echo
+}
+
+probe "/healthz" curl --fail --silent --show-error --max-time 5 \
+  http://127.0.0.1:8090/healthz
 
 # /readyz reports not_ready (503) until BUTTERS_ALLOWED_ORIGINS names the private
 # Tailscale HTTPS origin. That is a configuration result, not a crash, so print
 # the body either way instead of aborting the whole verification run.
-echo "== /readyz =="
-if ! curl --fail --silent --show-error --max-time 5 http://127.0.0.1:8090/readyz; then
-  echo
+if ! probe "/readyz" curl --fail --silent --show-error --max-time 5 \
+    http://127.0.0.1:8090/readyz; then
+  :
+fi
+if [[ "${failures}" -gt 0 ]]; then
   echo "readiness incomplete; check checks.production_origin above and set" >&2
   echo "BUTTERS_ALLOWED_ORIGINS in /etc/butters/butters.conf" >&2
 fi
-echo
 
-systemctl --no-pager --full status butters-web.service
-tailscale serve status
+probe "butters-web.service" systemctl --no-pager --full status butters-web.service
+probe "tailscale serve" tailscale serve status
+
+if [[ "${failures}" -gt 0 ]]; then
+  echo "${failures} check(s) reported a problem." >&2
+  exit 1
+fi
+echo "All checks reported healthy."

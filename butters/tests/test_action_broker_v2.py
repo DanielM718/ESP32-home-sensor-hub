@@ -4,11 +4,15 @@ import json
 import os
 import struct
 import threading
+import time
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 
 import pytest
+
 from butters.actions.broker import (
+    MONITOR_OPERATION_DEADLINE_SECONDS,
+    MONITOR_SETTLE_DEADLINE_SECONDS,
     BrokerClient,
     BrokerError,
     BrokerOperation,
@@ -163,6 +167,7 @@ def test_fixed_operations_use_only_server_configuration_and_explicit_argv(
 
         def __init__(self, payload):
             self.payload = json.dumps(payload).encode()
+            self.offset = 0
 
         def __enter__(self):
             return self
@@ -170,8 +175,14 @@ def test_fixed_operations_use_only_server_configuration_and_explicit_argv(
         def __exit__(self, *_args):
             return None
 
-        def read(self, _maximum):
-            return self.payload
+        def read(self, maximum):
+            # http.client returns at most `maximum` bytes and an empty bytes
+            # object at EOF. A fake that re-returns the whole body on every
+            # call cannot express a body that is still arriving, which is the
+            # shape the broker's read deadline exists to bound.
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
 
     def opener(request, **_kwargs):
         ha_requests.append(request)
@@ -224,6 +235,7 @@ def test_monitor_control_reports_already_partial_auth_and_unavailable_states(
 
         def __init__(self, payload):
             self.payload = json.dumps(payload).encode()
+            self.offset = 0
 
         def __enter__(self):
             return self
@@ -231,8 +243,14 @@ def test_monitor_control_reports_already_partial_auth_and_unavailable_states(
         def __exit__(self, *_args):
             return None
 
-        def read(self, _maximum):
-            return self.payload
+        def read(self, maximum):
+            # http.client returns at most `maximum` bytes and an empty bytes
+            # object at EOF. A fake that re-returns the whole body on every
+            # call cannot express a body that is still arriving, which is the
+            # shape the broker's read deadline exists to bound.
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
 
     config = FixedBrokerConfig(
         "192.168.1.209",
@@ -341,9 +359,10 @@ class ClientConnection:
     def __init__(self, response: bytes = b"", failure: Exception | None = None) -> None:
         self.response = bytearray(response)
         self.failure = failure
+        self.timeouts: list[float] = []
 
-    def settimeout(self, _timeout):
-        return None
+    def settimeout(self, timeout):
+        self.timeouts.append(timeout)
 
     def connect(self, _path):
         if self.failure:
@@ -419,6 +438,35 @@ def test_broker_client_fails_closed_on_unavailable_timeout_and_bad_response(
     assert protocol.value.code == "protocol_mismatch"
 
 
+def test_broker_client_clips_every_socket_phase_to_one_absolute_deadline(
+    tmp_path,
+) -> None:
+    request_id = "request_identifier_deadline"
+    payload = {
+        "version": 1,
+        "request_id": request_id,
+        "ok": True,
+        "status": {"accepted": True},
+        "error_code": None,
+    }
+    connection = ClientConnection(json.dumps(payload).encode() + b"\n")
+    readings = iter((0.0, 0.2, 0.6, 0.8))
+    client = BrokerClient(
+        BrokerSettings(enabled=True, socket_path=tmp_path / "broker.sock"),
+        connector=lambda *_args: connection,
+        monotonic=lambda: next(readings),
+    )
+
+    result = client.request(
+        BrokerOperation.DESKTOP_WAKE,
+        request_id=request_id,
+        timeout_seconds=1.0,
+    )
+
+    assert result.ok is True
+    assert connection.timeouts == pytest.approx((0.8, 0.4, 0.2))
+
+
 def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     tmp_path,
 ) -> None:
@@ -432,6 +480,9 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
 
     class Result:
         returncode = 0
+        stdout = json.dumps(
+            {"accepted": True, "transition": "restart", "scheduled": True}
+        )
 
     config = FixedBrokerConfig(
         "192.168.1.209",
@@ -457,7 +508,14 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
     assert "UpdateHostKeys=no" in options
     assert "-T" in argv
     assert not any(item.startswith("StrictHostKeyChecking=no") for item in options)
-    assert argv[-2:] == ["Daniel@192.168.1.209", "shutdown.exe /r /t 0"]
+    assert argv[-2:] == [
+        "Daniel@192.168.1.209",
+        (
+            "powershell.exe -NoLogo -NoProfile -NonInteractive "
+            "-ExecutionPolicy Bypass -File "
+            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Restart"
+        ),
+    ]
     assert argv[argv.index("-i") + 1].endswith("windows_remote_mode")
 
 
@@ -521,6 +579,7 @@ class _MonitorHarness:
 
         def __init__(self, payload: object) -> None:
             self.payload = json.dumps(payload).encode()
+            self.offset = 0
 
         def __enter__(self):
             return self
@@ -528,8 +587,10 @@ class _MonitorHarness:
         def __exit__(self, *_args):
             return None
 
-        def read(self, _maximum: int) -> bytes:
-            return self.payload
+        def read(self, maximum: int) -> bytes:
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
 
     def opener(self, request, **_kwargs):
         if request.method == "POST":
@@ -808,3 +869,489 @@ def test_monitor_settling_never_widens_the_fixed_entity_or_service_surface(
         broker_module.MONITOR_SETTLE_DEADLINE_SECONDS
         < BrokerSettings().request_timeout_seconds
     )
+
+
+# --- Home Assistant is a separate trust domain ----------------------------
+
+
+def _monitor_config(tmp_path) -> FixedBrokerConfig:
+    return FixedBrokerConfig(
+        "192.168.1.209",
+        "Daniel",
+        "34:5A:60:D7:4C:2C",
+        "192.168.1.255",
+        tmp_path / "fixed-key",
+        enabled_operations=frozenset({BrokerOperation.DESKTOP_MONITORS_OFF}),
+        # Never the real 127.0.0.1:8123: a fake handler that fails to displace
+        # urllib's HTTPHandler would otherwise reach the live Home Assistant on
+        # the development host instead of failing the test.
+        home_assistant_url="http://127.0.0.1:65535",
+    )
+
+
+def test_a_home_assistant_redirect_never_carries_the_token_off_host(tmp_path) -> None:
+    """Regression: urlopen would re-send the Bearer token wherever a 302 points.
+
+    urllib copies every request header except content-length/content-type onto
+    a redirect target, on any host. Home Assistant loads third-party
+    integrations and is a distinct trust domain, so a single 302 on the first
+    GET of a monitors operation would have exfiltrated the long-lived token
+    from this root process, while the operation still reported success.
+    """
+
+    import io
+    import urllib.request
+    from email.message import Message
+    from urllib.response import addinfourl
+
+    def _response(body, headers, url, code, reason):
+        # HTTPErrorProcessor reads .msg off the response; addinfourl delegates
+        # unknown attributes to the file object, which has none.
+        response = addinfourl(io.BytesIO(body), headers, url, code)
+        response.msg = reason
+        return response
+
+    seen: list[tuple[str, str | None]] = []
+
+    # Subclassing HTTPHandler is what makes build_opener *replace* urllib's own
+    # handler. A plain BaseHandler is merely appended, and the real one wins.
+    class Redirector(urllib.request.HTTPHandler):
+        def http_open(self, request):
+            seen.append((request.full_url, request.get_header("Authorization")))
+            headers = Message()
+            if "192.0.2." in request.full_url:
+                headers["Content-Type"] = "application/json"
+                return _response(b"{}", headers, request.full_url, 200, "OK")
+            headers["Location"] = "http://192.0.2.10/collect"
+            return _response(b"", headers, request.full_url, 302, "Found")
+
+    from butters.actions.broker import _NoRedirect
+
+    opener = urllib.request.build_opener(_NoRedirect, Redirector).open
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="LONG_LIVED_TOKEN",
+        opener=opener,
+    )
+
+    with pytest.raises(BrokerError) as failure:
+        operations.desktop_monitors_off()
+
+    assert failure.value.code == "home_assistant_failed"
+    assert seen, "the fake handler never ran; urllib would have used the network"
+    off_host = [item for item in seen if "127.0.0.1" not in item[0]]
+    assert off_host == [], f"token was sent off-host: {off_host}"
+
+
+def test_the_redirect_handler_refuses_rather_than_rewrites() -> None:
+    from butters.actions.broker import _NoRedirect
+
+    assert _NoRedirect().redirect_request(None, None, 302, "", {}, "http://elsewhere") is None
+
+
+def test_a_dripping_home_assistant_response_cannot_hold_the_serial_broker(
+    tmp_path,
+) -> None:
+    """Regression: urlopen's timeout is per socket operation, not a deadline.
+
+    A peer that sends one byte just inside every timeout window held a single
+    read open indefinitely. The broker serves connections serially with
+    Restart=no and no watchdog, so that one read blocked every other privileged
+    operation until an operator intervened.
+    """
+
+    clock = FakeClock()
+    reads = {"count": 0}
+
+    class Dripping:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            reads["count"] += 1
+            # Just inside the 5s socket timeout, so no read ever raises.
+            clock.now += 4.0
+            return b"{"
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Dripping(),
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    with pytest.raises(BrokerError) as failure:
+        operations.desktop_monitors_off()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    # Bounded by HOME_ASSISTANT_DEADLINE_SECONDS / 4s per read, not by the
+    # 64 KiB cap, which one-byte reads would take 65537 reads to reach.
+    assert reads["count"] <= 8
+
+
+def test_a_whole_home_assistant_body_still_arrives_in_chunks(tmp_path) -> None:
+    """The deadline must not truncate a large but timely response."""
+
+    payload = json.dumps({"state": "off", "filler": "x" * 40000}).encode()
+
+    class Chunked:
+        status = 200
+
+        def __init__(self) -> None:
+            self.offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Chunked(),
+    )
+
+    assert operations._monitor_states() == {
+        "switch.desktop_gigabyte": "off",
+        "switch.desktop_oled": "off",
+    }
+
+
+def test_an_unrenderable_status_still_answers_and_keeps_the_outcome() -> None:
+    """Encoding sits after handle()'s except clauses.
+
+    A status a handler made unserializable would otherwise escape as an
+    unhandled exception after the operation had already run: no reply, no audit
+    line, and a broker process that exits. The decision must survive, and a
+    mutation that succeeded must never be reported as failed, because that
+    invites the caller to retry it.
+    """
+
+    import socket as socket_module
+
+    server = BrokerServer(
+        {BrokerOperation.DESKTOP_WAKE: lambda: {"accepted": True, "bad": object()}},
+        expected_uid=os.getuid(),
+    )
+    left, right = socket_module.socketpair(socket_module.AF_UNIX)
+    request = json.dumps(
+        {
+            "version": 1,
+            "request_id": "unrenderable-status-0001",
+            "operation": "desktop.wake",
+        }
+    ).encode() + b"\n"
+    try:
+        right.sendall(request)
+        server.handle(left)
+        reply = json.loads(right.recv(8192).decode().strip())
+    finally:
+        left.close()
+        right.close()
+
+    assert reply["ok"] is True
+    assert reply["status"] == {}
+    assert reply["request_id"] == "unrenderable-status-0001"
+
+
+def test_a_default_urllib_opener_would_have_leaked_the_token(tmp_path) -> None:
+    """Pins why the no-redirect opener has to exist.
+
+    If a future change reverts the broker to urlopen, or urllib ever starts
+    stripping Authorization across hosts, exactly one of these two assertions
+    changes and the guard's justification is re-examined rather than silently
+    dropped.
+    """
+
+    import io
+    import urllib.request
+    from email.message import Message
+    from urllib.response import addinfourl
+
+    seen: list[tuple[str, str | None]] = []
+
+    class Redirector(urllib.request.HTTPHandler):
+        def http_open(self, request):
+            seen.append((request.full_url, request.get_header("Authorization")))
+            headers = Message()
+            if "192.0.2." in request.full_url:
+                headers["Content-Type"] = "application/json"
+                response = addinfourl(io.BytesIO(b"{}"), headers, request.full_url, 200)
+                response.msg = "OK"
+                return response
+            headers["Location"] = "http://192.0.2.10/collect"
+            response = addinfourl(io.BytesIO(b""), headers, request.full_url, 302)
+            response.msg = "Found"
+            return response
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="LONG_LIVED_TOKEN",
+        opener=urllib.request.build_opener(Redirector).open,
+    )
+    operations._monitor_states()
+
+    off_host = [item for item in seen if "192.0.2." in item[0]]
+    assert off_host, "the redirect was not followed; this test no longer proves anything"
+    assert off_host[0][1] == "Bearer LONG_LIVED_TOKEN"
+
+
+# --- the whole Home Assistant exchange is bounded, not just the body -------
+
+
+def test_a_slow_response_header_cannot_hold_the_serial_broker(tmp_path) -> None:
+    """Regression: urlopen's timeout is per socket operation, not a deadline.
+
+    A peer dripping one byte of the status line or headers just inside every
+    window held urlopen open for a measured 106 seconds against a 5s timeout,
+    and indefinitely if it never stops. _read_bounded covers only the body,
+    which is reached after that phase. The broker answers connections serially,
+    so one such call blocks every other privileged operation.
+    """
+
+    import threading
+
+    release = threading.Event()
+
+    class NeverReturnsHeaders:
+        status = 200
+
+        def __enter__(self):
+            # Stands in for the status-line/header phase inside urlopen, which
+            # completes before any body read and is not covered by _read_bounded.
+            release.wait(30)
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return b"{}"
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: NeverReturnsHeaders(),
+        home_assistant_deadline_seconds=0.2,
+    )
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(BrokerError) as failure:
+            operations.desktop_monitors_off()
+        elapsed = time.monotonic() - started
+    finally:
+        release.set()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    assert elapsed < 5.0, f"the broker was held for {elapsed:.1f}s"
+
+
+def test_a_wedged_home_assistant_fails_later_requests_immediately(
+    tmp_path,
+) -> None:
+    """A stuck exchange must not queue every later request behind it.
+
+    Abandoning the worker is what keeps the broker responsive; refusing to start
+    a second one is what stops an abandoned thread accumulating per request.
+    """
+
+    import threading
+
+    release = threading.Event()
+    starts = []
+
+    class Hanging:
+        status = 200
+
+        def __enter__(self):
+            starts.append(1)
+            release.wait(30)
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, _maximum):
+            return b"{}"
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Hanging(),
+        home_assistant_deadline_seconds=0.2,
+    )
+
+    try:
+        with pytest.raises(BrokerError):
+            operations.desktop_monitors_off()
+        second = time.monotonic()
+        with pytest.raises(BrokerError) as failure:
+            operations.desktop_monitors_off()
+        immediate = time.monotonic() - second
+    finally:
+        release.set()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    assert immediate < 0.1, f"the second request waited {immediate:.2f}s"
+    assert len(starts) == 1, "a second exchange was started behind a stuck one"
+
+
+def test_a_healthy_exchange_is_unaffected_by_the_supervision(tmp_path) -> None:
+    """The bound must not close the path it guards."""
+
+    class Fine:
+        status = 200
+
+        def __init__(self) -> None:
+            self.payload = json.dumps({"state": "off"}).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=lambda _request, **_kwargs: Fine(),
+    )
+
+    assert operations._monitor_states() == {
+        "switch.desktop_gigabyte": "off",
+        "switch.desktop_oled": "off",
+    }
+    # Still usable after a completed exchange: the worker is reused, not retired.
+    assert operations._monitor_states()["switch.desktop_oled"] == "off"
+
+
+def test_a_slow_home_assistant_cannot_multiply_the_monitor_operation_bound(
+    tmp_path,
+) -> None:
+    """Regression: the settle deadline was only checked between iterations.
+
+    Each iteration was then free to spend its own budget on top of it. Against a
+    Home Assistant that was merely slow -- 9s per request, never wedged, so no
+    per-exchange bound ever tripped -- one desktop.monitors_off took 63.5s
+    against a declared 20s, and well past the client's 30s request timeout, so
+    the caller gave up while this root process was still mutating.
+
+    This is the same shape as the reachability overrun DesktopWorkflow already
+    fixed, and it takes the same fix: one deadline for the operation, and every
+    sub-request clamped to what is left of it.
+    """
+
+    clock = FakeClock()
+    slow_seconds = 9.0
+
+    class Slow:
+        status = 200
+
+        def __init__(self, payload) -> None:
+            self.payload = json.dumps(payload).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            # Deliberately ignores the budget it was handed, so this measures
+            # deadline propagation rather than the worker join.
+            clock.now += slow_seconds
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    def opener(request, **_kwargs):
+        if request.method == "POST":
+            return Slow([])
+        return Slow({"state": "on"})  # never converges
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=opener,
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    with pytest.raises(BrokerError) as failure:
+        operations.desktop_monitors_off()
+
+    assert failure.value.code == "home_assistant_unavailable"
+    # One overshoot by a callee that ignored its budget, never a multiple.
+    assert clock.now <= MONITOR_OPERATION_DEADLINE_SECONDS + slow_seconds
+    assert clock.now < 40.0
+
+
+def test_the_monitor_operation_bound_fits_inside_the_client_timeout() -> None:
+    """A caller must not give up while the root broker is still mutating."""
+
+    assert MONITOR_OPERATION_DEADLINE_SECONDS < BrokerSettings().request_timeout_seconds
+    assert MONITOR_SETTLE_DEADLINE_SECONDS <= MONITOR_OPERATION_DEADLINE_SECONDS
+
+
+def test_a_healthy_settle_still_returns_a_bounded_partial_result(tmp_path) -> None:
+    """The operation bound must not turn a normal non-convergence into an error."""
+
+    clock = FakeClock()
+
+    class Quick:
+        status = 200
+
+        def __init__(self, payload) -> None:
+            self.payload = json.dumps(payload).encode()
+            self.offset = 0
+
+        def __enter__(self):
+            clock.now += 0.05
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self, maximum):
+            chunk = self.payload[self.offset : self.offset + maximum]
+            self.offset += len(chunk)
+            return chunk
+
+    def opener(request, **_kwargs):
+        if request.method == "POST":
+            return Quick([])
+        return Quick({"state": "on"})
+
+    operations = FixedBrokerOperations(
+        _monitor_config(tmp_path),
+        home_assistant_token="token",
+        opener=opener,
+        monotonic=clock.monotonic,
+        sleeper=clock.sleep,
+    )
+
+    result = operations.desktop_monitors_off()
+
+    assert result["accepted"] is False
+    assert result["partial"] is False
+    assert clock.now < MONITOR_OPERATION_DEADLINE_SECONDS

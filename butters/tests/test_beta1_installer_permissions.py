@@ -339,5 +339,8 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
 
     # Nothing may write to the staging tree after it has been sealed, otherwise
     # the published tree could still contain root-only or world-readable paths.
-    after_seal = [line for line in lines[seal + 1 :] if "${staging_dir}" in line]
-    assert after_seal == ['mv "${staging_dir}" "${install_dir}"']
+    # Renaming the sealed tree into place is the one permitted use; the publish
+    # is wrapped in a failure check that restores the previous tree, so match on
+    # the rename rather than on the whole line.
+    after_seal = [line.strip() for line in lines[seal + 1 :] if "${staging_dir}" in line]
+    assert after_seal == ['if ! mv "${staging_dir}" "${install_dir}"; then']

@@ -15,8 +15,8 @@ CONTROL_START = re.compile(
 )
 CONTROL_TOGGLE = re.compile(r"\bturn\b.+\b(?:on|off)\b")
 NEGATED_DESKTOP_ACTION = re.compile(
-    r"\b(?:do not|don't|dont|never)\s+(?:\w+\s+){0,3}"
-    r"(?:wake|turn|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
+    r"\b(?:do not|don't|dont|don t|never)\s+(?:\w+\s+){0,5}"
+    r"(?:wake|turn|start|put|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
 )
 
 
@@ -60,6 +60,11 @@ class IntentRouter:
         normalized = normalize_request(text)
         if not normalized:
             return self._unsupported(normalized, "I didn't hear a request.")
+        if self._ambiguous_desktop_mutation(normalized):
+            return self._clarification(
+                normalized,
+                "Please choose one exact desktop or Parsec action.",
+            )
         environment_action = self._environment_action(normalized)
         if self._desktop_remote_action(normalized) and environment_action is not None:
             environment_skill, environment_arguments = environment_action
@@ -116,6 +121,10 @@ class IntentRouter:
         if self._desktop_status_request(normalized):
             return self._matched(
                 normalized, "get_desktop_status", {"machine": "desktop"}, 0.99
+            )
+        if self._parsec_status_request(normalized):
+            return self._matched(
+                normalized, "get_parsec_status", {"machine": "desktop"}, 0.99
             )
         if environment_action is not None:
             skill, arguments = environment_action
@@ -1099,7 +1108,9 @@ class IntentRouter:
     def _desktop_remote_action(text: str) -> bool:
         if NEGATED_DESKTOP_ACTION.search(text):
             return False
-        if "prepare my computer" in text:
+        if "prepare my computer" in text and any(
+            word in text for word in ("remote", "parsec", "headless")
+        ):
             return True
         wake = any(
             phrase in text
@@ -1110,6 +1121,20 @@ class IntentRouter:
             )
         )
         return wake and any(word in text for word in ("parsec", "remote"))
+
+    @staticmethod
+    def _ambiguous_desktop_mutation(text: str) -> bool:
+        if " or " not in text or NEGATED_DESKTOP_ACTION.search(text):
+            return False
+        verbs = {
+            verb
+            for verb in ("start", "lock", "sleep", "restart", "shutdown", "shut down")
+            if re.search(rf"\b{re.escape(verb)}\b", text)
+        }
+        targets = {
+            target for target in ("parsec", "desktop", "computer") if target in text
+        }
+        return bool(targets) and (len(verbs) > 1 or len(targets) > 1)
 
     @staticmethod
     def _desktop_status_request(text: str) -> bool:
@@ -1126,10 +1151,36 @@ class IntentRouter:
         )
 
     @staticmethod
+    def _parsec_status_request(text: str) -> bool:
+        if "parsec" not in text:
+            return False
+        return any(
+            phrase in text
+            for phrase in (
+                "is parsec running",
+                "parsec running",
+                "is parsec ready",
+                "parsec ready",
+                "can i connect to parsec",
+                "can we connect to parsec",
+                "parsec status",
+            )
+        )
+
+    @staticmethod
     def _desktop_action(text: str) -> str | None:
         if NEGATED_DESKTOP_ACTION.search(text):
             return None
         mappings = (
+            (("restart parsec",), "restart_parsec"),
+            (
+                (
+                    "start parsec",
+                    "make sure parsec is running",
+                    "ensure parsec is running",
+                ),
+                "ensure_parsec_running",
+            ),
             (
                 (
                     "turn off my monitors",
@@ -1157,14 +1208,34 @@ class IntentRouter:
                 ("wake my desktop", "wake the desktop", "turn on my computer"),
                 "wake_desktop",
             ),
-            (("lock my desktop", "lock the desktop"), "lock_desktop"),
-            (("sleep my desktop", "sleep the desktop"), "sleep_desktop"),
-            (("restart my desktop", "restart the desktop"), "restart_desktop"),
+            (
+                ("lock my desktop", "lock the desktop", "lock my computer"),
+                "lock_desktop",
+            ),
+            (
+                (
+                    "sleep my desktop",
+                    "sleep the desktop",
+                    "put my desktop to sleep",
+                    "put the desktop to sleep",
+                ),
+                "sleep_desktop",
+            ),
+            (
+                (
+                    "restart my desktop",
+                    "restart the desktop",
+                    "restart my computer",
+                ),
+                "restart_desktop",
+            ),
             (
                 (
                     "shut down my desktop",
                     "shutdown my desktop",
                     "shut down the desktop",
+                    "turn off my desktop",
+                    "turn off my computer",
                 ),
                 "shutdown_desktop",
             ),

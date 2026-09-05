@@ -1153,6 +1153,96 @@ tbody tr:last-child td {
 .service-failed { border-left-color: var(--danger); }
 .service-unavailable { border-left-color: var(--muted); }
 
+/* Dependency health reuses the service card shape so the two status sections
+   read as one surface. The state is carried by the text and the glyph in
+   .health-state as well as by the border colour, so nothing is encoded by
+   colour alone. */
+.health-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.health-card {
+  min-width: 0;
+  padding: 14px;
+  background: var(--panel);
+  border: 1px solid var(--panel-border);
+  border-left-width: 4px;
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+}
+
+.health-healthy { border-left-color: var(--ok); }
+.health-degraded { border-left-color: var(--warning); }
+.health-unavailable { border-left-color: var(--danger); }
+.health-unknown { border-left-color: var(--muted); }
+
+.health-state {
+  display: inline-flex;
+  gap: 6px;
+  align-items: baseline;
+  white-space: nowrap;
+  font-size: 0.78rem;
+  color: var(--muted-strong, var(--muted));
+}
+
+.health-card p {
+  overflow-wrap: anywhere;
+  font-size: 0.82rem;
+}
+
+/* Filament totals reuse the tracked-print-time hero so the two read as one
+   pair of facts. The by-material list is a definition list rather than a table
+   so it collapses cleanly at phone widths without a horizontal scroller. */
+.filament-hero {
+  margin-top: 12px;
+}
+
+.filament-facts {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 2px;
+}
+
+.filament-row {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--panel-border);
+}
+
+.filament-row dt {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.filament-row dd {
+  margin: 0;
+  text-align: right;
+  white-space: nowrap;
+}
+
+.filament-heading dt {
+  font-size: 0.78rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.filament-unallocated dt {
+  font-weight: 500;
+  font-style: italic;
+}
+
+#health-build {
+  margin-top: 10px;
+  font-size: 0.78rem;
+  overflow-wrap: anywhere;
+}
+
 .service-heading {
   display: flex;
   align-items: flex-start;

@@ -306,6 +306,156 @@ class FrontendContractTest(unittest.TestCase):
         self.assertNotIn("ams_inventory_json", self.javascript)
         self.assertNotIn("home_assistant", self.javascript.lower())
 
+    def test_dependency_health_is_rendered_with_every_state(self) -> None:
+        for state in ("healthy", "degraded", "unavailable", "unknown"):
+            with self.subTest(state=state):
+                self.assertIn(f"health-{state}", self.styles)
+                self.assertIn(f'{state}: "', self.javascript)
+
+    def test_dependency_health_state_is_not_encoded_by_colour_alone(self) -> None:
+        """Each card carries the state in words and a redundant glyph."""
+
+        self.assertIn("HEALTH_STATE_LABELS", self.javascript)
+        self.assertIn("HEALTH_STATE_ICONS", self.javascript)
+        self.assertIn('<span aria-hidden="true">', self.javascript)
+        self.assertIn("healthStateLabel(itemState)", self.javascript)
+
+    def test_dependency_health_says_what_was_actually_checked(self) -> None:
+        """A process-only verdict must not read as end-to-end verification."""
+
+        self.assertIn("HEALTH_BASIS_NOTES", self.javascript)
+        self.assertIn("Only the unit's state was checked", self.javascript)
+        self.assertIn("Not required for sensor ingest.", self.javascript)
+
+    def test_a_health_outage_does_not_blank_the_status_tab(self) -> None:
+        """The endpoint that reports outages must not take the tab down."""
+
+        self.assertIn("fetchJson(API.systemStatus).catch(() => null)", self.javascript)
+        self.assertIn("Dependency health could not be read.", self.javascript)
+
+    def test_deployed_revision_and_uptime_are_surfaced(self) -> None:
+        self.assertIn("source_revision", self.javascript)
+        self.assertIn("process_uptime_seconds", self.javascript)
+        self.assertIn("checks that did not finish in time", self.javascript)
+        self.assertIn('id="health-build"', self.template)
+
+    def test_dependency_health_section_is_labelled_and_live(self) -> None:
+        self.assertIn('aria-labelledby="health-heading"', self.template)
+        self.assertIn('id="health-heading"', self.template)
+        self.assertIn('id="health-grid" class="health-grid" aria-live="polite"', self.template)
+
+    def test_dependency_health_grid_collapses_on_a_phone(self) -> None:
+        """Same auto-fit track as the services grid, so 390px is one column."""
+
+        health = self.styles[self.styles.index(".health-grid {") :]
+        self.assertIn("repeat(auto-fit, minmax(260px, 1fr))", health[:200])
+
+    def test_the_connection_pill_never_reports_a_printer_state(self) -> None:
+        """Regression: the printer "randomly" showed partial while working fine.
+
+        refreshPrinterDashboard issues five parallel fetches and counted the
+        rejected ones, then wrote "Printer partial (N)" into #connection-state --
+        the page's connection pill, which every other tab uses for Online or API
+        error. A dashboard-refresh problem was therefore presented as a printer
+        fault. The telemetry chart alone measured ~4.9s for its default 24h range
+        against an 8s abort, so ordinary slowness tripped it.
+        """
+
+        self.assertNotIn("Printer partial (", self.javascript)
+        self.assertIn("sections unavailable", self.javascript)
+        self.assertIn("PRINTER_SECTIONS", self.javascript)
+
+    def test_a_failed_refresh_names_the_section_rather_than_the_printer(self) -> None:
+        self.assertIn("Could not load:", self.javascript)
+        for section in (
+            "printer state",
+            "print history",
+            "maintenance",
+            "telemetry chart",
+            "sensor nodes",
+        ):
+            with self.subTest(section=section):
+                self.assertIn(f'"{section}"', self.javascript)
+
+    def test_a_timeout_message_states_the_budget_that_was_actually_used(self) -> None:
+        """A 20s telemetry abort must not claim it waited 8 seconds."""
+
+        self.assertIn("const budgetMs =", self.javascript)
+        self.assertIn("request timed out after ${budgetMs / 1000} seconds", self.javascript)
+        self.assertNotIn(
+            "request timed out after ${FETCH_TIMEOUT_MS / 1000} seconds", self.javascript
+        )
+
+    def test_only_the_telemetry_fetch_overrides_the_shared_budget(self) -> None:
+        """The longer budget must not become every request's timeout."""
+
+        self.assertEqual(self.javascript.count("timeoutMs: "), 1)
+        self.assertIn("timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+
+    def test_the_slow_telemetry_query_has_its_own_budget(self) -> None:
+        """The chart reads raw telemetry, not a downsampled aggregate."""
+
+        self.assertIn("PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+        self.assertIn("timeoutMs: PRINTER_TELEMETRY_TIMEOUT_MS", self.javascript)
+        # It must be a real increase over the shared default, not decoration.
+        default = int(
+            self.javascript.split("const FETCH_TIMEOUT_MS = ")[1].split(";")[0]
+        )
+        chart = int(
+            self.javascript.split("const PRINTER_TELEMETRY_TIMEOUT_MS = ")[1].split(";")[0]
+        )
+        self.assertGreater(chart, default)
+
+    def test_the_printer_card_still_shows_the_real_printer_state(self) -> None:
+        """The genuine state machine must keep its own, unrelated display."""
+
+        self.assertIn("formatLabel(printer.status", self.javascript)
+        self.assertIn("Normalized state", self.javascript)
+
+    def test_filament_totals_are_rendered_with_a_material_breakdown(self) -> None:
+        self.assertIn("Tracked Filament", self.javascript)
+        self.assertIn("tracked_filament_by_material", self.javascript)
+        self.assertIn("tracked_filament_estimate_g", self.javascript)
+        self.assertIn(".filament-row", self.styles)
+
+    def test_filament_is_presented_as_an_estimate_not_a_measurement(self) -> None:
+        """The number is Bambu's slicer plan, and the card has to say so."""
+
+        self.assertIn("slicer estimate, not weighed consumption", self.javascript)
+
+    def test_prints_without_a_usable_amount_stay_visible(self) -> None:
+        """Silently dropping them would make the total look complete."""
+
+        self.assertIn("tracked_filament_incomplete_job_count", self.javascript)
+        self.assertIn("tracked_filament_unknown_amount_job_count", self.javascript)
+        self.assertIn("Not included:", self.javascript)
+        self.assertIn("Not broken down", self.javascript)
+
+    def test_the_dashboard_never_shows_the_scheduler_enum_names(self) -> None:
+        """baseline_required and advisory are internal vocabulary.
+
+        They describe why the scheduler cannot put a date on a task, which is
+        not something a reader should have to decode.
+        """
+
+        self.assertIn("MAINTENANCE_STATE_LABELS", self.javascript)
+        self.assertIn("Maintenance history needed", self.javascript)
+        self.assertIn("Periodic inspection", self.javascript)
+        # The raw enum must not reach a label. It may still appear as a state
+        # comparison or a CSS class, so check the rendering helpers instead.
+        self.assertNotIn("formatLabel(task.state)", self.javascript)
+        self.assertNotIn("Advisory: ${Number(counts.advisory", self.javascript)
+        self.assertNotIn("Needs baseline:", self.javascript)
+
+    def test_each_unschedulable_state_explains_itself_in_plain_words(self) -> None:
+        self.assertIn("MAINTENANCE_STATE_HELP", self.javascript)
+        self.assertIn("no record of when it was last done", self.javascript)
+        self.assertIn("publishes no print-hour or calendar interval", self.javascript)
+
+    def test_the_completion_button_says_what_it_will_do(self) -> None:
+        self.assertIn("Record last service", self.javascript)
+        self.assertIn("Mark done today", self.javascript)
+
     def test_dashboard_javascript_brackets_are_balanced(self) -> None:
         """Guards against a parse error taking the whole dashboard down.
 
@@ -438,10 +588,14 @@ class FrontendContractTest(unittest.TestCase):
         self.assertIn("Mark all maintenance completed today", self.template)
         self.assertIn("renderMaintenanceSummary", self.javascript)
         self.assertIn("baseline_required", self.javascript)
-        self.assertIn("Needs a baseline", self.javascript)
+        # The state is still handled; it is the *label* that is now plain
+        # English rather than the scheduler's enum name.
+        self.assertIn("Maintenance history needed", self.javascript)
         self.assertIn("Manufacturer cadence:", self.javascript)
         self.assertIn("Local warning lead time only", self.javascript)
-        self.assertIn("Condition-based guidance", self.javascript)
+        # Same guarantee, now stated without the enum's vocabulary: an item
+        # Bambu gives no interval for must not acquire an invented due date.
+        self.assertIn("publishes no print-hour or calendar interval", self.javascript)
         self.assertIn("${API.printerMaintenance}/complete-all", self.javascript)
         self.assertIn("establishes the maintenance baseline", self.javascript)
         self.assertIn("does not send any command to the printer", self.javascript)
