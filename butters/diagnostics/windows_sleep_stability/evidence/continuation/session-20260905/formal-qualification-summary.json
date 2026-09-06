@@ -1,0 +1,787 @@
+{
+  "schema_version": 1,
+  "configuration": "Wake Up Event By=OS; approved NI PXI/MXI 22-package stack removed; all other BIOS, driver, power-policy, and device settings unchanged",
+  "formal_qualification": {
+    "status": "PASSED",
+    "cycle_count": 10,
+    "clean_cycle_count": 10,
+    "five_minute_cycle_count": 8,
+    "fifteen_minute_cycle_count": 2,
+    "total_s3_dwell_seconds": 4200.0,
+    "no_spontaneous_resume": true,
+    "exactly_one_wol_each": true,
+    "resume_after_wol_each": true,
+    "ethernet_and_ssh_recovered_each": true,
+    "no_reboots_or_bsods": true,
+    "no_unhealthy_pnp_snapshot": true,
+    "no_classified_usb_pnp_realtek_ndis_errors": true,
+    "network_latency_range_seconds": [
+      11.178,
+      11.231
+    ],
+    "ssh_latency_range_seconds": [
+      11.737,
+      11.838
+    ]
+  },
+  "prequalification": {
+    "clean_cycle_count": 3,
+    "five_minute_cycle_count": 3,
+    "status": "PASSED"
+  },
+  "combined_candidate_fix_evidence": {
+    "clean_cycle_count": 13,
+    "five_minute_cycle_count": 11,
+    "fifteen_minute_cycle_count": 2,
+    "total_s3_dwell_seconds": 5100
+  },
+  "settled_final_device_state": {
+    "collection_time_utc": "2026-09-06T00:37:29.3330738Z",
+    "present_pnp_count": 305,
+    "unhealthy_pnp_count": 0,
+    "xhci_controller_count": 6,
+    "root_hub_count": 7,
+    "all_xhci_and_root_hubs_ok_problem_zero": true
+  },
+  "pnp_enumeration_note": "Immediate post-resume collectors sometimes saw 295 or 296 present devices while all observed devices were healthy. The inventory returned to 304/305 before the next cycle, and the final settled audit found 305 with zero unhealthy, all six xHCI controllers and all seven root hubs OK. This is delayed enumeration, not persistent device loss or PnP corruption.",
+  "root_cause_assessment": {
+    "spontaneous_wake": {
+      "finding": "The unused NI PXI/MXI software stack is the causal component boundary under the tested OS-owned wake configuration.",
+      "confidence": "high",
+      "basis": "Changing BIOS wake ownership from BIOS to OS alone still produced an uncommanded resume about 15 seconds after sleep with no WOL. Removing only the approved unused NI PXI/MXI dependency set, followed by the one required restart, changed the result to 13 consecutive WOL-only clean cycles including formal 10/10 qualification. This identifies the package-stack boundary, not nipcibrd.sys alone."
+    },
+    "resume_corruption": {
+      "finding": "The prior processor-side xHCI/audio collapse remains a resume consequence whose exact internal driver/firmware cause is not separately proven.",
+      "confidence": "medium that the NI-stack removal avoids it; low for a specific causal subcomponent",
+      "basis": "No xHCI, root-hub, audio-platform, Realtek, or other PnP collapse occurred in 13 clean post-removal cycles. That materially strengthens NI-stack involvement, but the prior failure was intermittent and resume initiation preceded xHCI failure, so the evidence does not justify naming nipcibrd.sys, ACPI, AGESA, or Microsoft usbxhci as the sole resume-corruption cause."
+    }
+  },
+  "changes_not_performed": {
+    "bios_update_performed": false,
+    "amd_chipset_update_performed": false,
+    "reason": "The NI isolation passed prequalification and formal qualification before either higher-risk phase became necessary.",
+    "production_sleep_gates_changed": false
+  },
+  "cycles": [
+    {
+      "cycle_id": "qualification-20260905T225416Z-01",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T22:55:29.927Z",
+      "confirmed_offline_utc": "2026-09-05T22:55:41.678Z",
+      "wol_utc": "2026-09-05T23:00:43.713Z",
+      "resume_initiation_utc": "2026-09-05T23:00:44.5000000Z",
+      "network_return_utc": "2026-09-05T23:00:54.930Z",
+      "ssh_return_utc": "2026-09-05T23:00:55.524Z",
+      "network_latency_seconds": 11.217,
+      "ssh_latency_seconds": 11.811,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 304,
+      "immediate_after_present_pnp_count": 295,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T230229Z-02",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:03:42.774Z",
+      "confirmed_offline_utc": "2026-09-05T23:03:54.586Z",
+      "wol_utc": "2026-09-05T23:08:56.622Z",
+      "resume_initiation_utc": "2026-09-05T23:08:57.5000000Z",
+      "network_return_utc": "2026-09-05T23:09:07.842Z",
+      "ssh_return_utc": "2026-09-05T23:09:08.409Z",
+      "network_latency_seconds": 11.22,
+      "ssh_latency_seconds": 11.787,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 304,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T231042Z-03",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:11:57.983Z",
+      "confirmed_offline_utc": "2026-09-05T23:12:09.792Z",
+      "wol_utc": "2026-09-05T23:17:11.827Z",
+      "resume_initiation_utc": "2026-09-05T23:17:12.5000000Z",
+      "network_return_utc": "2026-09-05T23:17:23.009Z",
+      "ssh_return_utc": "2026-09-05T23:17:23.564Z",
+      "network_latency_seconds": 11.182,
+      "ssh_latency_seconds": 11.737,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T231857Z-04",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:20:12.939Z",
+      "confirmed_offline_utc": "2026-09-05T23:20:24.724Z",
+      "wol_utc": "2026-09-05T23:25:26.758Z",
+      "resume_initiation_utc": "2026-09-05T23:25:27.5000000Z",
+      "network_return_utc": "2026-09-05T23:25:37.936Z",
+      "ssh_return_utc": "2026-09-05T23:25:38.528Z",
+      "network_latency_seconds": 11.178,
+      "ssh_latency_seconds": 11.77,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T232712Z-05",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:28:27.256Z",
+      "confirmed_offline_utc": "2026-09-05T23:28:39.054Z",
+      "wol_utc": "2026-09-05T23:33:41.088Z",
+      "resume_initiation_utc": "2026-09-05T23:33:42.5000000Z",
+      "network_return_utc": "2026-09-05T23:33:52.319Z",
+      "ssh_return_utc": "2026-09-05T23:33:52.871Z",
+      "network_latency_seconds": 11.231,
+      "ssh_latency_seconds": 11.783,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T233527Z-06",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:36:42.088Z",
+      "confirmed_offline_utc": "2026-09-05T23:36:53.894Z",
+      "wol_utc": "2026-09-05T23:41:55.932Z",
+      "resume_initiation_utc": "2026-09-05T23:41:57.5000000Z",
+      "network_return_utc": "2026-09-05T23:42:07.160Z",
+      "ssh_return_utc": "2026-09-05T23:42:07.770Z",
+      "network_latency_seconds": 11.228,
+      "ssh_latency_seconds": 11.838,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T234341Z-07",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:44:56.987Z",
+      "confirmed_offline_utc": "2026-09-05T23:45:08.763Z",
+      "wol_utc": "2026-09-05T23:50:10.801Z",
+      "resume_initiation_utc": "2026-09-05T23:50:11.5000000Z",
+      "network_return_utc": "2026-09-05T23:50:21.989Z",
+      "ssh_return_utc": "2026-09-05T23:50:22.594Z",
+      "network_latency_seconds": 11.188,
+      "ssh_latency_seconds": 11.793,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260905T235156Z-08",
+      "dwell_seconds": 300.0,
+      "sleep_request_utc": "2026-09-05T23:53:11.958Z",
+      "confirmed_offline_utc": "2026-09-05T23:53:23.782Z",
+      "wol_utc": "2026-09-05T23:58:25.817Z",
+      "resume_initiation_utc": "2026-09-05T23:58:26.5000000Z",
+      "network_return_utc": "2026-09-05T23:58:37.044Z",
+      "ssh_return_utc": "2026-09-05T23:58:37.638Z",
+      "network_latency_seconds": 11.227,
+      "ssh_latency_seconds": 11.821,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260906T000011Z-09",
+      "dwell_seconds": 900.0,
+      "sleep_request_utc": "2026-09-06T00:01:26.863Z",
+      "confirmed_offline_utc": "2026-09-06T00:01:38.919Z",
+      "wol_utc": "2026-09-06T00:16:40.955Z",
+      "resume_initiation_utc": "2026-09-06T00:16:42.5000000Z",
+      "network_return_utc": "2026-09-06T00:16:52.182Z",
+      "ssh_return_utc": "2026-09-06T00:16:52.791Z",
+      "network_latency_seconds": 11.227,
+      "ssh_latency_seconds": 11.836,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 296,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    },
+    {
+      "cycle_id": "qualification-20260906T001827Z-10",
+      "dwell_seconds": 900.0,
+      "sleep_request_utc": "2026-09-06T00:19:42.426Z",
+      "confirmed_offline_utc": "2026-09-06T00:19:54.395Z",
+      "wol_utc": "2026-09-06T00:34:56.438Z",
+      "resume_initiation_utc": "2026-09-06T00:34:57.5000000Z",
+      "network_return_utc": "2026-09-06T00:35:07.669Z",
+      "ssh_return_utc": "2026-09-06T00:35:08.247Z",
+      "network_latency_seconds": 11.231,
+      "ssh_latency_seconds": 11.809,
+      "entered_s3": true,
+      "spontaneous_resume": false,
+      "wol_count": 1,
+      "wol_causal_evidence": "resume_began_after_wol",
+      "wake_source": "Unknown",
+      "lastwake": [
+        "Wake History Count - 1",
+        "Wake History [0]",
+        "  Wake Source Count - 1",
+        "  Wake Source [0]",
+        "    Type: Fixed Feature",
+        "    Power Button"
+      ],
+      "rebooted_instead": false,
+      "before_present_pnp_count": 305,
+      "immediate_after_present_pnp_count": 304,
+      "after_unhealthy_pnp_count": 0,
+      "tracked_xhci_and_roots": [
+        {
+          "device": "15B6",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B7",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "15B8",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        },
+        {
+          "device": "43FD",
+          "controller_status": "OK",
+          "controller_problem": 0,
+          "root_hub_status": "OK",
+          "root_hub_problem": 0
+        }
+      ],
+      "realtek": {
+        "status": "Up",
+        "pnp_status": "OK",
+        "pnp_problem": 0,
+        "link_speed": "2.5 Gbps"
+      },
+      "error_counts": {
+        "usb": 0,
+        "device": 0,
+        "realtek": 0,
+        "ndis": 0
+      },
+      "clean_cycle": true
+    }
+  ]
+}
