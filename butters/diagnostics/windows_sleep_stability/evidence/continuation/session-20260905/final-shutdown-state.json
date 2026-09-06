@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "hostname": "DESKTOP-G4CFVL1",
+  "target_ip": "192.168.1.209",
+  "shutdown_request_started_utc": "2026-09-06T00:40:13.500901051Z",
+  "shutdown_command": "Stop-Computer -Force",
+  "shutdown_command_exit_code": 0,
+  "network_transition": "ICMP replied for the first ten one-second probes after the command, then stopped replying and remained unreachable.",
+  "final_icmp_check": {
+    "packets_transmitted": 3,
+    "packets_received": 0,
+    "packet_loss_percent": 100,
+    "unreachable_confirmed_by_utc": "2026-09-06T00:41:18.967486530Z"
+  },
+  "final_ssh_check": {
+    "result": "unreachable",
+    "exit_code": 255,
+    "message": "ssh: connect to host 192.168.1.209 port 22: No route to host",
+    "completed_before_utc": "2026-09-06T00:42:04.527877442Z"
+  },
+  "final_power_state_assessment": "S5 / fully shut down",
+  "wol_sent_after_final_shutdown": false
+}
