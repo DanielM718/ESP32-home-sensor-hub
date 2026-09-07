@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "espnow_channel_recovery.h"
+
 _Static_assert(sizeof(sensor_packet_t) == 22, "sensor_packet_t wire size changed");
 
 typedef bool (*gateway_packet_match_fn_t)(const uint8_t *data, size_t len);
@@ -94,6 +96,12 @@ esp_err_t gateway_packets_build_mqtt_message(const uint8_t *data, size_t len,
 {
     if (data == NULL || message == NULL) {
         return ESP_ERR_INVALID_ARG;
+    }
+
+    /* Control frames, including malformed ones with our magic, never reach a
+     * legacy sensor decoder or MQTT. */
+    if (espnow_discovery_has_magic(data, len)) {
+        return ESP_ERR_NOT_SUPPORTED;
     }
 
     for (size_t i = 0; i < sizeof(PACKET_HANDLERS) / sizeof(PACKET_HANDLERS[0]); i++) {

@@ -17,10 +17,10 @@
 
 // sensative information
 #include "wifi_cred.h"
+#include "espnow_channel_recovery.h"
 #include "gateway_packets.h"
 #include "mqtt_publisher.h"
 
-#define ESPNOW_CHANNEL 6
 #define ESPNOW_RX_QUEUE_LENGTH 10
 #define ESPNOW_RX_TASK_STACK_SIZE 4096
 #define ESPNOW_RX_TASK_PRIORITY 5
@@ -40,6 +40,21 @@ typedef struct {
 
 static QueueHandle_t espnow_rx_queue;
 
+static void log_current_wifi_channel(void)
+{
+    uint8_t primary_channel = 0;
+    wifi_second_chan_t second_channel = WIFI_SECOND_CHAN_NONE;
+    esp_err_t err = esp_wifi_get_channel(&primary_channel, &second_channel);
+
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Current AP Wi-Fi channel: %u",
+                 (unsigned int)primary_channel);
+    } else {
+        ESP_LOGW(TAG, "Unable to read current AP Wi-Fi channel: %s",
+                 esp_err_to_name(err));
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data)
 {
@@ -53,6 +68,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t event_base,
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        log_current_wifi_channel();
         xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
     }
 }
@@ -62,6 +78,50 @@ static void on_espnow_send(const esp_now_send_info_t *tx_info, esp_now_send_stat
     ESP_LOGI(TAG, "send to " MACSTR " status: %s",
         MAC2STR(tx_info->des_addr),
         status == ESP_NOW_SEND_SUCCESS ? "success" : "fail");
+}
+
+static void respond_to_discovery(const espnow_rx_item_t *item,
+                                 const espnow_discovery_request_t *request)
+{
+    uint8_t primary_channel = 0;
+    wifi_second_chan_t second_channel = WIFI_SECOND_CHAN_NONE;
+    esp_err_t err = esp_wifi_get_channel(&primary_channel, &second_channel);
+
+    ESP_LOGI(TAG, "Discovery request: node=%lu source=" MACSTR,
+             (unsigned long)request->node_id, MAC2STR(item->src_addr));
+
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Cannot read current channel for discovery response: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+    if (!espnow_channel_is_valid(primary_channel)) {
+        ESP_LOGW(TAG, "Cannot answer discovery with out-of-range channel %u",
+                 (unsigned int)primary_channel);
+        return;
+    }
+
+    const espnow_discovery_response_t response = {
+        .magic = ESPNOW_DISCOVERY_MAGIC,
+        .version = ESPNOW_DISCOVERY_VERSION,
+        .packet_type = ESPNOW_DISCOVERY_RESPONSE,
+        .reserved = 0,
+        .node_id = request->node_id,
+        .nonce = request->nonce,
+        .channel = primary_channel,
+        .reserved_tail = {0, 0, 0},
+    };
+
+    err = esp_now_send(broadcast_mac, (const uint8_t *)&response,
+                       sizeof(response));
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Discovery response queued: node=%lu channel=%u",
+                 (unsigned long)request->node_id,
+                 (unsigned int)primary_channel);
+    } else {
+        ESP_LOGW(TAG, "Failed to queue discovery response for node=%lu: %s",
+                 (unsigned long)request->node_id, esp_err_to_name(err));
+    }
 }
 
 static void espnow_rx_task(void *arg)
@@ -75,6 +135,18 @@ static void espnow_rx_task(void *arg)
         if (xQueueReceive(espnow_rx_queue, &item, portMAX_DELAY) == pdTRUE) {
             ESP_LOGI(TAG, "ESP-NOW packet received from " MACSTR ", len=%d",
                      MAC2STR(item.src_addr), item.len);
+
+            if (espnow_discovery_has_magic(item.data, (size_t)item.len)) {
+                espnow_discovery_request_t request;
+                if (espnow_discovery_parse_request(item.data, (size_t)item.len,
+                                                   &request)) {
+                    respond_to_discovery(&item, &request);
+                } else {
+                    ESP_LOGW(TAG, "Rejected malformed discovery packet from " MACSTR
+                             ", len=%d", MAC2STR(item.src_addr), item.len);
+                }
+                continue;
+            }
 
             esp_err_t err = gateway_packets_build_mqtt_message(item.data,
                                                                (size_t)item.len,
@@ -183,11 +255,6 @@ static void wifi_init(void){
     uint8_t mac[ESP_NOW_ETH_ALEN];
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
     ESP_LOGI(TAG, "STA MAC: " MACSTR, MAC2STR(mac));
-
-    uint8_t primary_channel;
-    wifi_second_chan_t second_channel;
-    ESP_ERROR_CHECK(esp_wifi_get_channel(&primary_channel, &second_channel));
-    ESP_LOGI(TAG, "Current Wi-Fi channel: %d", primary_channel);
 
     ESP_LOGI(TAG, "Wi-Fi connected");
 }

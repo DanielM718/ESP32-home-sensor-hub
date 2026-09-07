@@ -31,8 +31,10 @@ Edit `main/wifi_cred.h` locally:
 `main/wifi_cred.h` is ignored by git. Do not commit real Wi-Fi or MQTT
 credentials.
 
-The sensor nodes and gateway must use the same 2.4 GHz Wi-Fi channel for
-ESP-NOW. The gateway logs the connected Wi-Fi channel at startup.
+ESP-NOW and Wi-Fi must use the same 2.4 GHz channel. The gateway remains on the
+access point's channel and logs the current channel after every association.
+SHT41 nodes using the channel-recovery firmware discover and cache that channel
+automatically; see [`../ESPNOW_CHANNEL_RECOVERY.md`](../ESPNOW_CHANNEL_RECOVERY.md).
 
 ## MQTT Output
 

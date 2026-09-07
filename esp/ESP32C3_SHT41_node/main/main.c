@@ -6,6 +6,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+#include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
 #include "esp_netif.h"
@@ -14,6 +15,7 @@
 #include "esp_now.h"
 #include "esp_mac.h"
 #include "esp_err.h"
+#include "esp_random.h"
 #include "esp_sleep.h"
 
 #include "driver/gpio.h"
@@ -21,13 +23,16 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
+#include "espnow_channel_recovery.h"
 
 #define NODE_ID 1//4
-#define ESPNOW_CHANNEL 1
 #define BATTERY_MONITOR_ENABLED 0
-#define SLEEP_INTERVAL_US (15ULL * 60ULL * 1000000ULL) // 15 min
-//#define SLEEP_INTERVAL_US (10ULL * 1000000ULL) // 10 seconds for testing
+#define NORMAL_SLEEP_SECONDS UINT32_C(900)
 #define ESPNOW_SEND_TIMEOUT_MS 500
+#define DISCOVERY_RESPONSE_TIMEOUT_MS 300
+#define CHANNEL_SETTLE_MS 10
+#define CHANNEL_CACHE_NAMESPACE "espnow"
+#define CHANNEL_CACHE_KEY "channel"
 
 // Seeed XIAO ESP32-C3 common I2C pins are D4/SDA = GPIO6 and D5/SCL = GPIO7.
 // Verify these match your wiring before flashing.
@@ -77,24 +82,55 @@ typedef struct __attribute__((packed)) {
     uint32_t status_flags;
 } sensor_packet_t;
 
+_Static_assert(sizeof(sensor_packet_t) == 22, "sensor_packet_t wire size changed");
+
 RTC_DATA_ATTR static uint32_t sequence_number = 0;
 RTC_DATA_ATTR static uint8_t low_battery_reading_count = 0;
+RTC_DATA_ATTR static uint8_t rtc_gateway_channel = 0;
+RTC_DATA_ATTR static uint8_t rtc_persisted_gateway_channel = 0;
+RTC_DATA_ATTR static uint8_t recovery_failure_count = 0;
 
 static i2c_master_bus_handle_t i2c_bus;
 static i2c_master_dev_handle_t sht41_dev;
 static SemaphoreHandle_t espnow_send_sem;
+static SemaphoreHandle_t discovery_response_sem;
 static esp_now_send_status_t last_send_status = ESP_NOW_SEND_FAIL;
+static volatile bool discovery_response_expected = false;
+static volatile uint32_t expected_discovery_nonce = 0;
+static volatile uint8_t discovered_gateway_channel = 0;
+static uint8_t persisted_gateway_channel = 0;
 
 static void on_espnow_send(const esp_now_send_info_t *tx_info,
                            esp_now_send_status_t status)
 {
-    ESP_LOGI(TAG, "Send to " MACSTR " status: %s",
+    ESP_LOGD(TAG, "Send to " MACSTR " status: %s",
              MAC2STR(tx_info->des_addr),
              status == ESP_NOW_SEND_SUCCESS ? "success" : "fail");
 
     last_send_status = status;
     if (espnow_send_sem != NULL) {
         xSemaphoreGive(espnow_send_sem);
+    }
+}
+
+static void on_espnow_recv(const esp_now_recv_info_t *recv_info,
+                           const uint8_t *data, int len)
+{
+    espnow_discovery_response_t response;
+
+    if (recv_info == NULL || data == NULL || len <= 0 ||
+        !discovery_response_expected ||
+        memcmp(recv_info->src_addr, gateway_mac, ESP_NOW_ETH_ALEN) != 0 ||
+        !espnow_discovery_response_matches(data, (size_t)len, NODE_ID,
+                                           expected_discovery_nonce,
+                                           &response)) {
+        return;
+    }
+
+    discovered_gateway_channel = response.channel;
+    discovery_response_expected = false;
+    if (discovery_response_sem != NULL) {
+        xSemaphoreGive(discovery_response_sem);
     }
 }
 
@@ -116,6 +152,7 @@ static uint8_t sht41_crc8(const uint8_t *data, size_t len)
     return crc;
 }
 
+#if BATTERY_MONITOR_ENABLED
 static esp_err_t battery_calibration_create(adc_cali_handle_t *out_handle)
 {
     if (out_handle == NULL) {
@@ -304,6 +341,7 @@ cleanup:
 
     return ESP_OK;
 }
+#endif
 
 static esp_err_t i2c_init(void)
 {
@@ -395,6 +433,91 @@ static esp_err_t sht41_read(float *temp_c, float *rh)
     return ESP_OK;
 }
 
+static uint8_t load_gateway_channel(void)
+{
+    if (espnow_channel_is_valid(rtc_gateway_channel) &&
+        espnow_channel_is_valid(rtc_persisted_gateway_channel)) {
+        persisted_gateway_channel = rtc_persisted_gateway_channel;
+        ESP_LOGI(TAG, "Using RTC cached gateway channel %u",
+                 (unsigned int)rtc_gateway_channel);
+        return rtc_gateway_channel;
+    }
+
+    nvs_handle_t handle;
+    uint8_t nvs_channel = 0;
+    esp_err_t err = nvs_open(CHANNEL_CACHE_NAMESPACE, NVS_READONLY, &handle);
+
+    if (err == ESP_OK) {
+        err = nvs_get_u8(handle, CHANNEL_CACHE_KEY, &nvs_channel);
+        nvs_close(handle);
+        if (err == ESP_OK) {
+            if (espnow_channel_is_valid(nvs_channel)) {
+                persisted_gateway_channel = nvs_channel;
+                rtc_persisted_gateway_channel = nvs_channel;
+            } else {
+                ESP_LOGW(TAG, "Ignoring out-of-range NVS channel %u",
+                         (unsigned int)nvs_channel);
+            }
+        } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "Ignoring invalid channel cache: %s", esp_err_to_name(err));
+        }
+    } else if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "Unable to open channel cache: %s", esp_err_to_name(err));
+    }
+
+    if (espnow_channel_is_valid(rtc_gateway_channel)) {
+        ESP_LOGI(TAG, "Using RTC cached gateway channel %u",
+                 (unsigned int)rtc_gateway_channel);
+        return rtc_gateway_channel;
+    }
+    if (espnow_channel_is_valid(persisted_gateway_channel)) {
+        rtc_gateway_channel = persisted_gateway_channel;
+        ESP_LOGI(TAG, "Using NVS cached gateway channel %u",
+                 (unsigned int)rtc_gateway_channel);
+        return rtc_gateway_channel;
+    }
+
+    ESP_LOGI(TAG, "No valid cached gateway channel; discovery required");
+    return 0;
+}
+
+static void cache_gateway_channel(uint8_t working_channel)
+{
+    if (!espnow_channel_is_valid(working_channel)) {
+        return;
+    }
+
+    rtc_gateway_channel = working_channel;
+    if (!espnow_channel_cache_needs_write(persisted_gateway_channel,
+                                          working_channel)) {
+        return;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(CHANNEL_CACHE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Unable to open channel cache for update: %s",
+                 esp_err_to_name(err));
+        return;
+    }
+
+    err = nvs_set_u8(handle, CHANNEL_CACHE_KEY, working_channel);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+
+    if (err == ESP_OK) {
+        persisted_gateway_channel = working_channel;
+        rtc_persisted_gateway_channel = working_channel;
+        ESP_LOGI(TAG, "Persisted new gateway channel %u",
+                 (unsigned int)working_channel);
+    } else {
+        ESP_LOGW(TAG, "Failed to persist gateway channel %u: %s",
+                 (unsigned int)working_channel, esp_err_to_name(err));
+    }
+}
+
 static void wifi_init(void)
 {
     ESP_ERROR_CHECK(esp_netif_init());
@@ -408,13 +531,6 @@ static void wifi_init(void)
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    // Must match the gateway/router 2.4 GHz channel.
-#if ESPNOW_CHANNEL != 0
-    ESP_ERROR_CHECK(esp_wifi_set_channel(ESPNOW_CHANNEL, WIFI_SECOND_CHAN_NONE));
-#else
-    ESP_LOGW(TAG, "ESPNOW_CHANNEL is 0, leaving Wi-Fi on its current channel");
-#endif
-
     uint8_t mac[ESP_NOW_ETH_ALEN];
     ESP_ERROR_CHECK(esp_wifi_get_mac(WIFI_IF_STA, mac));
     ESP_LOGI(TAG, "Node STA MAC: " MACSTR, MAC2STR(mac));
@@ -424,6 +540,7 @@ static void espnow_init(void)
 {
     ESP_ERROR_CHECK(esp_now_init());
     ESP_ERROR_CHECK(esp_now_register_send_cb(on_espnow_send));
+    ESP_ERROR_CHECK(esp_now_register_recv_cb(on_espnow_recv));
 
     esp_now_peer_info_t peer = {0};
     memcpy(peer.peer_addr, gateway_mac, ESP_NOW_ETH_ALEN);
@@ -436,10 +553,132 @@ static void espnow_init(void)
     ESP_LOGI(TAG, "ESP-NOW initialized");
 }
 
-static void enter_deep_sleep(void)
+static bool send_with_confirmation(const void *data, size_t len)
 {
-    ESP_LOGI(TAG, "Entering deep sleep for %llu us", SLEEP_INTERVAL_US);
-    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(SLEEP_INTERVAL_US));
+    if (espnow_send_sem == NULL) {
+        return false;
+    }
+
+    while (xSemaphoreTake(espnow_send_sem, 0) == pdTRUE) {
+    }
+    last_send_status = ESP_NOW_SEND_FAIL;
+
+    esp_err_t err = esp_now_send(gateway_mac, data, len);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    if (xSemaphoreTake(espnow_send_sem,
+                       pdMS_TO_TICKS(ESPNOW_SEND_TIMEOUT_MS)) != pdTRUE) {
+        ESP_LOGW(TAG, "Timed out waiting for ESP-NOW send callback");
+        return false;
+    }
+
+    return last_send_status == ESP_NOW_SEND_SUCCESS;
+}
+
+static bool send_sensor_packet(const sensor_packet_t *packet, uint8_t channel)
+{
+    esp_err_t err = esp_wifi_set_channel(channel, WIFI_SECOND_CHAN_NONE);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to select channel %u: %s",
+                 (unsigned int)channel, esp_err_to_name(err));
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(CHANNEL_SETTLE_MS));
+
+    bool sent = send_with_confirmation(packet, sizeof(*packet));
+    ESP_LOGI(TAG, "Sensor packet node=%lu sequence=%lu channel=%u: %s",
+             (unsigned long)packet->node_id,
+             (unsigned long)packet->sequence,
+             (unsigned int)channel,
+             sent ? "confirmed" : "failed");
+    return sent;
+}
+
+static bool discover_and_send(const sensor_packet_t *packet,
+                              uint8_t cached_channel,
+                              uint8_t *working_channel)
+{
+    uint8_t channels[ESPNOW_US_CHANNEL_COUNT];
+    size_t channel_count = espnow_build_channel_search_order(
+        cached_channel, channels, sizeof(channels));
+
+    ESP_LOGI(TAG, "Starting bounded gateway discovery across %u channels",
+             (unsigned int)channel_count);
+
+    for (size_t i = 0; i < channel_count; ++i) {
+        const uint8_t candidate = channels[i];
+        esp_err_t err = esp_wifi_set_channel(candidate, WIFI_SECOND_CHAN_NONE);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Skipping channel %u: %s",
+                     (unsigned int)candidate, esp_err_to_name(err));
+            continue;
+        }
+        vTaskDelay(pdMS_TO_TICKS(CHANNEL_SETTLE_MS));
+
+        while (xSemaphoreTake(discovery_response_sem, 0) == pdTRUE) {
+        }
+        const uint32_t nonce = esp_random();
+        expected_discovery_nonce = nonce;
+        discovered_gateway_channel = 0;
+        discovery_response_expected = true;
+
+        const espnow_discovery_request_t request = {
+            .magic = ESPNOW_DISCOVERY_MAGIC,
+            .version = ESPNOW_DISCOVERY_VERSION,
+            .packet_type = ESPNOW_DISCOVERY_REQUEST,
+            .reserved = 0,
+            .node_id = NODE_ID,
+            .nonce = nonce,
+        };
+
+        bool request_confirmed = send_with_confirmation(&request, sizeof(request));
+        bool response_received = false;
+        if (request_confirmed) {
+            response_received =
+                xSemaphoreTake(discovery_response_sem,
+                               pdMS_TO_TICKS(DISCOVERY_RESPONSE_TIMEOUT_MS)) == pdTRUE;
+        }
+        discovery_response_expected = false;
+
+        if (!response_received ||
+            !espnow_channel_is_valid(discovered_gateway_channel)) {
+            continue;
+        }
+
+        const uint8_t response_channel = discovered_gateway_channel;
+        ESP_LOGI(TAG, "Gateway discovered on channel %u",
+                 (unsigned int)response_channel);
+        if (send_sensor_packet(packet, response_channel)) {
+            *working_channel = response_channel;
+            return true;
+        }
+    }
+
+    ESP_LOGW(TAG, "Gateway discovery ended without a confirmed sensor send");
+    return false;
+}
+
+static bool transmit_with_recovery(const sensor_packet_t *packet,
+                                   uint8_t cached_channel,
+                                   uint8_t *working_channel)
+{
+    if (espnow_channel_is_valid(cached_channel) &&
+        send_sensor_packet(packet, cached_channel)) {
+        *working_channel = cached_channel;
+        return true;
+    }
+
+    return discover_and_send(packet, cached_channel, working_channel);
+}
+
+static void enter_deep_sleep(uint32_t seconds)
+{
+    const uint64_t sleep_interval_us = (uint64_t)seconds * UINT64_C(1000000);
+    ESP_LOGI(TAG, "Entering deep sleep for %lu seconds", (unsigned long)seconds);
+    ESP_ERROR_CHECK(esp_sleep_enable_timer_wakeup(sleep_interval_us));
     esp_deep_sleep_start();
 }
 
@@ -467,6 +706,18 @@ void app_main(void)
         err = nvs_flash_init();
     }
     ESP_ERROR_CHECK(err);
+
+    const uint8_t cached_gateway_channel = load_gateway_channel();
+
+    espnow_send_sem = xSemaphoreCreateBinary();
+    discovery_response_sem = xSemaphoreCreateBinary();
+    if (espnow_send_sem == NULL || discovery_response_sem == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate bounded ESP-NOW synchronization");
+        recovery_failure_count =
+            espnow_recovery_failure_count(recovery_failure_count, false);
+        enter_deep_sleep(
+            espnow_recovery_sleep_seconds(recovery_failure_count));
+    }
 
     uint16_t measured_battery_mv = 0;
     esp_err_t battery_err = ESP_ERR_NOT_SUPPORTED;
@@ -566,35 +817,28 @@ void app_main(void)
         ESP_LOGE(TAG, "SHT41 read failed: %s", esp_err_to_name(err));
     }
 
-    espnow_send_sem = xSemaphoreCreateBinary();
-    if (espnow_send_sem == NULL) {
-        ESP_LOGE(TAG, "Failed to create ESP-NOW send semaphore");
-    }
+    uint8_t working_channel = 0;
+    const bool communication_succeeded =
+        transmit_with_recovery(&packet, cached_gateway_channel, &working_channel);
+    recovery_failure_count = espnow_recovery_failure_count(
+        recovery_failure_count, communication_succeeded);
 
-    last_send_status = ESP_NOW_SEND_FAIL;
-    err = esp_now_send(gateway_mac, (const uint8_t *)&packet, sizeof(packet));
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Queued packet: node=%lu sequence=%lu status=0x%08lx",
-                 packet.node_id, packet.sequence, packet.status_flags);
-
-        if (espnow_send_sem != NULL &&
-            xSemaphoreTake(espnow_send_sem, pdMS_TO_TICKS(ESPNOW_SEND_TIMEOUT_MS)) == pdTRUE) {
-            if (last_send_status == ESP_NOW_SEND_SUCCESS) {
-                ESP_LOGI(TAG, "ESP-NOW send confirmed");
-            } else {
-                ESP_LOGE(TAG, "ESP-NOW send callback reported failure");
-            }
-        } else {
-            ESP_LOGE(TAG, "Timed out waiting for ESP-NOW send callback");
-        }
+    uint32_t next_sleep_seconds = NORMAL_SLEEP_SECONDS;
+    if (communication_succeeded) {
+        cache_gateway_channel(working_channel);
+        ESP_LOGI(TAG, "Communication succeeded; recovery backoff reset");
     } else {
-        ESP_LOGE(TAG, "esp_now_send failed: %s", esp_err_to_name(err));
+        next_sleep_seconds =
+            espnow_recovery_sleep_seconds(recovery_failure_count);
+        ESP_LOGW(TAG, "Communication failure %u; retry after %lu seconds",
+                 (unsigned int)recovery_failure_count,
+                 (unsigned long)next_sleep_seconds);
     }
 
-    vTaskDelay(pdMS_TO_TICKS(500));
+    vTaskDelay(pdMS_TO_TICKS(50));
     if (low_battery_shutdown) {
         enter_indefinite_deep_sleep();
     } else {
-        enter_deep_sleep();
+        enter_deep_sleep(next_sleep_seconds);
     }
 }
