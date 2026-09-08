@@ -16,6 +16,14 @@ from butters.actions.agent import AgentHub
 from butters.actions.streaming import StreamingWorkflow
 from butters.skills.desktop_agent import register_agent_skills
 from butters_agent.protocol import SCHEMAS as AGENT_ACTIONS, MUTATIONS as AGENT_MUTATIONS
+
+# Registered broker skills the Tools panel may invoke by name. Each already
+# exists as a skill with its own authentication level and its own broker gate,
+# and the panel supplies no arguments, so listing one here exposes a button --
+# not a new capability, and not a second implementation. A future voice request
+# reaches the identical skill through the router, and both go through
+# _freeze_or_execute below, so neither route can skip authorization or audit.
+TOOLS_REGISTERED_ACTIONS = frozenset({"wake_desktop"})
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
@@ -150,19 +158,24 @@ class BetaAssistantService:
             raise PermissionError("Administrator identity is required")
         if type(parameters) is not dict:
             raise ValueError("Action parameters must be an object")
+        if action in TOOLS_REGISTERED_ACTIONS:
+            # The browser supplies nothing. The machine identity comes from
+            # configuration -- where it is already allow-listed to the single
+            # configured desktop -- and the MAC and broadcast address come from
+            # the root-owned broker configuration, so no address or hostname
+            # from the request can influence what gets woken.
+            if parameters:
+                raise ValueError("Registered action accepts no parameters")
+            return self._freeze_or_execute(
+                session, action, {"machine": self.settings.desktop.machine}
+            )
         if action in AGENT_ACTIONS or action in {"desktop.streaming.status", "desktop.streaming.prepare"}:
             from dataclasses import asdict
-            import uuid
             if action in AGENT_MUTATIONS or action == "desktop.streaming.prepare":
-                plan = self.actions.freeze(skill=action, arguments=parameters,
-                    summary=action, session_id=session.session_id, identity=session.peer_key,
-                    request_id=str(uuid.uuid4()), source="manual_ui",
-                    pending_confirmation=action == "desktop.vm.stop")
-                elevation = self.auth_state.elevation(session.session_id, session.peer_key)
-                if elevation is not None and plan.authentication is AuthenticationLevel.ELEVATED:
-                    return {"jobs": self.actions.execute(plan.plan_id,
-                        session_id=session.session_id, identity=session.peer_key, authentication=elevation)}
-                return {"pending_action": plan.safe_dict(), "jobs": []}
+                return self._freeze_or_execute(
+                    session, action, parameters,
+                    pending_confirmation=action == "desktop.vm.stop",
+                )
             execution = self.assistant.skills.execute(action, parameters, administrator=True)
             self.action_state.audit(identity=session.peer_key, session_id=session.session_id,
                 skill=action, authentication=AuthenticationLevel.NONE, method="tailnet_identity",
@@ -190,6 +203,78 @@ class BetaAssistantService:
             result["duration_seconds"],
         )
         return result
+
+    def _freeze_or_execute(
+        self,
+        session: BrowserSession,
+        action: str,
+        parameters: dict,
+        *,
+        pending_confirmation: bool = False,
+    ) -> dict:
+        """Freeze a registered action, and run it only if elevation already holds.
+
+        Every privileged action the Tools panel offers goes through here, which
+        is the same coordinator path the router uses for a spoken request. When
+        elevation has lapsed the caller gets the frozen plan back and satisfies
+        it with a passkey assertion bound to that exact plan, so a button can
+        never reach a skill by a route that skips authorization or the audit
+        record.
+        """
+
+        import uuid
+
+        plan = self.actions.freeze(
+            skill=action,
+            arguments=parameters,
+            summary=action,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            request_id=str(uuid.uuid4()),
+            source="manual_ui",
+            pending_confirmation=pending_confirmation,
+        )
+        elevation = self.auth_state.elevation(session.session_id, session.peer_key)
+        if elevation is not None and plan.authentication is AuthenticationLevel.ELEVATED:
+            return {
+                "jobs": self.actions.execute(
+                    plan.plan_id,
+                    session_id=session.session_id,
+                    identity=session.peer_key,
+                    authentication=elevation,
+                )
+            }
+        return {"pending_action": plan.safe_dict(), "jobs": []}
+
+    def tools_registered_actions(self) -> tuple[dict[str, object], ...]:
+        """Declarative state for the registered actions the Tools panel shows.
+
+        The panel renders a control per entry and needs to distinguish "the
+        capability is switched off or the broker is unprovisioned" from "you
+        need to re-elevate". Both come straight from the skill registry, so the
+        button can never claim to be usable when the skill is not.
+        """
+
+        found = []
+        for name in sorted(TOOLS_REGISTERED_ACTIONS):
+            spec = self.assistant.skills.get(name)
+            if spec is None:
+                found.append({
+                    "action": name, "available": False, "configured": False,
+                    "enabled": False, "authentication": "elevated",
+                    "unavailable_reason": "action is not registered on this build",
+                })
+                continue
+            found.append({
+                "action": name,
+                "available": bool(spec.available),
+                "configured": bool(spec.configured),
+                "enabled": self.assistant.skills.is_enabled(name),
+                "authentication": spec.authentication.value,
+                "description": spec.description,
+                "unavailable_reason": spec.unavailable_reason,
+            })
+        return tuple(found)
 
     def __init__(
         self,

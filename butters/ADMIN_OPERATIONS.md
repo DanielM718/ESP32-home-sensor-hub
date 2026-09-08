@@ -62,6 +62,50 @@ authorization lapsed.
 | **Not configured** | No backing configuration — no registered project, application absent from the agent's `apps.toml`, no VM backend | Visible, disabled, labelled `Not configured` |
 | **Authorization required** | Available but elevation expired | Visible, **enabled**; clicking requests the passkey ceremony |
 
+### Wake Desktop
+
+The Tools desktop section exposes **Wake Desktop**, which invokes the existing
+registered `wake_desktop` skill. That skill reaches the root broker's
+`desktop.wake` operation, which sends one Wake-on-LAN packet using the `mac`
+and `broadcast` in `/etc/butters/action-broker.toml`. There is no second WOL
+implementation, and the browser sends no parameters at all: the machine
+identity comes from `desktop.machine` in `assistant.toml` (allow-listed to the
+single configured desktop) and the MAC and broadcast from the broker's
+root-owned config. A request carrying a `mac`, `host`, or `machine` parameter is
+rejected with `invalid_action`.
+
+Authorization is the skill's own — `elevated`, via the same freeze →
+passkey → coordinator path a spoken "wake my computer" takes, with the same
+audit record. Exposing it in Tools added a button, not a capability.
+
+Control states:
+
+| Condition | Rendering |
+| --- | --- |
+| Desktop unreachable, or reachability unknown | **Available** (or `Authorization required` if elevation lapsed) |
+| Desktop already reachable | **Temporarily unavailable** — *"already reachable; no wake is needed"*. Clicking is unnecessary, not an error |
+| `desktop.wake_enabled` false, or broker unprovisioned | **Not configured**, with the registry's reason |
+
+Repeated requests are safe. A click while an action is running is dropped, and
+if the desktop is already awake no packet is sent — that is reported rather
+than treated as a failure.
+
+Progress is reported only for stages Butters has **observed**, polled from
+`/api/desktop/status` for up to 120 s:
+
+```
+wake requested → magic packet sent → waiting for desktop
+              → network reachable → SSH available → agent connected
+```
+
+A cancelled ceremony or a failed action reports *"wake was not performed; no
+packet was sent"* and claims no stage. If the desktop does not become reachable
+within 120 s the panel says so and notes it may still be booting; the timeout
+is an observation window, not a failure of the wake itself.
+
+Shutdown, restart and sleep are **not** exposed in Tools. Their broker gates
+are separately default-off.
+
 ### Desktop state axes
 
 Desktop condition is reported as separate axes, never collapsed into one word:
@@ -207,6 +251,8 @@ is never requested or recorded.
 | Tools shows an authorization error and no application rows | Frontend/backend deployment drift | `./butters/scripts/verify-deployment`, then `install-beta1 --start` |
 | `Launch <app>` rows absent while the agent is connected | Application not in the agent's `apps.toml`, or its path does not resolve | Fix `apps.toml` on the desktop; rows come from `desktop.app.list`, not from Butters |
 | Privileged button says `Authorization required` | Elevation expired | Click it, or Passkeys → Authenticate |
+| `Wake Desktop` shows `Not configured` | `desktop.wake_enabled` false, or broker unprovisioned | Check `assistant.toml` and `/etc/butters/action-broker.toml` (`"desktop.wake" = true`) |
+| Wake sent but nothing happens | Desktop WOL disabled in firmware, or wrong `broadcast` for the LAN | Verify `mac`/`broadcast` in the broker config; WOL cannot be diagnosed from Butters alone |
 | Banner: session expired | Session idle TTL | Reload and sign in |
 | Status pill `Denied` | Identity not allow-listed, or request bypassed `tailscale serve` | Check `admin_identities`; reach Butters via its Serve origin |
 | Agent `disconnected` but the desktop is on | Agent not running, or ingress unreachable on the LAN | Check the Windows task; `journalctl -u butters-agent-ingress` |

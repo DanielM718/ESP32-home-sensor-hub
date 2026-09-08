@@ -265,6 +265,8 @@ let desktopProjects = [];
 let desktopBusy = false;
 let desktopAgent = null;
 let elevated = false;
+let desktopRegistered = {};
+let desktopReachable = null;
 
 // The four control states. Anything not `available` stays visible with a
 // reason rather than vanishing or silently doing nothing. The exception is
@@ -321,6 +323,106 @@ function desktopButtons() {
   });
   applyControlState(document.querySelector("#desktop-refresh"), "available", "Re-read desktop state");
   applyControlState(document.querySelector("#desktop-ssh-test"), "available", "Read-only SSH reachability check");
+  applyControlState(document.querySelector("#desktop-wake"), ...wakeControlState());
+}
+
+// Wake is offered when the desktop is unreachable, and stays visible and
+// explained when it is not needed or not configured, so the control is
+// discoverable rather than appearing only in the state where it is useful.
+function wakeControlState() {
+  const registered = desktopRegistered.wake_desktop;
+  if (!registered) {
+    return ["not_configured", "Wake is not registered on this Butters build."];
+  }
+  if (!registered.available || !registered.enabled) {
+    return ["not_configured", registered.unavailable_reason
+      || "Wake is disabled, or the action broker is unprovisioned."];
+  }
+  if (desktopReachable === true) {
+    // Not an error, and not hidden: sending another packet would simply be
+    // redundant. The reason says so.
+    return ["unavailable", "The desktop is already reachable; no wake is needed."];
+  }
+  return privilegedState(desktopReachable === false
+    ? "Send the configured Wake-on-LAN packet to the desktop."
+    : "Reachability is unknown; sending wake is safe and idempotent.");
+}
+
+// The stages Butters can actually observe, in the order they become true.
+// Rendered from real status, never from an assumption about what wake did.
+const WAKE_STAGES = [
+  ["wake requested", state => state.requested],
+  ["magic packet sent", state => state.sent],
+  ["waiting for desktop", state => state.waiting],
+  ["network reachable", state => state.network],
+  ["SSH available", state => state.ssh],
+  ["agent connected", state => state.agent],
+];
+
+function renderWakeProgress(state) {
+  const target = document.querySelector("#desktop-wake-progress");
+  const reached = WAKE_STAGES.filter(([, test]) => test(state)).map(([label]) => label);
+  const parts = reached.length ? reached.join(" → ") : "no stage observed yet";
+  target.textContent = state.note ? `${parts} — ${state.note}` : parts;
+}
+
+async function wakeDesktop() {
+  if (desktopBusy || sessionDead) return;   // repeated clicks are dropped
+  if (desktopReachable === true) {
+    renderWakeProgress({network: true, ssh: null,
+                        note: "The desktop was already reachable; no packet was sent."});
+    return;
+  }
+  renderWakeProgress({requested: true, note: "requesting authorization if required"});
+  // The same registered action, coordinator and audit path a spoken request
+  // takes. runDesktop handles elevation, the pending-action ceremony, and job
+  // polling, and restores button state on failure.
+  if (!await runDesktop("wake_desktop")) {
+    renderWakeProgress({requested: true,
+      note: "wake was not performed; no packet was sent"});
+    return;
+  }
+  await observeWakeProgress();
+}
+
+// After the packet is sent, report only what the existing status surface
+// observes. Butters never claims a stage it has not seen.
+async function observeWakeProgress() {
+  const deadline = Date.now() + 120000;
+  let state = {requested: true, sent: true, waiting: true};
+  renderWakeProgress(state);
+  while (Date.now() < deadline && !sessionDead) {
+    let status;
+    try {
+      status = (await api("/api/desktop/status")).value;
+    } catch (error) {
+      renderWakeProgress({...state, note: `status unavailable: ${describeError(error)}`});
+      return;
+    }
+    const axes = status.axes || {};
+    state = {
+      requested: true,
+      sent: true,
+      waiting: !status.online,
+      network: status.online === true,
+      ssh: status.ssh_reachable === true,
+      agent: status.agent_connected === true,
+    };
+    desktopReachable = typeof status.online === "boolean" ? status.online : null;
+    if (state.agent) {
+      renderWakeProgress({...state, waiting: false, note: "desktop and agent are ready"});
+      return;
+    }
+    if (state.ssh) {
+      renderWakeProgress({...state, waiting: false,
+        note: `SSH is up; Windows session ${axes.session || "UNKNOWN"}, agent ${axes.agent || "OFFLINE"}`});
+      return;
+    }
+    renderWakeProgress(state);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  renderWakeProgress({...state,
+    note: "the desktop did not become reachable within 120s; it may still be booting"});
 }
 
 // ---- host status -----------------------------------------------------------
@@ -335,6 +437,8 @@ async function refreshDesktopStatus() {
   const status = document.querySelector("#desktop-status");
   try {
     const result = (await api("/api/desktop/status")).value;
+    // online is true, false, or absent when the probe could not decide.
+    desktopReachable = typeof result.online === "boolean" ? result.online : null;
     status.replaceChildren();
     const host = document.createElement("strong");
     host.textContent = result.hostname || "desktop";
@@ -362,6 +466,8 @@ async function refreshDesktopStatus() {
 async function refreshDesktopCatalog() {
   const catalog = (await api("/api/desktop/catalog")).value;
   desktopProjects = catalog.projects || [];
+  desktopRegistered = Object.fromEntries(
+    (catalog.registered_actions || []).map(item => [item.action, item]));
   const select = document.querySelector("#desktop-project");
   const previous = select.value;
   select.replaceChildren(...(desktopProjects.length
@@ -530,8 +636,10 @@ async function runDesktop(action, parameters = {}) {
   document.querySelectorAll("#desktop-apps button, #desktop-streaming").forEach(b => { b.disabled = true; });
   const output = document.querySelector("#desktop-result");
   output.textContent = `Running ${action}…`;
+  let succeeded = false;
   try {
     output.textContent = pretty(await executeDesktop(action, parameters, output));
+    succeeded = true;
   } catch (error) {
     // Say what actually happened. "Git Bash launch requires renewed
     // authorization" is actionable; "session invalid or expired" was not, and
@@ -546,6 +654,9 @@ async function runDesktop(action, parameters = {}) {
     desktopBusy = false;
     await refreshDesktop();
   }
+  // Callers that follow an action with observation need to know whether it ran,
+  // so a cancelled ceremony is never reported as progress.
+  return succeeded;
 }
 
 async function executeDesktop(action, parameters, output) {
@@ -592,6 +703,7 @@ async function executeDesktop(action, parameters, output) {
 
 document.querySelector("#desktop-refresh").addEventListener("click", refreshDesktop);
 document.querySelector("#desktop-ssh-test").addEventListener("click", () => runDesktop("desktop.ssh_test"));
+document.querySelector("#desktop-wake").addEventListener("click", wakeDesktop);
 document.querySelector("#desktop-project").addEventListener("change", desktopButtons);
 document.querySelectorAll("[data-compute]").forEach(button => button.addEventListener("click",
   () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value})));

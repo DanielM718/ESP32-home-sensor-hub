@@ -254,7 +254,14 @@ def create_app(
         try:
             _admin(request, auth)
             _bound_session(request, runtime, auth)
-            return JSONResponse(runtime.desktop_actions.catalog())
+            # Merged rather than pushed into DesktopActions.catalog(): the
+            # compute layer knows nothing about the skill registry, and the
+            # registered-action state has to come from the registry so a
+            # disabled capability can never render as an enabled button.
+            return JSONResponse({
+                **runtime.desktop_actions.catalog(),
+                "registered_actions": runtime.tools_registered_actions(),
+            })
         except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
 
