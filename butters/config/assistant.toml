@@ -25,10 +25,16 @@ wake_enabled = true
 # switches. The root broker retains a separate, default-off gate for each.
 headless_enabled = true
 monitors_enabled = true
-# Fixed Parsec support is present in source but remains disabled until the
-# reviewed feature branch and Windows helper are deployed together.
-parsec_status_enabled = false
-parsec_ensure_enabled = false
+# Fixed Parsec support: status and idempotent ensure are validated against the
+# real desktop and are the state production has been running, so they are
+# enabled here. Without this the first correct install would have silently
+# disabled working Parsec control, because the deployed config had been edited
+# in place while this file was left behind.
+parsec_status_enabled = true
+parsec_ensure_enabled = true
+# Restart tears down a live Parsec session, so it stays off until it is
+# deliberately exercised against the desktop. The root broker keeps its own
+# separate default-off gate regardless.
 parsec_restart_enabled = false
 lock_enabled = false
 sleep_enabled = false

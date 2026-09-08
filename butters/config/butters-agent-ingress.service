@@ -1,7 +1,9 @@
 [Unit]
 Description=Butters Desktop Agent TLS WebSocket ingress
 After=network-online.target butters-web.service
-Wants=network-online.target
+# After= alone does not pull the daemon in. The ingress is only a TLS proxy in
+# front of butters-web, so it must not be brought up on its own at boot.
+Wants=network-online.target butters-web.service
 
 [Service]
 User=butters

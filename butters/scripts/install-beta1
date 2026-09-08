@@ -13,6 +13,8 @@ state_dir="/var/lib/butters"
 config_dir="/etc/butters"
 unit_name="butters-web.service"
 listener_unit_name="butters-live.service"
+ingress_unit_name="butters-agent-ingress.service"
+broker_unit_name="butters-action-broker.service"
 enable_service=0
 start_service=0
 
@@ -135,6 +137,15 @@ command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
 [[ -f "${butters_dir}/requirements.txt" ]] \
   || { echo "Butters requirements.txt is missing" >&2; exit 2; }
 [[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
+# butters.actions.agent and butters.web.service import butters_agent.protocol,
+# the wire contract shared with the Windows Desktop Agent. It lives in a
+# sibling checkout directory, so it is not covered by the rsync below and has
+# to be staged explicitly. It was previously satisfied only by a package
+# someone had pip-installed into the venv by hand, which meant the first
+# correct reinstall would take butters-web down with ModuleNotFoundError.
+agent_package="$(dirname "${butters_dir}")/butters-agent/src/butters_agent"
+[[ -f "${agent_package}/protocol.py" ]] \
+  || { echo "Shared agent protocol is missing at ${agent_package}" >&2; exit 2; }
 
 # A production install must never ship the development authorization bypass.
 if grep -Eq '^[[:space:]]*development_mode[[:space:]]*=[[:space:]]*true' \
@@ -164,6 +175,8 @@ rsync -a --delete \
   --exclude '*.pyc' \
   --exclude .venv \
   "${butters_dir}/" "${staging_dir}/"
+rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
+  "${agent_package}/" "${staging_dir}/src/butters_agent/"
 # Freeze the snapshot before root executes anything out of it. Running as root,
 # rsync -a preserves the *source* owner, so without this the staged tree would
 # still be owned by the invoking user while the interpreter below runs as root.
@@ -187,6 +200,39 @@ verify_runtime_dependencies \
   || { echo "Staged tree failed to compile; nothing was replaced." >&2; exit 3; }
 [[ -f "${staging_dir}/src/butters/web/app.py" ]] \
   || { echo "Staged tree is incomplete; nothing was replaced." >&2; exit 3; }
+# Import the ASGI application exactly as the unit does. A missing runtime
+# dependency then fails here, while the previous tree is still serving, instead
+# of after the swap.
+PYTHONPATH="${staging_dir}/src" BUTTERS_CONFIG="${staging_dir}/config/assistant.toml" \
+  "${staging_dir}/.venv/bin/python" -c 'import butters.web.app' \
+  || { echo "Staged tree cannot import butters.web.app; nothing was replaced." >&2; exit 3; }
+
+# 2c. Record the deployment identity and a digest of everything installed.
+#     The daemon recomputes this digest from the tree it is actually running
+#     and reports `modified_since_install` on the Admin Overview, so a tree
+#     that is later hand-patched file-by-file can no longer look installed.
+source_commit="$(git -C "${butters_dir}" rev-parse HEAD 2>/dev/null || echo unknown)"
+source_branch="$(git -C "${butters_dir}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+PYTHONPATH="${staging_dir}/src" "${staging_dir}/.venv/bin/python" - \
+    "${staging_dir}" "${source_commit}" "${source_branch}" "${butters_dir}" <<'PYTHON'
+import datetime
+import json
+import pathlib
+import sys
+
+from butters.deployment import MANIFEST_NAME, tree_digest
+
+root = pathlib.Path(sys.argv[1])
+manifest = {
+    "commit": sys.argv[2],
+    "branch": sys.argv[3],
+    "source": sys.argv[4],
+    "installed_at": datetime.datetime.now(datetime.UTC).isoformat(timespec="seconds"),
+    "tree_digest": tree_digest(root),
+}
+(root / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+print(f"recorded deployment {manifest['commit'][:12]} digest {manifest['tree_digest'][:16]}")
+PYTHON
 
 # 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
 #    also covers the bytecode compileall just generated and establishes the final
@@ -238,15 +284,34 @@ install -m 0644 -o root -g root "${butters_dir}/systemd/${unit_name}" "/etc/syst
 install -m 0644 -o root -g root "${butters_dir}/systemd/${listener_unit_name}" \
   "/etc/systemd/system/${listener_unit_name}"
 
+# The Desktop Agent TLS ingress runs out of this same tree, so the installer
+# owns its unit too. It was previously installed only by
+# scripts/deploy-desktop-agent.py, which meant a routine Butters deployment
+# refreshed the code the ingress executes without ever restarting it.
+install -m 0644 -o root -g root "${butters_dir}/config/${ingress_unit_name}" \
+  "/etc/systemd/system/${ingress_unit_name}"
+
 systemctl daemon-reload
 if [[ "${enable_service}" == "1" ]]; then
-  systemctl enable "${unit_name}"
+  systemctl enable "${unit_name}" "${ingress_unit_name}"
 fi
 if [[ "${start_service}" == "1" ]]; then
+  # Every daemon that executes this tree has to be restarted together, or the
+  # deployment is only half applied: the files change under a process that
+  # keeps running the code it imported at its own start. That is precisely how
+  # the Tools page came to call actions its backend had never registered.
   systemctl restart "${unit_name}"
+  systemctl restart "${ingress_unit_name}"
+  # Socket-activated and installed separately, so only ever restarted, never
+  # enabled or created here.
+  if systemctl is-active --quiet "${broker_unit_name}"; then
+    systemctl restart "${broker_unit_name}"
+  fi
 fi
 
 echo "Installed Butters Beta 1 at ${install_dir}."
+echo "Deployment record: ${install_dir}/DEPLOYMENT (commit ${source_commit:0:12})."
+echo "Verify with: ./butters/scripts/verify-deployment"
 echo "Application tree: ${install_dir} (root:butters, 0750 directories, 0640 files)."
 echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then restart)."
 echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."

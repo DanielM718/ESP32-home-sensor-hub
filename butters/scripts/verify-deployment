@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Report whether the installed Butters tree matches this checkout and whether
+# every daemon that executes it is actually running that code.
+#
+# This exists because a deployment can drift in two independent ways, and
+# neither was previously visible:
+#
+#   1. Files in /opt/butters differ from the checkout (never installed, or
+#      hand-patched afterwards).
+#   2. Files match, but a daemon has been running since before they changed, so
+#      the process is still executing the previous code.
+#
+# Exits non-zero when either is true, so it is usable as a deployment gate.
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_dir="$(dirname "${script_dir}")"
+install_dir="${BUTTERS_INSTALL_DIR:-/opt/butters}"
+units=(butters-web.service butters-agent-ingress.service butters-action-broker.service)
+problems=0
+
+if [[ ! -d "${install_dir}" ]]; then
+  echo "FAIL  ${install_dir} does not exist; run: sudo ./butters/scripts/install-beta1 --start"
+  exit 1
+fi
+
+echo "== tree =="
+# The digest covers behaviour-determining files only, so runtime state, models
+# and the virtualenv never show up as drift.
+checkout_digest="$(PYTHONPATH="${butters_dir}/src" python3 -c \
+  'import pathlib,sys; from butters.deployment import checkout_digest; print(checkout_digest(pathlib.Path(sys.argv[1])))' \
+  "${butters_dir}")"
+installed_digest="$(sudo PYTHONPATH="${install_dir}/src" "${install_dir}/.venv/bin/python" -c \
+  'import pathlib,sys; from butters.deployment import tree_digest; print(tree_digest(pathlib.Path(sys.argv[1])))' \
+  "${install_dir}" 2>/dev/null || echo unavailable)"
+
+printf 'checkout   %s\n' "${checkout_digest:0:16}"
+printf 'installed  %s\n' "${installed_digest:0:16}"
+if [[ "${checkout_digest}" != "${installed_digest}" ]]; then
+  echo "FAIL  installed tree differs from this checkout"
+  echo "      fix: sudo ./butters/scripts/install-beta1 --start"
+  problems=1
+else
+  echo "OK    installed tree matches this checkout"
+fi
+
+echo
+echo "== recorded deployment =="
+if sudo test -f "${install_dir}/DEPLOYMENT"; then
+  sudo cat "${install_dir}/DEPLOYMENT"
+  recorded="$(sudo python3 -c \
+    'import json,sys; print(json.load(open(sys.argv[1])).get("tree_digest",""))' \
+    "${install_dir}/DEPLOYMENT")"
+  if [[ "${recorded}" != "${installed_digest}" ]]; then
+    echo "FAIL  installed tree was modified after it was installed"
+    problems=1
+  fi
+else
+  echo "FAIL  no DEPLOYMENT record; this tree predates install fingerprinting"
+  problems=1
+fi
+
+echo
+echo "== daemons running this tree =="
+# A unit started before the tree was last written is still executing the
+# previous code even though the files on disk now look correct.
+# The newest behaviour-determining file, not the directory mtime: overwriting
+# a file in place leaves the containing directory's mtime untouched, which is
+# exactly what a hand-patched deployment looks like.
+installed_epoch="$(sudo find "${install_dir}/src" -type f \
+  \( -name '*.py' -o -name '*.js' -o -name '*.css' -o -name '*.html' \) \
+  -printf '%T@\n' 2>/dev/null | sort -n | tail -1 | cut -d. -f1)"
+installed_epoch="${installed_epoch:-0}"
+for unit in "${units[@]}"; do
+  if ! systemctl is-active --quiet "${unit}"; then
+    printf 'SKIP  %-32s not active\n' "${unit}"
+    continue
+  fi
+  started="$(systemctl show "${unit}" -p ExecMainStartTimestamp --value)"
+  started_epoch="$(date -d "${started}" +%s 2>/dev/null || echo 0)"
+  if (( started_epoch < installed_epoch )); then
+    printf 'FAIL  %-32s started %s, before the tree changed\n' "${unit}" "${started}"
+    echo "      fix: sudo systemctl restart ${unit}"
+    problems=1
+  else
+    printf 'OK    %-32s started %s\n' "${unit}" "${started}"
+  fi
+done
+
+echo
+if (( problems )); then
+  echo "RESULT  deployment is inconsistent"
+  exit 1
+fi
+echo "RESULT  deployment is consistent"

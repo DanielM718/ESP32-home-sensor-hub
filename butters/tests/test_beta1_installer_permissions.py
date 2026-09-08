@@ -325,9 +325,19 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
         assert len(matches) == 1, f"expected exactly one {needle!r}, got {matches}"
         return matches[0]
 
-    rsync = index_of("rsync -a --delete")
+    def indices_of(needle: str) -> list[int]:
+        matches = [i for i, line in enumerate(lines) if needle in line]
+        assert matches, f"expected at least one {needle!r}"
+        return matches
+
+    # Two staging copies: the Butters tree, and butters_agent from the sibling
+    # checkout directory, which carries the wire protocol the server imports.
+    # Every one of them must precede the freeze.
+    rsyncs = indices_of("rsync -a --delete")
+    assert len(rsyncs) == 2, rsyncs
     freeze = index_of('chown -h -R root:butters "${staging_dir}"')
     compile_step = index_of("-m compileall")
+    manifest = index_of("from butters.deployment import MANIFEST_NAME, tree_digest")
     seal = index_of('normalize_application_tree "${staging_dir}"')
     swap = index_of('mv "${staging_dir}" "${install_dir}"')
     first_systemctl = min(i for i, line in enumerate(lines) if "systemctl" in line)
@@ -335,7 +345,11 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
     # The freeze must land between staging and the first time root executes
     # anything out of the staged tree, so the snapshot cannot be swapped under
     # root by the unprivileged user who owns the source checkout.
-    assert rsync < freeze < compile_step < seal < swap < first_systemctl
+    assert max(rsyncs) < freeze < compile_step < seal < swap < first_systemctl
+
+    # The deployment manifest is written before the seal, so it is published
+    # with the same ownership and modes as the rest of the tree.
+    assert compile_step < manifest < seal
 
     # Nothing may write to the staging tree after it has been sealed, otherwise
     # the published tree could still contain root-only or world-readable paths.
