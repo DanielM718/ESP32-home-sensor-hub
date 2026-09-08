@@ -5,7 +5,10 @@ now calls a shared deterministic action API for desktop status, SSH tests, and
 registered builds/tests. Wake-on-LAN, hostname discovery, passwordless service
 SSH, and interactive/noninteractive Git Bash have been verified on Windows.
 See [DESKTOP_COMPUTE.md](DESKTOP_COMPUTE.md) for configuration, validation,
-deployment files, and rollback.
+deployment files, and rollback, and
+[ADMIN_OPERATIONS.md](ADMIN_OPERATIONS.md) for Admin authentication and
+elevation behaviour, Tools control-state semantics, the deployment/restart
+procedure, and failure recovery.
 
 Butters is the local voice-assistant subsystem for this home network. It lives
 inside the sensor repository because later restricted skills will query sensors

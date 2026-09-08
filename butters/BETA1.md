@@ -232,6 +232,16 @@ That worker is not built yet. Copying provider keys into Codex is forbidden.
 
 ## Verification and rollback
 
+Admin authentication behaviour, Tools control-state semantics, the full
+deployment/restart procedure, service-health commands, and failure recovery are
+in [ADMIN_OPERATIONS.md](ADMIN_OPERATIONS.md). Deploy with
+`sudo ./butters/scripts/install-beta1 --start`, then confirm the installed tree
+and every daemon running it agree:
+
+```bash
+./butters/scripts/verify-deployment
+```
+
 ```bash
 systemctl is-active butters-web.service
 curl -fsS http://127.0.0.1:8090/healthz
