@@ -125,6 +125,22 @@ class _ForcedDiagnosticPolicy:
         return None
 
 
+class ElevationRequired(PermissionError):
+    """A privileged desktop action was refused only because elevation expired.
+
+    This is deliberately distinct from SessionError("invalid_session"). The
+    browser session is still valid here; only the temporary passkey elevation
+    has lapsed, so the Admin page must keep working and offer to re-elevate
+    rather than treating the whole session as dead.
+    """
+
+    code = "elevation_required"
+
+    def __init__(self, message: str, *, action: str) -> None:
+        super().__init__(message)
+        self.action = action
+
+
 class BetaAssistantService:
     def execute_desktop_action(
         self, session: BrowserSession, action: str, parameters: dict
@@ -159,8 +175,10 @@ class BetaAssistantService:
             action not in {"desktop.status", "desktop.ping", "desktop.ssh_test"}
             and self.auth_state.elevation(session.session_id, session.peer_key) is None
         ):
-            raise PermissionError(
-                "Authenticate in Passkeys / Auth before running registered compute actions"
+            raise ElevationRequired(
+                "Renewed passkey authorization is required before running "
+                "registered compute actions.",
+                action=action,
             )
         result = self.desktop_actions.execute(action, parameters)
         # Journal only action/result metadata; output may contain project secrets.

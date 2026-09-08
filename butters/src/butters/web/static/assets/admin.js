@@ -9,20 +9,125 @@ let selectedTraceId = null;
 const traceCards = new Map();
 const titles = {overview:"Overview",trace:"Live Trace",sessions:"Conversations / Sessions",routing:"Routing",models:"Models / STT",voice:"TTS / Voice",skills:"Skills",tools:"Tools",usage:"Usage",system:"System",logs:"Logs",security:"Security / Credential Status",passkeys:"Passkeys / Authentication",actions:"Actions / Broker",capabilities:"Capabilities",codex:"Codex Jobs"};
 
+// Codes that mean the browser session itself is gone. Everything else -- an
+// expired elevation above all -- leaves the session usable, and must not be
+// reported as "your session is invalid", which was the cryptic dead end that
+// made the Admin page look broken.
+const SESSION_DEAD_CODES = ["invalid_session", "authentication_session_invalid",
+                            "session_expired", "session_identity_denied"];
+
+class ApiError extends Error {
+  constructor(code, message, status, payload) {
+    super(message);
+    this.name = "ApiError";
+    this.code = code || "request_failed";
+    this.status = status;
+    this.payload = payload || {};
+  }
+  // A privileged action refused only because temporary elevation lapsed. The
+  // fix is one passkey ceremony, not a reload.
+  get requiresElevation() {
+    return this.code === "elevation_required" || this.payload.reauthorize === "elevation";
+  }
+  get sessionDead() { return SESSION_DEAD_CODES.includes(this.code); }
+}
+
+let sessionDead = false;
+
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
   if (options.method && options.method !== "GET") headers.set("X-Butters-CSRF", csrf);
-  const response = await fetch(path, {...options, headers, credentials:"same-origin"});
+  let response;
+  try {
+    response = await fetch(path, {...options, headers, credentials:"same-origin"});
+  } catch (cause) {
+    // A dropped connection or a restarting daemon is not an authorization
+    // problem, and previously surfaced as a bare "Failed to fetch".
+    throw new ApiError("network_unreachable",
+      "Butters could not be reached. It may be restarting; retry in a moment.", 0);
+  }
   const contentType = response.headers.get("content-type") || "";
-  const value = contentType.includes("json") ? await response.json() : await response.blob();
+  let value;
+  try {
+    value = contentType.includes("json") ? await response.json() : await response.blob();
+  } catch (cause) {
+    if (response.ok) throw new ApiError("malformed_response", "Butters returned an unreadable response.", response.status);
+    value = {};
+  }
   if (!response.ok) {
-    if (["invalid_session", "authentication_session_invalid", "session_expired"].includes(value.error)) {
-      throw new Error("Session expired. Reload this page, then authenticate in Passkeys / Authentication. No action was retried.");
-    }
-    throw new Error(value.message || `Request failed: ${response.status}`);
+    const error = new ApiError(value.error, value.message || `Request failed: ${response.status}`,
+                               response.status, value);
+    if (error.sessionDead) announceSessionExpired();
+    throw error;
   }
   return {value, response};
+}
+
+// -------------------------------------------------------- session recovery UI
+//
+// An expired browser session used to leave every control on the page in place,
+// failing only once clicked. It is now announced once, at the top of the page,
+// with the existing login path, and the page stops issuing further requests.
+function announceSessionExpired() {
+  if (sessionDead) return;
+  sessionDead = true;
+  const banner = ensureBanner();
+  banner.className = "warning-card admin-banner";
+  banner.replaceChildren();
+  const text = document.createElement("span");
+  text.textContent = "Your browser session expired. No action was retried. " +
+    "Reload to sign in again; the Admin page will return to this state.";
+  const reload = document.createElement("button");
+  reload.className = "primary-button";
+  reload.type = "button";
+  reload.textContent = "Reload and sign in";
+  reload.addEventListener("click", () => location.reload());
+  banner.append(text, reload);
+  banner.hidden = false;
+  document.querySelector("#admin-status").textContent = "Session expired";
+  // Stale controls that would only fail on click are disabled up front.
+  document.querySelectorAll(".admin-main button").forEach(button => {
+    if (button !== reload) button.disabled = true;
+  });
+}
+
+function ensureBanner() {
+  let banner = document.querySelector("#admin-banner");
+  if (!banner) {
+    banner = document.createElement("div");
+    banner.id = "admin-banner";
+    banner.hidden = true;
+    document.querySelector(".admin-main").prepend(banner);
+  }
+  return banner;
+}
+
+function showNotice(message) {
+  const banner = ensureBanner();
+  if (sessionDead) return;
+  banner.className = "warning-card admin-banner";
+  banner.replaceChildren(document.createTextNode(message));
+  banner.hidden = false;
+}
+
+function clearNotice() {
+  const banner = document.querySelector("#admin-banner");
+  if (banner && !sessionDead) banner.hidden = true;
+}
+
+// Panel failures are reported without destroying the authorization pill, which
+// previously became the error text and never recovered.
+function reportPanelError(error) {
+  if (error instanceof ApiError && error.sessionDead) return;
+  showNotice(describeError(error));
+}
+
+function describeError(error) {
+  if (error instanceof ApiError && error.requiresElevation) {
+    return error.message + " Use Authenticate in Passkeys / Authentication, or click the action again.";
+  }
+  return (error && error.message) || "An unexpected error occurred.";
 }
 
 function pretty(value) { return JSON.stringify(value, null, 2); }
@@ -49,6 +154,7 @@ document.querySelector("#admin-nav").addEventListener("click", event => {
   document.querySelectorAll("#admin-nav button").forEach(item=>item.classList.toggle("active",item===button));
   document.querySelectorAll(".admin-panel").forEach(panel=>panel.classList.toggle("active",panel.id===`panel-${button.dataset.panel}`));
   document.querySelector("#panel-title").textContent=titles[button.dataset.panel];
+  clearNotice();
   refresh(button.dataset.panel);
 });
 
@@ -63,7 +169,14 @@ async function initialize() {
     const select=document.querySelector("#route-model"); select.replaceChildren(...models.map(model=>new Option(model,model)));
     const output=document.querySelector("#route-output"); output.max=String(modelData.text.max_output_tokens); output.value=String(modelData.text.max_output_tokens);
     await refreshTraces();
-  } catch(error) { document.querySelector("#admin-status").textContent=error.message || "Denied"; }
+  } catch(error) {
+    // A denied identity is a different condition from an expired session and
+    // from a transport failure; only the first is a permanent "Denied".
+    if (error instanceof ApiError && error.sessionDead) return;
+    document.querySelector("#admin-status").textContent =
+      error instanceof ApiError && error.status === 403 ? "Denied" : "Unavailable";
+    reportPanelError(error);
+  }
 }
 
 async function refresh(panel) {
@@ -83,7 +196,7 @@ async function refresh(panel) {
     if(panel==="actions") renderObject(document.querySelector("#action-admin-view"),(await api("/api/admin/actions")).value);
     if(panel==="capabilities") renderCapabilities((await api("/api/capabilities")).value.capabilities);
     if(panel==="codex") await refreshJobs();
-  } catch(error) { document.querySelector("#admin-status").textContent=error.message; }
+  } catch(error) { reportPanelError(error); }
 }
 
 function renderObject(container,value){rows(container,Object.entries(value),item=>[item[0].replaceAll("_"," "),typeof item[1]==="object"?pretty(item[1]):String(item[1])]);}
@@ -138,98 +251,350 @@ async function decideJob(decision){if(!selectedJob)return;if(decision==="approve
 document.querySelector("#codex-approve").addEventListener("click",()=>decideJob("approve"));
 document.querySelector("#codex-reject").addEventListener("click",()=>decideJob("reject"));
 
+// ============================================================= Tools panel ===
+//
+// Every subsection below refreshes and fails independently. The previous
+// version wrapped host status, agent status, applications and VMs in one
+// try/catch whose only output was #desktop-status, so a single rejected
+// desktop.app.list request -- which is what an expired elevation or a backend
+// that had never registered the action produced -- simultaneously removed the
+// application controls and replaced the host status with an authorization
+// error. One transient failure made the whole panel look broken.
+
 let desktopProjects = [];
 let desktopBusy = false;
+let desktopAgent = null;
+let elevated = false;
+
+// The four control states. Anything not `available` stays visible with a
+// reason rather than vanishing or silently doing nothing. The exception is
+// `requires_authorization`, which stays clickable, because clicking it is how
+// the user re-elevates.
+const CONTROL_LABELS = {
+  available: "",
+  unavailable: "Temporarily unavailable",
+  not_configured: "Not configured",
+  requires_authorization: "Authorization required",
+};
+
+function applyControlState(button, state, reason) {
+  const enabled = state === "available" || state === "requires_authorization";
+  button.disabled = desktopBusy || sessionDead || !enabled;
+  button.dataset.controlState = state;
+  button.title = reason || CONTROL_LABELS[state] || "";
+  button.setAttribute("aria-disabled", String(button.disabled));
+}
+
+// A control that needs elevation is offered, not hidden. Hiding it was how the
+// Tools page came to look as though the desktop controls did not exist.
+function privilegedState(availableReason) {
+  return elevated ? ["available", availableReason]
+                  : ["requires_authorization",
+                     "Renewed passkey authorization is required; clicking will request it."];
+}
+
+async function refreshAuthState() {
+  try {
+    const status = (await api("/api/auth/status")).value;
+    elevated = status.elevated === true;
+    return status;
+  } catch (error) {
+    // Not knowing the elevation state must not hide controls; assume it is
+    // needed and let the action itself request it.
+    elevated = false;
+    throw error;
+  }
+}
+
 function desktopButtons() {
   const project = desktopProjects.find(item => item.name === document.querySelector("#desktop-project").value);
   document.querySelectorAll("[data-compute]").forEach(button => {
     const build = button.dataset.compute !== "desktop.test";
     const test = button.dataset.compute !== "desktop.compile";
-    button.disabled = desktopBusy || !project || (build && !project.build_available) || (test && !project.test_available);
+    if (!project) {
+      applyControlState(button, "not_configured", "Register a verified project in desktop-compute.toml first.");
+    } else if ((build && !project.build_available) || (test && !project.test_available)) {
+      applyControlState(button, "not_configured", `Project ${project.name} declares no matching command.`);
+    } else {
+      applyControlState(button, ...privilegedState(`Run on ${project.name}`));
+    }
   });
-  document.querySelector("#desktop-refresh").disabled = desktopBusy;
-  document.querySelector("#desktop-ssh-test").disabled = desktopBusy;
+  applyControlState(document.querySelector("#desktop-refresh"), "available", "Re-read desktop state");
+  applyControlState(document.querySelector("#desktop-ssh-test"), "available", "Read-only SSH reachability check");
 }
-async function refreshDesktop() {
+
+// ---- host status -----------------------------------------------------------
+//
+// The backend already reports discrete power/network/os/session/agent axes.
+// Rendering them separately, rather than collapsing to one word, is the point:
+// "powered off" and "reachable but no interactive session" are different
+// operational situations with different next steps.
+const AXIS_LABELS = {power:"Power", network:"Network", os:"SSH / OS", session:"Windows session", agent:"Desktop Agent"};
+
+async function refreshDesktopStatus() {
   const status = document.querySelector("#desktop-status");
   try {
-    const catalog = (await api("/api/desktop/catalog")).value;
-    await refreshDesktopAgent(catalog.desktop_agent);
-    desktopProjects = catalog.projects;
-    const select = document.querySelector("#desktop-project");
-    const previous = select.value;
-    select.replaceChildren(...(desktopProjects.length ? desktopProjects.map(item => new Option(item.name, item.name)) : [new Option("No registered projects", "")]));
-    if (desktopProjects.some(item => item.name === previous)) select.value = previous;
-    select.disabled = !desktopProjects.length;
     const result = (await api("/api/desktop/status")).value;
-    status.textContent = `${result.hostname} · ${result.online === true ? "Online" : result.online === false ? "Offline / unavailable" : "Unknown"} · SSH ${result.ssh_reachable ? "reachable" : "unreachable"}. ${result.status_note || result.stderr || ""}`;
-    if (catalog.configuration_error) document.querySelector("#desktop-compute-note").textContent = catalog.configuration_error;
-  } catch (error) { status.textContent = `Desktop status unavailable: ${error.message}`; }
+    status.replaceChildren();
+    const host = document.createElement("strong");
+    host.textContent = result.hostname || "desktop";
+    status.append(host);
+    const axes = result.axes || {};
+    for (const [key, label] of Object.entries(AXIS_LABELS)) {
+      if (!(key in axes)) continue;
+      const item = document.createElement("span");
+      item.className = "state-axis";
+      item.textContent = ` · ${label}: ${axes[key]}`;
+      status.append(item);
+    }
+    const note = result.status_note || result.stderr;
+    if (note) {
+      const detail = document.createElement("small");
+      detail.textContent = ` — ${note}`;
+      status.append(detail);
+    }
+  } catch (error) {
+    status.textContent = `Desktop host status unavailable: ${describeError(error)}`;
+    throw error;
+  }
+}
+
+async function refreshDesktopCatalog() {
+  const catalog = (await api("/api/desktop/catalog")).value;
+  desktopProjects = catalog.projects || [];
+  const select = document.querySelector("#desktop-project");
+  const previous = select.value;
+  select.replaceChildren(...(desktopProjects.length
+    ? desktopProjects.map(item => new Option(item.name, item.name))
+    : [new Option("No registered projects", "")]));
+  if (desktopProjects.some(item => item.name === previous)) select.value = previous;
+  select.disabled = !desktopProjects.length;
+  if (catalog.configuration_error) {
+    document.querySelector("#desktop-compute-note").textContent = catalog.configuration_error;
+  }
+  return catalog;
+}
+
+// Sections are refreshed concurrently and settled independently, so one
+// rejection cannot prevent the others from rendering.
+async function refreshDesktop() {
+  if (sessionDead) return;
+  let catalog = null;
+  const outcomes = await Promise.allSettled([
+    refreshAuthState(),
+    refreshDesktopCatalog().then(value => { catalog = value; }),
+    refreshDesktopStatus(),
+  ]);
+  // The agent subsection needs the catalog, so it runs once that has settled.
+  // A missing desktop_agent key means the backend predates the agent work --
+  // report that plainly instead of throwing a TypeError into the console.
+  await refreshDesktopAgent(catalog ? catalog.desktop_agent : null);
   desktopButtons();
+  const failure = outcomes.find(item => item.status === "rejected");
+  if (failure) reportPanelError(failure.reason); else clearNotice();
 }
-async function runDesktop(action, parameters = {}) {
-  if (desktopBusy) return;
-  desktopBusy = true; desktopButtons();
-  const output = document.querySelector("#desktop-result");
-  output.textContent = "Running…";
+
+// ---- Desktop Agent, applications and VMs -----------------------------------
+const AGENT_STATE_TEXT = {
+  not_configured: "No Desktop Agent is configured on this Butters host.",
+  disconnected: "Not connected. The desktop is powered off, asleep, or the agent is not running.",
+  awaiting_heartbeat: "Connected, waiting for the first authenticated heartbeat.",
+  heartbeat_stale: "Heartbeat is stale; the agent is treated as gone.",
+  heartbeat_aging: "Heartbeat is aging; GUI launch is withheld until it recovers.",
+  connected: "Connected.",
+};
+
+function describeAgent(agent) {
+  if (!agent) return "Desktop Agent state is unavailable from this backend.";
+  const base = AGENT_STATE_TEXT[agent.state] || agent.reason || "State unknown.";
+  const parts = [base];
+  if (agent.version) parts.push(`v${agent.version}`);
+  if (agent.session && agent.session.state) parts.push(`session ${agent.session.state}`);
+  if (agent.last_heartbeat_age_seconds !== null && agent.last_heartbeat_age_seconds !== undefined) {
+    parts.push(`heartbeat ${agent.last_heartbeat_age_seconds}s ago`);
+  } else {
+    parts.push("no heartbeat observed");
+  }
+  return parts.join(" · ");
+}
+
+function appControlState(app, agent) {
+  if (!agent || !agent.agent_connected) {
+    return ["unavailable", describeAgent(agent)];
+  }
+  if (app.installed === false) {
+    return ["not_configured", app.reason || "Not installed at its registered path on the desktop."];
+  }
+  if (!(agent.capabilities && agent.capabilities.gui_launch)) {
+    return ["unavailable", "An active, unlocked interactive Windows session is required."];
+  }
+  return privilegedState(app.running
+    ? "Already running; launching again is idempotent."
+    : "Launch this registered application.");
+}
+
+async function refreshDesktopAgent(agent) {
+  desktopAgent = agent;
+  const area = document.querySelector("#desktop-apps");
+  const vms = document.querySelector("#desktop-vms");
+  area.replaceChildren();
+  document.querySelector("#desktop-agent-status").textContent = describeAgent(agent);
+
+  const streaming = document.querySelector("#desktop-streaming");
+  if (!agent || !agent.agent_connected) {
+    applyControlState(streaming, "unavailable", describeAgent(agent));
+  } else {
+    applyControlState(streaming, ...privilegedState("Wake, ensure Parsec, and launch the streaming desktop."));
+  }
+
+  if (!agent || !agent.agent_connected) {
+    const note = document.createElement("p");
+    note.textContent = "Registered GUI controls are listed once the agent reconnects. " +
+      "SSH compute and wake remain available and independent.";
+    area.append(note);
+    vms.textContent = agent && agent.state === "not_configured"
+      ? "No VM backend is configured."
+      : "VM status is unavailable while the agent is disconnected.";
+    return;
+  }
+
+  await renderApplications(area, agent);
+  await renderVms(vms);
+}
+
+async function renderApplications(area, agent) {
+  let data;
   try {
-    let result = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action, parameters})})).value;
-    if (result.pending_action) {
-      const begin = (await api("/api/auth/authenticate/options", {method:"POST", body:JSON.stringify({purpose:"pending_action", pending_action_id:result.pending_action.pending_action_id})})).value;
-      const credential = await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});
-      if (!credential) throw new Error("Authentication cancelled");
-      result = (await api("/api/auth/authenticate/verify", {method:"POST", body:JSON.stringify({ceremony_id:begin.ceremony_id, credential:assertionJson(credential)})})).value;
+    const response = (await api("/api/desktop/actions",
+      {method:"POST", body:JSON.stringify({action:"desktop.app.list", parameters:{}})})).value;
+    data = response.data || response;
+  } catch (error) {
+    // Listing applications is read-only. If it fails, say so here and leave
+    // the rest of the panel -- host status, SSH test, compute -- working.
+    area.textContent = `Application list unavailable: ${describeError(error)}`;
+    reportPanelError(error);
+    return;
+  }
+  if (data.success === false) {
+    area.textContent = `Application list unavailable: ${data.error || "the agent rejected the request"}`;
+    return;
+  }
+  const apps = data.apps || [];
+  if (!apps.length) {
+    area.textContent = "The agent reports no registered applications. Add entries to its apps.toml.";
+    return;
+  }
+  for (const app of apps) {
+    const [state, reason] = appControlState(app, agent);
+    const row = document.createElement("p");
+    row.className = "app-row";
+    const label = document.createElement("span");
+    const condition = app.running ? "running" : app.installed === false ? "not installed" : "stopped";
+    label.textContent = `${app.app}: ${condition}${app.instances ? ` (${app.instances})` : ""} `;
+    const button = document.createElement("button");
+    button.className = "secondary-button";
+    button.type = "button";
+    button.textContent = `Launch ${app.app}`;
+    applyControlState(button, state, reason);
+    button.addEventListener("click", () => runDesktop("desktop.app.launch", {app: app.app}));
+    row.append(label, button);
+    if (state !== "available") {
+      const why = document.createElement("small");
+      why.className = "control-reason";
+      why.textContent = ` ${CONTROL_LABELS[state]}: ${reason}`;
+      row.append(why);
     }
-    const jobs = result.jobs || result.action_jobs || [];
-    for (const initial of jobs) {
-      let job = initial;
-      for (let poll = 0; poll < 310 && ["queued", "running", "waiting"].includes(job.state); poll++) {
-        output.textContent = pretty(job);
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        const response = (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value;
-        job = response.job || response;
-      }
-      result = job;
-    }
-    output.textContent = pretty(result);
-  } catch (error) { output.textContent = error.message; }
-  finally { desktopBusy = false; await refreshDesktop(); }
+    area.append(row);
+  }
 }
+
+async function renderVms(target) {
+  try {
+    const response = (await api("/api/desktop/actions",
+      {method:"POST", body:JSON.stringify({action:"desktop.vm.list", parameters:{}})})).value;
+    const vms = response.data || response;
+    const list = vms.vms || [];
+    target.textContent = list.length
+      ? list.map(item => `${item.vm}: ${item.state || "unknown"}`).join(" · ")
+      : (vms.reason || vms.error || "No VM backend is configured on the desktop.");
+  } catch (error) {
+    target.textContent = `VM status unavailable: ${describeError(error)}`;
+  }
+}
+
+// ---- running an action -----------------------------------------------------
+async function runDesktop(action, parameters = {}) {
+  if (desktopBusy || sessionDead) return;   // no duplicate submissions
+  desktopBusy = true;
+  desktopButtons();
+  document.querySelectorAll("#desktop-apps button, #desktop-streaming").forEach(b => { b.disabled = true; });
+  const output = document.querySelector("#desktop-result");
+  output.textContent = `Running ${action}…`;
+  try {
+    output.textContent = pretty(await executeDesktop(action, parameters, output));
+  } catch (error) {
+    // Say what actually happened. "Git Bash launch requires renewed
+    // authorization" is actionable; "session invalid or expired" was not, and
+    // was not even true.
+    output.textContent = error instanceof ApiError && error.requiresElevation
+      ? `${action} requires renewed passkey authorization. Nothing was run. ` +
+        `Click the action again, or use Authenticate in Passkeys / Authentication.`
+      : describeError(error);
+    reportPanelError(error);
+  } finally {
+    // Button state is always restored, including after a failure.
+    desktopBusy = false;
+    await refreshDesktop();
+  }
+}
+
+async function executeDesktop(action, parameters, output) {
+  let result;
+  try {
+    result = (await api("/api/desktop/actions",
+      {method:"POST", body:JSON.stringify({action, parameters})})).value;
+  } catch (error) {
+    // Elevation expired between rendering and clicking: run the existing
+    // ceremony and retry exactly once, rather than dead-ending.
+    if (!(error instanceof ApiError) || !error.requiresElevation) throw error;
+    output.textContent = "Renewed authorization required. Confirm with your passkey…";
+    await authenticatePurpose("elevation");
+    elevated = true;
+    result = (await api("/api/desktop/actions",
+      {method:"POST", body:JSON.stringify({action, parameters})})).value;
+  }
+  // A privileged action returns a frozen plan instead of running. Satisfying
+  // it with a passkey assertion is the designed elevation path.
+  if (result.pending_action) {
+    output.textContent = "Confirm this action with your passkey…";
+    const begin = (await api("/api/auth/authenticate/options", {method:"POST",
+      body:JSON.stringify({purpose:"pending_action",
+                           pending_action_id:result.pending_action.pending_action_id})})).value;
+    const credential = await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});
+    if (!credential) throw new Error("Authentication was cancelled. Nothing was run.");
+    result = (await api("/api/auth/authenticate/verify", {method:"POST",
+      body:JSON.stringify({ceremony_id:begin.ceremony_id,
+                           credential:assertionJson(credential)})})).value;
+    elevated = true;
+  }
+  for (const initial of result.jobs || result.action_jobs || []) {
+    let job = initial;
+    for (let poll = 0; poll < 310 && ["queued", "running", "waiting"].includes(job.state); poll++) {
+      output.textContent = pretty(job);
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      job = (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value.job
+         || (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value;
+    }
+    result = job;
+  }
+  return result;
+}
+
 document.querySelector("#desktop-refresh").addEventListener("click", refreshDesktop);
 document.querySelector("#desktop-ssh-test").addEventListener("click", () => runDesktop("desktop.ssh_test"));
 document.querySelector("#desktop-project").addEventListener("change", desktopButtons);
-document.querySelectorAll("[data-compute]").forEach(button => button.addEventListener("click", () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value})));
-
-async function refreshDesktopAgent(agent) {
-  const area = document.querySelector("#desktop-apps");
-  area.replaceChildren();
-  const status = document.querySelector("#desktop-agent-status");
-  status.textContent = "Agent " + (agent.agent_connected ? "connected" : "unavailable") + " · session " + (agent.session?.state || "unknown") + " · " + (agent.reason || ("v" + agent.version + ", heartbeat " + agent.last_heartbeat_age_seconds + "s ago"));
-  document.querySelector("#desktop-streaming").disabled = desktopBusy;
-  if (!agent.agent_connected) {
-    area.textContent = "Registered GUI controls are unavailable until the agent reconnects. SSH and wake remain independent.";
-    document.querySelector("#desktop-vms").textContent = "VM status unavailable: agent disconnected.";
-    return;
-  }
-  const response = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action:"desktop.app.list", parameters:{}})})).value;
-  const data = response.data || response;
-  if (data.success === false) area.textContent = "Application state unavailable: " + (data.error || "agent request failed");
-  for (const app of data.apps || []) {
-    const row = document.createElement("p");
-    const label = document.createElement("span");
-    label.textContent = app.app + ": " + (app.running ? "running" : app.installed ? "stopped" : "unavailable") + " " + (app.reason || "") + " ";
-    const button = document.createElement("button");
-    button.className = "secondary-button"; button.type = "button";
-    button.textContent = "Launch " + app.app;
-    button.disabled = desktopBusy || !app.installed || !agent.capabilities?.gui_launch;
-    button.title = !agent.capabilities?.gui_launch ? "An active unlocked interactive session is required" : app.reason || "Launch registered application";
-    button.addEventListener("click", () => runDesktop("desktop.app.launch", {app:app.app}));
-    row.append(label, button); area.append(row);
-  }
-  const vmResponse = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action:"desktop.vm.list", parameters:{}})})).value;
-  const vms = vmResponse.data || vmResponse;
-  document.querySelector("#desktop-vms").textContent = vms.reason || vms.error || "No registered VMs";
-}
+document.querySelectorAll("[data-compute]").forEach(button => button.addEventListener("click",
+  () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value})));
 document.querySelector("#desktop-streaming").addEventListener("click", () => runDesktop("desktop.streaming.prepare"));
 
 initialize();

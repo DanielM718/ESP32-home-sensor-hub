@@ -42,7 +42,10 @@ class AgentHub:
         self.loop = None
         self.connection_id = None
         self.connected_at = None
-        self.last_seen = 0
+        # None, never 0. time.monotonic() is time since boot, so within the
+        # first 45 seconds of uptime a 0 sentinel produced age < 45 and an
+        # unauthenticated socket reported itself as a live agent.
+        self.last_seen = None
         self.session = {}
         self.version = None
         self.actions = []
@@ -50,14 +53,23 @@ class AgentHub:
         self.reconnect_count = 0
         self.gate = threading.Lock()
 
+    HEARTBEAT_STALE_SECONDS = 45
+    HEARTBEAT_GUI_SECONDS = 30
+
     def status(self):
-        age = time.monotonic() - self.last_seen
-        connected = self.ws is not None and age < 45
-        gui = connected and age < 30 and self.session.get("gui_launch") is True
+        age = None if self.last_seen is None else time.monotonic() - self.last_seen
+        attached = self.ws is not None
+        fresh = age is not None and age < self.HEARTBEAT_STALE_SECONDS
+        connected = attached and fresh
+        gui = (connected and age < self.HEARTBEAT_GUI_SECONDS
+               and self.session.get("gui_launch") is True)
         return {"available": connected, "agent_connected": connected,
             "reason": None if connected else self.reason,
-            "connected_since": self.connected_at, "last_heartbeat_age_seconds":
-            round(age, 2) if self.last_seen else None, "version": self.version,
+            "state": self.state(attached, age), "configured": bool(self.config),
+            "heartbeat_stale_after_seconds": self.HEARTBEAT_STALE_SECONDS,
+            "connected_since": self.connected_at,
+            "last_heartbeat_age_seconds": None if age is None else round(age, 2),
+            "version": self.version,
             "protocol": 1, "reconnect_count": self.reconnect_count,
             "session": self.session if connected else {"state": "UNKNOWN"},
             "interactive_session": connected and self.session.get("interactive_session") is True,
@@ -65,6 +77,26 @@ class AgentHub:
                              "streaming_ready": False},
             "actions": self.actions if connected else [], "observed_at": time.time(),
             "confidence": "observed" if connected else "unknown"}
+
+    def state(self, attached, age):
+        """Name the state instead of collapsing everything into connected/not.
+
+        The Admin page renders a different control state for each of these, so
+        "the desktop was shut down and the socket is gone" must not look the
+        same as "the agent is attached but its heartbeat has aged out".
+        """
+
+        if not self.config:
+            return "not_configured"
+        if not attached:
+            return "disconnected"
+        if age is None:
+            return "awaiting_heartbeat"
+        if age >= self.HEARTBEAT_STALE_SECONDS:
+            return "heartbeat_stale"
+        if age >= self.HEARTBEAT_GUI_SECONDS:
+            return "heartbeat_aging"
+        return "connected"
 
     def snapshot(self):
         return self.status()
@@ -161,7 +193,7 @@ class AgentHub:
             self.loop = asyncio.get_running_loop()
             self.connection_id = secrets.token_hex(32)
             self.connected_at = time.time()
-            self.last_seen = 0  # Connected is not READY until authenticated heartbeat.
+            self.last_seen = None  # Not READY until an authenticated heartbeat.
             self.actions = hello["actions"]
             self.version = hello["version"]
             self.reconnect_count += 1
@@ -222,6 +254,12 @@ class AgentHub:
     def _disconnect(self):
         self.ws = None
         self.reason = "agent_disconnected"
+        # Drop the last observed interactive-session snapshot with the socket.
+        # A normally shut-down desktop must not leave Butters reporting the
+        # session it saw before the shutdown.
+        self.last_seen = None
+        self.session = {}
+        self.actions = []
         for ack, future, action in self.pending.values():
             ack.set()
             if not future.done():

@@ -7,6 +7,7 @@ import io
 import json
 import logging
 import os
+import re
 import threading
 import time
 import wave
@@ -30,12 +31,14 @@ from butters.assistant_config import AssistantSettings, load_assistant_settings
 from butters.auth.manager import WebAuthnError
 from butters.auth.store import AuthStateError
 from butters.config import default_vocabulary_path, load_stt_settings
+from butters.deployment import asset_version, describe as describe_deployment
 from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
 from butters.remediation.skill_builder import SkillAuthoringError
 from butters.stt.normalization import DomainVocabulary, load_domain_vocabulary
 from butters.web.audio import BrowserAudioError, BrowserAudioStream
 from butters.web.security import AuthPolicy, RateLimiter, SecurityError
-from butters.web.service import BetaAssistantService, RouteOverride
+from butters.web.service import (BetaAssistantService, ElevationRequired,
+                                 RouteOverride)
 from butters.web.sessions import BrowserSession, SessionError
 from butters.web.speech import SpeechProviderError, VoicePreset
 from butters.web.stt_pool import STTEngineLease, STTEnginePool, STTEnginePoolError
@@ -140,8 +143,30 @@ def create_app(
     # 3.13/aarch64 host that path can hit the same executor wake-up failure that
     # run_blocking() already polls around. An explicit allow-list also preserves
     # the invariant that admin/index HTML is never public under /assets.
-    index_document = (STATIC_ROOT / "index.html").read_bytes()
-    admin_document = (STATIC_ROOT / "admin.html").read_bytes()
+    # Version every asset URL with a digest of the running tree, so a browser
+    # can never keep executing the JavaScript of a previous deployment against
+    # a restarted backend. That mismatch is exactly what made the Tools page
+    # fail with an authorization-shaped error, and it was invisible.
+    deployment_root = WEB_ROOT.parent.parent.parent
+    deployment_state = describe_deployment(deployment_root)
+    assets_version = str(deployment_state["tree_digest"])[:16]
+    if deployment_state["modified_since_install"]:
+        LOGGER.warning(
+            "installed tree was modified after install: commit=%s recorded=%s live=%s",
+            deployment_state["commit"],
+            deployment_state["recorded_tree_digest"],
+            deployment_state["tree_digest"],
+        )
+
+    def _version_assets(document: bytes) -> bytes:
+        return re.sub(
+            rb'(/assets/[A-Za-z0-9_.-]+)"',
+            rb'\1?v=' + assets_version.encode("ascii") + b'"',
+            document,
+        )
+
+    index_document = _version_assets((STATIC_ROOT / "index.html").read_bytes())
+    admin_document = _version_assets((STATIC_ROOT / "admin.html").read_bytes())
     public_assets = {
         "styles.css": (
             (ASSET_ROOT / "styles.css").read_bytes(),
@@ -216,7 +241,11 @@ def create_app(
         if asset is None:
             return Response(status_code=404)
         content, media_type = asset
-        return Response(content, media_type=media_type)
+        return Response(
+            content,
+            media_type=media_type,
+            headers={"Cache-Control": "no-cache, must-revalidate"},
+        )
 
     async def health(_request: Request) -> Response:
         return JSONResponse({"status": "ok", "service": "butters", "version": "beta1"})
@@ -240,6 +269,8 @@ def create_app(
             ))
         except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
+        except ElevationRequired as exc:
+            return _elevation_error(exc)
         except PermissionError as exc:
             return _error("forbidden", str(exc), 403)
 
@@ -260,6 +291,8 @@ def create_app(
             return JSONResponse(result)
         except (SecurityError, SessionError) as exc:
             return _exception_response(exc)
+        except ElevationRequired as exc:
+            return _elevation_error(exc)
         except PermissionError as exc:
             return _error("forbidden", str(exc), 403)
         except ValueError as exc:
@@ -309,6 +342,7 @@ def create_app(
                 )
             else:
                 _require_session_peer(request, existing, auth)
+                _refresh_administrator(request, existing, auth)
             response = JSONResponse(
                 {
                     "session": "ready",
@@ -427,6 +461,10 @@ def create_app(
                     "cloud_available": runtime.general_reasoner.available,
                     "local_llm_enabled": configured.llm.enabled,
                     "bind": f"{configured.web.host}:{configured.web.port}",
+                    # Computed once at startup: the running tree cannot change
+                    # under a live process, and recomputing per request would
+                    # hash ~130 files on every Overview poll.
+                    "deployment": deployment_state,
                 }
             )
         except SecurityError as exc:
@@ -1725,7 +1763,30 @@ def _bound_session(
     session = _session_from_request(request, runtime)
     assert session is not None
     _require_session_peer(request, session, auth)
+    _refresh_administrator(request, session, auth)
     return session
+
+
+def _refresh_administrator(
+    request: Request,
+    session: BrowserSession,
+    auth: AuthPolicy,
+) -> None:
+    """Re-derive the session administrator flag from the proxy identity.
+
+    The flag was previously captured once, when the session was allocated. A
+    browser that loaded normal mode first therefore carried administrator=False
+    into /admin forever, and every desktop action failed with a bare
+    "Administrator identity is required" even though the page itself had passed
+    the identity check. Re-deriving is not a relaxation: _require_session_peer
+    has already proven this request carries the same identity that created the
+    session, and AuthPolicy.is_administrator re-applies the identical
+    loopback-proxy and allow-list rules used at creation. It can also correctly
+    revoke the flag if the identity is no longer authorized.
+    """
+
+    client = request.client.host if request.client else None
+    session.administrator = auth.is_administrator(request.headers, client)
 
 
 def _require_session_peer(
@@ -1917,6 +1978,21 @@ def _exception_response(
     if isinstance(exc, PermissionError):
         return _error("forbidden", "request is not authorized", 403)
     return _error("invalid_request", str(exc), 400)
+
+
+def _elevation_error(exc: ElevationRequired) -> JSONResponse:
+    """403 that says "re-elevate", never "your session is gone".
+
+    The browser session is still valid, so the Admin page keeps every read-only
+    control working and offers the existing passkey ceremony for this one
+    action.
+    """
+
+    response = _error(exc.code, str(exc), 403)
+    payload = json.loads(bytes(response.body))
+    payload["action"] = exc.action
+    payload["reauthorize"] = "elevation"
+    return JSONResponse(payload, status_code=403)
 
 
 def _error(
