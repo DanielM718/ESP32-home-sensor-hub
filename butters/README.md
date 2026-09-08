@@ -1,5 +1,12 @@
 # Butters
 
+Desktop compute foundation: the existing private administrator **Tools** panel
+now calls a shared deterministic action API for desktop status, SSH tests, and
+registered builds/tests. Wake-on-LAN, hostname discovery, passwordless service
+SSH, and interactive/noninteractive Git Bash have been verified on Windows.
+See [DESKTOP_COMPUTE.md](DESKTOP_COMPUTE.md) for configuration, validation,
+deployment files, and rollback.
+
 Butters is the local voice-assistant subsystem for this home network. It lives
 inside the sensor repository because later restricted skills will query sensors
 and integrate with MQTT, InfluxDB, Home Assistant, monitoring sessions, and
@@ -812,3 +819,9 @@ selection while updates continue.
 - WAV input supports uncompressed integer PCM, not compressed/float WAV.
 - The Beta 1 systemd unit and installer are tracked; live install/service and
   iPhone/Tailscale acceptance status must be reported separately per run.
+
+## Interactive Desktop Agent
+
+The implemented interactive-session agent extends the existing action backend
+and Tools panel. See [installation/security/runbook](../butters-agent/README.md)
+and [remote validation and remaining acceptance checks](../docs/DESKTOP_AGENT_REMOTE_VALIDATION.md).

@@ -1,0 +1,18 @@
+# Operator-owned allowlist: never writable by the web service or an LLM.
+# Install root:butters 0640 as /etc/butters/desktop-compute.toml.
+[desktop]
+hostname = "DESKTOP-G4CFVL1.local"
+ssh_config = "/etc/butters/desktop-ssh/config"
+timeout_seconds = 60
+
+[commands]
+git_version = "git --version"
+shell_info = "uname -s; pwd"
+
+# No real project locations have been verified. Register a project only after
+# reviewing its scripts. Shell text is trusted operator configuration.
+# [projects.example]
+# host = "desktop"
+# directory = "/c/Users/REPLACE_ME/projects/REPLACE_ME"
+# build = "./scripts/build.sh"
+# test = "./scripts/test.sh"

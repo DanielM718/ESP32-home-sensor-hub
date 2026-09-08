@@ -466,7 +466,7 @@ def test_desktop_ssh_pins_the_host_key_and_refuses_pty_or_forwarding(
         (
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
             "-ExecutionPolicy Bypass -File "
-            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Restart"
+            '\"C:/ProgramData/Butters/desktop-control.ps1\" -Operation Restart'
         ),
     ]
     assert argv[argv.index("-i") + 1].endswith("windows_remote_mode")

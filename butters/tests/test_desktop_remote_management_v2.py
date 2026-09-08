@@ -239,7 +239,7 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
         assert argv[-2] == "Daniel@192.168.1.209"
         assert argv[-1].startswith(
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
-            "-ExecutionPolicy Bypass -File C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation "
+            '-ExecutionPolicy Bypass -File "C:/ProgramData/Butters/desktop-control.ps1" -Operation '
         )
         assert not any(token in argv for token in ("shell", "service", "path", "host"))
         assert argv[-1].rsplit(" ", 1)[-1] in {

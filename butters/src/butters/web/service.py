@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import threading
 import time
@@ -10,6 +11,11 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from butters.actions.compute import DesktopActions
+from butters.actions.agent import AgentHub
+from butters.actions.streaming import StreamingWorkflow
+from butters.skills.desktop_agent import register_agent_skills
+from butters_agent.protocol import SCHEMAS as AGENT_ACTIONS, MUTATIONS as AGENT_MUTATIONS
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
@@ -120,6 +126,53 @@ class _ForcedDiagnosticPolicy:
 
 
 class BetaAssistantService:
+    def execute_desktop_action(
+        self, session: BrowserSession, action: str, parameters: dict
+    ) -> dict:
+        """Common deterministic entry point for authorized UI/future voice actions."""
+        if not session.administrator:
+            raise PermissionError("Administrator identity is required")
+        if type(parameters) is not dict:
+            raise ValueError("Action parameters must be an object")
+        if action in AGENT_ACTIONS or action in {"desktop.streaming.status", "desktop.streaming.prepare"}:
+            from dataclasses import asdict
+            import uuid
+            if action in AGENT_MUTATIONS or action == "desktop.streaming.prepare":
+                plan = self.actions.freeze(skill=action, arguments=parameters,
+                    summary=action, session_id=session.session_id, identity=session.peer_key,
+                    request_id=str(uuid.uuid4()), source="manual_ui",
+                    pending_confirmation=action == "desktop.vm.stop")
+                elevation = self.auth_state.elevation(session.session_id, session.peer_key)
+                if elevation is not None and plan.authentication is AuthenticationLevel.ELEVATED:
+                    return {"jobs": self.actions.execute(plan.plan_id,
+                        session_id=session.session_id, identity=session.peer_key, authentication=elevation)}
+                return {"pending_action": plan.safe_dict(), "jobs": []}
+            execution = self.assistant.skills.execute(action, parameters, administrator=True)
+            self.action_state.audit(identity=session.peer_key, session_id=session.session_id,
+                skill=action, authentication=AuthenticationLevel.NONE, method="tailnet_identity",
+                arguments=execution.arguments if execution.ok else {},
+                outcome="completed" if execution.ok else "denied", job_id=None,
+                reason_code=execution.failure.code if execution.failure else None)
+            return asdict(execution.result) if execution.ok else {"success": False,
+                "error": execution.failure.code}
+        if (
+            action not in {"desktop.status", "desktop.ping", "desktop.ssh_test"}
+            and self.auth_state.elevation(session.session_id, session.peer_key) is None
+        ):
+            raise PermissionError(
+                "Authenticate in Passkeys / Auth before running registered compute actions"
+            )
+        result = self.desktop_actions.execute(action, parameters)
+        # Journal only action/result metadata; output may contain project secrets.
+        logging.getLogger("uvicorn.error.butters.compute").info(
+            "action=%s success=%s exit_code=%s duration_seconds=%s",
+            action,
+            result["success"],
+            result["exit_code"],
+            result["duration_seconds"],
+        )
+        return result
+
     def __init__(
         self,
         settings: AssistantSettings,
@@ -133,6 +186,9 @@ class BetaAssistantService:
         state_dir: Path | None = None,
         local_tts: LocalTTSProvider | None = None,
     ) -> None:
+        self.desktop_actions = DesktopActions(
+            Path(os.environ.get("BUTTERS_COMPUTE_CONFIG", "/etc/butters/desktop-compute.toml"))
+        )
         self.settings = settings
         self.vocabulary = vocabulary
         self.state_dir = Path(state_dir or settings.web.state_dir)
@@ -153,6 +209,10 @@ class BetaAssistantService:
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
         self.actions = ActionCoordinator(self.assistant.skills, self.action_state)
+        self.desktop_agent = AgentHub(Path(os.environ.get("BUTTERS_AGENT_CONFIG", "/etc/butters/agents.toml")))
+        self.desktop_actions.agent = self.desktop_agent
+        self.desktop_streaming = StreamingWorkflow(self.desktop_actions, self.desktop_agent, settings.broker)
+        register_agent_skills(self.assistant.skills, self.desktop_agent, self.desktop_streaming)
         self.ledger = ledger or UsageLedger(
             settings.cloud,
             self.state_dir / "usage.sqlite3",

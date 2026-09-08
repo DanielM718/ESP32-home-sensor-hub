@@ -1,0 +1,6 @@
+schema_version = 1
+# No usable hypervisor or real VM was discovered on DESKTOP-G4CFVL1.
+# Intentionally no VM definitions. The VmBackend protocol defines available,
+# status, start and graceful stop. An implemented backend plus reviewed local
+# definitions is required before enabling VM control; names/paths from the wire
+# must never become hypervisor command arguments.

@@ -13,7 +13,7 @@ max_response_bytes = 2097152
 [desktop]
 enabled = true
 machine = "desktop"
-host = "192.168.1.209"
+host = "DESKTOP-G4CFVL1.local"
 ssh_port = 22
 network_timeout_seconds = 45.0
 ssh_timeout_seconds = 90.0

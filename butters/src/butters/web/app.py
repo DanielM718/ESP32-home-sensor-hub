@@ -23,6 +23,7 @@ from starlette.responses import JSONResponse, Response
 from starlette.routing import Route, WebSocketRoute
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from butters.actions.compute import ComputeError
 from butters.actions.coordinator import ActionCoordinatorError
 from butters.actions.store import ActionStateError
 from butters.assistant_config import AssistantSettings, load_assistant_settings
@@ -219,6 +220,50 @@ def create_app(
 
     async def health(_request: Request) -> Response:
         return JSONResponse({"status": "ok", "service": "butters", "version": "beta1"})
+
+    async def desktop_catalog(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.desktop_actions.catalog())
+        except (SecurityError, SessionError) as exc:
+            return _exception_response(exc)
+
+    async def desktop_status(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            if not admin_rate.check("desktop:" + session.peer_key):
+                return _error("rate_limited", "Desktop request rate limit exceeded", 429)
+            return JSONResponse(await run_blocking(
+                runtime.execute_desktop_action, session, "desktop.status", {}
+            ))
+        except (SecurityError, SessionError) as exc:
+            return _exception_response(exc)
+        except PermissionError as exc:
+            return _error("forbidden", str(exc), 403)
+
+    async def desktop_execute(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            if not admin_rate.check("desktop:" + session.peer_key):
+                return _error("rate_limited", "Desktop request rate limit exceeded", 429)
+            payload = await _json_body(request, 1024)
+            if set(payload) != {"action", "parameters"}:
+                raise ComputeError("Expected action and parameters only")
+            if not isinstance(payload["action"], str):
+                raise ComputeError("Action must be a registered name")
+            result = await run_blocking(
+                runtime.execute_desktop_action, session, payload["action"], payload["parameters"]
+            )
+            return JSONResponse(result)
+        except (SecurityError, SessionError) as exc:
+            return _exception_response(exc)
+        except PermissionError as exc:
+            return _error("forbidden", str(exc), 403)
+        except ValueError as exc:
+            return _error("invalid_action", str(exc), 400)
 
     async def ready(_request: Request) -> Response:
         origin_ready = configured.web.production_origin_configured
@@ -1511,6 +1556,9 @@ def create_app(
         Route("/", index),
         Route("/admin", admin_page),
         Route("/healthz", health),
+        Route("/api/desktop/status", desktop_status),
+        Route("/api/desktop/catalog", desktop_catalog),
+        Route("/api/desktop/actions", desktop_execute, methods=["POST"]),
         Route("/readyz", ready),
         Route("/api/session", session_endpoint),
         Route("/api/session/conversation", clear_session, methods=["DELETE"]),
@@ -1568,6 +1616,7 @@ def create_app(
             decide_skill_job,
             methods=["POST"],
         ),
+        WebSocketRoute("/agent/v1/session", runtime.desktop_agent.socket),
         WebSocketRoute("/ws/voice", voice_socket),
         WebSocketRoute("/ws/admin/traces", trace_socket),
         Route("/assets/{asset_name:str}", public_asset),

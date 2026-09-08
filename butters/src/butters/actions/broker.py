@@ -578,7 +578,7 @@ class FixedBrokerOperations:
         command = (
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
             "-ExecutionPolicy Bypass "
-            "-File C:\\ProgramData\\Butters\\desktop-control.ps1 "
+            '-File "C:/ProgramData/Butters/desktop-control.ps1" '
             f"-Operation {operation.value}"
         )
         argv = [

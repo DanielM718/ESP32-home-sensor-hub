@@ -686,7 +686,7 @@ def test_fixed_ssh_argv_keeps_every_host_key_and_authentication_control(
         (
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
             "-ExecutionPolicy Bypass -File "
-            "C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation Lock"
+            '\"C:/ProgramData/Butters/desktop-control.ps1\" -Operation Lock'
         ),
     ]
 

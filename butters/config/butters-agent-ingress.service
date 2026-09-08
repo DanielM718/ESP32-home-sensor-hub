@@ -1,0 +1,24 @@
+[Unit]
+Description=Butters Desktop Agent TLS WebSocket ingress
+After=network-online.target butters-web.service
+Wants=network-online.target
+
+[Service]
+User=butters
+Group=butters
+WorkingDirectory=/opt/butters
+Environment=PYTHONPATH=/opt/butters/src
+ExecStart=/opt/butters/.venv/bin/python -m butters.actions.agent_ingress
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+UMask=0077
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

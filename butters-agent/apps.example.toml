@@ -1,0 +1,5 @@
+schema_version = 1
+# Install only paths actually discovered on the target. No applications are assumed.
+# [apps.git_bash]
+# path = 'C:\Program Files\Git\git-bash.exe'
+# images = ['C:\Program Files\Git\usr\bin\mintty.exe']

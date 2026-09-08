@@ -1,0 +1,6 @@
+# Bind only the private IPv4s currently assigned to these LAN adapters.
+# Neither the public/wildcard addresses nor Tailscale/browser routes are exposed.
+bind_interfaces = ["eth0", "wlan0"]
+port = 8443
+certificate = "/etc/butters/agent-server.crt"
+private_key = "/etc/butters/agent-server.key"

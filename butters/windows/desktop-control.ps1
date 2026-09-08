@@ -129,7 +129,9 @@ switch ($Operation) {
         Write-JsonResult ([ordered]@{ accepted = $true; transition = 'restart'; scheduled = $true })
     }
     'Shutdown' {
-        & shutdown.exe /s /t 5 /d p:0:0 /c 'Butters fixed desktop shutdown' | Out-Null
+        # A positive /t implies /f on Windows. Normal shutdown must not force
+        # applications with unsaved work to close.
+        & shutdown.exe /s /t 0 /d p:0:0 /c 'Butters fixed desktop shutdown' | Out-Null
         if ($LASTEXITCODE -ne 0) { throw 'Fixed shutdown request failed' }
         Write-JsonResult ([ordered]@{ accepted = $true; transition = 'shutdown'; scheduled = $true })
     }

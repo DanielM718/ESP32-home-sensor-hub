@@ -3,7 +3,7 @@
 service_user = "butters"
 
 [desktop]
-host = "192.168.1.209"
+host = "DESKTOP-G4CFVL1.local"
 user = "Daniel"
 mac = "34:5A:60:D7:4C:2C"
 broadcast = "192.168.1.255"

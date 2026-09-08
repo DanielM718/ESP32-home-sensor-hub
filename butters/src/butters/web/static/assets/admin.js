@@ -16,7 +16,12 @@ async function api(path, options = {}) {
   const response = await fetch(path, {...options, headers, credentials:"same-origin"});
   const contentType = response.headers.get("content-type") || "";
   const value = contentType.includes("json") ? await response.json() : await response.blob();
-  if (!response.ok) throw new Error(value.message || `Request failed: ${response.status}`);
+  if (!response.ok) {
+    if (["invalid_session", "authentication_session_invalid", "session_expired"].includes(value.error)) {
+      throw new Error("Session expired. Reload this page, then authenticate in Passkeys / Authentication. No action was retried.");
+    }
+    throw new Error(value.message || `Request failed: ${response.status}`);
+  }
   return {value, response};
 }
 
@@ -69,7 +74,7 @@ async function refresh(panel) {
     if(panel==="models") renderObject(document.querySelector("#model-status"),(await api("/api/admin/models")).value);
     if(panel==="voice") await refreshVoice();
     if(panel==="skills") await refreshSkills();
-    if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
+    if(panel==="tools") {await refreshDesktop();const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
     if(panel==="usage") renderObject(document.querySelector("#usage-view"),(await api("/api/admin/usage")).value);
     if(panel==="system") renderObject(document.querySelector("#system-view"),(await api("/api/admin/system")).value);
     if(panel==="logs") document.querySelector("#logs-view").textContent=pretty((await api("/api/admin/logs")).value);
@@ -132,5 +137,99 @@ document.querySelector("#codex-run").addEventListener("click",async()=>{if(!sele
 async function decideJob(decision){if(!selectedJob)return;if(decision==="approve"&&!confirm("Apply this reviewed patch to the clean repository worktree? This does not deploy or restart Butters."))return;try{selectedJob=(await api(`/api/admin/codex/jobs/${encodeURIComponent(selectedJob.job_id)}/decision`,{method:"POST",body:JSON.stringify({decision})})).value;document.querySelector("#codex-job-detail").textContent=pretty(selectedJob);await refreshJobs();}catch(error){document.querySelector("#codex-job-detail").textContent=error.message;}}
 document.querySelector("#codex-approve").addEventListener("click",()=>decideJob("approve"));
 document.querySelector("#codex-reject").addEventListener("click",()=>decideJob("reject"));
+
+let desktopProjects = [];
+let desktopBusy = false;
+function desktopButtons() {
+  const project = desktopProjects.find(item => item.name === document.querySelector("#desktop-project").value);
+  document.querySelectorAll("[data-compute]").forEach(button => {
+    const build = button.dataset.compute !== "desktop.test";
+    const test = button.dataset.compute !== "desktop.compile";
+    button.disabled = desktopBusy || !project || (build && !project.build_available) || (test && !project.test_available);
+  });
+  document.querySelector("#desktop-refresh").disabled = desktopBusy;
+  document.querySelector("#desktop-ssh-test").disabled = desktopBusy;
+}
+async function refreshDesktop() {
+  const status = document.querySelector("#desktop-status");
+  try {
+    const catalog = (await api("/api/desktop/catalog")).value;
+    await refreshDesktopAgent(catalog.desktop_agent);
+    desktopProjects = catalog.projects;
+    const select = document.querySelector("#desktop-project");
+    const previous = select.value;
+    select.replaceChildren(...(desktopProjects.length ? desktopProjects.map(item => new Option(item.name, item.name)) : [new Option("No registered projects", "")]));
+    if (desktopProjects.some(item => item.name === previous)) select.value = previous;
+    select.disabled = !desktopProjects.length;
+    const result = (await api("/api/desktop/status")).value;
+    status.textContent = `${result.hostname} · ${result.online === true ? "Online" : result.online === false ? "Offline / unavailable" : "Unknown"} · SSH ${result.ssh_reachable ? "reachable" : "unreachable"}. ${result.status_note || result.stderr || ""}`;
+    if (catalog.configuration_error) document.querySelector("#desktop-compute-note").textContent = catalog.configuration_error;
+  } catch (error) { status.textContent = `Desktop status unavailable: ${error.message}`; }
+  desktopButtons();
+}
+async function runDesktop(action, parameters = {}) {
+  if (desktopBusy) return;
+  desktopBusy = true; desktopButtons();
+  const output = document.querySelector("#desktop-result");
+  output.textContent = "Running…";
+  try {
+    let result = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action, parameters})})).value;
+    if (result.pending_action) {
+      const begin = (await api("/api/auth/authenticate/options", {method:"POST", body:JSON.stringify({purpose:"pending_action", pending_action_id:result.pending_action.pending_action_id})})).value;
+      const credential = await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});
+      if (!credential) throw new Error("Authentication cancelled");
+      result = (await api("/api/auth/authenticate/verify", {method:"POST", body:JSON.stringify({ceremony_id:begin.ceremony_id, credential:assertionJson(credential)})})).value;
+    }
+    const jobs = result.jobs || result.action_jobs || [];
+    for (const initial of jobs) {
+      let job = initial;
+      for (let poll = 0; poll < 310 && ["queued", "running", "waiting"].includes(job.state); poll++) {
+        output.textContent = pretty(job);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        const response = (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value;
+        job = response.job || response;
+      }
+      result = job;
+    }
+    output.textContent = pretty(result);
+  } catch (error) { output.textContent = error.message; }
+  finally { desktopBusy = false; await refreshDesktop(); }
+}
+document.querySelector("#desktop-refresh").addEventListener("click", refreshDesktop);
+document.querySelector("#desktop-ssh-test").addEventListener("click", () => runDesktop("desktop.ssh_test"));
+document.querySelector("#desktop-project").addEventListener("change", desktopButtons);
+document.querySelectorAll("[data-compute]").forEach(button => button.addEventListener("click", () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value})));
+
+async function refreshDesktopAgent(agent) {
+  const area = document.querySelector("#desktop-apps");
+  area.replaceChildren();
+  const status = document.querySelector("#desktop-agent-status");
+  status.textContent = "Agent " + (agent.agent_connected ? "connected" : "unavailable") + " · session " + (agent.session?.state || "unknown") + " · " + (agent.reason || ("v" + agent.version + ", heartbeat " + agent.last_heartbeat_age_seconds + "s ago"));
+  document.querySelector("#desktop-streaming").disabled = desktopBusy;
+  if (!agent.agent_connected) {
+    area.textContent = "Registered GUI controls are unavailable until the agent reconnects. SSH and wake remain independent.";
+    document.querySelector("#desktop-vms").textContent = "VM status unavailable: agent disconnected.";
+    return;
+  }
+  const response = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action:"desktop.app.list", parameters:{}})})).value;
+  const data = response.data || response;
+  if (data.success === false) area.textContent = "Application state unavailable: " + (data.error || "agent request failed");
+  for (const app of data.apps || []) {
+    const row = document.createElement("p");
+    const label = document.createElement("span");
+    label.textContent = app.app + ": " + (app.running ? "running" : app.installed ? "stopped" : "unavailable") + " " + (app.reason || "") + " ";
+    const button = document.createElement("button");
+    button.className = "secondary-button"; button.type = "button";
+    button.textContent = "Launch " + app.app;
+    button.disabled = desktopBusy || !app.installed || !agent.capabilities?.gui_launch;
+    button.title = !agent.capabilities?.gui_launch ? "An active unlocked interactive session is required" : app.reason || "Launch registered application";
+    button.addEventListener("click", () => runDesktop("desktop.app.launch", {app:app.app}));
+    row.append(label, button); area.append(row);
+  }
+  const vmResponse = (await api("/api/desktop/actions", {method:"POST", body:JSON.stringify({action:"desktop.vm.list", parameters:{}})})).value;
+  const vms = vmResponse.data || vmResponse;
+  document.querySelector("#desktop-vms").textContent = vms.reason || vms.error || "No registered VMs";
+}
+document.querySelector("#desktop-streaming").addEventListener("click", () => runDesktop("desktop.streaming.prepare"));
 
 initialize();
