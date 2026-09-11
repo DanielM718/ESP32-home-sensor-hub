@@ -339,6 +339,15 @@ If MagicDNS is not enabled, use the Pi's Tailscale IP instead of `sensor-pi`.
 
 ## systemd Services
 
+### InfluxDB readiness at boot
+
+`home-sensor-dashboard` and `home-sensor-printer-observer` order themselves
+`After=influxdb.service`, then use a shared bounded readiness check against
+InfluxDB's local `/health` endpoint and an authenticated Flux query before
+starting. The check uses the existing backend environment credentials, retries
+once per second for up to 30 seconds, and logs both retry progress and timeout
+failures. `Restart=on-failure` remains enabled as a fallback.
+
 ### X2D observer recovery (deployment pending)
 
 The X2D observer is not part of MQTT ingestion. Its non-secret configuration is
