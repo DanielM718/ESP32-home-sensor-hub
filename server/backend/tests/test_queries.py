@@ -1588,8 +1588,8 @@ class DurableInventoryCacheTest(unittest.TestCase):
         self.assertEqual(snapshot["air_quality"][0]["id"], "office")
 
     def test_repository_startup_fails_closed_when_reconstruction_fails(self) -> None:
-        client = Mock()
-        client.query_api.return_value.query.side_effect = RuntimeError(
+        startup_client = Mock()
+        startup_client.query_api.return_value.query.side_effect = RuntimeError(
             "Influx temporarily unavailable"
         )
         settings = InfluxSettings(
@@ -1602,17 +1602,26 @@ class DurableInventoryCacheTest(unittest.TestCase):
         )
 
         with (
-            patch("influxdb_client.InfluxDBClient", return_value=client),
+            patch(
+                "influxdb_client.InfluxDBClient", return_value=startup_client
+            ) as client_factory,
             self.assertLogs("home_sensor.queries", level="ERROR"),
             self.assertRaisesRegex(RuntimeError, "temporarily unavailable"),
         ):
             InfluxReadRepository(settings)
 
-        client.close.assert_called_once_with()
+        client_factory.assert_called_once_with(
+            url=settings.url,
+            token=settings.read_token,
+            org=settings.org,
+            timeout=30_000,
+        )
+        startup_client.close.assert_called_once_with()
 
     def test_repository_serializes_startup_inventory_query(self) -> None:
-        client = Mock()
-        client.query_api.return_value.query.return_value = []
+        startup_client = Mock()
+        startup_client.query_api.return_value.query.return_value = []
+        runtime_client = Mock()
         settings = InfluxSettings(
             url="http://127.0.0.1:8086",
             org="test",
@@ -1623,13 +1632,21 @@ class DurableInventoryCacheTest(unittest.TestCase):
         )
 
         with (
-            patch("influxdb_client.InfluxDBClient", return_value=client),
+            patch(
+                "influxdb_client.InfluxDBClient",
+                side_effect=(startup_client, runtime_client),
+            ) as client_factory,
             patch("app.queries.serialized_inventory_query") as serialized,
         ):
             repository = InfluxReadRepository(settings)
 
         serialized.assert_called_once_with()
+        self.assertEqual(client_factory.call_count, 2)
+        self.assertEqual(client_factory.call_args_list[0].kwargs["timeout"], 30_000)
+        self.assertNotIn("timeout", client_factory.call_args_list[1].kwargs)
+        startup_client.close.assert_called_once_with()
         repository.close()
+        runtime_client.close.assert_called_once_with()
 
 
 def _latest_environment_node(

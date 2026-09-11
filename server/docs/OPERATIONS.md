@@ -349,6 +349,9 @@ application startup scans share an advisory lock so concurrent process starts
 cannot overload that historical query path. The check uses the existing backend
 environment credentials, retries once per second for up to 60 seconds, and logs
 query latency, lock waits, retry progress, and timeout failures.
+Initial inventory reconstruction uses a 30-second InfluxDB client timeout;
+subsequent runtime queries retain the client's 10-second default. Gunicorn uses
+a 70-second worker timeout so both serialized startup scans can finish.
 `Restart=on-failure` remains enabled as a fallback.
 
 ### X2D observer recovery (deployment pending)
