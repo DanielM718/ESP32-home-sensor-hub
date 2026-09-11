@@ -29,7 +29,12 @@ while (( SECONDS < deadline )); do
   attempt=$((attempt + 1))
   if last_error="$(curl --fail --silent --show-error --max-time 2 \
     --output /dev/null "${health_url}" 2>&1)"; then
-    if last_error="$(timeout --foreground 30s \
+    remaining_seconds=$((deadline - SECONDS))
+    probe_timeout_seconds=35
+    if (( remaining_seconds < probe_timeout_seconds )); then
+      probe_timeout_seconds="${remaining_seconds}"
+    fi
+    if last_error="$(timeout --foreground "${probe_timeout_seconds}s" \
       /opt/home-sensor/server/backend/.venv/bin/python \
       -m app.influx_readiness 2>&1)"; then
       printf '%s\n' "${last_error}"
@@ -38,7 +43,7 @@ while (( SECONDS < deadline )); do
       exit 0
     fi
     [[ -n "${last_error}" ]] || \
-      last_error="Durable inventory query failed or exceeded 30s"
+      last_error="Durable inventory probe exceeded its bounded timeout"
   fi
 
   if (( attempt == 1 || attempt % 5 == 0 )); then

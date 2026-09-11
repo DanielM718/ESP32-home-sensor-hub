@@ -14,7 +14,7 @@ EnvironmentFile=/opt/home-sensor/server/backend/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStartPre=/opt/home-sensor/server/scripts/wait_for_influxdb.sh
-ExecStart=/opt/home-sensor/server/backend/.venv/bin/gunicorn --workers ${GUNICORN_WORKERS} --bind ${FLASK_HOST}:${FLASK_PORT} app.web:create_app()
+ExecStart=/opt/home-sensor/server/backend/.venv/bin/gunicorn --workers ${GUNICORN_WORKERS} --timeout 70 --bind ${FLASK_HOST}:${FLASK_PORT} app.web:create_app()
 Restart=on-failure
 RestartSec=10s
 TimeoutStartSec=70s
