@@ -605,6 +605,56 @@ changes monitor state, and contributes no authentication of its own. A plan
 consisting only of observations or substituting another read-only capability is
 refused.
 
+### Conversational planner foundation
+
+The optional `/api/planner` surface is a separate first vertical slice for a
+future conversational model. Its provider receives only bounded user text, a
+narrow desktop action catalog derived from `SkillRegistry`, and a short existing
+session context. This slice supplies no observed state facets yet; collapsing
+power, network, SSH, interactive session, and device freshness into one value
+would be worse than supplying none, so state assembly is a later slice.
+Production uses the `DisabledPlannerProvider`, and `[planner].enabled` is a
+second independent gate, so configuration alone switches planning off. No API
+key, network, or cloud call is required on any path. Tests inject a
+deterministic fake provider.
+
+The planner catalog is a proposal catalog, not a model tool catalog. Nothing in
+it becomes callable by a model: `butters.llm.catalog` still omits every `ACTION`
+from `derive_safe_tool_catalog`, and the planner never receives an executable
+binding. `PlannerValidator.catalog()` additionally drops anything unregistered,
+disabled, or unavailable, so a capability switched off in configuration cannot
+be named.
+
+Provider output is untrusted even when it is valid JSON. `PlannerValidator`
+requires the exact plan shape, bounds the plan, rejects unknown action IDs and
+extra parameters through the registered typed parsers, and can narrow a
+registered parameter further with a planner-only enum allow-list.
+Authentication and confirmation are recomputed from `SkillSpec` and the reviewed
+confirmation set; the provider's confirmation boolean has no authority.
+`SkillSpec.confirmation_required` is deliberately not the discriminator, because
+the shared `action()` helper sets it for every action, so the operator-visible
+confirmation step comes from an explicitly reviewed membership set instead.
+Read-only status executes through `SkillRegistry`. Mutations are frozen and
+executed only by `ActionCoordinator`, so a conversational request converges on
+the same deterministic skill, broker, passkey, and audit path a typed or spoken
+request already uses. Shutdown retains FRESH authentication bound to the frozen
+digest and the existing `pending_confirmation` state.
+
+Multi-stage physical behavior is not something the planner may assemble. A
+sequence is admitted only when its exact ordered action IDs appear in a reviewed
+composition template; that set is empty in this slice, so a validated plan
+freezes exactly one action. A small step count is not permission to sequence
+physical effects. The requested wake -> observe -> launch Parsec composition is
+therefore deferred to a later slice that adds a first-class state-gated workflow
+action, rather than inventing sleeps, shell polling, or a second executor. The
+current coordinator also permits only a final observation, so placing the
+existing reachability observer between two actions would weaken that reviewed
+invariant.
+
+Interactive application launch is absent from this deployment's catalog: the
+Windows Desktop Agent that would implement `desktop.app.launch` is not part of
+current `main`.
+
 ## Model-visible capability policy
 
 The `SkillRegistry` is authoritative for what Butters can do. What a *model* may
