@@ -100,11 +100,108 @@ wake requested → magic packet sent → waiting for desktop
 
 A cancelled ceremony or a failed action reports *"wake was not performed; no
 packet was sent"* and claims no stage. If the desktop does not become reachable
-within 120 s the panel says so and notes it may still be booting; the timeout
-is an observation window, not a failure of the wake itself.
+within 120 s the panel says *"Wake sent. Desktop is still starting or has not
+yet become reachable."*; the timeout is an observation window, not a failure of
+the wake itself, and is not reported as one.
 
-Shutdown, restart and sleep are **not** exposed in Tools. Their broker gates
-are separately default-off.
+Restart, sleep and lock are **not** exposed in Tools, and neither is the
+Butters host's own shutdown. Their broker gates are separately default-off.
+Desktop shutdown *is* exposed — see below.
+
+### Shutdown Desktop
+
+The Tools desktop section exposes **Shut Down Desktop**, in its own card below
+Compute rather than beside Wake, so a mis-aimed click cannot reach it. It
+invokes the existing registered `shutdown_desktop` skill, which reaches the
+root broker's `desktop.shutdown` operation and, through it, the one fixed
+`desktop-control.ps1 -Operation shutdown` helper on the desktop. There is no
+second shutdown implementation.
+
+As with Wake, the browser supplies **nothing**: no host, IP, MAC, command line,
+or force flag. The machine identity comes from `desktop.machine` in
+`assistant.toml`. A request carrying any parameter is rejected with
+`invalid_action`.
+
+#### Two independent capability gates
+
+Shutdown is the only Tools control that needs **two** gates enabled, in two
+different files, owned by two different users. Both must be true for the
+control to work end to end.
+
+| # | Gate | File | Owner | Purpose |
+| --- | --- | --- | --- | --- |
+| 1 | `desktop.shutdown_enabled = true` | `butters/config/assistant.toml` | in git, deployed by `install-beta1` | **Assistant/skill capability gate.** Decides whether the `shutdown_desktop` skill is registered as available at all. This is what the Tools catalog reads, so it alone determines whether the button renders `Available` or `Not configured`. |
+| 2 | `"desktop.shutdown" = true` under `[operations]` | `/etc/butters/action-broker.toml` | root, **outside git** | **Root-owned broker policy gate.** The privileged broker's own allowlist, enforced at execution. It is deliberately not readable by the skill layer, so that an assistant-side change can never grant itself a privileged operation. |
+
+The asymmetry matters operationally: **gate 1 controls what the button looks
+like, gate 2 controls whether it works.** With gate 1 on and gate 2 off the
+control renders `Available` and fails at execution with a broker refusal —
+reported honestly in the result panel, but avoidable by keeping the two in
+step. With gate 1 off, the control renders `Not configured` with the registry's
+reason regardless of gate 2.
+
+`install-action-broker` will **not** overwrite an existing
+`/etc/butters/action-broker.toml`; gate 2 is edited by hand. The `[operations]`
+table must match the `BrokerOperation` enum exactly or the broker refuses to
+start, so add or change values in place rather than trimming the table.
+
+After changing gate 2, restart the socket-activated broker:
+
+```bash
+sudo systemctl restart butters-action-broker.socket
+systemctl is-active butters-action-broker.socket butters-action-broker.service
+sudo journalctl -u butters-action-broker.service -n 20 --no-pager
+```
+
+Gate 1 is a deployed file, so changing it means a normal redeploy
+(`sudo ./butters/scripts/install-beta1 --start`).
+
+Disabling **either** gate safely disables shutdown again; they are independent,
+and neither depends on the other being set.
+
+Pre-change backup of the broker config, from when gate 2 was first enabled:
+`/var/backups/action-broker-toml-20260911T034150Z.bak` (root:root 0600).
+Restore it with `sudo cp -a` and restart the socket to revert gate 2 alone.
+
+#### Authorization
+
+Shutdown is registered at **`fresh`** authentication, one tier above Wake's
+`elevated`. A standing elevation is therefore never sufficient, and the backend
+always returns a frozen plan rather than running:
+
+1. The plan is frozen in the `pending_confirmation` state before anything runs.
+2. The panel shows that exact plan and asks for explicit confirmation.
+   Declining releases the plan through `/api/actions/pending/{id}/cancel`;
+   nothing is run. This is the existing confirmation architecture, not a
+   browser-side `confirm()`.
+3. Confirming requests a passkey assertion **bound to that plan's digest**.
+4. The coordinator runs it and audits it as `confirmed_user_request` rather
+   than `direct_user_request`.
+
+A click while a shutdown is already executing is dropped.
+
+#### Expected states
+
+| Condition | Behaviour |
+| --- | --- |
+| Desktop offline | **Temporarily unavailable** — *"already offline; there is nothing to shut down"*. Clicking reports `Desktop already offline`; no request is sent, and this is not a failure |
+| Desktop online | Confirmation of the frozen plan → passkey → request accepted → panel waits for the machine to stop answering |
+| Either gate off | **Not configured**, with the reason (gate 1 directly; gate 2 as a broker refusal at execution) |
+
+Progress is reported only from **observed** state, polled from
+`/api/desktop/status` for up to 120 s:
+
+```
+shutdown requested → confirmed and authorized
+                  → waiting for desktop to go offline → desktop offline
+```
+
+`desktop offline` is asserted only once the machine stops answering both ping
+and SSH. If it is still reachable when the window closes, the panel says
+*"Shutdown accepted. The desktop is still reachable and has not confirmed it
+went offline"* — which is what Windows closing applications looks like. That is
+reported as an unresolved observation, never as a completed shutdown and never
+as a failure. Bringing the machine back is **Wake Desktop**.
 
 ### Desktop state axes
 
@@ -253,6 +350,8 @@ is never requested or recorded.
 | Privileged button says `Authorization required` | Elevation expired | Click it, or Passkeys → Authenticate |
 | `Wake Desktop` shows `Not configured` | `desktop.wake_enabled` false, or broker unprovisioned | Check `assistant.toml` and `/etc/butters/action-broker.toml` (`"desktop.wake" = true`) |
 | Wake sent but nothing happens | Desktop WOL disabled in firmware, or wrong `broadcast` for the LAN | Verify `mac`/`broadcast` in the broker config; WOL cannot be diagnosed from Butters alone |
+| `Shut Down Desktop` shows `Not configured` | Gate 1 off: `desktop.shutdown_enabled` false, or broker unprovisioned | Set it in `assistant.toml`, redeploy |
+| Shutdown is accepted by the panel but refused at execution | Gate 2 off: `"desktop.shutdown" = false` in the broker config | Set it in `/etc/butters/action-broker.toml`, `systemctl restart butters-action-broker.socket` |
 | Banner: session expired | Session idle TTL | Reload and sign in |
 | Status pill `Denied` | Identity not allow-listed, or request bypassed `tailscale serve` | Check `admin_identities`; reach Butters via its Serve origin |
 | Agent `disconnected` but the desktop is on | Agent not running, or ingress unreachable on the LAN | Check the Windows task; `journalctl -u butters-agent-ingress` |
