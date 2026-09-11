@@ -377,6 +377,28 @@ class LLMSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class PlannerSettings:
+    """The first planner slice is disabled unless a provider is injected."""
+
+    enabled: bool = False
+    provider: str = "disabled"
+    max_actions: int = 3
+    max_context_messages: int = 4
+    max_context_chars: int = 2000
+
+    def validated(self) -> PlannerSettings:
+        if self.provider != "disabled":
+            raise ConfigError("planner.provider currently supports only disabled")
+        if not 1 <= self.max_actions <= 4:
+            raise ConfigError("planner.max_actions must be one to four")
+        if not 0 <= self.max_context_messages <= 8:
+            raise ConfigError("planner.max_context_messages must be zero to eight")
+        if not 0 <= self.max_context_chars <= 8000:
+            raise ConfigError("planner.max_context_chars must be zero to 8000")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class DiagnosticSettings:
     enabled: bool = True
     session_ttl_seconds: float = 900.0
@@ -540,6 +562,7 @@ class AssistantSettings:
     authentication: AuthenticationSettings = AuthenticationSettings()
     broker: BrokerSettings = BrokerSettings()
     actions: ActionSettings = ActionSettings()
+    planner: PlannerSettings = PlannerSettings()
 
 
 def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
@@ -767,6 +790,15 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         timeout_seconds=float(llm_table.get("timeout_seconds", 12.0)),
     ).validated()
 
+    planner_table = _table(data, "planner")
+    planner = PlannerSettings(
+        enabled=bool(planner_table.get("enabled", False)),
+        provider=str(planner_table.get("provider", "disabled")),
+        max_actions=int(planner_table.get("max_actions", 3)),
+        max_context_messages=int(planner_table.get("max_context_messages", 4)),
+        max_context_chars=int(planner_table.get("max_context_chars", 2000)),
+    ).validated()
+
     diagnostic_table = _table(data, "diagnostics")
     diagnostics = DiagnosticSettings(
         enabled=bool(diagnostic_table.get("enabled", True)),
@@ -885,6 +917,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         authentication=authentication,
         broker=broker,
         actions=actions,
+        planner=planner,
     )
 
 

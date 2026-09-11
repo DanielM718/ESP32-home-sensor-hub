@@ -422,6 +422,24 @@ class SkillRegistry:
             )
         return self._canonical_arguments(spec, arguments)
 
+    def canonical_arguments(
+        self,
+        skill_name: str,
+        arguments: Mapping[str, object],
+    ) -> dict[str, object] | None:
+        """Return typed canonical arguments without granting execution authority.
+
+        Callers must first apply the appropriate proposal/action validation.
+        This public projection lets upstream planners freeze the exact typed
+        values accepted by the registry without duplicating individual parsers.
+        """
+
+        spec = self._skills.get(skill_name)
+        if spec is None:
+            return None
+        canonical, failure = self._canonical_arguments(spec, arguments)
+        return None if failure is not None else canonical
+
     @staticmethod
     def _canonical_arguments(
         spec: SkillSpec,
