@@ -16,7 +16,10 @@ from app.config import AppSettings, ConfigError, configure_logging, load_setting
 from app.export_queries import InfluxExportQueryRepository
 from app.persistence import MonitoringExportStore
 from app.printer_intelligence import PrinterIntelligenceError
-from app.printer_queries import PrinterReadRepository
+from app.printer_queries import (
+    PrinterReadRepository,
+    printer_telemetry_query_from_params,
+)
 from app.queries import (
     InfluxReadRepository,
     QueryValidationError,
@@ -25,6 +28,7 @@ from app.queries import (
     readings_query_from_params,
 )
 from app.service_status import SystemStatusProvider
+from app.system_health import SystemHealthProvider
 from app.workflow_routes import register_workflow_routes
 from app.workflow_services import ExportService, MonitoringService, utc_now
 from app.workflows import (
@@ -46,6 +50,7 @@ def create_app(
     clock: Any | None = None,
     status_provider: Any | None = None,
     printer_repository: Any | None = None,
+    health_provider: Any | None = None,
 ) -> Flask:
     """Create the Flask WSGI application."""
 
@@ -95,6 +100,16 @@ def create_app(
     app.config["SEN66_EXPECTED_PUBLISH_SECONDS"] = (
         settings.air_quality.expected_publish_seconds
     )
+    app.config["HEALTH_PROVIDER"] = health_provider or SystemHealthProvider(
+        status_provider=app.config["STATUS_PROVIDER"],
+        latest_resolver=read_repository.latest,
+        printer_resolver=app.config["PRINTER_REPOSITORY"].current,
+        node_stale_after_seconds=settings.node_stale_after_seconds,
+        air_quality_stale_after_seconds=settings.air_quality.stale_after_seconds,
+        printer_stale_after_seconds=int(
+            os.environ.get("PRINTER_STALE_AFTER_SECONDS", "300")
+        ),
+    )
 
     store = monitoring_store or MonitoringExportStore(
         settings.monitoring_exports.database_path,
@@ -103,7 +118,8 @@ def create_app(
     store.initialize()
     app.config["MONITORING_STORE"] = store
     export_queries = export_query_repository or InfluxExportQueryRepository(
-        settings.influx
+        settings.influx,
+        raw_retention_seconds=settings.monitoring_exports.raw_retention_seconds,
     )
     current_clock = clock or utc_now
     export_service = ExportService(
@@ -122,10 +138,53 @@ def create_app(
         capability_resolver=read_repository.latest,
     )
 
+    register_origin_guard(app)
     register_routes(app)
     register_workflow_routes(app)
     register_error_handlers(app)
     return app
+
+
+#: Methods that change server state and therefore need the origin check.
+UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def register_origin_guard(app: Flask) -> None:
+    """Reject cross-origin state changes.
+
+    This dashboard has no login by design: SECURITY.md places the trust
+    boundary at the LAN/Tailscale deployment and says these routes must not be
+    published through Funnel or port forwarding. That assumption covers a
+    trusted user reaching the API directly. It does not cover a page in that
+    user's browser driving the API for them, which is a different actor.
+
+    Today that is blocked only incidentally -- every mutating route reads a
+    JSON body, so a form post cannot reach one and a cross-origin fetch needs a
+    preflight this app never approves. That is an accident of the body parser,
+    not a guarantee, and it would evaporate the first time a route accepted
+    form encoding. Check the origin explicitly instead.
+
+    A request with no Origin header is allowed: curl, the CLI and the verify
+    scripts send none, and the documented model permits them. Only a browser
+    that names a different origin is refused.
+    """
+
+    @app.before_request
+    def deny_cross_origin_mutations() -> Any:
+        if request.method not in UNSAFE_METHODS:
+            return None
+        origin = request.headers.get("Origin")
+        if origin is None or origin == request.host_url.rstrip("/"):
+            return None
+        LOGGER.warning(
+            "rejected a cross-origin %s to %s", request.method, request.path
+        )
+        return jsonify(
+            {
+                "error": "forbidden",
+                "message": "cross-origin state changes are not accepted",
+            }
+        ), 403
 
 
 def register_routes(app: Flask) -> None:
@@ -205,6 +264,17 @@ def register_routes(app: Flask) -> None:
         }
         return jsonify(payload)
 
+    @app.get("/api/system-status")
+    def system_status() -> Any:
+        """Bounded dependency health.
+
+        This endpoint exists to describe outages, so it must not become one. It
+        returns 200 whatever the dependencies are doing; the payload carries the
+        verdict.
+        """
+
+        return jsonify(current_app.config["HEALTH_PROVIDER"].snapshot())
+
     @app.get("/api/printer")
     def printer() -> Any:
         payload = dict(current_app.config["PRINTER_REPOSITORY"].current())
@@ -248,6 +318,11 @@ def register_routes(app: Flask) -> None:
         if not 1 <= limit <= 500:
             raise QueryValidationError("limit must be between 1 and 500")
         return jsonify(current_app.config["PRINTER_REPOSITORY"].history(limit=limit))
+
+    @app.get("/api/printer/telemetry")
+    def printer_telemetry() -> Any:
+        query = printer_telemetry_query_from_params(request.args)
+        return jsonify(current_app.config["PRINTER_REPOSITORY"].telemetry(query))
 
     @app.get("/api/printer/usage")
     def printer_usage() -> Any:

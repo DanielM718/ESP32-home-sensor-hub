@@ -1108,7 +1108,9 @@ class IntentRouter:
     def _desktop_remote_action(text: str) -> bool:
         if NEGATED_DESKTOP_ACTION.search(text):
             return False
-        if "prepare my computer" in text:
+        if "prepare my computer" in text and any(
+            word in text for word in ("remote", "parsec", "headless")
+        ):
             return True
         wake = any(
             phrase in text

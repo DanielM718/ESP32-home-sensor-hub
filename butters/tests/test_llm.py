@@ -153,7 +153,13 @@ def test_malformed_unknown_and_invalid_proposals_fail_closed(
     )
 
     assert response.route.status == "unsupported"
-    assert response.policy_status in {"invalid_proposal", "denied"}
+    # tool_not_offered is the earlier, more specific refusal for a name that
+    # was never in the catalog the model was handed.
+    assert response.policy_status in {
+        "invalid_proposal",
+        "denied",
+        "tool_not_offered",
+    }
     assert response.execution is None or not response.execution.ok
 
 

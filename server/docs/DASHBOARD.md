@@ -11,8 +11,8 @@ The top-level navigation is hash-backed and does not reload the page:
 - `#monitoring` contains current readings, source/range filters, a reusable
   measurement selector, and one historical chart.
 - `#bambu-printer` is a failure-isolated, read-only X2D view ordered Current
-  Print, Printer Usage, Maintenance, Printer/AMS details, Print History, and
-  Environmental Association.
+  Print, Historical Telemetry, Printer Usage, Maintenance, Printer/AMS details,
+  Print History, and Environmental Association.
 - `#active-monitoring` contains timed sessions, running/recent session state,
   and persistent Historical Data Export jobs.
 - `#status` contains the fixed allow-list systemd status view, node status and
@@ -72,6 +72,24 @@ fields use arithmetic mean; battery voltage averages only battery-valid
 samples, and status flags are never averaged. A session shorter than its mean
 window produces one partial-window mean when it has data.
 
+## Bambu Historical Telemetry
+
+The Bambu Historical Telemetry panel is backed by structured
+`printer_telemetry`, not `ams_inventory_json`. Its 1h, 6h, and 24h ranges use
+the high-resolution live tier; 7d uses permanent five-minute samples. Initial
+selections are every discovered AMS unit's humidity and temperature plus X2D
+chamber temperature. Bed/nozzle temperatures and targets, fan/Wi-Fi/progress
+diagnostics, and observed status fields are capability-driven choices. Chart
+axes are grouped by unit, and another AMS appears automatically from the source
+catalog. A known offline/stale AMS remains selectable for retained history.
+
+Manual Active Monitoring and Historical Export forms use the same backend
+source/field catalog for SHT41, SEN66, printer, and AMS sources. Boolean Bambu
+status fields are raw-only; numeric fields may be downsampled. Automatic print
+environment monitoring still requires its configured SEN66 to be online at
+print start. Skipping that automatic interval does not stop independent Bambu
+telemetry persistence.
+
 ## Printer Usage and Maintenance
 
 Printer Usage leads with **Tracked Print Time** as a single large value
@@ -94,7 +112,8 @@ requires a confirmation dialog and only writes local audit records.
 
 ## CSV formats
 
-Wide is the default. It writes one logical timestamp/source sample per row:
+Wide is the default. A legacy environment/SEN66-only export keeps its existing
+shape and writes one logical timestamp/source sample per row:
 
 ```text
 timestamp_utc,sensor_type,source_id,node_id,location,<selected fields>,data_tier
@@ -111,6 +130,9 @@ timestamp_utc,sensor_type,source_id,node_id,location,field,value,unit,data_tier
 Both selectors show a short explanation in the UI. Sessions and jobs live in
 SQLite and are processed by `home-sensor-export-worker.service`, so navigation,
 refresh, browser closure, and frontend request timeouts do not cancel them.
+When any printer or AMS source is selected, both formats append explicit
+`printer_id` and `ams_id` identity columns. Long rows keep units explicit and
+all Bambu rows label whether values came from live raw data or durable samples.
 
 ## Polling
 

@@ -8,17 +8,17 @@ from flask import Flask, current_app, jsonify, request, send_file
 
 from app.workflow_services import ExportService, MonitoringService
 from app.workflows import (
-    AIR_QUALITY_FIELDS,
     CSV_FORMATS,
-    ENVIRONMENT_FIELDS,
     FIELD_DISPLAY_UNITS,
     FIELD_GROUPS,
     FIELD_LABELS,
     FIELD_UNITS,
+    FIELDS_BY_SENSOR_TYPE,
     MIN_MONITORING_SECONDS,
     RESOLUTION_OPTIONS,
     RESOLUTIONS,
     SUPPORTED_FIELDS,
+    field_supports_aggregation,
 )
 
 
@@ -48,6 +48,10 @@ def register_workflow_routes(app: Flask) -> None:
                     for option in RESOLUTION_OPTIONS
                 ],
                 "csv_formats": list(CSV_FORMATS),
+                "source_types": [
+                    {"name": sensor_type, "available_fields": list(fields)}
+                    for sensor_type, fields in FIELDS_BY_SENSOR_TYPE.items()
+                ],
                 "fields": [
                     {
                         "name": field,
@@ -55,12 +59,10 @@ def register_workflow_routes(app: Flask) -> None:
                         "unit": FIELD_UNITS[field],
                         "display_unit": FIELD_DISPLAY_UNITS[field],
                         "group": FIELD_GROUPS[field],
+                        "numeric_aggregation": field_supports_aggregation(field),
                         "sensor_types": [
                             sensor_type
-                            for sensor_type, allowed in (
-                                ("environment", ENVIRONMENT_FIELDS),
-                                ("air_quality", AIR_QUALITY_FIELDS),
-                            )
+                            for sensor_type, allowed in FIELDS_BY_SENSOR_TYPE.items()
                             if field in allowed
                         ],
                     }

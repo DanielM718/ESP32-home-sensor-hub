@@ -123,6 +123,7 @@ def test_action_requires_exact_direct_user_authorization() -> None:
     assistant, desktop = _assistant()
     registry = assistant.skills
     args = {"machine": "desktop"}
+    digest = "d" * 64
     denied = registry.execute("start_remote_desktop_session", args)
     wrong = registry.execute(
         "start_remote_desktop_session",
@@ -147,14 +148,16 @@ def test_action_requires_exact_direct_user_authorization() -> None:
             True,
         ),
         authentication_context=AuthenticationContext(
-            AuthenticationLevel.ELEVATED,
+            AuthenticationLevel.FRESH,
             "session",
             "identity",
             time.time() + 60,
             "webauthn",
+            digest,
         ),
         session_id="session",
         identity="identity",
+        action_digest=digest,
     )
     assert denied.failure and denied.failure.code == "action_confirmation_required"
     assert wrong.failure and wrong.failure.code == "action_confirmation_required"
@@ -208,7 +211,7 @@ def test_natural_language_direct_action_and_status_stay_deterministic() -> None:
 def test_explicit_multi_action_request_freezes_as_exact_deterministic_plan() -> None:
     assistant, _desktop = _assistant()
     route = assistant.router.route(
-        "Prepare my computer and turn on the dehumidifier for 30 minutes"
+        "Prepare my computer for remote access and turn on the dehumidifier for 30 minutes"
     )
     assert route.matched
     assert route.action_plan == (
@@ -218,6 +221,25 @@ def test_explicit_multi_action_request_freezes_as_exact_deterministic_plan() -> 
             {"state": "on", "duration_minutes": 30},
         ),
     )
+
+
+def test_vague_prepare_request_cannot_trigger_headless_remote_session() -> None:
+    assistant, _desktop = _assistant()
+
+    route = assistant.router.route("Prepare my computer")
+
+    assert route.skill != "start_remote_desktop_session"
+
+
+def test_explicit_remote_prepare_request_reaches_fresh_authentication() -> None:
+    assistant, desktop = _assistant()
+
+    response = assistant.handle_text("Prepare my computer for remote access")
+
+    assert response.route.skill == "start_remote_desktop_session"
+    assert response.execution and response.execution.failure
+    assert response.execution.failure.code == "authentication_required"
+    assert desktop.calls == 0
 
 
 def _desktop_parser(values):

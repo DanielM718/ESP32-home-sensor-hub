@@ -1699,6 +1699,12 @@ class BetaAssistantService:
         if model not in self.settings.cloud.pricing:
             return self._cloud_failure(trace, normalized, "model_denied", route)
         tools = self._relevant_skill_tools(normalized, administrator)
+        # _relevant_skill_tools calls the derived catalog "the complete provider
+        # boundary" and refuses to reconstruct a schema for anything outside it.
+        # A provider response is untrusted text, so that boundary has to be
+        # enforced when a tool call comes back too, not only when the list goes
+        # out -- otherwise naming an excluded skill runs it anyway.
+        offered_tools = {str(item["name"]) for item in tools}
         context = self.sessions.context(session)
         if (
             context
@@ -1876,6 +1882,16 @@ class BetaAssistantService:
                     trace, normalized, "repeated_tool_call", route
                 )
             seen_calls.add(canonical_call)
+            if request.name not in offered_tools:
+                trace.emit(
+                    TraceStage.POLICY,
+                    "denied",
+                    reason_code="tool_not_offered",
+                    fields={"skill": request.name, "action_authorized": False},
+                )
+                return self._cloud_failure(
+                    trace, normalized, "tool_not_offered", route
+                )
             failure = self.assistant.skills.validate_proposal(
                 request.name, request.arguments, administrator=administrator
             )
@@ -2356,14 +2372,17 @@ def _bounded_result(value: object) -> object:
 
 def _direct_desktop_action(text: str) -> bool:
     text = text.casefold()
-    return any(
+    remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
+    wake = any(
         phrase in text
         for phrase in (
             "turn on my computer",
             "wake my computer",
             "wake the desktop",
         )
-    ) and any(word in text for word in ("parsec", "remote"))
+    )
+    prepare = "prepare my computer" in text
+    return remote_intent and (wake or prepare)
 
 
 def _action_summary(skill: str, arguments: dict[str, object]) -> str:

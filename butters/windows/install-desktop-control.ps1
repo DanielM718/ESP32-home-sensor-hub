@@ -52,11 +52,11 @@ $sleepAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowe
 $sleepPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskPath $taskPath -TaskName 'SleepDesktop' -Action $sleepAction -Principal $sleepPrincipal -Settings $settings -Force | Out-Null
 
-# The observed per-machine Parsec installation had no Run key or task and its
-# LocalSystem service was Manual, so it could not recover before login after a
-# reboot or shutdown. Automatic is the smallest reversible unattended fix.
-Set-Service -Name 'Parsec' -StartupType Automatic
-Start-Service -Name 'Parsec'
+# Parsec is deliberately on demand. Installing the fixed helper must not make
+# the service a boot/login startup mechanism or start it as an installer side
+# effect. ParsecEnsure and ParsecRestart start this one fixed service without
+# changing its startup type.
+Set-Service -Name 'Parsec' -StartupType Manual
 
 [pscustomobject]@{
     installed_script = $target

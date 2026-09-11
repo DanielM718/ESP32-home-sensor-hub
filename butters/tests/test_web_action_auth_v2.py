@@ -138,7 +138,7 @@ async def _direct_action_freezes_then_passkey_resumes_exact_action(
             payload = action.json()
             assert action.status_code == 200
             assert payload["route"] == "pending_auth"
-            assert payload["authentication_required"] == "elevated"
+            assert payload["authentication_required"] == "fresh"
             assert desktop.calls == 0
             pending = payload["pending_action"]["pending_action_id"]
             begin = await http.post(

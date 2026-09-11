@@ -28,7 +28,13 @@ from app.printer_maintenance import (
     X2D_MAINTENANCE_TASKS,
     LoggingMaintenanceNotifier,
 )
-from app.printer_model import print_session_point, printer_state_point
+from app.printer_model import (
+    PrinterState,
+    PrintSession,
+    print_session_point,
+    printer_state_point,
+    printer_telemetry_points,
+)
 from app.printer_monitoring import PrinterMonitoringCoordinator
 from app.printer_persistence import PrinterStore
 from app.queries import InfluxReadRepository, air_quality_sensor_status
@@ -210,32 +216,15 @@ def run() -> int:
                     )
                 except Exception:
                     LOGGER.exception("printer maintenance evaluation failed")
-            try:
-                writer.write_point_data(
-                    printer_state_point(state, measurement="printer_state"),
-                    bucket=app_settings.influx.live_bucket,
-                )
-                changed = (
-                    previous is None
-                    or previous.normalized_state != state.normalized_state
-                    or previous.online != state.online
-                    or previous.job_id != state.job_id
-                )
-                if changed or store.permanent_sample_due(
-                    state.printer_id,
-                    state.observed_at,
-                    settings.permanent_sample_seconds,
-                ):
-                    writer.write_point_data(
-                        printer_state_point(state, measurement="printer_state_5m")
-                    )
-                    store.mark_permanent_sample(state.printer_id, state.observed_at)
-                for session in changed_sessions:
-                    writer.write_point_data(print_session_point(session))
-            except Exception:
-                # This worker is non-critical. Never allow its Influx failure to
-                # affect MQTT ingestion or any other service.
-                LOGGER.exception("printer InfluxDB write failed")
+            persist_observation(
+                writer,
+                store,
+                state,
+                previous=previous,
+                changed_sessions=changed_sessions,
+                permanent_sample_seconds=settings.permanent_sample_seconds,
+                live_bucket=app_settings.influx.live_bucket,
+            )
 
             delay = min(
                 settings.poll_seconds * (2 ** min(failure_count, 4)),
@@ -243,6 +232,68 @@ def run() -> int:
             )
             stop_event.wait(delay)
     return 0
+
+
+def persist_observation(
+    writer: InfluxWriter,
+    store: PrinterStore,
+    state: PrinterState,
+    *,
+    previous: PrinterState | None,
+    changed_sessions: tuple[PrintSession, ...],
+    permanent_sample_seconds: int,
+    live_bucket: str,
+) -> None:
+    """Write optional Influx records without coupling their failure domains."""
+
+    try:
+        writer.write_point_data(
+            printer_state_point(state, measurement="printer_state"),
+            bucket=live_bucket,
+        )
+    except Exception:
+        LOGGER.exception("live printer_state InfluxDB write failed")
+
+    telemetry = printer_telemetry_points(state)
+    try:
+        writer.write_point_data_many(telemetry, bucket=live_bucket)
+    except Exception:
+        LOGGER.exception("live printer_telemetry InfluxDB write failed")
+
+    changed = (
+        previous is None
+        or previous.normalized_state != state.normalized_state
+        or previous.online != state.online
+        or previous.job_id != state.job_id
+    )
+    durable_due = changed or store.permanent_sample_due(
+        state.printer_id,
+        state.observed_at,
+        permanent_sample_seconds,
+    )
+    if durable_due:
+        durable_state_written = False
+        durable_telemetry_written = False
+        try:
+            writer.write_point_data(
+                printer_state_point(state, measurement="printer_state_5m")
+            )
+            durable_state_written = True
+        except Exception:
+            LOGGER.exception("durable printer_state InfluxDB write failed")
+        try:
+            writer.write_point_data_many(telemetry)
+            durable_telemetry_written = True
+        except Exception:
+            LOGGER.exception("durable printer_telemetry InfluxDB write failed")
+        if durable_state_written and durable_telemetry_written:
+            store.mark_permanent_sample(state.printer_id, state.observed_at)
+
+    for session in changed_sessions:
+        try:
+            writer.write_point_data(print_session_point(session))
+        except Exception:
+            LOGGER.exception("printer session InfluxDB write failed")
 
 
 def main() -> None:

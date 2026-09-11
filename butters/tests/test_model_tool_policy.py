@@ -299,3 +299,97 @@ def test_the_policy_rejects_an_administrator_observation(assembled) -> None:
     )
 
     assert model_eligible(admin) == (False, "administrator_audience")
+
+
+# --- execution is confined to the offered catalog --------------------------
+
+
+def _puppet_assistant(skill: str, arguments: dict | None = None):
+    """An assistant whose model always proposes one chosen skill name."""
+
+    from butters.llm.model import (
+        LanguageModel,
+        LanguageModelResult,
+        ProposalKind,
+        ToolProposal,
+    )
+
+    class Puppet(LanguageModel):
+        def propose_tools(self, request, available_tools, context=()):
+            return LanguageModelResult(
+                ToolProposal(ProposalKind.TOOL, skill, dict(arguments or {})),
+                "puppet",
+                0.0,
+            )
+
+    settings = load_assistant_settings()
+    import tempfile
+    from pathlib import Path
+
+    state = ActionStateStore(
+        Path(tempfile.mkdtemp()) / "actions.sqlite3", settings.actions
+    )
+    return create_assistant(
+        settings,
+        DomainVocabulary((), ()),
+        action_state=state,
+        language_model=Puppet(),
+    )
+
+
+UNROUTABLE = "please do the thing that has no local route at all zzz"
+
+
+@pytest.mark.parametrize(
+    "skill",
+    [
+        # Excluded for privacy or administrator-audience reasons, not because
+        # they mutate. Before this gate they executed on the model's say-so.
+        "get_butters_host_status",
+        "get_storage_status",
+        "get_network_service_health",
+        "get_nas_status",
+        "get_server_health",
+        "get_environment_control_status",
+        "wait_for_desktop_reachability",
+    ],
+)
+def test_a_skill_excluded_from_the_catalog_is_not_executable_by_the_model(
+    skill: str,
+) -> None:
+    """The catalog decides what the model sees; it must also decide what runs.
+
+    Every one of these is a registered, enabled, read-only skill that the
+    action policy is happy to run, so nothing below the assistant refuses it.
+    Only the catalog check does.
+    """
+
+    response = _puppet_assistant(skill).handle_text(UNROUTABLE)
+
+    assert response.policy_status == "tool_not_offered"
+    assert response.execution is None
+
+
+@pytest.mark.parametrize(
+    "skill",
+    ["wake_desktop", "shutdown_desktop", "monitors_off", "sleep_desktop"],
+)
+def test_a_mutating_skill_stays_unreachable_from_a_proposal(skill: str) -> None:
+    """Defence in depth: the action policy refused these before the gate too."""
+
+    response = _puppet_assistant(skill, {"machine": "desktop"}).handle_text(UNROUTABLE)
+
+    assert response.policy_status == "tool_not_offered"
+    assert response.execution is None
+
+
+def test_a_catalogued_skill_is_still_executable_by_the_model() -> None:
+    """The gate must not close the fallback path it is guarding."""
+
+    response = _puppet_assistant(
+        "get_sensor_value", {"entity": "filament_box_3", "metric": "humidity"}
+    ).handle_text(UNROUTABLE)
+
+    assert response.policy_status != "tool_not_offered"
+    assert response.execution is not None
+    assert response.execution.skill == "get_sensor_value"

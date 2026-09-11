@@ -12,7 +12,14 @@ from uuid import UUID
 
 SENSOR_TYPE_ENVIRONMENT = "environment"
 SENSOR_TYPE_AIR_QUALITY = "air_quality"
-SENSOR_TYPES = (SENSOR_TYPE_ENVIRONMENT, SENSOR_TYPE_AIR_QUALITY)
+SENSOR_TYPE_PRINTER = "printer"
+SENSOR_TYPE_AMS = "ams"
+SENSOR_TYPES = (
+    SENSOR_TYPE_ENVIRONMENT,
+    SENSOR_TYPE_AIR_QUALITY,
+    SENSOR_TYPE_PRINTER,
+    SENSOR_TYPE_AMS,
+)
 
 ENVIRONMENT_FIELDS = ("temperature_c", "humidity", "battery_mv")
 AIR_QUALITY_FIELDS = (
@@ -26,7 +33,47 @@ AIR_QUALITY_FIELDS = (
     "voc_index",
     "nox_index",
 )
-SUPPORTED_FIELDS = tuple(dict.fromkeys(ENVIRONMENT_FIELDS + AIR_QUALITY_FIELDS))
+PRINTER_FIELDS = (
+    "chamber_temperature_c",
+    "chamber_target_c",
+    "bed_temperature_c",
+    "bed_target_c",
+    "nozzle_1_temperature_c",
+    "nozzle_1_target_c",
+    "nozzle_2_temperature_c",
+    "nozzle_2_target_c",
+    "cooling_fan_percent",
+    "auxiliary_fan_percent",
+    "chamber_fan_percent",
+    "heatbreak_fan_percent",
+    "wifi_signal_dbm",
+    "print_progress_percent",
+    "remaining_print_seconds",
+    "online",
+    "printer_is_printing",
+    "session_active",
+)
+AMS_FIELDS = (
+    "ams_humidity",
+    "ams_temperature_c",
+    "ams_humidity_index",
+    "ams_drying",
+    "ams_remaining_drying_seconds",
+    "ams_active",
+)
+FIELDS_BY_SENSOR_TYPE = {
+    SENSOR_TYPE_ENVIRONMENT: ENVIRONMENT_FIELDS,
+    SENSOR_TYPE_AIR_QUALITY: AIR_QUALITY_FIELDS,
+    SENSOR_TYPE_PRINTER: PRINTER_FIELDS,
+    SENSOR_TYPE_AMS: AMS_FIELDS,
+}
+SUPPORTED_FIELDS = tuple(
+    dict.fromkeys(ENVIRONMENT_FIELDS + AIR_QUALITY_FIELDS + PRINTER_FIELDS + AMS_FIELDS)
+)
+BOOLEAN_FIELDS = frozenset(
+    {"online", "printer_is_printing", "session_active", "ams_drying", "ams_active"}
+)
+NUMERIC_FIELDS = frozenset(SUPPORTED_FIELDS) - BOOLEAN_FIELDS
 
 FIELD_UNITS = {
     "temperature_c": "degC",
@@ -39,6 +86,30 @@ FIELD_UNITS = {
     "pm10": "ug/m3",
     "voc_index": "index",
     "nox_index": "index",
+    "chamber_temperature_c": "degC",
+    "chamber_target_c": "degC",
+    "bed_temperature_c": "degC",
+    "bed_target_c": "degC",
+    "nozzle_1_temperature_c": "degC",
+    "nozzle_1_target_c": "degC",
+    "nozzle_2_temperature_c": "degC",
+    "nozzle_2_target_c": "degC",
+    "cooling_fan_percent": "percent",
+    "auxiliary_fan_percent": "percent",
+    "chamber_fan_percent": "percent",
+    "heatbreak_fan_percent": "percent",
+    "wifi_signal_dbm": "dBm",
+    "print_progress_percent": "percent",
+    "remaining_print_seconds": "seconds",
+    "online": "boolean",
+    "printer_is_printing": "boolean",
+    "session_active": "boolean",
+    "ams_humidity": "percent",
+    "ams_temperature_c": "degC",
+    "ams_humidity_index": "index",
+    "ams_drying": "boolean",
+    "ams_remaining_drying_seconds": "seconds",
+    "ams_active": "boolean",
 }
 FIELD_LABELS = {
     "temperature_c": "Temperature",
@@ -51,6 +122,30 @@ FIELD_LABELS = {
     "pm10": "PM10",
     "voc_index": "VOC Index",
     "nox_index": "NOx Index",
+    "chamber_temperature_c": "Chamber temperature",
+    "chamber_target_c": "Chamber target",
+    "bed_temperature_c": "Bed temperature",
+    "bed_target_c": "Bed target",
+    "nozzle_1_temperature_c": "Nozzle 1 temperature",
+    "nozzle_1_target_c": "Nozzle 1 target",
+    "nozzle_2_temperature_c": "Nozzle 2 temperature",
+    "nozzle_2_target_c": "Nozzle 2 target",
+    "cooling_fan_percent": "Cooling fan",
+    "auxiliary_fan_percent": "Auxiliary fan",
+    "chamber_fan_percent": "Chamber fan",
+    "heatbreak_fan_percent": "Heatbreak fan",
+    "wifi_signal_dbm": "Wi-Fi signal",
+    "print_progress_percent": "Print progress",
+    "remaining_print_seconds": "Remaining print time",
+    "online": "Online",
+    "printer_is_printing": "Printing",
+    "session_active": "Print session active",
+    "ams_humidity": "AMS humidity",
+    "ams_temperature_c": "AMS temperature",
+    "ams_humidity_index": "AMS humidity index",
+    "ams_drying": "AMS drying",
+    "ams_remaining_drying_seconds": "AMS drying time remaining",
+    "ams_active": "AMS active",
 }
 FIELD_DISPLAY_UNITS = {
     "temperature_c": "°C",
@@ -63,6 +158,30 @@ FIELD_DISPLAY_UNITS = {
     "pm10": "µg/m³",
     "voc_index": "index",
     "nox_index": "index",
+    "chamber_temperature_c": "°C",
+    "chamber_target_c": "°C",
+    "bed_temperature_c": "°C",
+    "bed_target_c": "°C",
+    "nozzle_1_temperature_c": "°C",
+    "nozzle_1_target_c": "°C",
+    "nozzle_2_temperature_c": "°C",
+    "nozzle_2_target_c": "°C",
+    "cooling_fan_percent": "%",
+    "auxiliary_fan_percent": "%",
+    "chamber_fan_percent": "%",
+    "heatbreak_fan_percent": "%",
+    "wifi_signal_dbm": "dBm",
+    "print_progress_percent": "%",
+    "remaining_print_seconds": "s",
+    "online": "on/off",
+    "printer_is_printing": "on/off",
+    "session_active": "on/off",
+    "ams_humidity": "% RH",
+    "ams_temperature_c": "°C",
+    "ams_humidity_index": "index",
+    "ams_drying": "on/off",
+    "ams_remaining_drying_seconds": "s",
+    "ams_active": "on/off",
 }
 FIELD_GROUPS = {
     "temperature_c": "Climate",
@@ -75,6 +194,30 @@ FIELD_GROUPS = {
     "pm10": "Particulate matter",
     "voc_index": "Gas and indices",
     "nox_index": "Gas and indices",
+    "chamber_temperature_c": "Printer Thermal",
+    "chamber_target_c": "Printer Thermal",
+    "bed_temperature_c": "Printer Thermal",
+    "bed_target_c": "Printer Thermal",
+    "nozzle_1_temperature_c": "Printer Thermal",
+    "nozzle_1_target_c": "Printer Thermal",
+    "nozzle_2_temperature_c": "Printer Thermal",
+    "nozzle_2_target_c": "Printer Thermal",
+    "cooling_fan_percent": "Cooling / Diagnostics",
+    "auxiliary_fan_percent": "Cooling / Diagnostics",
+    "chamber_fan_percent": "Cooling / Diagnostics",
+    "heatbreak_fan_percent": "Cooling / Diagnostics",
+    "wifi_signal_dbm": "Cooling / Diagnostics",
+    "print_progress_percent": "Print Context",
+    "remaining_print_seconds": "Print Context",
+    "online": "Print Context",
+    "printer_is_printing": "Print Context",
+    "session_active": "Print Context",
+    "ams_humidity": "AMS Climate",
+    "ams_temperature_c": "AMS Climate",
+    "ams_humidity_index": "AMS State",
+    "ams_drying": "AMS State",
+    "ams_remaining_drying_seconds": "AMS State",
+    "ams_active": "AMS State",
 }
 
 RESOLUTION_OPTIONS = (
@@ -150,12 +293,18 @@ class Source:
     sensor_type: str
     node_id: int | None = None
     location: str | None = None
+    printer_id: str | None = None
+    ams_id: str | None = None
 
     @property
     def source_id(self) -> str:
         if self.sensor_type == SENSOR_TYPE_ENVIRONMENT:
             return str(self.node_id)
-        return str(self.location)
+        if self.sensor_type == SENSOR_TYPE_AIR_QUALITY:
+            return str(self.location)
+        if self.sensor_type == SENSOR_TYPE_PRINTER:
+            return str(self.printer_id)
+        return f"{self.printer_id}/{self.ams_id}"
 
     @property
     def key(self) -> tuple[str, str]:
@@ -165,8 +314,13 @@ class Source:
         result: dict[str, Any] = {"sensor_type": self.sensor_type}
         if self.sensor_type == SENSOR_TYPE_ENVIRONMENT:
             result["node_id"] = self.node_id
-        else:
+        elif self.sensor_type == SENSOR_TYPE_AIR_QUALITY:
             result["location"] = self.location
+        elif self.sensor_type == SENSOR_TYPE_PRINTER:
+            result["printer_id"] = self.printer_id
+        else:
+            result["printer_id"] = self.printer_id
+            result["ams_id"] = self.ams_id
         return result
 
 
@@ -277,6 +431,26 @@ def validate_export_request(
                 f"{raw_retention_seconds // 3600} hours; data before {iso_utc(boundary)} "
                 "may have expired. Aggregates are not substituted."
             )
+    bambu_selected = any(
+        source.sensor_type in {SENSOR_TYPE_PRINTER, SENSOR_TYPE_AMS}
+        for source in sources
+    )
+    if bambu_selected:
+        reference = _aware_utc(now or datetime.now(timezone.utc))
+        retained_after = reference.timestamp() - raw_retention_seconds
+        if start.timestamp() < retained_after and resolution in {"raw", "1m"}:
+            boundary = datetime.fromtimestamp(retained_after, tz=timezone.utc)
+            warnings.append(
+                "High-resolution Bambu telemetry is retained for approximately "
+                f"{raw_retention_seconds // 3600} hours; data before "
+                f"{iso_utc(boundary)} may have expired. Durable five-minute samples "
+                "are not substituted for raw or 1-minute exports."
+            )
+        elif start.timestamp() < retained_after and resolution in {"5m", "15m", "1h"}:
+            warnings.append(
+                "Bambu telemetry outside live retention uses permanent five-minute "
+                "samples and reports that durable source tier in the CSV."
+            )
     return ExportRequest(
         name=name,
         start_time=start,
@@ -337,11 +511,12 @@ def validate_sources(value: Any) -> tuple[Source, ...]:
             raise WorkflowValidationError(
                 f"sources[{index}].sensor_type must be one of: {', '.join(SENSOR_TYPES)}"
             )
-        allowed_keys = (
-            {"sensor_type", "node_id"}
-            if sensor_type == SENSOR_TYPE_ENVIRONMENT
-            else {"sensor_type", "location"}
-        )
+        allowed_keys = {
+            SENSOR_TYPE_ENVIRONMENT: {"sensor_type", "node_id"},
+            SENSOR_TYPE_AIR_QUALITY: {"sensor_type", "location"},
+            SENSOR_TYPE_PRINTER: {"sensor_type", "printer_id"},
+            SENSOR_TYPE_AMS: {"sensor_type", "printer_id", "ams_id"},
+        }[sensor_type]
         unknown = set(item) - allowed_keys
         if unknown:
             raise WorkflowValidationError(
@@ -354,13 +529,32 @@ def validate_sources(value: Any) -> tuple[Source, ...]:
                     f"sources[{index}].node_id must be an integer >= 1"
                 )
             source = Source(sensor_type=sensor_type, node_id=node_id)
-        else:
+        elif sensor_type == SENSOR_TYPE_AIR_QUALITY:
             location = item.get("location")
             if not isinstance(location, str) or not LOCATION_RE.fullmatch(location):
                 raise WorkflowValidationError(
                     f"sources[{index}].location must be a stable 1-64 character slug"
                 )
             source = Source(sensor_type=sensor_type, location=location)
+        else:
+            printer_id = item.get("printer_id")
+            if not isinstance(printer_id, str) or not LOCATION_RE.fullmatch(printer_id):
+                raise WorkflowValidationError(
+                    f"sources[{index}].printer_id must be a stable 1-64 character slug"
+                )
+            if sensor_type == SENSOR_TYPE_PRINTER:
+                source = Source(sensor_type=sensor_type, printer_id=printer_id)
+            else:
+                ams_id = item.get("ams_id")
+                if not isinstance(ams_id, str) or not LOCATION_RE.fullmatch(ams_id):
+                    raise WorkflowValidationError(
+                        f"sources[{index}].ams_id must be a stable 1-64 character slug"
+                    )
+                source = Source(
+                    sensor_type=sensor_type,
+                    printer_id=printer_id,
+                    ams_id=ams_id,
+                )
         if source.key not in seen:
             seen.add(source.key)
             result.append(source)
@@ -390,14 +584,18 @@ def fields_for_source(
     *,
     stored_aggregate: bool = False,
 ) -> tuple[str, ...]:
-    if stored_aggregate and source.sensor_type != SENSOR_TYPE_AIR_QUALITY:
+    if stored_aggregate and source.sensor_type == SENSOR_TYPE_ENVIRONMENT:
         return ()
-    supported = (
-        ENVIRONMENT_FIELDS
-        if source.sensor_type == SENSOR_TYPE_ENVIRONMENT
-        else AIR_QUALITY_FIELDS
+    supported = FIELDS_BY_SENSOR_TYPE[source.sensor_type]
+    return tuple(
+        field
+        for field in fields
+        if field in supported and (resolution == "raw" or field in NUMERIC_FIELDS)
     )
-    return tuple(field for field in fields if field in supported)
+
+
+def field_supports_aggregation(field: str) -> bool:
+    return field in NUMERIC_FIELDS
 
 
 def aggregate_field(field: str) -> str:
@@ -486,6 +684,13 @@ def _validate_supported_selection(
     *,
     stored_aggregate: bool = False,
 ) -> None:
+    if resolution != "raw":
+        boolean_fields = [field for field in fields if field in BOOLEAN_FIELDS]
+        if boolean_fields:
+            raise WorkflowValidationError(
+                "boolean/status measurements are raw-only and cannot be averaged: "
+                + ", ".join(boolean_fields)
+            )
     if not any(
         fields_for_source(
             source,

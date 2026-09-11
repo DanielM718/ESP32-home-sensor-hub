@@ -107,57 +107,38 @@ def _voice(tmp_path):
     return voice, state, desktop, clock
 
 
-def _wait_for_call(desktop: Desktop) -> None:
-    deadline = time.time() + 2
-    while time.time() < deadline and desktop.calls == 0:
-        time.sleep(0.01)
-
-
-def test_voice_action_uses_one_wake_session_for_request_and_exact_yes(tmp_path) -> None:
-    voice, _state, desktop, _clock = _voice(tmp_path)
+def test_combined_remote_session_requires_fresh_passkey_even_after_voice_wake(
+    tmp_path,
+) -> None:
+    voice, state, desktop, _clock = _voice(tmp_path)
     no_wake = voice.handle_text("Turn on my computer and get Parsec ready")
     assert no_wake and no_wake.policy_status == "local_console_required"
     voice.note_physical_wake()
     prompt = voice.handle_text("Turn on my computer and get Parsec ready")
-    assert prompt and prompt.policy_status == "confirmation_required"
+    assert prompt and prompt.policy_status == "fresh_authentication_required"
+    assert "passkey" in prompt.response_text.casefold()
     assert desktop.calls == 0
-    confirmed = voice.handle_text("do it")
-    assert confirmed and confirmed.policy_status == "action_started"
-    _wait_for_call(desktop)
-    assert desktop.calls == 1
+    assert voice.handle_text("do it") is None
+    assert not state.jobs(identity="local-console")
 
 
-def test_voice_no_unrelated_speech_and_each_action_needs_confirmation(tmp_path) -> None:
-    voice, _state, desktop, _clock = _voice(tmp_path)
+def test_voice_cannot_create_a_confirmable_remote_session_without_passkey(
+    tmp_path,
+) -> None:
+    voice, state, desktop, _clock = _voice(tmp_path)
     voice.note_physical_wake()
-    voice.handle_text("Turn on my computer and get Parsec ready")
-    cancelled = voice.handle_text("no")
-    assert cancelled and cancelled.policy_status == "cancelled"
+    denied = voice.handle_text("Turn on my computer and get Parsec ready")
+    assert denied and denied.policy_status == "fresh_authentication_required"
+    assert voice.handle_text("no") is None
     assert desktop.calls == 0
+    assert not state.jobs(identity="local-console")
 
+
+def test_new_voice_session_cannot_replay_fresh_remote_session_request(tmp_path) -> None:
+    voice, state, desktop, _clock = _voice(tmp_path)
     voice.note_physical_wake()
-    voice.handle_text("Turn on my computer and get Parsec ready")
-    unrelated = voice.handle_text("maybe later")
-    assert unrelated and unrelated.policy_status == "confirmation_denied"
-    assert desktop.calls == 0
-
-    voice.note_physical_wake()
-    second = voice.handle_text("Turn on my computer and get Parsec ready")
-    assert second and second.policy_status == "confirmation_required"
-    assert desktop.calls == 0
-
-
-def test_expired_or_new_voice_session_cannot_confirm_frozen_action(tmp_path) -> None:
-    voice, state, desktop, clock = _voice(tmp_path)
-    voice.note_physical_wake()
-    voice.handle_text("Turn on my computer and get Parsec ready")
-    clock.now += 31
-    expired = voice.handle_text("yes")
-    assert expired and expired.policy_status == "confirmation_expired"
-    assert desktop.calls == 0
-
-    voice.note_physical_wake()
-    voice.handle_text("Turn on my computer and get Parsec ready")
+    denied = voice.handle_text("Turn on my computer and get Parsec ready")
+    assert denied and denied.policy_status == "fresh_authentication_required"
     voice.note_physical_wake()
     assert voice.handle_text("yes") is None
     assert desktop.calls == 0

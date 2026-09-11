@@ -22,11 +22,13 @@ from butters.assistant_config import load_assistant_settings
 from butters.integrations.desktop import DesktopWorkflow
 from butters.integrations.model import IntegrationError
 from butters.llm.catalog import derive_safe_tool_catalog
+from butters.skills.actions_v2 import ActionSkillImplementations
 from butters.skills.model import (
     ActionAuthorization,
     ActionClass,
     AuthenticationContext,
     AuthenticationLevel,
+    DesktopArgs,
 )
 from butters.stt.normalization import DomainVocabulary
 
@@ -35,7 +37,7 @@ PARSEC_HEALTHY = {
     "installation_type": "machine",
     "service_present": True,
     "service_running": True,
-    "service_startup": "auto",
+    "service_startup": "manual",
     "service_process_present": True,
     "host_process_present": True,
     "system_host_process_present": True,
@@ -199,6 +201,26 @@ def test_parsec_restart_success_and_subprocess_timeout_are_bounded(
     assert timeout.value.code == "operation_failed"
 
 
+def test_wake_and_simple_parsec_start_are_separate_fixed_operations() -> None:
+    calls: list[BrokerOperation] = []
+
+    class Actions:
+        def execute(self, operation, *, cancel_event=None):
+            calls.append(operation)
+            return {"accepted": True}
+
+    implementation = ActionSkillImplementations(None, Actions(), None, None)
+    arguments = DesktopArgs("desktop")
+
+    implementation.wake_desktop(arguments)
+    assert calls == [BrokerOperation.DESKTOP_WAKE]
+
+    calls.clear()
+    implementation.ensure_parsec_running(arguments)
+    assert calls == [BrokerOperation.DESKTOP_PARSEC_ENSURE]
+    assert BrokerOperation.DESKTOP_MONITORS_OFF not in calls
+
+
 def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_argv(
     tmp_path: Path,
 ) -> None:
@@ -259,22 +281,25 @@ class StatusOperations:
         self.network = network
         self.ssh = ssh
 
-    def network_reachable(self) -> bool:
+    def network_reachable(self, _timeout_seconds: float) -> bool:
         return self.network
 
-    def ssh_ready(self) -> bool:
+    def ssh_ready(self, _timeout_seconds: float) -> bool:
         return self.ssh
 
-    def parsec_status(self) -> dict[str, object] | None:
+    def parsec_status(self, _timeout_seconds: float) -> dict[str, object] | None:
         return self.value
 
-    def parsec_ready(self) -> bool | None:
+    def parsec_ready(self, _timeout_seconds: float) -> bool | None:
         return None if self.value is None else bool(self.value["plausibly_ready"])
 
-    def send_wake(self) -> bool:
+    def send_wake(self, _timeout_seconds: float) -> bool:
         raise AssertionError
 
-    def request_headless_mode(self) -> bool:
+    def ensure_parsec_running(self, _timeout_seconds: float) -> bool:
+        raise AssertionError
+
+    def request_headless_mode(self, _timeout_seconds: float) -> bool:
         raise AssertionError
 
 
@@ -385,6 +410,7 @@ def test_every_new_action_requires_fresh_auth_and_models_see_zero_actions(
 ) -> None:
     assistant, _state = _enabled_assistant(tmp_path)
     action_names = {
+        "start_remote_desktop_session",
         "ensure_parsec_running",
         "restart_parsec",
         "lock_desktop",
@@ -512,4 +538,139 @@ def test_windows_helper_uses_s3_not_hibernate_and_fixed_tasks_only() -> None:
     assert "\\Butters\\LockDesktop" in helper
     assert "\\Butters\\SleepDesktop" in helper
     assert "ValidateSet('ParsecStatus'" in helper
-    assert "Set-Service -Name 'Parsec' -StartupType Automatic" in installer
+    assert "Set-Service -Name 'Parsec' -StartupType Manual" in installer
+    assert "StartupType Automatic" not in installer
+    assert "Start-Service -Name 'Parsec'" not in installer
+    assert "Set-Service" not in helper
+
+
+def test_human_git_bash_launcher_cannot_change_automation_shell_semantics() -> None:
+    root = Path(__file__).resolve().parents[1]
+    launcher = (root / "windows" / "human-ssh-launcher.ps1").read_text(
+        encoding="utf-8"
+    )
+    powershell_files = "\n".join(
+        path.read_text(encoding="utf-8") for path in (root / "windows").glob("*.ps1")
+    )
+
+    assert "C:\\Program Files\\Git\\bin\\bash.exe" in launcher
+    assert "$env:SSH_ORIGINAL_COMMAND" in launcher
+    assert "& $bash '--login' '-i'" in launcher
+    assert "& $bash '--login' '-c' $original" in launcher
+    assert "DefaultShell" not in powershell_files
+
+
+# --- parsec_status_enabled governs every Parsec observation ---------------
+
+
+def test_the_desktop_overview_does_not_observe_parsec_when_it_is_disabled() -> None:
+    """The flag that gates get_parsec_status must gate this overview too.
+
+    get_desktop_status is model-visible and unconditional, and it reached the
+    same desktop.parsec_status broker operation, so a deployment that had
+    deliberately left parsec_status_enabled false still observed Parsec.
+    """
+
+    import dataclasses
+
+    from butters.assistant_config import DesktopSettings
+    from butters.integrations.desktop import DesktopWorkflow
+
+    class Operations:
+        def __init__(self) -> None:
+            self.parsec_calls = 0
+
+        def network_reachable(self, _timeout: float) -> bool:
+            return True
+
+        def ssh_ready(self, _timeout: float) -> bool:
+            return True
+
+        def parsec_ready(self, _timeout: float) -> bool | None:
+            self.parsec_calls += 1
+            return True
+
+        def parsec_status(self, _timeout: float) -> dict[str, object] | None:
+            self.parsec_calls += 1
+            return {}
+
+        def send_wake(self, _timeout: float) -> bool:
+            return True
+
+        def ensure_parsec_running(self, _timeout: float) -> bool:
+            return True
+
+        def request_headless_mode(self, _timeout: float) -> bool:
+            return True
+
+    base = DesktopSettings(enabled=True, machine="desktop", host="192.0.2.1")
+
+    disabled = Operations()
+    state = DesktopWorkflow(
+        dataclasses.replace(base, parsec_status_enabled=False), disabled
+    ).status("desktop")
+    assert state.parsec_ready is None
+    assert disabled.parsec_calls == 0
+
+    enabled = Operations()
+    state = DesktopWorkflow(
+        dataclasses.replace(base, parsec_status_enabled=True), enabled
+    ).status("desktop")
+    assert state.parsec_ready is True
+    assert enabled.parsec_calls == 1
+
+
+def test_disabling_parsec_observation_does_not_touch_session_verification() -> None:
+    """start_remote_session must still verify readiness after ensure.
+
+    That verification is the validated live acceptance behaviour; it is gated by
+    parsec_ensure_enabled at registration, not by the observation flag.
+    """
+
+    from butters.assistant_config import DesktopSettings
+    from butters.integrations.desktop import DesktopWorkflow
+
+    class Operations:
+        def __init__(self) -> None:
+            self.ensured = False
+            self.parsec_checks = 0
+            self.headless = False
+
+        def network_reachable(self, _timeout: float) -> bool:
+            return True
+
+        def ssh_ready(self, _timeout: float) -> bool:
+            return True
+
+        def parsec_ready(self, _timeout: float) -> bool | None:
+            self.parsec_checks += 1
+            return self.ensured
+
+        def parsec_status(self, _timeout: float) -> dict[str, object] | None:
+            return {}
+
+        def send_wake(self, _timeout: float) -> bool:
+            return True
+
+        def ensure_parsec_running(self, _timeout: float) -> bool:
+            self.ensured = True
+            return True
+
+        def request_headless_mode(self, _timeout: float) -> bool:
+            self.headless = True
+            return True
+
+    operations = Operations()
+    settings = DesktopSettings(
+        enabled=True,
+        machine="desktop",
+        host="192.0.2.1",
+        parsec_status_enabled=False,
+    )
+
+    result = DesktopWorkflow(settings, operations).start_remote_session("desktop")
+
+    assert result["verification_complete"] is True
+    assert result["parsec_ready"] is True
+    assert operations.parsec_checks >= 1
+    assert operations.headless is True

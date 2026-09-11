@@ -662,17 +662,16 @@ def register_v2_skills(
     registry.register(
         spec(
             "start_remote_desktop_session",
-            "Run the fixed WOL, readiness, and headless monitor-power workflow for the configured desktop.",
+            "Run the fixed WOL, SSH, on-demand Parsec, readiness, and headless monitor-power workflow for the configured desktop.",
             ActionClass.ACTION,
             _parse_desktop,
             impl.authorize_desktop,
             impl.start_remote_desktop_session,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
             timeout=desktop.settings.total_timeout_seconds + 5,
-            side_effects="wake configured desktop and turn off its two physical monitors through Home Assistant",
+            side_effects="wake configured desktop, start its fixed Parsec service on demand, and turn off its two physical monitors through Home Assistant",
             explicit=True,
-            authentication=AuthenticationLevel.ELEVATED,
-            local_console_allowed=True,
+            authentication=AuthenticationLevel.FRESH,
             configured=desktop.settings.headless_enabled,
             available=(
                 desktop.settings.headless_enabled and desktop.broker_settings.enabled

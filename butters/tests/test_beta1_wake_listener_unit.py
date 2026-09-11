@@ -11,8 +11,11 @@ enable, start, or query a running service.
 
 from __future__ import annotations
 
+import subprocess
 from collections import defaultdict
 from pathlib import Path
+
+import pytest
 
 BUTTERS = Path(__file__).resolve().parents[1]
 UNIT = BUTTERS / "systemd" / "butters-live.service"
@@ -54,10 +57,84 @@ def test_uses_the_server_side_audio_and_assistant_configuration() -> None:
     assert "BUTTERS_AUDIO_CONFIG=/opt/butters/config/audio.local.toml" in environment
     assert "BUTTERS_CONFIG=/opt/butters/config/assistant.toml" in environment
 
-    # The referenced audio configuration must name a real capture device rather
-    # than the example file's placeholder.
-    audio = (BUTTERS / "config" / "audio.local.toml").read_text(encoding="utf-8")
-    assert "CHANGE_ME" not in audio
+
+def test_a_placeholder_audio_device_is_refused_at_install_time() -> None:
+    """The placeholder check belongs to the install, not to this suite.
+
+    config/audio.local.toml is machine-specific and gitignored, so reading it
+    here made the suite fail on any fresh clone -- and it checked the developer's
+    machine rather than the repository. It also never ran at the only moment it
+    matters, because the installer rsyncs that file into the deployed tree where
+    butters-live.service points BUTTERS_AUDIO_CONFIG at it.
+
+    The guard now lives beside the installer's development_mode refusal, and
+    this pins it as a source contract instead.
+    """
+
+    installer = INSTALLER.read_text(encoding="utf-8")
+
+    assert 'if [[ -f "${butters_dir}/config/audio.local.toml" ]]; then' in installer
+    assert "grep -q 'CHANGE_ME' \"${butters_dir}/config/audio.local.toml\"" in installer
+    # An absent file is a note, not a refusal: the listener is opt-in and this
+    # installer never enables it, so the web assistant must still install.
+    guard = installer[installer.index("audio.local.toml") :]
+    refusal = guard.index("Refusing to install: config/audio.local.toml")
+    absent = guard.index("config/audio.local.toml is absent")
+    assert refusal < absent
+    assert "exit 2" in guard[refusal:absent]
+
+
+def _audio_guard() -> str:
+    """Slice the guard out of the installer so the rehearsal cannot drift.
+
+    The installer refuses to run without root long before this point, so it
+    cannot be driven end to end from the suite. Executing the real text is the
+    next best thing, and it fails if the block is renamed or removed.
+    """
+
+    installer = INSTALLER.read_text(encoding="utf-8")
+    start = installer.index("# config/audio.local.toml is machine-specific")
+    end = installer.index("if ! getent group butters", start)
+    return installer[start:end]
+
+
+@pytest.mark.parametrize(
+    ("contents", "status"),
+    [
+        ('device = "plughw:CARD=CHANGE_ME,DEV=0"\n', 2),
+        ('device = "plughw:CARD=Camera,DEV=0"\n', 0),
+        (None, 0),
+    ],
+    ids=["placeholder-refused", "real-device-accepted", "absent-accepted"],
+)
+def test_the_audio_guard_refuses_only_the_placeholder(
+    tmp_path: Path, contents: str | None, status: int
+) -> None:
+    """Drive the installer's real guard text against each fixture."""
+
+    (tmp_path / "config").mkdir()
+    if contents is not None:
+        (tmp_path / "config" / "audio.local.toml").write_text(
+            contents, encoding="utf-8"
+        )
+
+    script = (
+        'set -Eeuo pipefail\n'
+        'butters_dir="$1"\n'
+        'listener_unit_name="butters-live.service"\n'
+    ) + _audio_guard()
+    completed = subprocess.run(
+        ["bash", "-c", script, "bash", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == status, completed.stderr
+    if status == 2:
+        assert "CHANGE_ME" in completed.stderr
+    elif contents is None:
+        assert "audio.local.toml is absent" in completed.stdout
 
 
 def test_audio_capture_is_permitted_by_an_allow_list_not_by_weak_hardening() -> None:
