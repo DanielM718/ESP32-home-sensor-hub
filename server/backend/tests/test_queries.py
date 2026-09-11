@@ -1610,6 +1610,27 @@ class DurableInventoryCacheTest(unittest.TestCase):
 
         client.close.assert_called_once_with()
 
+    def test_repository_serializes_startup_inventory_query(self) -> None:
+        client = Mock()
+        client.query_api.return_value.query.return_value = []
+        settings = InfluxSettings(
+            url="http://127.0.0.1:8086",
+            org="test",
+            bucket="environment",
+            write_token="unused",
+            read_token="unused",
+            live_bucket="environment_live",
+        )
+
+        with (
+            patch("influxdb_client.InfluxDBClient", return_value=client),
+            patch("app.queries.serialized_inventory_query") as serialized,
+        ):
+            repository = InfluxReadRepository(settings)
+
+        serialized.assert_called_once_with()
+        repository.close()
+
 
 def _latest_environment_node(
     *,

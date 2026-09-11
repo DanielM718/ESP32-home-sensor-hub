@@ -343,10 +343,13 @@ If MagicDNS is not enabled, use the Pi's Tailscale IP instead of `sensor-pi`.
 
 `home-sensor-dashboard` and `home-sensor-printer-observer` order themselves
 `After=influxdb.service`, then use a shared bounded readiness check against
-InfluxDB's local `/health` endpoint and an authenticated Flux query before
-starting. The check uses the existing backend environment credentials, retries
-once per second for up to 30 seconds, and logs both retry progress and timeout
-failures. `Restart=on-failure` remains enabled as a fallback.
+InfluxDB's local `/health` endpoint and the same authenticated durable inventory
+query required by the applications before starting. Readiness probes and
+application startup scans share an advisory lock so concurrent process starts
+cannot overload that historical query path. The check uses the existing backend
+environment credentials, retries once per second for up to 60 seconds, and logs
+query latency, lock waits, retry progress, and timeout failures.
+`Restart=on-failure` remains enabled as a fallback.
 
 ### X2D observer recovery (deployment pending)
 

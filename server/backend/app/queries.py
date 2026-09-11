@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app.air_quality_policy import interpret_station, rolling_24h_status
 from app.battery_status import decode_battery_status
+from app.influx_startup import serialized_inventory_query
 from app.workflows import AMS_FIELDS, PRINTER_FIELDS
 
 if TYPE_CHECKING:
@@ -145,7 +146,8 @@ class InfluxReadRepository:
         self._expected_publish_seconds = expected_publish_seconds
         self._minimum_coverage_percent = minimum_coverage_percent
         try:
-            inventory = self._load_inventory()
+            with serialized_inventory_query():
+                inventory = self._load_inventory()
         except Exception:
             self._client.close()
             LOGGER.exception(

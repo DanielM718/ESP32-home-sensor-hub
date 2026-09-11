@@ -17,7 +17,7 @@ ExecStartPre=/opt/home-sensor/server/scripts/wait_for_influxdb.sh
 ExecStart=/opt/home-sensor/server/backend/.venv/bin/gunicorn --workers ${GUNICORN_WORKERS} --bind ${FLASK_HOST}:${FLASK_PORT} app.web:create_app()
 Restart=on-failure
 RestartSec=10s
-TimeoutStartSec=40s
+TimeoutStartSec=70s
 TimeoutStopSec=30s
 
 NoNewPrivileges=true
