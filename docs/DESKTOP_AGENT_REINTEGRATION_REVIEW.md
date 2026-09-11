@@ -25,12 +25,11 @@ lineage diverged.
 | `origin/feature/butters-remote-interaction-completion` | `5459942` | **already an ancestor of `main`** (0 ahead) |
 | `origin/diagnostic/windows-sleep-stability` | `a6c3cc1` | based on `826fc9a`; +6 unreviewed diagnostic commits |
 
-The fetch could not be refreshed in this session (`git fetch` failed with
-`Permission denied (publickey)` — the ssh-agent socket is not exported here), so
-the audit was performed against the local `origin/*` refs. `main` and
-`origin/main` are identical at `bcaab83`, and the divergence arithmetic above is
-self-consistent, so the conclusions are not sensitive to a stale fetch. Re-run
-`git fetch --all` with the agent socket before acting on the slice plan.
+The audit was performed against local `origin/*` refs and then confirmed against
+a live `git fetch --all`: `origin/main` is `bcaab83`, the lineage head is
+`c4ffe0f`, and the divergence is exactly 40/7 as tabulated. `main` and
+`origin/main` are identical. (`git fetch` and `git push` here need
+`SSH_AUTH_SOCK=/run/user/1000/openssh_agent`, which is not exported by default.)
 
 ### 1.2 The important correction
 
