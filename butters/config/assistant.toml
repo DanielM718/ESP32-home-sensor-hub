@@ -39,7 +39,13 @@ parsec_restart_enabled = false
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false
-shutdown_enabled = false
+# Shutdown is exposed in Admin -> Tools. It is the only desktop power-off
+# route, reaching the same fixed desktop-control.ps1 operation a spoken request
+# would use. It stays behind FRESH passkey authentication bound to a frozen
+# plan plus an explicit confirmation of that plan, so enabling the capability
+# here does not make it a one-click action. host_shutdown_enabled, which powers
+# off the Butters host itself, is deliberately left off.
+shutdown_enabled = true
 
 # Passkey trust values are server-known constants, never derived from proxy
 # headers. Authentication is a step-up inside the private tailnet boundary.

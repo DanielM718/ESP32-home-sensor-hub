@@ -267,6 +267,12 @@ let desktopAgent = null;
 let elevated = false;
 let desktopRegistered = {};
 let desktopReachable = null;
+let desktopHostname = "";
+// The registry the agent last reported. Keeping it means a registered
+// application stays represented, and explains itself, while the desktop is
+// off -- instead of the controls appearing to materialise out of nowhere the
+// moment the agent connects.
+let knownApps = [];
 
 // The four control states. Anything not `available` stays visible with a
 // reason rather than vanishing or silently doing nothing. The exception is
@@ -285,6 +291,10 @@ function applyControlState(button, state, reason) {
   button.dataset.controlState = state;
   button.title = reason || CONTROL_LABELS[state] || "";
   button.setAttribute("aria-disabled", String(button.disabled));
+  // The state also gets a visible word, not only a hover title and a colour:
+  // a phone has no hover, and a colour alone is not a message.
+  if (CONTROL_LABELS[state]) button.dataset.controlLabel = CONTROL_LABELS[state];
+  else delete button.dataset.controlLabel;
 }
 
 // A control that needs elevation is offered, not hidden. Hiding it was how the
@@ -308,6 +318,198 @@ async function refreshAuthState() {
   }
 }
 
+// ---- interaction feedback --------------------------------------------------
+//
+// The complaint this answers was "it feels like I'm pressing an image": the
+// press produced nothing until the network came back. Pressed and focus states
+// are CSS; the loading state is here, because it has to name what is running
+// and it has to be undone on every exit path, including a thrown error.
+
+let activeControl = null;
+let outcomeTimer = null;
+
+function markBusy(button, label) {
+  activeControl = button || null;
+  if (!button) return;
+  if (button.dataset.idleLabel === undefined) button.dataset.idleLabel = button.textContent;
+  if (label) button.textContent = label;
+  button.dataset.busy = "true";
+  button.setAttribute("aria-busy", "true");
+}
+
+function clearBusy() {
+  const button = activeControl;
+  activeControl = null;
+  if (!button) return;
+  if (button.dataset.idleLabel !== undefined) {
+    button.textContent = button.dataset.idleLabel;
+    delete button.dataset.idleLabel;
+  }
+  delete button.dataset.busy;
+  button.removeAttribute("aria-busy");
+}
+
+// A brief, non-blocking confirmation on the control that was pressed. The
+// durable record of what happened is the result summary, so losing this flash
+// -- on a control that a refresh re-rendered -- costs no information.
+function flashOutcome(button, ok) {
+  if (!button || !button.isConnected) return;
+  clearTimeout(outcomeTimer);
+  button.dataset.outcome = ok ? "success" : "failure";
+  outcomeTimer = setTimeout(() => { delete button.dataset.outcome; }, 2400);
+}
+
+// ---- stage lists -----------------------------------------------------------
+//
+// Wake and shutdown both report a sequence of stages Butters can actually
+// observe. Reached, awaited and unobserved stages differ by glyph as well as
+// by colour, and each carries a screen-reader word, so none of the three
+// depends on seeing a hue.
+const STAGE_MARKS = {done: "✓", active: "•", pending: "○"};
+const STAGE_WORDS = {done: "observed", active: "waiting", pending: "not observed"};
+
+function renderStageList(target, stages, reached, note, active) {
+  target.replaceChildren();
+  for (const [label] of stages) {
+    const tone = reached.includes(label) ? "done" : label === active ? "active" : "pending";
+    const item = document.createElement("li");
+    item.dataset.stage = tone;
+    const mark = document.createElement("span");
+    mark.className = "stage-mark";
+    mark.setAttribute("aria-hidden", "true");
+    mark.textContent = STAGE_MARKS[tone];
+    const text = document.createElement("span");
+    text.textContent = label;
+    const spoken = document.createElement("span");
+    spoken.className = "visually-hidden";
+    spoken.textContent = ` (${STAGE_WORDS[tone]})`;
+    item.append(mark, text, spoken);
+    target.append(item);
+  }
+  if (note) {
+    const item = document.createElement("li");
+    item.className = "stage-note";
+    item.textContent = note;
+    target.append(item);
+  }
+}
+
+function stageProgress(stages, state) {
+  const reached = stages.filter(([, test]) => test(state)).map(([label]) => label);
+  const next = stages.map(([label]) => label).find(label => !reached.includes(label));
+  return [reached, next];
+}
+
+// ---- result presentation ---------------------------------------------------
+//
+// The panel used to lead with a pretty-printed job object and leave the reader
+// to work out that `visible_window: true, session_id: 1` meant the window was
+// up. It now leads with a sentence and keeps the object, unabridged, under
+// Technical details -- nothing diagnostic is discarded.
+
+const APP_TITLES = {git_bash: "Git Bash", parsec: "Parsec", vs_code: "VS Code",
+                    vscode: "VS Code", explorer: "File Explorer"};
+
+function appTitle(name) {
+  if (APP_TITLES[name]) return APP_TITLES[name];
+  return String(name || "application").replace(/[_-]+/g, " ")
+    .replace(/\b\w/g, character => character.toUpperCase());
+}
+
+// Unwrap only the layers the action path genuinely produces: a coordinator job
+// wraps per-step skill results, and a structured skill result wraps its data.
+function actionPayload(value) {
+  if (!value || typeof value !== "object") return {};
+  const steps = value.result && value.result.steps;
+  if (Array.isArray(steps) && steps.length) {
+    return actionPayload(steps[steps.length - 1].result);
+  }
+  if (value.kind && value.data && typeof value.data === "object") return value.data;
+  return value;
+}
+
+function summarizeAction(action, parameters, result) {
+  // A job that did not reach `completed` is reported as exactly that, with the
+  // backend's own failure reason rather than a guess.
+  if (result && typeof result === "object" && result.state
+      && ["failed", "cancelled", "expired"].includes(result.state)) {
+    return {ok: false, text: result.failure_reason || result.failure_code
+      || `The ${action} job ended ${result.state}.`};
+  }
+  const data = actionPayload(result);
+  if (action === "desktop.app.launch") {
+    const title = appTitle(parameters.app);
+    if (data.success === false) {
+      return {ok: false, text: `${title} did not launch: ` +
+        `${data.error || data.reason || "the Desktop Agent rejected the launch"}.`};
+    }
+    const session = data.session_id === undefined || data.session_id === null
+      ? "" : ` in Windows session ${data.session_id}`;
+    if (data.state === "already_running") {
+      return {ok: true, text: `${title} already running${session}.`};
+    }
+    return {ok: true, text: `${title} launched${session}.`};
+  }
+  if (action === "wake_desktop") {
+    return data.accepted === false
+      ? {ok: false, text: "The broker did not accept the wake request."}
+      : {ok: true, text: "Desktop wake request succeeded."};
+  }
+  if (action === "shutdown_desktop") {
+    return data.accepted === false
+      ? {ok: false, text: "The broker did not accept the shutdown request."}
+      : {ok: true, text: "Desktop shutdown request accepted by the desktop."};
+  }
+  if (action === "desktop.ssh_test") {
+    return data.success
+      ? {ok: true, text: "SSH reached the desktop and its sentinel matched."}
+      : {ok: false, text: `SSH did not complete: ${data.stderr || "no sentinel response"}.`};
+  }
+  if (action === "desktop.streaming.prepare") {
+    return data.success === false
+      ? {ok: false, text: `Streaming preparation stopped: ${data.error || "see details"}.`}
+      : {ok: true, text: "Desktop prepared for streaming."};
+  }
+  if (action && action.startsWith("desktop.") && data.exit_code !== undefined) {
+    const seconds = data.duration_seconds === undefined ? "" : ` in ${data.duration_seconds}s`;
+    return data.success
+      ? {ok: true, text: `${action} completed${seconds} (exit code 0).`}
+      : {ok: false, text: `${action} failed${seconds} with exit code ${data.exit_code}.`};
+  }
+  if (data.success === false) {
+    return {ok: false, text: `${action} did not succeed: ${data.error || "see details"}.`};
+  }
+  return {ok: true, text: `${action} completed.`};
+}
+
+const RESULT_MARKS = {success: "✓", failure: "✕", pending: "…"};
+
+function showResult(summary, raw) {
+  const line = document.querySelector("#desktop-result-summary");
+  const tone = summary.ok === null || summary.ok === undefined
+    ? "pending" : summary.ok ? "success" : "failure";
+  line.dataset.outcome = tone;
+  line.replaceChildren();
+  const mark = document.createElement("span");
+  mark.className = "result-mark";
+  mark.setAttribute("aria-hidden", "true");
+  mark.textContent = RESULT_MARKS[tone];
+  const text = document.createElement("span");
+  text.textContent = summary.text;
+  line.append(mark, text);
+  if (raw !== undefined) {
+    document.querySelector("#desktop-result").textContent = pretty(raw);
+  }
+}
+
+// While a job is queued or running, report the coordinator's own state, stage
+// and progress rather than an invented timer.
+function describeJob(job) {
+  const percent = typeof job.progress === "number"
+    ? ` · ${Math.round(job.progress * 100)}%` : "";
+  return `Job ${job.state}${job.stage ? ` · ${job.stage}` : ""}${percent}…`;
+}
+
 function desktopButtons() {
   const project = desktopProjects.find(item => item.name === document.querySelector("#desktop-project").value);
   document.querySelectorAll("[data-compute]").forEach(button => {
@@ -324,6 +526,7 @@ function desktopButtons() {
   applyControlState(document.querySelector("#desktop-refresh"), "available", "Re-read desktop state");
   applyControlState(document.querySelector("#desktop-ssh-test"), "available", "Read-only SSH reachability check");
   applyControlState(document.querySelector("#desktop-wake"), ...wakeControlState());
+  applyControlState(document.querySelector("#desktop-shutdown"), ...shutdownControlState());
 }
 
 // Wake is offered when the desktop is unreachable, and stays visible and
@@ -348,6 +551,26 @@ function wakeControlState() {
     : "Reachability is unknown; sending wake is safe and idempotent.");
 }
 
+// Shutdown is the same shape of control, one risk tier up. It is never
+// reported as available-without-authorization, because the registered skill is
+// FRESH-authenticated: every run freezes a plan, is confirmed against that
+// plan, and is then satisfied with a passkey assertion bound to its digest.
+function shutdownControlState() {
+  const registered = desktopRegistered.shutdown_desktop;
+  if (!registered) {
+    return ["not_configured", "Shutdown is not registered on this Butters build."];
+  }
+  if (!registered.available || !registered.enabled) {
+    return ["not_configured", registered.unavailable_reason
+      || "Shutdown is disabled, or the action broker is unprovisioned."];
+  }
+  if (desktopReachable === false) {
+    return ["unavailable", "The desktop is already offline; there is nothing to shut down."];
+  }
+  return ["available",
+    "Freeze a shutdown plan. You confirm the plan, then authorize it with a passkey."];
+}
+
 // The stages Butters can actually observe, in the order they become true.
 // Rendered from real status, never from an assumption about what wake did.
 const WAKE_STAGES = [
@@ -362,8 +585,8 @@ const WAKE_STAGES = [
 function renderWakeProgress(state) {
   const target = document.querySelector("#desktop-wake-progress");
   const reached = WAKE_STAGES.filter(([, test]) => test(state)).map(([label]) => label);
-  const parts = reached.length ? reached.join(" → ") : "no stage observed yet";
-  target.textContent = state.note ? `${parts} — ${state.note}` : parts;
+  const [, next] = stageProgress(WAKE_STAGES, state);
+  renderStageList(target, WAKE_STAGES, reached, state.note, state.waiting ? next : null);
 }
 
 async function wakeDesktop() {
@@ -371,6 +594,7 @@ async function wakeDesktop() {
   if (desktopReachable === true) {
     renderWakeProgress({network: true, ssh: null,
                         note: "The desktop was already reachable; no packet was sent."});
+    showResult({ok: true, text: "Desktop already reachable. No wake packet was sent."});
     return;
   }
   renderWakeProgress({requested: true, note: "requesting authorization if required"});
@@ -411,18 +635,160 @@ async function observeWakeProgress() {
     desktopReachable = typeof status.online === "boolean" ? status.online : null;
     if (state.agent) {
       renderWakeProgress({...state, waiting: false, note: "desktop and agent are ready"});
+      showResult({ok: true, text: "Desktop awake. SSH is up and the Desktop Agent is connected."});
       return;
     }
     if (state.ssh) {
       renderWakeProgress({...state, waiting: false,
         note: `SSH is up; Windows session ${axes.session || "UNKNOWN"}, agent ${axes.agent || "OFFLINE"}`});
+      showResult({ok: true, text: "Desktop awake and answering SSH. The Desktop Agent has not connected yet."});
       return;
     }
     renderWakeProgress(state);
     await new Promise(resolve => setTimeout(resolve, 3000));
   }
+  // The observation window closing is not a wake failure. The broker accepted
+  // the request; the desktop simply has not been seen yet.
   renderWakeProgress({...state,
-    note: "the desktop did not become reachable within 120s; it may still be booting"});
+    note: "Wake sent. Desktop is still starting or has not yet become reachable."});
+  showResult({ok: true,
+    text: "Wake sent. Desktop is still starting or has not yet become reachable."});
+}
+
+// ---- shutdown --------------------------------------------------------------
+//
+// Shutdown reuses the registered `shutdown_desktop` skill, which already
+// reaches the root broker's one fixed desktop-control operation. There is no
+// second implementation and no command, host, address or parameter the browser
+// can supply: the backend rejects parameters for a registered action and takes
+// the machine from configuration. Because the skill is FRESH-authenticated the
+// backend always returns a frozen plan first, which is what the confirmation
+// step below confirms.
+const SHUTDOWN_STAGES = [
+  ["shutdown requested", state => state.requested],
+  ["confirmed and authorized", state => state.authorized],
+  ["waiting for desktop to go offline", state => state.waiting],
+  ["desktop offline", state => state.offline],
+];
+
+function renderShutdownProgress(state) {
+  const target = document.querySelector("#desktop-shutdown-progress");
+  const [reached, next] = stageProgress(SHUTDOWN_STAGES, state);
+  renderStageList(target, SHUTDOWN_STAGES, reached, state.note, state.waiting ? next : null);
+}
+
+// The confirmation is a step in the existing ceremony, not a browser-only
+// gate: the plan being confirmed is the one the coordinator already froze, and
+// declining releases it through the existing cancel endpoint.
+function confirmShutdown(plan) {
+  const panel = document.querySelector("#desktop-shutdown-confirm");
+  panel.replaceChildren();
+  const question = document.createElement("p");
+  question.className = "confirm-question";
+  question.textContent = `Shut down ${desktopHostname || "the desktop"}? ` +
+    "This ends every interactive session, including Parsec, and any running build.";
+  const detail = document.createElement("p");
+  detail.className = "control-reason";
+  const steps = (plan.steps || []).map(step => step.skill).join(", ");
+  detail.textContent = `Frozen plan: ${steps || plan.summary || "shutdown_desktop"}` +
+    ` · ${plan.state === "pending_confirmation" ? "awaiting your confirmation" : plan.state}` +
+    " · confirming requests a fresh passkey assertion bound to this plan.";
+  const row = document.createElement("div");
+  row.className = "button-row";
+  const go = document.createElement("button");
+  go.className = "danger-button";
+  go.type = "button";
+  go.textContent = "Confirm shutdown";
+  const stop = document.createElement("button");
+  stop.className = "secondary-button";
+  stop.type = "button";
+  stop.textContent = "Cancel";
+  row.append(go, stop);
+  panel.append(question, detail, row);
+  panel.hidden = false;
+  go.focus();
+  return new Promise(resolve => {
+    const settle = value => {
+      panel.hidden = true;
+      panel.replaceChildren();
+      document.querySelector("#desktop-shutdown").focus();
+      resolve(value);
+    };
+    go.addEventListener("click", () => settle(true));
+    stop.addEventListener("click", () => settle(false));
+    // Escape declines, which is what a keyboard user expects of a confirmation.
+    panel.addEventListener("keydown", event => {
+      if (event.key === "Escape") { event.stopPropagation(); settle(false); }
+    });
+  });
+}
+
+async function cancelPendingAction(planId) {
+  try {
+    await api(`/api/actions/pending/${encodeURIComponent(planId)}/cancel`, {method: "POST"});
+  } catch (error) {
+    // The frozen plan expires by itself, so a failed cancel is reportable but
+    // never leaves a runnable plan behind.
+    reportPanelError(error);
+  }
+}
+
+async function shutdownDesktop() {
+  if (desktopBusy || sessionDead) return;   // repeated clicks are dropped
+  if (desktopReachable === false) {
+    renderShutdownProgress({offline: true,
+      note: "Desktop already offline; no shutdown was requested."});
+    showResult({ok: true, text: "Desktop already offline. Nothing was requested."});
+    return;
+  }
+  renderShutdownProgress({requested: true, note: "freezing a plan for confirmation"});
+  const button = document.querySelector("#desktop-shutdown");
+  const ran = await runDesktop("shutdown_desktop", {}, {
+    origin: button,
+    busyLabel: "Shutting down…",
+    pendingLabel: "Freezing a shutdown plan for confirmation…",
+    confirm: confirmShutdown,
+  });
+  if (!ran) {
+    renderShutdownProgress({requested: true,
+      note: "shutdown was not performed; the desktop is untouched"});
+    return;
+  }
+  await observeShutdownProgress();
+}
+
+// Shutdown is reported from observation, not from the broker's acceptance. The
+// desktop is called offline only once it stops answering ping and SSH.
+async function observeShutdownProgress() {
+  const deadline = Date.now() + 120000;
+  let state = {requested: true, authorized: true, waiting: true};
+  renderShutdownProgress(state);
+  while (Date.now() < deadline && !sessionDead) {
+    let status;
+    try {
+      status = (await api("/api/desktop/status")).value;
+    } catch (error) {
+      renderShutdownProgress({...state, note: `status unavailable: ${describeError(error)}`});
+      return;
+    }
+    desktopReachable = typeof status.online === "boolean" ? status.online : null;
+    if (status.online === false) {
+      renderShutdownProgress({requested: true, authorized: true, waiting: false, offline: true,
+        note: "the desktop stopped answering ping and SSH"});
+      showResult({ok: true, text: "Desktop offline. The shutdown completed."});
+      await refreshDesktop();
+      return;
+    }
+    renderShutdownProgress(state);
+    await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  // Accurate rather than optimistic: the request was accepted, and the machine
+  // is still answering, which is what Windows looks like while it closes
+  // applications. Claiming success here would be a claim Butters cannot make.
+  renderShutdownProgress({...state,
+    note: "Shutdown accepted. The desktop is still reachable and has not gone offline yet."});
+  showResult({ok: null,
+    text: "Shutdown accepted. The desktop is still reachable and has not confirmed it went offline."});
 }
 
 // ---- host status -----------------------------------------------------------
@@ -430,35 +796,61 @@ async function observeWakeProgress() {
 // The backend already reports discrete power/network/os/session/agent axes.
 // Rendering them separately, rather than collapsing to one word, is the point:
 // "powered off" and "reachable but no interactive session" are different
-// operational situations with different next steps.
+// operational situations with different next steps. They are now laid out as a
+// grid of labelled chips so the five can be read at a glance, which is a
+// presentation change only -- no axis was merged away.
 const AXIS_LABELS = {power:"Power", network:"Network", os:"SSH / OS", session:"Windows session", agent:"Desktop Agent"};
+const AXIS_TONE = {
+  RESPONDING: "good", REACHABLE: "good", AUTHENTICATED: "good", CONNECTED: "good",
+  ACTIVE: "good", UNLOCKED: "good",
+  SSH_RESPONDING: "partial", LOCKED: "partial", AWAITING_HEARTBEAT: "partial",
+  UNREACHABLE: "bad", OFFLINE: "bad", NONE: "bad", DISCONNECTED: "bad",
+};
+
+function axisTone(value) {
+  return AXIS_TONE[String(value).toUpperCase()] || "unknown";
+}
 
 async function refreshDesktopStatus() {
   const status = document.querySelector("#desktop-status");
+  const headline = document.querySelector("#desktop-summary");
   try {
     const result = (await api("/api/desktop/status")).value;
     // online is true, false, or absent when the probe could not decide.
     desktopReachable = typeof result.online === "boolean" ? result.online : null;
+    desktopHostname = result.hostname || "desktop";
     status.replaceChildren();
-    const host = document.createElement("strong");
-    host.textContent = result.hostname || "desktop";
-    status.append(host);
     const axes = result.axes || {};
     for (const [key, label] of Object.entries(AXIS_LABELS)) {
       if (!(key in axes)) continue;
-      const item = document.createElement("span");
-      item.className = "state-axis";
-      item.textContent = ` · ${label}: ${axes[key]}`;
+      const item = document.createElement("div");
+      item.className = "axis";
+      item.dataset.tone = axisTone(axes[key]);
+      const name = document.createElement("span");
+      name.className = "axis-label";
+      name.textContent = label;
+      const value = document.createElement("span");
+      value.className = "axis-value";
+      value.textContent = axes[key];
+      item.append(name, value);
       status.append(item);
     }
-    const note = result.status_note || result.stderr;
-    if (note) {
-      const detail = document.createElement("small");
-      detail.textContent = ` — ${note}`;
-      status.append(detail);
+    if (!status.childElementCount) {
+      status.textContent = "This backend reported no per-axis desktop state.";
     }
+    const note = result.status_note || result.stderr;
+    headline.replaceChildren();
+    const host = document.createElement("strong");
+    host.textContent = desktopHostname;
+    headline.append(host);
+    const summary = document.createElement("span");
+    summary.textContent = ` · ${desktopReachable === true ? "reachable"
+      : desktopReachable === false ? "not reachable" : "reachability unknown"}` +
+      (note ? ` — ${note}` : "");
+    headline.append(summary);
   } catch (error) {
     status.textContent = `Desktop host status unavailable: ${describeError(error)}`;
+    headline.textContent = "Desktop state could not be read.";
     throw error;
   }
 }
@@ -554,10 +946,9 @@ async function refreshDesktopAgent(agent) {
   }
 
   if (!agent || !agent.agent_connected) {
-    const note = document.createElement("p");
-    note.textContent = "Registered GUI controls are listed once the agent reconnects. " +
-      "SSH compute and wake remain available and independent.";
-    area.append(note);
+    // The registry the agent last reported keeps the capability represented
+    // and explained, instead of the controls seeming to appear at random.
+    renderAppCards(area, knownApps, agent, true);
     vms.textContent = agent && agent.state === "not_configured"
       ? "No VM backend is configured."
       : "VM status is unavailable while the agent is disconnected.";
@@ -586,31 +977,70 @@ async function renderApplications(area, agent) {
     return;
   }
   const apps = data.apps || [];
+  if (apps.length) knownApps = apps;
+  renderAppCards(area, apps, agent, false);
+}
+
+function renderAppCards(area, apps, agent, remembered) {
+  area.replaceChildren();
   if (!apps.length) {
-    area.textContent = "The agent reports no registered applications. Add entries to its apps.toml.";
+    const note = document.createElement("p");
+    note.className = "tool-note";
+    note.textContent = remembered
+      ? "Registered GUI controls are listed once the agent reconnects. " +
+        "SSH compute and wake remain available and independent."
+      : "The agent reports no registered applications. Add entries to its apps.toml.";
+    area.append(note);
     return;
   }
   for (const app of apps) {
     const [state, reason] = appControlState(app, agent);
-    const row = document.createElement("p");
-    row.className = "app-row";
-    const label = document.createElement("span");
-    const condition = app.running ? "running" : app.installed === false ? "not installed" : "stopped";
-    label.textContent = `${app.app}: ${condition}${app.instances ? ` (${app.instances})` : ""} `;
+    const card = document.createElement("div");
+    card.className = "app-card";
+    card.dataset.controlState = state;
+
+    const head = document.createElement("div");
+    head.className = "app-head";
+    const name = document.createElement("strong");
+    name.textContent = appTitle(app.app);
+    const chip = document.createElement("span");
+    chip.className = "app-chip";
+    // While the agent is gone, the honest condition is that the control is
+    // waiting for it -- not a stale "running" from the last time it answered.
+    const condition = remembered ? "waiting for Desktop Agent"
+      : app.installed === false ? "not installed"
+      : app.running ? "running" : "stopped";
+    chip.dataset.condition = remembered ? "waiting"
+      : app.installed === false ? "missing"
+      : app.running ? "running" : "stopped";
+    chip.textContent = condition +
+      (!remembered && app.instances ? ` (${app.instances})` : "");
+    head.append(name, chip);
+
     const button = document.createElement("button");
-    button.className = "secondary-button";
+    button.className = "secondary-button app-launch";
     button.type = "button";
-    button.textContent = `Launch ${app.app}`;
+    button.textContent = `Launch ${appTitle(app.app)}`;
     applyControlState(button, state, reason);
-    button.addEventListener("click", () => runDesktop("desktop.app.launch", {app: app.app}));
-    row.append(label, button);
+    button.addEventListener("click", () => runDesktop("desktop.app.launch", {app: app.app},
+      {origin: button, busyLabel: "Launching…",
+       pendingLabel: `Launching ${appTitle(app.app)}…`}));
+
+    card.append(head, button);
     if (state !== "available") {
       const why = document.createElement("small");
       why.className = "control-reason";
-      why.textContent = ` ${CONTROL_LABELS[state]}: ${reason}`;
-      row.append(why);
+      why.textContent = `${CONTROL_LABELS[state]}: ${reason}`;
+      card.append(why);
     }
-    area.append(row);
+    area.append(card);
+  }
+  if (remembered) {
+    const note = document.createElement("p");
+    note.className = "tool-note";
+    note.textContent = "Shown from the registry the Desktop Agent last reported. " +
+      "Launching resumes when it reconnects; wake and SSH compute are independent.";
+    area.append(note);
   }
 }
 
@@ -629,29 +1059,40 @@ async function renderVms(target) {
 }
 
 // ---- running an action -----------------------------------------------------
-async function runDesktop(action, parameters = {}) {
+async function runDesktop(action, parameters = {}, options = {}) {
   if (desktopBusy || sessionDead) return;   // no duplicate submissions
   desktopBusy = true;
+  // The pressed control names what it is doing before the first byte moves.
+  markBusy(options.origin, options.busyLabel);
   desktopButtons();
   document.querySelectorAll("#desktop-apps button, #desktop-streaming").forEach(b => { b.disabled = true; });
   const output = document.querySelector("#desktop-result");
-  output.textContent = `Running ${action}…`;
+  showResult({ok: null, text: options.pendingLabel || `Running ${action}…`});
   let succeeded = false;
   try {
-    output.textContent = pretty(await executeDesktop(action, parameters, output));
-    succeeded = true;
+    const result = await executeDesktop(action, parameters, output, options);
+    const summary = summarizeAction(action, parameters, result);
+    showResult(summary, result);
+    flashOutcome(options.origin, summary.ok !== false);
+    // A completed job that reports a failed operation is not a success, and
+    // callers that observe afterwards must not treat it as one.
+    succeeded = summary.ok !== false;
   } catch (error) {
     // Say what actually happened. "Git Bash launch requires renewed
     // authorization" is actionable; "session invalid or expired" was not, and
     // was not even true.
-    output.textContent = error instanceof ApiError && error.requiresElevation
+    const text = error instanceof ApiError && error.requiresElevation
       ? `${action} requires renewed passkey authorization. Nothing was run. ` +
         `Click the action again, or use Authenticate in Passkeys / Authentication.`
       : describeError(error);
+    showResult({ok: false, text},
+               error instanceof ApiError ? error.payload : {error: String(error && error.message)});
+    flashOutcome(options.origin, false);
     reportPanelError(error);
   } finally {
     // Button state is always restored, including after a failure.
     desktopBusy = false;
+    clearBusy();
     await refreshDesktop();
   }
   // Callers that follow an action with observation need to know whether it ran,
@@ -659,7 +1100,7 @@ async function runDesktop(action, parameters = {}) {
   return succeeded;
 }
 
-async function executeDesktop(action, parameters, output) {
+async function executeDesktop(action, parameters, output, options = {}) {
   let result;
   try {
     result = (await api("/api/desktop/actions",
@@ -668,7 +1109,7 @@ async function executeDesktop(action, parameters, output) {
     // Elevation expired between rendering and clicking: run the existing
     // ceremony and retry exactly once, rather than dead-ending.
     if (!(error instanceof ApiError) || !error.requiresElevation) throw error;
-    output.textContent = "Renewed authorization required. Confirm with your passkey…";
+    showResult({ok: null, text: "Renewed authorization required. Confirm with your passkey…"});
     await authenticatePurpose("elevation");
     elevated = true;
     result = (await api("/api/desktop/actions",
@@ -677,7 +1118,14 @@ async function executeDesktop(action, parameters, output) {
   // A privileged action returns a frozen plan instead of running. Satisfying
   // it with a passkey assertion is the designed elevation path.
   if (result.pending_action) {
-    output.textContent = "Confirm this action with your passkey…";
+    // A higher-risk action is confirmed against the frozen plan before any
+    // ceremony starts. Declining releases the plan through the existing
+    // endpoint instead of leaving it to expire unexplained.
+    if (options.confirm && !await options.confirm(result.pending_action)) {
+      await cancelPendingAction(result.pending_action.pending_action_id);
+      throw new Error("Cancelled at the confirmation step. Nothing was run.");
+    }
+    showResult({ok: null, text: "Confirm this action with your passkey…"});
     const begin = (await api("/api/auth/authenticate/options", {method:"POST",
       body:JSON.stringify({purpose:"pending_action",
                            pending_action_id:result.pending_action.pending_action_id})})).value;
@@ -691,10 +1139,15 @@ async function executeDesktop(action, parameters, output) {
   for (const initial of result.jobs || result.action_jobs || []) {
     let job = initial;
     for (let poll = 0; poll < 310 && ["queued", "running", "waiting"].includes(job.state); poll++) {
+      // The summary reports the coordinator's own state and stage; the raw job
+      // stays live under Technical details.
+      showResult({ok: null, text: describeJob(job)});
       output.textContent = pretty(job);
       await new Promise(resolve => setTimeout(resolve, 1000));
-      job = (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value.job
-         || (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value;
+      // One request per poll: the previous form issued a second identical
+      // request whenever the payload had no `job` key.
+      const payload = (await api("/api/actions/jobs/" + encodeURIComponent(job.job_id))).value;
+      job = payload.job || payload;
     }
     result = job;
   }
@@ -702,11 +1155,19 @@ async function executeDesktop(action, parameters, output) {
 }
 
 document.querySelector("#desktop-refresh").addEventListener("click", refreshDesktop);
-document.querySelector("#desktop-ssh-test").addEventListener("click", () => runDesktop("desktop.ssh_test"));
+document.querySelector("#desktop-ssh-test").addEventListener("click",
+  () => runDesktop("desktop.ssh_test", {},
+    {origin: document.querySelector("#desktop-ssh-test"), busyLabel: "Testing…",
+     pendingLabel: "Running a read-only SSH reachability check…"}));
 document.querySelector("#desktop-wake").addEventListener("click", wakeDesktop);
+document.querySelector("#desktop-shutdown").addEventListener("click", shutdownDesktop);
 document.querySelector("#desktop-project").addEventListener("change", desktopButtons);
 document.querySelectorAll("[data-compute]").forEach(button => button.addEventListener("click",
-  () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value})));
-document.querySelector("#desktop-streaming").addEventListener("click", () => runDesktop("desktop.streaming.prepare"));
+  () => runDesktop(button.dataset.compute, {project:document.querySelector("#desktop-project").value},
+    {origin: button, busyLabel: "Running…"})));
+document.querySelector("#desktop-streaming").addEventListener("click",
+  () => runDesktop("desktop.streaming.prepare", {},
+    {origin: document.querySelector("#desktop-streaming"), busyLabel: "Preparing…",
+     pendingLabel: "Preparing the desktop for streaming…"}));
 
 initialize();

@@ -23,7 +23,13 @@ from butters_agent.protocol import SCHEMAS as AGENT_ACTIONS, MUTATIONS as AGENT_
 # not a new capability, and not a second implementation. A future voice request
 # reaches the identical skill through the router, and both go through
 # _freeze_or_execute below, so neither route can skip authorization or audit.
-TOOLS_REGISTERED_ACTIONS = frozenset({"wake_desktop"})
+TOOLS_REGISTERED_ACTIONS = frozenset({"wake_desktop", "shutdown_desktop"})
+# The subset the panel must not run on a single click. Freezing these in the
+# `pending_confirmation` state is the existing confirmation architecture: the
+# plan is recorded before anything runs, the operator confirms that exact plan,
+# and the coordinator audits the run as `confirmed_user_request` rather than
+# `direct_user_request`. It is deliberately not a browser-side confirm().
+TOOLS_CONFIRM_ACTIONS = frozenset({"shutdown_desktop"})
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
@@ -167,7 +173,10 @@ class BetaAssistantService:
             if parameters:
                 raise ValueError("Registered action accepts no parameters")
             return self._freeze_or_execute(
-                session, action, {"machine": self.settings.desktop.machine}
+                session,
+                action,
+                {"machine": self.settings.desktop.machine},
+                pending_confirmation=action in TOOLS_CONFIRM_ACTIONS,
             )
         if action in AGENT_ACTIONS or action in {"desktop.streaming.status", "desktop.streaming.prepare"}:
             from dataclasses import asdict

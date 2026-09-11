@@ -76,23 +76,41 @@
     </section>
 
     <section id="panel-tools" class="admin-panel">
-      <div class="control-card">
-        <h2>Desktop</h2>
-        <p id="desktop-status" role="status">Select Tools to load desktop status.</p>
-        <div class="button-row"><button id="desktop-refresh" class="secondary-button" type="button">Refresh Status</button><button id="desktop-ssh-test" class="primary-button" type="button">SSH Test</button><button id="desktop-wake" class="primary-button" type="button">Wake Desktop</button></div>
-        <p id="desktop-wake-progress" role="status">Wake has not been requested.</p>
+      <div class="control-card tool-card">
+        <div class="tool-head">
+          <h2>Desktop</h2>
+          <span id="desktop-summary" class="tool-headline" role="status">Checking desktop state…</span>
+        </div>
+        <div id="desktop-status" class="axis-grid" role="group" aria-label="Observed desktop state">Select Tools to load desktop status.</div>
+        <div class="button-row"><button id="desktop-refresh" class="secondary-button" type="button">Refresh Status</button><button id="desktop-ssh-test" class="secondary-button" type="button">SSH Test</button><button id="desktop-wake" class="primary-button" type="button">Wake Desktop</button></div>
+        <ol id="desktop-wake-progress" class="stage-list" role="status">Wake has not been requested.</ol>
+
         <h3>Interactive Desktop Agent</h3>
-        <p id="desktop-agent-status" role="status">Agent state has not been checked.</p>
-        <div id="desktop-apps"></div>
-        <p id="desktop-vms">VM capability has not been checked.</p>
-        <button id="desktop-streaming" class="primary-button" type="button" disabled>Prepare for Streaming</button>
-        <p>GUI controls require an active unlocked user session and passkey authentication. SSH compute remains independent.</p>
+        <p id="desktop-agent-status" class="tool-note" role="status">Agent state has not been checked.</p>
+        <div id="desktop-apps" class="app-grid"></div>
+        <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>
+        <div class="button-row"><button id="desktop-streaming" class="primary-button" type="button" disabled>Prepare for Streaming</button></div>
+        <p class="tool-note">GUI controls require an active unlocked user session and passkey authentication. SSH compute remains independent.</p>
+
         <h2>Compute</h2>
         <label>Registered project<select id="desktop-project" disabled><option value="">No registered projects</option></select></label>
-        <p id="desktop-compute-note">Register a verified project to enable build and test. Compute actions require authentication in Passkeys / Auth.</p>
+        <p id="desktop-compute-note" class="tool-note">Register a verified project to enable build and test. Compute actions require authentication in Passkeys / Auth.</p>
         <div class="button-row"><button data-compute="desktop.compile" class="secondary-button" type="button" disabled>Build</button><button data-compute="desktop.test" class="secondary-button" type="button" disabled>Test</button><button data-compute="desktop.build_and_test" class="primary-button" type="button" disabled>Build + Test</button></div>
-        <pre id="desktop-result" class="code-output" aria-live="polite">No action run.</pre>
+
+        <div class="action-result">
+          <p id="desktop-result-summary" class="result-summary" role="status">No action run.</p>
+          <details id="desktop-result-details" class="tech-details"><summary>Technical details</summary><pre id="desktop-result" class="code-output">No action run.</pre></details>
+        </div>
       </div>
+
+      <div class="control-card tool-card danger-card">
+        <div class="tool-head"><h2>Power off</h2><span class="risk-tag">Higher risk</span></div>
+        <p class="tool-note">Shutting the desktop down ends every interactive session, including Parsec, and any running build. Bringing it back needs Wake Desktop above. Butters itself is unaffected.</p>
+        <div class="button-row"><button id="desktop-shutdown" class="danger-button" type="button">Shut Down Desktop…</button></div>
+        <div id="desktop-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm desktop shutdown" hidden></div>
+        <ol id="desktop-shutdown-progress" class="stage-list" role="status">Shutdown has not been requested.</ol>
+      </div>
+
       <h2>Diagnostic tools</h2><div id="tool-list" class="data-list"></div>
     </section>
     <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>

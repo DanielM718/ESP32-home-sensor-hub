@@ -116,7 +116,7 @@ def test_wake_is_the_existing_registered_skill_not_a_new_one(tmp_path):
     """No second WOL implementation: the panel invokes the registered skill."""
 
     _app, service = _application(tmp_path)
-    assert TOOLS_REGISTERED_ACTIONS == frozenset({"wake_desktop"})
+    assert "wake_desktop" in TOOLS_REGISTERED_ACTIONS
     spec = service.assistant.skills.get("wake_desktop")
     assert spec is not None
     # Its authorization is the skill's own, unchanged by being exposed in Tools.
@@ -419,16 +419,24 @@ def test_repeated_wake_requests_are_dropped_while_one_is_running():
     assert "if (desktopBusy || sessionDead) return;" in body.split("}")[0] + "}"
 
 
-def test_no_shutdown_or_restart_control_was_added():
-    """Scope guard: this task exposed wake only."""
+def test_no_restart_or_sleep_control_was_added():
+    """Scope guard.
+
+    Wake and shutdown are the two registered power actions Tools exposes.
+    `restart_desktop`, `sleep_desktop` and `lock_desktop` are registered skills
+    too, so exposing one more control is a one-line change -- which is exactly
+    why this pins that it did not happen. The Butters host's own shutdown stays
+    out of the panel entirely.
+    """
 
     html = ADMIN_HTML.read_text()
     js = ADMIN_JS.read_text()
-    for forbidden in ("desktop.shutdown", "desktop.restart", "desktop.sleep",
-                      "shutdown_desktop", "restart_desktop", "sleep_desktop"):
+    for forbidden in ("desktop.restart", "desktop.sleep", "restart_desktop",
+                      "sleep_desktop", "lock_desktop", "shutdown_butters_host",
+                      "reboot_butters_host"):
         assert forbidden not in html
         assert forbidden not in js
-    assert TOOLS_REGISTERED_ACTIONS == frozenset({"wake_desktop"})
+    assert TOOLS_REGISTERED_ACTIONS == frozenset({"wake_desktop", "shutdown_desktop"})
 
 
 def test_admin_js_still_parses_and_has_no_dangling_selectors():
