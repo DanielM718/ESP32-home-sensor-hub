@@ -73,6 +73,7 @@ CONVERSATIONAL_PLANNER_ACTIONS = frozenset(
     {
         "get_desktop_status",
         "wake_desktop",
+        "wake_nas",
         "shutdown_desktop",
     }
 )
@@ -1107,6 +1108,45 @@ class BetaAssistantService:
 
     def authentication_status(self, session: BrowserSession) -> dict[str, object]:
         return self.passkeys.status(session.session_id, session.peer_key)
+
+    def start_admin_nas_wake(self, session: BrowserSession) -> dict[str, object]:
+        """Freeze and start the fixed NAS action through the normal coordinator."""
+
+        self._require_action_admin(session)
+        plan = self.actions.freeze(
+            skill="wake_nas",
+            arguments={},
+            summary="Wake the configured NAS",
+            session_id=session.session_id,
+            identity=session.peer_key,
+            request_id="admin-tools-" + secrets.token_urlsafe(12),
+            source="admin_tools",
+        )
+        elevation = self.auth_state.elevation(session.session_id, session.peer_key)
+        if elevation is None:
+            self.action_state.audit(
+                identity=session.peer_key,
+                session_id=session.session_id,
+                skill="wake_nas",
+                authentication=AuthenticationLevel.ELEVATED,
+                method="pending_webauthn",
+                arguments={},
+                outcome="pending_auth",
+                job_id=None,
+            )
+            return {
+                "status": "authentication_required",
+                "authentication_required": plan.authentication.value,
+                "pending_action": plan.safe_dict(),
+                "jobs": [],
+            }
+        jobs = self.actions.execute(
+            plan.plan_id,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            authentication=elevation,
+        )
+        return {"status": "queued", "jobs": list(jobs)}
 
     def lock_elevation(self, session: BrowserSession) -> dict[str, object]:
         self.auth_state.lock(session.session_id)

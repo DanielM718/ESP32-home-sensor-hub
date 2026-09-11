@@ -20,8 +20,10 @@ key = "/etc/butters/action-broker/windows_remote_mode"
 url = "http://127.0.0.1:8123"
 
 [nas]
-mac = ""
-broadcast = ""
+# Fixed, manually validated TrueNAS Wake-on-LAN target. These values are read
+# only by the root broker and are never accepted from a browser/action request.
+mac = "00:e2:69:7d:40:cd"
+broadcast = "192.168.1.255"
 
 # Every privileged operation has a second, broker-local gate. Keep all values
 # false until its fixed target, credential, and operation have been reviewed.

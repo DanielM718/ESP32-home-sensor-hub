@@ -657,6 +657,20 @@ def create_app(
         except SecurityError as exc:
             return _exception_response(exc)
 
+    async def wake_nas_tool(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if payload:
+                raise ValueError("NAS wake accepts no parameters")
+            return JSONResponse(
+                await run_blocking(runtime.start_admin_nas_wake, session)
+            )
+        except (SecurityError, SessionError, ActionCoordinatorError, ValueError) as exc:
+            return _exception_response(exc)
+
     async def usage(request: Request) -> Response:
         try:
             _admin(request, auth)
@@ -1585,6 +1599,7 @@ def create_app(
         Route("/api/admin/skills/toggle", skill_toggle, methods=["POST"]),
         Route("/api/admin/skills/test", skill_test, methods=["POST"]),
         Route("/api/admin/tools", tools),
+        Route("/api/admin/tools/wake-nas", wake_nas_tool, methods=["POST"]),
         Route("/api/admin/usage", usage),
         Route("/api/admin/security", security_status),
         Route("/api/admin/actions", admin_actions),

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import json
 import logging
 import re
@@ -478,14 +479,8 @@ class FixedBrokerOperations:
         }
 
     def desktop_wake(self) -> dict[str, object]:
-        return self._run(
-            [
-                "/usr/bin/wakeonlan",
-                "-i",
-                self.config.desktop_broadcast,
-                self.config.desktop_mac,
-            ],
-            10,
+        return self._wake_configured_machine(
+            self.config.desktop_mac, self.config.desktop_broadcast
         )
 
     def desktop_monitors_off(self) -> dict[str, object]:
@@ -705,12 +700,22 @@ class FixedBrokerOperations:
             ) from None
 
     def nas_wake(self) -> dict[str, object]:
+        return self._wake_configured_machine(
+            self.config.nas_mac, self.config.nas_broadcast
+        )
+
+    def _wake_configured_machine(
+        self, mac: str, broadcast: str
+    ) -> dict[str, object]:
+        """Send WOL using only a target already loaded by the root broker."""
+
+        _validate_wol_target(mac, broadcast)
         return self._run(
             [
                 "/usr/bin/wakeonlan",
                 "-i",
-                self.config.nas_broadcast,
-                self.config.nas_mac,
+                broadcast,
+                mac,
             ],
             10,
         )
@@ -911,6 +916,19 @@ def _desktop_control_result(
     ):
         raise BrokerError("malformed_result", "fixed operation result is invalid")
     return dict(payload)
+
+
+def _validate_wol_target(mac: str, broadcast: str) -> None:
+    """Validate root-owned WOL configuration before it can reach subprocess argv."""
+
+    if re.fullmatch(r"(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}", mac) is None:
+        raise BrokerError("invalid_configuration", "WOL target is invalid")
+    try:
+        address = ipaddress.IPv4Address(broadcast)
+    except ipaddress.AddressValueError as exc:
+        raise BrokerError("invalid_configuration", "WOL target is invalid") from exc
+    if address.is_unspecified or address.is_loopback or address.is_multicast:
+        raise BrokerError("invalid_configuration", "WOL target is invalid")
 
 
 def _read_bounded(

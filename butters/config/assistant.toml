@@ -70,8 +70,8 @@ host_reboot_enabled = false
 host_shutdown_enabled = false
 
 [actions.nas]
-enabled = false
-configured = false
+enabled = true
+configured = true
 maximum_duration_minutes = 1
 local_console_allowed = false
 require_fresh_sensor = false

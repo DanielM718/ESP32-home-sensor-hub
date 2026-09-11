@@ -6,11 +6,15 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
-from beta1_harness import ADMIN_IDENTITY, PRODUCTION_ORIGIN, admin_headers, build_app, client
+from beta1_harness import (
+    ADMIN_IDENTITY,
+    PRODUCTION_ORIGIN,
+    admin_headers,
+    build_app,
+    client,
+)
 from butters.assistant_config import WebSettings
 from butters.web.security import AuthPolicy, SecurityError
-
 
 PRODUCTION: dict[str, object] = {
     "development_mode": False,
@@ -38,6 +42,7 @@ ADMIN_POST_ROUTES = (
     "/api/admin/stt/test",
     "/api/admin/skills/toggle",
     "/api/admin/skills/test",
+    "/api/admin/tools/wake-nas",
     "/api/admin/voice/presets",
     "/api/admin/voice/preview",
     "/api/admin/codex/jobs",

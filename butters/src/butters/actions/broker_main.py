@@ -15,10 +15,12 @@ from urllib.parse import urlparse
 import tomllib
 
 from butters.actions.broker import (
+    BrokerError,
     BrokerOperation,
     BrokerServer,
     FixedBrokerConfig,
     FixedBrokerOperations,
+    _validate_wol_target,
 )
 
 
@@ -49,6 +51,17 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     enabled_operations = frozenset(
         BrokerOperation(name) for name, enabled in operations.items() if enabled
     )
+    nas_mac = str(nas["mac"])
+    nas_broadcast = str(nas["broadcast"])
+    if bool(nas_mac) != bool(nas_broadcast):
+        raise ValueError("NAS wake configuration must provide both target fields")
+    if nas_mac:
+        try:
+            _validate_wol_target(nas_mac, nas_broadcast)
+        except BrokerError as exc:
+            raise ValueError("NAS wake configuration is invalid") from exc
+    if BrokerOperation.NAS_WAKE in enabled_operations and not nas_mac:
+        raise ValueError("enabled NAS wake operation requires a fixed target")
     uid = pwd.getpwnam(str(broker["service_user"])).pw_uid
     key = Path(str(desktop["key"]))
     if not key.is_absolute():
@@ -83,8 +96,8 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         desktop_mac=str(desktop["mac"]),
         desktop_broadcast=str(desktop["broadcast"]),
         desktop_key=key,
-        nas_mac=str(nas["mac"]),
-        nas_broadcast=str(nas["broadcast"]),
+        nas_mac=nas_mac,
+        nas_broadcast=nas_broadcast,
         enabled_operations=enabled_operations,
         home_assistant_url=home_assistant_url,
     )

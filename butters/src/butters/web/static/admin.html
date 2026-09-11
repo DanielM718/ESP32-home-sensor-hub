@@ -75,7 +75,14 @@
       <div class="split-view"><div id="skill-list" class="data-list"></div><div><pre id="skill-detail" class="code-output">Select a skill.</pre><label class="json-label">Bounded test arguments<textarea id="skill-test-args" maxlength="4000">{}</textarea></label><div class="button-row"><button id="skill-test" class="secondary-button" type="button" disabled>Run test</button><button id="skill-toggle" class="secondary-button" type="button" disabled>Disable</button></div><pre id="skill-test-result" class="code-output">No invocation run.</pre></div></div>
     </section>
 
-    <section id="panel-tools" class="admin-panel"><div id="tool-list" class="data-list"></div></section>
+    <section id="panel-tools" class="admin-panel">
+      <div class="control-card">
+        <div><h2>Machine power</h2><p>Send a Wake-on-LAN packet using the fixed root-owned NAS configuration.</p></div>
+        <div class="button-row"><button id="wake-nas" class="primary-button" type="button">Wake NAS</button></div>
+        <p id="wake-nas-status" class="tool-action-status" role="status" aria-live="polite">Ready.</p>
+      </div>
+      <div id="tool-list" class="data-list"></div>
+    </section>
     <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>
     <section id="panel-system" class="admin-panel"><div id="system-view" class="data-list"></div></section>
     <section id="panel-logs" class="admin-panel"><pre id="logs-view" class="code-output"></pre></section>

@@ -50,6 +50,7 @@ class DeterministicPlannerProvider:
         match = {
             "check my desktop": ("get_desktop_status", {"machine": "desktop"}),
             "wake my desktop": ("wake_desktop", {"machine": "desktop"}),
+            "wake my nas": ("wake_nas", {}),
             "shut down my desktop": (
                 "shutdown_desktop",
                 {"machine": "desktop"},
@@ -58,7 +59,7 @@ class DeterministicPlannerProvider:
         if match is None:
             raise PlannerError(
                 "clarification_required",
-                "Please ask for desktop status, wake, or shutdown.",
+                "Please ask for desktop status, desktop wake or shutdown, or NAS wake.",
             )
         action_id, parameters = match
         if action_id not in {item.action_id for item in request.actions}:
@@ -67,7 +68,7 @@ class DeterministicPlannerProvider:
             )
         return {
             "summary": normalized.capitalize() + ".",
-            "rationale": "Use the existing registered desktop action.",
+            "rationale": "Use the existing registered deterministic action.",
             "requires_confirmation": False,
             "steps": [{"action_id": action_id, "parameters": parameters}],
         }
