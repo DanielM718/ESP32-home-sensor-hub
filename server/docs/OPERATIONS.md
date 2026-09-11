@@ -339,6 +339,21 @@ If MagicDNS is not enabled, use the Pi's Tailscale IP instead of `sensor-pi`.
 
 ## systemd Services
 
+### InfluxDB readiness at boot
+
+`home-sensor-dashboard` and `home-sensor-printer-observer` order themselves
+`After=influxdb.service`, then use a shared bounded readiness check against
+InfluxDB's local `/health` endpoint and the same authenticated durable inventory
+query required by the applications before starting. Readiness probes and
+application startup scans share an advisory lock so concurrent process starts
+cannot overload that historical query path. The check uses the existing backend
+environment credentials, retries once per second for up to 60 seconds, and logs
+query latency, lock waits, retry progress, and timeout failures.
+Initial inventory reconstruction uses a 30-second InfluxDB client timeout;
+subsequent runtime queries retain the client's 10-second default. Gunicorn uses
+a 70-second worker timeout so both serialized startup scans can finish.
+`Restart=on-failure` remains enabled as a fallback.
+
 ### X2D observer recovery (deployment pending)
 
 The X2D observer is not part of MQTT ingestion. Its non-secret configuration is

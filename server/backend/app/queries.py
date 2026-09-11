@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from app.air_quality_policy import interpret_station, rolling_24h_status
 from app.battery_status import decode_battery_status
+from app.influx_startup import serialized_inventory_query
 from app.workflows import AMS_FIELDS, PRINTER_FIELDS
 
 if TYPE_CHECKING:
@@ -92,6 +93,7 @@ AIR_QUALITY_P95_FIELDS = ("co2", "pm25", "pm10", "voc_index", "nox_index")
 
 LOCATION_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 INVENTORY_REFRESH_SECONDS = 15 * 60
+STARTUP_QUERY_TIMEOUT_SECONDS = 30
 LOGGER = logging.getLogger("home_sensor.queries")
 
 
@@ -131,8 +133,12 @@ class InfluxReadRepository:
         expected_publish_seconds: int = 5,
         minimum_coverage_percent: int = 75,
         inventory_refresh_seconds: float = INVENTORY_REFRESH_SECONDS,
+        startup_query_timeout_seconds: int = STARTUP_QUERY_TIMEOUT_SECONDS,
     ) -> None:
         from influxdb_client import InfluxDBClient
+
+        if startup_query_timeout_seconds <= 0:
+            raise ValueError("startup_query_timeout_seconds must be positive")
 
         token = settings.read_token or settings.write_token
         self._settings = settings
@@ -140,12 +146,14 @@ class InfluxReadRepository:
             url=settings.url,
             token=token,
             org=settings.org,
+            timeout=startup_query_timeout_seconds * 1000,
         )
         self._query_api = self._client.query_api()
         self._expected_publish_seconds = expected_publish_seconds
         self._minimum_coverage_percent = minimum_coverage_percent
         try:
-            inventory = self._load_inventory()
+            with serialized_inventory_query():
+                inventory = self._load_inventory()
         except Exception:
             self._client.close()
             LOGGER.exception(
@@ -153,6 +161,13 @@ class InfluxReadRepository:
                 "start with an empty inventory"
             )
             raise
+        self._client.close()
+        self._client = InfluxDBClient(
+            url=settings.url,
+            token=token,
+            org=settings.org,
+        )
+        self._query_api = self._client.query_api()
         self._inventory = DurableInventoryCache(
             inventory,
             refresh_seconds=inventory_refresh_seconds,
