@@ -223,10 +223,11 @@ tailscale status && sudo tailscale serve status
 ```
 
 `home-sensor-dashboard` and `home-sensor-printer-observer` order themselves
-`After=influxdb.service`, which waits for the unit to activate but not for
-InfluxDB to accept queries. Each may therefore fail once at boot and be
-recovered by `Restart=on-failure` within 10–15 s. This is self-healing; a
-non-zero `NRestarts` shortly after boot is expected and not a fault.
+`After=influxdb.service`, then use a shared bounded readiness check against
+InfluxDB's local `/health` endpoint and an authenticated Flux query before
+starting. The check uses the existing backend environment credentials, retries
+once per second for up to 30 seconds, and logs both retry progress and timeout
+failures. `Restart=on-failure` remains enabled as a fallback.
 
 ## Logs
 

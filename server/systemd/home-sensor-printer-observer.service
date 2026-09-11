@@ -16,9 +16,11 @@ EnvironmentFile=/etc/home-sensor/printer.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=PRINTER_CONFIG_PATH=/etc/home-sensor/printer.toml
+ExecStartPre=/opt/home-sensor/server/scripts/wait_for_influxdb.sh
 ExecStart=/opt/home-sensor/server/backend/.venv/bin/python -m app.printer_worker
 Restart=on-failure
 RestartSec=15s
+TimeoutStartSec=40s
 TimeoutStopSec=15s
 MemoryMax=192M
 CPUQuota=25%
