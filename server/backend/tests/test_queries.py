@@ -1605,11 +1605,15 @@ class DurableInventoryCacheTest(unittest.TestCase):
             patch(
                 "influxdb_client.InfluxDBClient", return_value=startup_client
             ) as client_factory,
+            # The real helper locks the production path under /var/lib, which a
+            # unit test must not touch; the sibling startup test does the same.
+            patch("app.queries.serialized_inventory_query") as serialized,
             self.assertLogs("home_sensor.queries", level="ERROR"),
             self.assertRaisesRegex(RuntimeError, "temporarily unavailable"),
         ):
             InfluxReadRepository(settings)
 
+        serialized.assert_called_once_with()
         client_factory.assert_called_once_with(
             url=settings.url,
             token=settings.read_token,
