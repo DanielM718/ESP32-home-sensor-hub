@@ -605,6 +605,33 @@ changes monitor state, and contributes no authentication of its own. A plan
 consisting only of observations or substituting another read-only capability is
 refused.
 
+### Conversational planner foundation
+
+The optional `/api/planner` surface is a separate first vertical slice for a
+future conversational model. Its provider receives only bounded user text, a
+narrow desktop action catalog derived from `SkillRegistry`, sanitized current
+Desktop Agent state, and a short existing session context. Production uses the
+`DisabledPlannerProvider`; no API key or cloud call is required. Tests inject a
+deterministic fake provider.
+
+Provider output is untrusted even when it is valid JSON. `PlannerValidator`
+requires the exact plan shape, caps plans at three steps, rejects unknown action
+IDs and extra parameters through the registered typed parsers, and narrows GUI
+launch parameters to `git_bash` or `parsec`. Authentication and confirmation
+are recomputed from `SkillSpec`; the provider's confirmation boolean has no
+authority. Read-only status executes through `SkillRegistry`. Mutations are
+frozen and executed only by `ActionCoordinator`, so conversational and Admin
+Tools requests converge on the same deterministic skill, broker, passkey, and
+audit path. Shutdown retains FRESH authentication bound to the frozen digest
+and the existing `pending_confirmation` state.
+
+The plan schema supports a short ordered sequence of registered actions, but
+the requested wake -> observe -> launch Parsec composition is deliberately
+deferred. The current coordinator permits only a final observation, so putting
+the existing reachability observer between two actions would weaken that
+reviewed invariant. A later slice should add a first-class state-gated workflow
+rather than inventing sleeps, shell polling, or a second executor.
+
 ## Model-visible capability policy
 
 The `SkillRegistry` is authoritative for what Butters can do. What a *model* may

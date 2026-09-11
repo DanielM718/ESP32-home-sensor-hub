@@ -123,6 +123,16 @@ num_threads = 2
 speed = 1.0
 max_text_chars = 500
 
+# Provider-independent conversational planning is fail-closed until a reviewed
+# provider is configured. The first foundation deliberately ships without any
+# cloud credentials or model integration.
+[planner]
+enabled = false
+provider = "disabled"
+max_actions = 3
+max_context_messages = 4
+max_context_chars = 2000
+
 # The beta web daemon is deliberately loopback-only. Production HTTPS and
 # identity forwarding are supplied by private Tailscale Serve, never Funnel.
 [web]

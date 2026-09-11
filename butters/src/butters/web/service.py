@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -30,6 +31,17 @@ TOOLS_REGISTERED_ACTIONS = frozenset({"wake_desktop", "shutdown_desktop"})
 # and the coordinator audits the run as `confirmed_user_request` rather than
 # `direct_user_request`. It is deliberately not a browser-side confirm().
 TOOLS_CONFIRM_ACTIONS = frozenset({"shutdown_desktop"})
+CONVERSATIONAL_PLANNER_ACTIONS = frozenset(
+    {
+        "get_desktop_status",
+        "wake_desktop",
+        "desktop.app.launch",
+        "shutdown_desktop",
+    }
+)
+CONVERSATIONAL_PLANNER_PARAMETER_ENUMS = {
+    "desktop.app.launch": {"app": ("git_bash", "parsec")}
+}
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
@@ -52,7 +64,10 @@ from butters.cloud.orchestrator import CloudDiagnosticEscalator
 from butters.cloud.usage import UsageLedger
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticRequest, RequestDepth
-from butters.diagnostics.sanitizer import sanitize_value
+from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
+from butters.planner.model import PlannerError, PlannerRequest
+from butters.planner.provider import DisabledPlannerProvider, PlannerProvider
+from butters.planner.validator import PlannerValidator
 from butters.remediation.skill_builder import CodexSkillBuilder
 from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
@@ -297,6 +312,7 @@ class BetaAssistantService:
         traces: TraceBuffer | None = None,
         state_dir: Path | None = None,
         local_tts: LocalTTSProvider | None = None,
+        planner_provider: PlannerProvider | None = None,
     ) -> None:
         self.desktop_actions = DesktopActions(
             Path(os.environ.get("BUTTERS_COMPUTE_CONFIG", "/etc/butters/desktop-compute.toml"))
@@ -325,6 +341,10 @@ class BetaAssistantService:
         self.desktop_actions.agent = self.desktop_agent
         self.desktop_streaming = StreamingWorkflow(self.desktop_actions, self.desktop_agent, settings.broker)
         register_agent_skills(self.assistant.skills, self.desktop_agent, self.desktop_streaming)
+        self.planner_provider = planner_provider or DisabledPlannerProvider()
+        self.planner_validator = PlannerValidator(
+            self.assistant.skills, max_actions=settings.planner.max_actions
+        )
         self.ledger = ledger or UsageLedger(
             settings.cloud,
             self.state_dir / "usage.sqlite3",
@@ -360,6 +380,258 @@ class BetaAssistantService:
         # passing a stale daily or monthly budget check.
         self._paid_operation_gate = threading.Lock()
         self._wire_diagnostic_cloud()
+
+    def plan_conversation(
+        self, session: BrowserSession, user_text: str
+    ) -> dict[str, object]:
+        """Plan and dispatch only through the existing registry/coordinator path."""
+
+        cleaned = sanitize_text(user_text, max_bytes=4000).text.strip()
+        if not cleaned:
+            raise ValueError("text must not be empty")
+        if not self.planner_provider.available:
+            self._audit_planner(
+                session,
+                request=cleaned,
+                raw_plan=None,
+                outcome="unavailable",
+                reason_code="planner_unavailable",
+            )
+            return {
+                "status": "unavailable",
+                "reason_code": "planner_unavailable",
+                "message": "Conversational planning is not configured.",
+            }
+        catalog = self.planner_validator.catalog(
+            CONVERSATIONAL_PLANNER_ACTIONS,
+            parameter_enums=CONVERSATIONAL_PLANNER_PARAMETER_ENUMS,
+        )
+        context = tuple(
+            {
+                "role": item["role"],
+                "content": sanitize_text(item["content"], max_bytes=1000).text,
+            }
+            for item in self.sessions.context(
+                session,
+                max_messages=self.settings.planner.max_context_messages,
+                max_chars=self.settings.planner.max_context_chars,
+            )
+        )
+        request = PlannerRequest(
+            cleaned,
+            catalog,
+            {"desktop_agent": sanitize_value(self.desktop_agent.status())[0]},
+            context,
+        )
+        raw_plan: object = None
+        try:
+            raw_plan = self.planner_provider.plan(request)
+            plan = self.planner_validator.validate(
+                raw_plan, catalog=catalog, administrator=session.administrator
+            )
+        except PlannerError as exc:
+            outcome = (
+                "clarification_required"
+                if exc.code == "clarification_required"
+                else "invalid_plan"
+            )
+            self._audit_planner(
+                session,
+                request=cleaned,
+                raw_plan=raw_plan,
+                outcome=outcome,
+                reason_code=exc.code,
+            )
+            if exc.code == "clarification_required":
+                status = "clarification_required"
+            elif exc.code in {
+                "planner_unavailable",
+                "administrator_required",
+                "capability_unavailable",
+            }:
+                status = "unavailable"
+            else:
+                status = "invalid_plan"
+            return {
+                "status": status,
+                "reason_code": exc.code,
+                "message": str(exc),
+            }
+        except Exception:  # provider is an untrusted boundary
+            logging.getLogger("uvicorn.error.butters.planner").exception(
+                "planner provider failed safely"
+            )
+            self._audit_planner(
+                session,
+                request=cleaned,
+                raw_plan=None,
+                outcome="invalid_plan",
+                reason_code="provider_failure",
+            )
+            return {
+                "status": "invalid_plan",
+                "reason_code": "provider_failure",
+                "message": "The planner failed safely.",
+            }
+
+        plan_dict = plan.safe_dict()
+        self._audit_planner(
+            session,
+            request=cleaned,
+            raw_plan=plan_dict,
+            outcome="validated",
+            reason_code=None,
+        )
+        specs = [self.assistant.skills.get(step.action_id) for step in plan.steps]
+        if all(
+            spec is not None and spec.action_class is not ActionClass.ACTION
+            for spec in specs
+        ):
+            results = []
+            for step in plan.steps:
+                execution = self.assistant.skills.execute(
+                    step.action_id,
+                    step.parameters,
+                    administrator=session.administrator,
+                )
+                self.action_state.audit(
+                    identity=session.peer_key,
+                    session_id=session.session_id,
+                    skill=step.action_id,
+                    authentication=AuthenticationLevel.NONE,
+                    method="conversational_planner:" + self.planner_provider.name,
+                    arguments=step.parameters,
+                    outcome="completed" if execution.ok else "denied",
+                    job_id=None,
+                    reason_code=execution.failure.code if execution.failure else None,
+                )
+                if not execution.ok:
+                    assert execution.failure is not None
+                    return {
+                        "status": "unavailable",
+                        "reason_code": execution.failure.code,
+                        "message": execution.failure.message,
+                        "plan": plan_dict,
+                    }
+                results.append(
+                    asdict(execution.result)
+                    if is_dataclass(execution.result)
+                    else execution.result
+                )
+            return {"status": "executed", "plan": plan_dict, "results": results}
+
+        if not session.administrator:
+            return {
+                "status": "unavailable",
+                "reason_code": "administrator_required",
+                "message": "The selected action requires an administrator identity.",
+                "plan": plan_dict,
+            }
+        try:
+            frozen = self.actions.freeze_plan(
+                steps=tuple(
+                    (step.action_id, step.parameters) for step in plan.steps
+                ),
+                summary=plan.summary,
+                session_id=session.session_id,
+                identity=session.peer_key,
+                request_id="planner-" + secrets.token_urlsafe(12),
+                source="conversational_planner:" + self.planner_provider.name,
+                pending_confirmation=any(
+                    step.action_id in TOOLS_CONFIRM_ACTIONS for step in plan.steps
+                ),
+            )
+        except ActionCoordinatorError as exc:
+            self._audit_planner(
+                session,
+                request=cleaned,
+                raw_plan=plan_dict,
+                outcome="invalid_plan",
+                reason_code=exc.code,
+            )
+            return {
+                "status": "invalid_plan",
+                "reason_code": exc.code,
+                "message": str(exc),
+                "plan": plan_dict,
+            }
+        elevation = self.auth_state.elevation(session.session_id, session.peer_key)
+        if (
+            frozen.state != "pending_confirmation"
+            and frozen.authentication is AuthenticationLevel.ELEVATED
+            and elevation is not None
+        ):
+            jobs = self.actions.execute(
+                frozen.plan_id,
+                session_id=session.session_id,
+                identity=session.peer_key,
+                authentication=elevation,
+            )
+            for job in jobs:
+                self._audit_planner(
+                    session,
+                    request=cleaned,
+                    raw_plan=plan_dict,
+                    outcome="executed",
+                    reason_code=None,
+                    job_id=str(job["job_id"]),
+                )
+            return {"status": "executed", "plan": plan_dict, "jobs": jobs}
+        self._audit_planner(
+            session,
+            request=cleaned,
+            raw_plan={
+                **plan_dict,
+                "pending_action_id": frozen.plan_id,
+                "pending_state": frozen.state,
+            },
+            outcome="confirmation_required",
+            reason_code=frozen.authentication.value,
+        )
+        return {
+            "status": "confirmation_required",
+            "plan": plan_dict,
+            "authentication_required": frozen.authentication.value,
+            "pending_action": frozen.safe_dict(),
+            "jobs": (),
+        }
+
+    def _audit_planner(
+        self,
+        session: BrowserSession,
+        *,
+        request: str,
+        raw_plan: object,
+        outcome: str,
+        reason_code: str | None,
+        job_id: str | None = None,
+    ) -> None:
+        safe_request = sanitize_text(request, max_bytes=700).text
+        try:
+            safe_plan, _redactions = sanitize_value(raw_plan, max_text_bytes=500)
+            encoded = json.dumps(safe_plan, default=str, separators=(",", ":"))
+            if len(encoded.encode("utf-8")) > 1000:
+                safe_plan = {
+                    "truncated": True,
+                    "preview": sanitize_text(repr(raw_plan), max_bytes=700).text,
+                }
+        except Exception:  # audit must not reopen provider failure
+            safe_plan = {"unavailable": True, "type": type(raw_plan).__name__[:80]}
+        safe = {
+            "user_request": safe_request,
+            "structured_plan": safe_plan,
+        }
+        self.action_state.audit(
+            identity=session.peer_key,
+            session_id=session.session_id,
+            skill="conversational_planner",
+            authentication=AuthenticationLevel.NONE,
+            method=self.planner_provider.name,
+            arguments=safe,
+            outcome=outcome,
+            job_id=job_id,
+            reason_code=reason_code,
+        )
 
     def handle_text(
         self,

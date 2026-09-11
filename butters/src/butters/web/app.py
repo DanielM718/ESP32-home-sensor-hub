@@ -432,6 +432,22 @@ def create_app(
         except (SecurityError, SessionError, ValueError, PermissionError) as exc:
             return _exception_response(exc)
 
+    async def conversational_plan(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            if not normal_rate.check("planner:" + session.session_id):
+                return _error("rate_limited", "planner rate limit exceeded", 429)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"text"} or not isinstance(payload["text"], str):
+                return _error("invalid_request", "text is required", 400)
+            return JSONResponse(
+                await run_blocking(
+                    runtime.plan_conversation, session, payload["text"]
+                )
+            )
+        except (SecurityError, SessionError, ValueError, PermissionError) as exc:
+            return _exception_response(exc)
+
     async def speech(request: Request) -> Response:
         try:
             session = _mutation_session(request, runtime, auth)
@@ -1608,6 +1624,7 @@ def create_app(
         Route("/api/session", session_endpoint),
         Route("/api/session/conversation", clear_session, methods=["DELETE"]),
         Route("/api/chat", chat, methods=["POST"]),
+        Route("/api/planner", conversational_plan, methods=["POST"]),
         Route("/api/speech", speech, methods=["POST"]),
         Route("/api/auth/status", auth_status),
         Route("/api/auth/authenticate/options", auth_options, methods=["POST"]),
