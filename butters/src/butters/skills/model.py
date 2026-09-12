@@ -158,6 +158,11 @@ class DesktopArgs:
 
 
 @dataclass(frozen=True, slots=True)
+class DesktopAppArgs:
+    app: str
+
+
+@dataclass(frozen=True, slots=True)
 class EnvironmentActionArgs:
     state: str
     duration_minutes: int | None
@@ -253,6 +258,7 @@ SkillArguments: TypeAlias = (
     | SensorHistorySummaryArgs
     | ProjectStatusArgs
     | DesktopArgs
+    | DesktopAppArgs
     | EnvironmentActionArgs
     | NoArguments
     | SensorHistoryArgs

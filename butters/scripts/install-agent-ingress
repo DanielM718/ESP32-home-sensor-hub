@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install observer-only ingress artifacts. Nothing is enabled or started unless
+# Install authenticated ingress artifacts. Nothing is enabled or started unless
 # the operator explicitly asks, and both committed configuration gates are off.
 set -Eeuo pipefail
 

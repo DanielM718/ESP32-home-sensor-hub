@@ -364,7 +364,7 @@ def test_heartbeat_threshold_order_leaves_stale_observation_window() -> None:
         replace(settings, socket_idle_seconds=45).validated()
 
 
-def test_no_agent_action_skill_or_planner_entry_is_registered(tmp_path: Path) -> None:
+def test_no_generic_agent_api_or_planner_entry_is_exposed(tmp_path: Path) -> None:
     settings = load_assistant_settings()
     assert settings.agent_ingress.enabled is False
     assert not any(
@@ -373,7 +373,8 @@ def test_no_agent_action_skill_or_planner_entry_is_registered(tmp_path: Path) ->
     assert not any("app.launch" in name for name in CONVERSATIONAL_PLANNER_ACTIONS)
     source = (Path(__file__).parents[1] / "src/butters/actions/agent.py").read_text()
     assert "def invoke(" not in source
-    assert "def send(" not in source
+    assert "def send_command(" not in source
+    assert "def execute(" not in source
 
 
 def test_route_gate_and_existing_admin_manual_surface_are_unchanged(
@@ -426,7 +427,11 @@ def test_route_gate_and_existing_admin_manual_surface_are_unchanged(
         registered = {spec.name for spec in service.assistant.skills.skills}
         assert "get_desktop_status" in registered
         assert not any(name.startswith("desktop.agent") for name in registered)
-        assert not any("app.launch" in name for name in registered)
+        assert {
+            "desktop.app.list",
+            "desktop.app.status",
+            "desktop.app.launch",
+        } <= registered
 
     async def observe() -> None:
         transport = httpx.ASGITransport(app=disabled_app)

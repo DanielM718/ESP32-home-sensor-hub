@@ -144,6 +144,7 @@ class AgentIngressSettings:
     socket_idle_seconds: float = 60.0
     heartbeat_aging_seconds: float = 30.0
     heartbeat_stale_seconds: float = 45.0
+    request_timeout_seconds: int = 30
 
     def validated(self) -> AgentIngressSettings:
         if not self.config_path.is_absolute():
@@ -163,6 +164,8 @@ class AgentIngressSettings:
                 "agent_ingress heartbeat stale timeout must precede "
                 "socket idle timeout"
             )
+        if not 1 <= self.request_timeout_seconds <= 30:
+            raise ConfigError("agent_ingress.request_timeout_seconds must be 1 to 30")
         return self
 
 
@@ -795,6 +798,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         socket_idle_seconds=float(agent_table.get("socket_idle_seconds", 60.0)),
         heartbeat_aging_seconds=float(agent_table.get("heartbeat_aging_seconds", 30.0)),
         heartbeat_stale_seconds=float(agent_table.get("heartbeat_stale_seconds", 45.0)),
+        request_timeout_seconds=int(agent_table.get("request_timeout_seconds", 30)),
     ).validated()
 
     actions_table = _table(data, "actions")

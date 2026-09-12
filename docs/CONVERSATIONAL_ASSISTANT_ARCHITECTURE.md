@@ -58,14 +58,14 @@ Non-goals for this design:
 | `LanguageModel`, `CloudReasoner`, `GeneralCloudReasoner` | present | three provider abstractions |
 | `UsageLedger`, `TraceStage` / `TraceBuffer`, diagnostics sanitizer | present | |
 | STT / TTS / wakeword / live controller edge | present | |
-| Windows Desktop Agent (`butters-agent/`, `actions/agent.py`, `AgentHub`) | **absent** | not in this repository's `main` |
+| Windows Desktop Agent (`butters-agent/`, `actions/agent.py`, `AgentHub`) | present | standalone outbound agent, signed ingress, state facets, and dormant Slice 3 app operations |
 | `actions/compute.py` (`DesktopActions`), `actions/streaming.py` (`StreamingWorkflow`) | **absent** | |
-| `skills/desktop_agent.py`: `desktop.app.launch`, `desktop.vm.stop`, `desktop.agent.status`, `desktop.streaming.*` | **absent** | so no interactive application launch exists |
+| `skills/desktop_agent.py` | partial | `desktop.app.list`, `desktop.app.status`, and elevated `desktop.app.launch` are registered; VM, streaming, Admin, and planner exposure remain absent |
 | `execute_desktop_action` / `_freeze_or_execute` / `TOOLS_REGISTERED_ACTIONS` / `TOOLS_CONFIRM_ACTIONS` | **absent** | there is no Admin Tools manual desktop-action path |
-| `/api/desktop/*` routes, `/agent/v1/session` WebSocket, `ElevationRequired` | **absent** | |
+| Desktop Agent routes | partial | default-off `/agent/v1/session` exists; `/api/desktop/*` and Admin desktop mutation routes remain absent |
 | shared manual + spoken entry point | **different** | actions are frozen only from the deterministic route inside `handle_text`; there is one path, not two converging ones |
 | desktop capability availability | **different** | committed config sets `shutdown_enabled`, `parsec_*_enabled`, `lock_enabled`, `sleep_enabled`, `restart_enabled` all `false`; those skills register but report unavailable |
-| interactive-session / Desktop Agent state facets | **proposed** | no observer exists in `main` to produce them |
+| interactive-session / Desktop Agent state facets | present | signed heartbeats produce independent freshness-aware facets |
 | `butters.planner` package, `/api/planner`, `PlannerValidator` | **branch only** | on `integration/conversational-planner-foundation`, not merged |
 
 
@@ -178,9 +178,9 @@ This is the pattern the planner must feed, not replace.
 deliberately nullable so "not observed" is distinct from "not running". That is
 the pattern this design extends.
 
-No interactive-session or agent-liveness observer exists in `main`, because the
-Desktop Agent is absent. Those facets in section 7 are therefore **proposed**,
-not present, and nothing in `main` can supply them today.
+The default-off signed Desktop Agent ingress supplies independent
+`desktop.interactive_session` and `desktop.agent` facets. It does not infer
+either from SSH, network, or power state.
 
 ### 2.8 Provider abstraction already exists three times
 
@@ -680,8 +680,8 @@ Facets, each from its existing independent observer:
 | `desktop.power` | `on`, `off`, `unknown`, `wake_requested` | WOL job history plus reachability; never asserted from a sent packet |
 | `desktop.network` | `reachable`, `unreachable`, `unknown` | `DesktopState.network_reachable` |
 | `desktop.ssh` | `ready`, `not_ready`, `unknown` | `DesktopState.ssh_ready` |
-| `desktop.interactive_session` | `present`, `absent`, `unknown` | **proposed**: no observer exists in `main` |
-| `desktop.agent` | `not_configured`, `disconnected`, `awaiting_heartbeat`, `heartbeat_stale`, `heartbeat_aging`, `connected` | **proposed**: the Desktop Agent is absent from `main` |
+| `desktop.interactive_session` | `present`, `absent`, `unknown` | signed Desktop Agent heartbeat; independent of network/SSH |
+| `desktop.agent` | `not_configured`, `disconnected`, `awaiting_heartbeat`, `heartbeat_stale`, `heartbeat_aging`, `connected` | authenticated connection plus signed heartbeat freshness |
 | `desktop.parsec` | `running`, `not_running`, `unknown` | `DesktopState.parsec_ready`, which is nullable for a reason |
 | `iot.<device>` | `on`, `off`, `unavailable`, `stale` | environment adapter plus freshness |
 | `sensor.<entity>` | `fresh`, `stale`, `missing` | existing dashboard adapter freshness policy |

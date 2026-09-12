@@ -43,6 +43,7 @@ from butters.remediation.skill_builder import CodexSkillBuilder
 from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
 from butters.routing.model import RoutedIntent
+from butters.skills.desktop_agent import register_desktop_agent_skills
 from butters.skills.model import (
     ActionAuthorization,
     ActionClass,
@@ -189,10 +190,9 @@ class BetaAssistantService:
             self.state_dir / "security.sqlite3", settings.authentication
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
-        self.actions = ActionCoordinator(self.assistant.skills, self.action_state)
-        # This is an observer only. AgentHub has no invocation or command API,
-        # and no Desktop Agent skill is registered with either catalog.
         self.desktop_agent = AgentHub(settings.agent_ingress)
+        register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
+        self.actions = ActionCoordinator(self.assistant.skills, self.action_state)
         self.planner_provider = planner_provider or DisabledPlannerProvider()
         self.planner_validator = PlannerValidator(
             self.assistant.skills,

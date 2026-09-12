@@ -73,6 +73,7 @@ hello_timeout_seconds = 5
 socket_idle_seconds = 60
 heartbeat_aging_seconds = 30
 heartbeat_stale_seconds = 45
+request_timeout_seconds = 30
 
 [actions]
 audit_capacity = 1000

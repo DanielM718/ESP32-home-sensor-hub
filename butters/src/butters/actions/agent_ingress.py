@@ -1,4 +1,4 @@
-"""Private TLS transport for the observer-only Desktop Agent WebSocket.
+"""Private TLS transport for the authenticated Desktop Agent WebSocket.
 
 The proxy forwards exactly one machine path to the loopback web daemon. It
 strips browser identity by accepting only the WebSocket upgrade allowlist;
