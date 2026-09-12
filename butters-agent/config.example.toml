@@ -1,0 +1,5 @@
+schema_version = 1
+agent_id = "desktop"
+url = "wss://butters.lan:8443/agent/v1/session"
+# Provision the actual SPKI SHA-256 before installation; no trust-store fallback.
+spki_sha256 = "REPLACE_WITH_VERIFIED_SERVER_SPKI_SHA256"
