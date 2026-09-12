@@ -1,0 +1,11 @@
+# Root-managed machine identity configuration read by butters-web.
+schema_version = 1
+protocol_version = 1
+agent_id = "desktop"
+
+# Store only SHA-256(token), never the agent's plaintext token.
+token_sha256 = "REPLACE_WITH_64_HEX_SHA256_OF_AGENT_TOKEN"
+
+# This file contains the 32-byte HMAC key as 64 hex characters and must be
+# root:butters 0640 (or stricter while still readable by butters-web).
+command_key_file = "/etc/butters/desktop-agent/command.key"

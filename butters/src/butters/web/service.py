@@ -12,6 +12,7 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from enum import Enum
 from pathlib import Path
 
+from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
@@ -189,6 +190,9 @@ class BetaAssistantService:
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
         self.actions = ActionCoordinator(self.assistant.skills, self.action_state)
+        # This is an observer only. AgentHub has no invocation or command API,
+        # and no Desktop Agent skill is registered with either catalog.
+        self.desktop_agent = AgentHub(settings.agent_ingress)
         self.planner_provider = planner_provider or DisabledPlannerProvider()
         self.planner_validator = PlannerValidator(
             self.assistant.skills,
@@ -273,11 +277,9 @@ class BetaAssistantService:
         request = PlannerRequest(
             cleaned,
             catalog,
-            # No observed state facets are supplied yet. Assembling them from
-            # the independent observers (power, network, SSH, interactive
-            # session, IoT freshness) is the next slice; fabricating a single
-            # collapsed "online" value here would be worse than none.
-            {},
+            # Agent and interactive-session truth remain independent. No
+            # network/SSH/Parsec observation is used to guess either facet.
+            self.desktop_agent.snapshot().safe_dict(),
             context,
         )
         raw_plan: object = None

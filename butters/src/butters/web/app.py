@@ -1606,6 +1606,12 @@ def create_app(
         WebSocketRoute("/ws/admin/traces", trace_socket),
         Route("/assets/{asset_name:str}", public_asset),
     ]
+    # The route is absent under the committed default. It is reachable only
+    # from the separately gated private TLS ingress when explicitly enabled.
+    if configured.agent_ingress.enabled:
+        routes.insert(
+            -3, WebSocketRoute("/agent/v1/session", runtime.desktop_agent.socket)
+        )
 
     async def shutdown_workers() -> None:
         worker_pool.shutdown(wait=True, cancel_futures=True)

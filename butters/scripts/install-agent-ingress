@@ -1,0 +1,120 @@
+#!/usr/bin/env bash
+# Install observer-only ingress artifacts. Nothing is enabled or started unless
+# the operator explicitly asks, and both committed configuration gates are off.
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_dir="$(dirname "${script_dir}")"
+repository_dir="$(dirname "${butters_dir}")"
+agent_source="${repository_dir}/butters-agent"
+agent_install="/opt/butters-agent"
+agent_staging="/opt/butters-agent.staging.$$"
+agent_previous="/opt/butters-agent.previous"
+config_dir="/etc/butters"
+secret_dir="${config_dir}/desktop-agent"
+unit_name="butters-agent-ingress.service"
+enable_service=0
+start_service=0
+
+usage() {
+  echo "Usage: sudo ./butters/scripts/install-agent-ingress [--enable] [--start]"
+}
+
+cleanup() {
+  rm -rf "${agent_staging}"
+}
+
+normalize_agent_tree() {
+  local root="$1" owner="$2" group="$3"
+  [[ -n "${root}" && "${root}" != "/" && -d "${root}" ]] || return 2
+  chown -h -R "${owner}:${group}" "${root}"
+  find "${root}" -type d -exec chmod 0750 {} +
+  find "${root}" -type f -exec chmod 0640 {} +
+}
+
+publish_agent_tree() {
+  local staging="$1" install_root="$2" previous="$3"
+  [[ -n "${staging}" && -n "${install_root}" && -n "${previous}" ]] || return 2
+  [[ "${staging}" != "/" && "${install_root}" != "/" && "${previous}" != "/" ]] \
+    || return 2
+  if [[ -d "${install_root}" ]]; then
+    rm -rf "${previous}"
+    mv "${install_root}" "${previous}"
+  fi
+  if ! mv "${staging}" "${install_root}"; then
+    [[ -d "${previous}" ]] && mv "${previous}" "${install_root}"
+    return 3
+  fi
+}
+
+(return 0 2>/dev/null) && return 0
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) enable_service=1 ;;
+    --start) enable_service=1; start_service=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+if [[ "${EUID}" -ne 0 ]]; then
+  echo "Run this installer with sudo." >&2
+  exit 2
+fi
+if ! id butters >/dev/null 2>&1 || [[ ! -d /opt/butters/src/butters ]]; then
+  echo "Install Butters before installing the Desktop Agent ingress." >&2
+  exit 2
+fi
+[[ -f "${agent_source}/src/butters_agent/protocol.py" ]] \
+  || { echo "The reviewed standalone Desktop Agent package is missing." >&2; exit 2; }
+
+install -d -m 0750 -o root -g butters "${config_dir}"
+install -d -m 0750 -o root -g butters "${secret_dir}"
+if [[ ! -e "${config_dir}/agent-ingress.toml" ]]; then
+  install -m 0640 -o root -g butters \
+    "${butters_dir}/config/agent-ingress.example.toml" \
+    "${config_dir}/agent-ingress.toml"
+fi
+if [[ ! -e "${config_dir}/desktop-agent.toml" ]]; then
+  install -m 0640 -o root -g butters \
+    "${butters_dir}/config/desktop-agent.example.toml" \
+    "${config_dir}/desktop-agent.toml"
+fi
+
+# Publish the protocol package as a sealed, separately replaceable tree. Keep
+# one rollback generation and restore it if the publish rename fails.
+rm -rf "${agent_staging}"
+install -d -m 0755 -o root -g root "${agent_staging}"
+# Copy only the reviewed import package. Local Windows config, registries, or
+# DPAPI material beside a developer checkout can never enter the Pi install.
+cp -a "${agent_source}/src" "${agent_staging}/"
+normalize_agent_tree "${agent_staging}" root butters
+/usr/bin/python3 -m compileall -q "${agent_staging}/src" >/dev/null
+PYTHONPATH="${agent_staging}/src" /opt/butters/.venv/bin/python -c \
+  'import butters_agent.protocol' \
+  || { echo "Staged Desktop Agent protocol is not importable." >&2; exit 3; }
+normalize_agent_tree "${agent_staging}" root butters
+
+trap - EXIT
+if ! publish_agent_tree "${agent_staging}" "${agent_install}" "${agent_previous}"; then
+  echo "Publishing the Desktop Agent package failed; the previous tree was restored." >&2
+  exit 3
+fi
+trap cleanup EXIT
+
+install -m 0644 -o root -g root \
+  "${butters_dir}/systemd/${unit_name}" "/etc/systemd/system/${unit_name}"
+systemctl daemon-reload
+if [[ "${enable_service}" == "1" ]]; then
+  systemctl enable "${unit_name}"
+fi
+if [[ "${start_service}" == "1" ]]; then
+  systemctl start "${unit_name}"
+fi
+
+echo "Observer-only Desktop Agent ingress artifacts installed."
+echo "The templates default false; the installer does not change either enable gate."
+echo "Provision TLS material, token hash, and command key without placing secrets in the unit."

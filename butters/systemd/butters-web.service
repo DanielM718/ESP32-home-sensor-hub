@@ -14,7 +14,7 @@ WorkingDirectory=/opt/butters
 EnvironmentFile=-/etc/butters/butters.conf
 EnvironmentFile=-/etc/butters/butters.env
 Environment=BUTTERS_CONFIG=/opt/butters/config/assistant.toml
-Environment=PYTHONPATH=/opt/butters/src
+Environment=PYTHONPATH=/opt/butters/src:/opt/butters-agent/src
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
 ExecStart=/opt/butters/.venv/bin/python -m butters.web

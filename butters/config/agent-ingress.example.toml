@@ -1,0 +1,14 @@
+# Transport-only configuration. The committed template is inert.
+enabled = false
+
+# Bind only private IPv4 addresses assigned to these named LAN interfaces.
+bind_interfaces = ["eth0", "wlan0"]
+port = 8443
+
+certificate = "/etc/butters/desktop-agent/tls.crt"
+private_key = "/etc/butters/desktop-agent/tls.key"
+
+# The browser service remains loopback-only. The proxy forwards one path and
+# removes Cookie, Authorization, Origin, and all proxy/browser identity headers.
+upstream_host = "127.0.0.1"
+upstream_port = 8090

@@ -5,17 +5,15 @@ interactive desktop and application observation and control.
 
 ## Reintegration status
 
-The package is deliberately dormant in this repository slice:
+Butters can now reuse this package's signed protocol through a separately
+gated, authenticated machine ingress. The server-side `AgentHub` accepts only
+hello and heartbeat frames and exposes the independent `desktop.agent` and
+`desktop.interactive_session` state facets.
 
-- Butters does not import or depend on it.
-- No authenticated ingress, listener, AgentHub, action registration, planner
-  exposure, or Admin control is included.
-- The agent is not deployed and no production configuration is changed.
-- A future, separately reviewed slice will add authenticated ingress and state
-  observation before any application action is connected to Butters.
-
-The package can therefore be reviewed and reverted independently of the
-running Butters application.
+No action from `SCHEMAS` is registered with Butters, the hub has no command or
+invoke API, and there is no planner or Admin action exposure. The ingress is
+default-disabled and has not been deployed. Connecting any effector is a
+future, separately reviewed slice.
 
 ## Security model
 
