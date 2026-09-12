@@ -415,6 +415,9 @@ def create_app(
                     "cloud_available": runtime.general_reasoner.available,
                     "local_llm_enabled": configured.llm.enabled,
                     "bind": f"{configured.web.host}:{configured.web.port}",
+                    # Passive facets only: no connection id, credential,
+                    # capability list, or command surface crosses to Admin.
+                    "desktop_agent_state": runtime.desktop_agent.snapshot().safe_dict(),
                 }
             )
         except SecurityError as exc:

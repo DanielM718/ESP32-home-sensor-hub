@@ -15,6 +15,7 @@ from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from butters.actions.agent import AgentHub
 from butters.actions.agent_ingress import (
@@ -316,6 +317,7 @@ def test_route_gate_and_existing_admin_manual_surface_are_unchanged(
                 base.web,
                 state_dir=tmp_path / ("on" if enabled else "off"),
                 development_mode=True,
+                admin_identities=("admin@example.com",),
             ).validated(),
             remediation=replace(
                 base.remediation,
@@ -348,6 +350,26 @@ def test_route_gate_and_existing_admin_manual_surface_are_unchanged(
         assert "get_desktop_status" in registered
         assert not any(name.startswith("desktop.agent") for name in registered)
         assert not any("app.launch" in name for name in registered)
+
+    async def observe() -> None:
+        transport = httpx.ASGITransport(app=disabled_app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.get(
+                "/api/admin/overview",
+                headers={"tailscale-user-login": "admin@example.com"},
+            )
+        assert response.status_code == 200
+        snapshot = response.json()["desktop_agent_state"]
+        facets = {facet["name"]: facet["value"] for facet in snapshot["facets"]}
+        assert facets == {
+            "desktop.agent": "not_configured",
+            "desktop.interactive_session": "unknown",
+        }
+        assert "connection_id" not in json.dumps(snapshot)
+
+    asyncio.run(observe())
 
 
 def test_application_config_parsing_and_validation(tmp_path: Path) -> None:

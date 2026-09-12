@@ -32,6 +32,10 @@ An authenticated hello is not called connected until a valid signed heartbeat
 arrives. Disconnect discards the session observation. Network reachability,
 SSH, power, and Parsec state never substitute for either agent facet.
 
+The existing read-only Admin overview response includes this safe snapshot for
+operator observation. It contains no connection identifier, credential,
+reported action list, or invocation mechanism, and no Admin control is added.
+
 ## Configuration and installation
 
 There are two independent default-off gates:
