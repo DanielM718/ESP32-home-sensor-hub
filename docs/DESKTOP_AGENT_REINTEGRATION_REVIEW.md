@@ -699,6 +699,13 @@ lands and is hardware-validated. Not to be started before then.
 Baseline to preserve: 426 backend + 914 Butters tests passing, 4 pre-existing
 websocket/uvicorn deprecation warnings, no skips on this host.
 
+Corrected 2026-09-11 while reviewing Slices 1 and 2: with the slices applied the
+Butters suite is 935 passed, 2 skipped. The two skips are environmental --
+`sherpa-onnx` runtime/model absent from the venv used for the review
+(`test_live.py:542`, `test_stt.py:226`) -- so "no skips on this host" holds only
+where the local STT/wake models are installed. See
+`docs/DESKTOP_AGENT_SLICE_1_2_REVIEW.md` §10.
+
 Additional gate: a test asserting the model-visible tool catalog is byte-identical
 before and after each slice. The planner must gain **no** new model-executable
 capability from any of this.

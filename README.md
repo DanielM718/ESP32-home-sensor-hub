@@ -178,4 +178,5 @@ hardware-aware validation before CI rules are useful.
 - [SHT41 battery measurement wiring and semantics](docs/SHT41_BATTERY_MEASUREMENT.md)
 - [Conversational assistant and action planner architecture](docs/CONVERSATIONAL_ASSISTANT_ARCHITECTURE.md)
 - [Desktop Agent reintegration review](docs/DESKTOP_AGENT_REINTEGRATION_REVIEW.md)
+- [Desktop Agent Slices 1 and 2 implementation review](docs/DESKTOP_AGENT_SLICE_1_2_REVIEW.md)
 - [Server documentation](server/docs)
