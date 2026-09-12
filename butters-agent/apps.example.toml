@@ -1,0 +1,8 @@
+schema_version = 1
+
+# Applications are operator-configured symbolic names. Executable paths never
+# cross the network protocol.
+# [apps.git_bash]
+# path = 'C:\Program Files\Git\git-bash.exe'
+# images = ['C:\Program Files\Git\usr\bin\mintty.exe']
+# require_visible = true

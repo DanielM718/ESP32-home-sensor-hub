@@ -14,6 +14,7 @@ sensor_home/
 │   └── ESP32C3_SEN66_air_quality/    ESP32-C3 SEN66 air quality node
 ├── server/                           Raspberry Pi backend and deployment scripts
 ├── home-assistant/                   Isolated Home Assistant automation layer
+├── butters-agent/                    Standalone Windows Desktop Agent package
 ├── docs/                             Repository-level development documentation
 ├── .editorconfig                     Shared editor formatting defaults
 ├── .gitignore                        Authoritative repository ignore rules
@@ -177,4 +178,5 @@ hardware-aware validation before CI rules are useful.
 - [Development workflow](docs/DEVELOPMENT.md)
 - [SHT41 battery measurement wiring and semantics](docs/SHT41_BATTERY_MEASUREMENT.md)
 - [Conversational assistant and action planner architecture](docs/CONVERSATIONAL_ASSISTANT_ARCHITECTURE.md)
+- [Standalone Windows Desktop Agent package](butters-agent/README.md)
 - [Server documentation](server/docs)
