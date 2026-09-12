@@ -70,7 +70,7 @@ enabled = false
 config_path = "/etc/butters/desktop-agent.toml"
 protocol_version = 1
 hello_timeout_seconds = 5
-socket_idle_seconds = 45
+socket_idle_seconds = 60
 heartbeat_aging_seconds = 30
 heartbeat_stale_seconds = 45
 

@@ -89,10 +89,28 @@ def _credentials(tmp_path: Path) -> Path:
 
 
 def _hub(tmp_path: Path, **changes: object) -> AgentHub:
+    monotonic = changes.pop("monotonic", time.monotonic)
+    wall_clock = changes.pop("wall_clock", time.time)
     settings = AgentIngressSettings(
         enabled=True, config_path=_credentials(tmp_path), **changes
     ).validated()
-    return AgentHub(settings)
+    return AgentHub(settings, monotonic=monotonic, wall_clock=wall_clock)
+
+
+class Clock:
+    def __init__(self, monotonic: float = 100.0, wall: float = 1_700_000_000.0):
+        self.monotonic_now = monotonic
+        self.wall_now = wall
+
+    def monotonic(self) -> float:
+        return self.monotonic_now
+
+    def wall(self) -> float:
+        return self.wall_now
+
+    def advance(self, seconds: float) -> None:
+        self.monotonic_now += seconds
+        self.wall_now += seconds
 
 
 def _hello(*, token: object = TOKEN, agent_id: str = "desktop") -> str:
@@ -147,7 +165,7 @@ async def _wait_connected(hub: AgentHub) -> None:
     for _ in range(100):
         if hub.status()["agent_connected"]:
             return
-        await asyncio.sleep(0.001)
+        await asyncio.sleep(0)
     raise AssertionError("agent did not become connected")
 
 
@@ -256,8 +274,11 @@ def test_new_authenticated_connection_supersedes_old_identity(tmp_path: Path) ->
         await old_task
         assert hub.connection_id == new_id
         assert hub.status()["agent_connected"] is True
+        assert hub.reason == "agent_connected"
         await new.incoming.put(None)
         await new_task
+        assert hub.status()["state"] == "disconnected"
+        assert hub.status()["interactive_session"] == "unknown"
 
     asyncio.run(scenario())
 
@@ -285,6 +306,62 @@ def test_default_disabled_and_configured_state_is_truthful(tmp_path: Path) -> No
     configured = _hub(tmp_path)
     assert configured.status()["state"] == "disconnected"
     assert configured.status()["interactive_session"] == "unknown"
+
+
+def test_all_agent_states_and_heartbeat_thresholds_use_injected_time(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        clock = Clock()
+        disabled = AgentHub(
+            AgentIngressSettings(),
+            monotonic=clock.monotonic,
+            wall_clock=clock.wall,
+        )
+        assert disabled.status()["state"] == "not_configured"
+
+        hub = _hub(tmp_path, monotonic=clock.monotonic, wall_clock=clock.wall)
+        assert hub.status()["state"] == "disconnected"
+        socket = Socket()
+        task, connection_id = await _authenticate(hub, socket)
+        assert hub.status()["state"] == "awaiting_heartbeat"
+
+        await socket.incoming.put(_heartbeat(connection_id))
+        await _wait_connected(hub)
+        assert hub.status()["state"] == "connected"
+        assert hub.status()["interactive_session"] == "present"
+
+        clock.advance(30)
+        aging = hub.snapshot()
+        assert aging.facets[0].value == "heartbeat_aging"
+        assert aging.facets[0].confidence == "stale"
+        assert aging.facets[1].value == "unknown"
+        assert set(aging.incomplete) == {
+            "desktop.agent",
+            "desktop.interactive_session",
+        }
+
+        clock.advance(15)
+        stale = hub.snapshot()
+        assert stale.facets[0].value == "heartbeat_stale"
+        assert stale.facets[0].age_seconds == 45
+        assert stale.facets[1].value == "unknown"
+
+        await socket.incoming.put(None)
+        await task
+        assert hub.status()["state"] == "disconnected"
+        assert hub.status()["interactive_session"] == "unknown"
+
+    asyncio.run(scenario())
+
+
+def test_heartbeat_threshold_order_leaves_stale_observation_window() -> None:
+    settings = AgentIngressSettings().validated()
+    assert settings.heartbeat_aging_seconds == 30
+    assert settings.heartbeat_stale_seconds == 45
+    assert settings.socket_idle_seconds == 60
+    with pytest.raises(ConfigError, match="stale timeout must precede"):
+        replace(settings, socket_idle_seconds=45).validated()
 
 
 def test_no_agent_action_skill_or_planner_entry_is_registered(tmp_path: Path) -> None:
@@ -414,6 +491,60 @@ def test_transport_config_is_default_disabled_and_root_managed(tmp_path: Path) -
     assert loaded.upstream_host == "127.0.0.1"
     config.chmod(0o666)
     with pytest.raises(ValueError, match="unsafe_configuration"):
+        load_config(config)
+
+
+def _enabled_transport_config(tmp_path: Path, key: Path) -> Path:
+    example = Path(__file__).parents[1] / "config/agent-ingress.example.toml"
+    config = tmp_path / "agent-ingress.toml"
+    config.write_text(
+        example.read_text()
+        .replace("enabled = false", "enabled = true", 1)
+        .replace(
+            'private_key = "/etc/butters/desktop-agent/tls.key"',
+            f'private_key = "{key}"',
+        ),
+        encoding="utf-8",
+    )
+    config.chmod(0o640)
+    return config
+
+
+@pytest.mark.parametrize("mode", [0o600, 0o640])
+def test_enabled_transport_accepts_safe_tls_private_key_modes(
+    tmp_path: Path, mode: int
+) -> None:
+    key = tmp_path / "tls.key"
+    key.write_text("test-only-placeholder", encoding="utf-8")
+    key.chmod(mode)
+    config = _enabled_transport_config(tmp_path, key)
+    assert load_config(config).private_key == key
+
+
+@pytest.mark.parametrize("mode", [0o620, 0o604, 0o666])
+def test_enabled_transport_rejects_unsafe_tls_private_key_modes(
+    tmp_path: Path, mode: int
+) -> None:
+    key = tmp_path / "tls.key"
+    key.write_text("test-only-placeholder", encoding="utf-8")
+    key.chmod(mode)
+    config = _enabled_transport_config(tmp_path, key)
+    with pytest.raises(ValueError, match="unsafe_tls_private_key"):
+        load_config(config)
+
+
+def test_enabled_transport_rejects_untrusted_tls_key_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    key = tmp_path / "tls.key"
+    key.write_text("test-only-placeholder", encoding="utf-8")
+    key.chmod(0o600)
+    config = _enabled_transport_config(tmp_path, key)
+    unrelated_uid = os.geteuid() + 1
+    monkeypatch.setattr(
+        "butters.actions.file_security.os.geteuid", lambda: unrelated_uid
+    )
+    with pytest.raises(ValueError, match="unsafe_tls_private_key"):
         load_config(config)
 
 

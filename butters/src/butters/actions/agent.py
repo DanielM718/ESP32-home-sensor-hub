@@ -20,6 +20,7 @@ from typing import Any
 
 import tomllib
 
+from butters.actions.file_security import require_private_regular_file
 from butters.assistant_config import AgentIngressSettings
 from butters.state import StateFacet, StateSnapshot
 
@@ -245,6 +246,8 @@ class AgentHub:
                 ):
                     raise protocol.ProtocolError("malformed_message")
                 with self._state_lock:
+                    if self._socket is not websocket:
+                        break
                     self._session = dict(session)
                     self.last_authenticated_activity = self._monotonic()
                     self._last_authenticated_wall = self._wall_clock()
@@ -254,15 +257,15 @@ class AgentHub:
             raise
         except Exception as exc:  # noqa: BLE001 - frames and secrets are never logged.
             protocol_error = self._protocol().ProtocolError
+            reason = (
+                str(exc) if isinstance(exc, protocol_error) else type(exc).__name__
+            )
             with self._state_lock:
-                self.reason = (
-                    str(exc) if isinstance(exc, protocol_error) else type(exc).__name__
-                )
+                if current and self._socket is websocket:
+                    self.reason = reason
         finally:
-            if current and self._is_current(websocket):
-                with self._state_lock:
-                    reason = self.reason
-                self._disconnect(reason=reason)
+            if current:
+                self._disconnect_if_current(websocket)
             with suppress(Exception):
                 await websocket.close(code=1008)
 
@@ -295,8 +298,11 @@ class AgentHub:
         if not valid:
             raise self._protocol().ProtocolError("unauthorized")
 
-    def _disconnect(self, *, reason: str = "agent_disconnected") -> None:
+    def _disconnect_if_current(self, websocket: Any) -> None:
         with self._state_lock:
+            if self._socket is not websocket:
+                return
+            reason = self.reason
             self._socket = None
             self.connection_id = None
             self.connected_at = None
@@ -326,8 +332,9 @@ class AgentHub:
                 raise ValueError("unsafe_configuration")
             data = tomllib.loads(path.read_text(encoding="utf-8"))
             key_path = Path(data["command_key_file"])
-            if not key_path.is_absolute() or key_path.stat().st_mode & 0o027:
+            if not key_path.is_absolute():
                 raise ValueError("unsafe_command_key")
+            require_private_regular_file(key_path, "command_key")
             key = bytes.fromhex(key_path.read_text(encoding="utf-8").strip())
             token_hash = data["token_sha256"]
             if (

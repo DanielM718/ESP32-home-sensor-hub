@@ -141,7 +141,7 @@ class AgentIngressSettings:
     config_path: Path = Path("/etc/butters/desktop-agent.toml")
     protocol_version: int = 1
     hello_timeout_seconds: float = 5.0
-    socket_idle_seconds: float = 45.0
+    socket_idle_seconds: float = 60.0
     heartbeat_aging_seconds: float = 30.0
     heartbeat_stale_seconds: float = 45.0
 
@@ -158,9 +158,9 @@ class AgentIngressSettings:
             raise ConfigError(
                 "agent_ingress heartbeat aging must precede stale timeout"
             )
-        if not self.heartbeat_stale_seconds <= self.socket_idle_seconds:
+        if not self.heartbeat_stale_seconds < self.socket_idle_seconds:
             raise ConfigError(
-                "agent_ingress heartbeat stale timeout must not exceed "
+                "agent_ingress heartbeat stale timeout must precede "
                 "socket idle timeout"
             )
         return self
@@ -792,7 +792,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         ).expanduser(),
         protocol_version=int(agent_table.get("protocol_version", 1)),
         hello_timeout_seconds=float(agent_table.get("hello_timeout_seconds", 5.0)),
-        socket_idle_seconds=float(agent_table.get("socket_idle_seconds", 45.0)),
+        socket_idle_seconds=float(agent_table.get("socket_idle_seconds", 60.0)),
         heartbeat_aging_seconds=float(agent_table.get("heartbeat_aging_seconds", 30.0)),
         heartbeat_stale_seconds=float(agent_table.get("heartbeat_stale_seconds", 45.0)),
     ).validated()

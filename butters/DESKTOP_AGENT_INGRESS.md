@@ -18,7 +18,7 @@ add an agent capability to the conversational planner catalog.
 | Browser `Origin` refusal | `AgentHub.socket` rejects any Origin-bearing socket before acceptance. The TLS ingress handshake allowlist also rejects `Origin`. |
 | Browser identity stripping | `agent_ingress.validate_handshake` accepts only Host and the four required WebSocket upgrade headers. Cookie, Authorization, Tailscale identity, forwarded identity, CSRF, and all other headers are rejected and never reach Butters. |
 | Private-only listener | `agent_ingress.bind_addresses` resolves only explicitly configured interfaces or a host and refuses wildcard, unspecified, public, or non-IPv4 addresses. Only `/agent/v1/session` is forwarded to the loopback web daemon. |
-| Secrets at rest | The committed configs contain placeholders only. `/etc/butters/desktop-agent.toml` stores a token hash and a command-key file reference; the key and TLS private key remain separate root-managed files. No secret is placed in a systemd unit. |
+| Secrets at rest | The committed configs contain placeholders only. `/etc/butters/desktop-agent.toml` stores a token hash and a command-key file reference; the key and TLS private key remain separate root-managed files. Both key files must be regular, owned by root or the running service identity, and no more permissive than group-readable (`0640` is supported). No secret is placed in a systemd unit. |
 
 ## Truthful state
 
@@ -31,6 +31,11 @@ add an agent capability to the conversational planner catalog.
 An authenticated hello is not called connected until a valid signed heartbeat
 arrives. Disconnect discards the session observation. Network reachability,
 SSH, power, and Parsec state never substitute for either agent facet.
+
+The agent sends a heartbeat every 15 seconds. A heartbeat is fresh below 30
+seconds old, aging from 30 to below 45 seconds, and stale from 45 seconds until
+the socket idle timeout disconnects it at 60 seconds. Configuration validation
+requires the strict ordering `aging < stale < idle`.
 
 The existing read-only Admin overview response includes this safe snapshot for
 operator observation. It contains no connection identifier, credential,

@@ -21,6 +21,8 @@ from pathlib import Path
 
 import tomllib
 
+from butters.actions.file_security import require_private_regular_file
+
 AGENT_PATH = "/agent/v1/session"
 
 
@@ -66,6 +68,8 @@ def load_config(path: Path) -> IngressConfig:
         raise ValueError("loopback_upstream_required")
     if not config.certificate.is_absolute() or not config.private_key.is_absolute():
         raise ValueError("absolute_tls_paths_required")
+    if config.enabled:
+        require_private_regular_file(config.private_key, "tls_private_key")
     return config
 
 
