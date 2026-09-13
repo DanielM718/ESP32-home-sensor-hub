@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Read-only collision check to run before staging installation or enablement.
+set -Eeuo pipefail
+
+machine_port=18090
+lan_tls_port=18443
+validation_socket=/run/butters-staging/validation.sock
+
+command -v ss >/dev/null || { echo "ss is required for staging preflight." >&2; exit 2; }
+
+failed=0
+for port in "${machine_port}" "${lan_tls_port}"; do
+  if ! listeners="$(ss -H -ltn "sport = :${port}" 2>&1)"; then
+    echo "FAIL: unable to inspect staging port ${port}: ${listeners}" >&2
+    exit 2
+  fi
+  if [[ -n "${listeners}" ]]; then
+    echo "FAIL: staging port ${port} is already listening:" >&2
+    echo "${listeners}" >&2
+    failed=1
+  else
+    echo "PASS: staging port ${port} is unused"
+  fi
+done
+
+if [[ -e "${validation_socket}" || -L "${validation_socket}" ]]; then
+  echo "FAIL: stale or active validation socket exists: ${validation_socket}" >&2
+  stat --format='type=%F mode=%a owner=%U group=%G path=%n' \
+    "${validation_socket}" >&2 || true
+  failed=1
+else
+  echo "PASS: validation socket path is absent: ${validation_socket}"
+fi
+
+if [[ "${failed}" != 0 ]]; then
+  echo "Staging preflight failed; do not enable or start staging." >&2
+  exit 1
+fi
+echo "Staging listener preflight passed."

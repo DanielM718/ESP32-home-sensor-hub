@@ -9,7 +9,7 @@ port = 18443
 certificate = "/etc/butters-staging/desktop-agent/tls.crt"
 private_key = "/etc/butters-staging/desktop-agent/tls.key"
 
-# Only the validation daemon is reachable here. The proxy itself accepts only
-# /agent/v1/session and strips browser/authentication headers.
+# Only the machine-ingress upstream is reachable here. The proxy accepts only
+# /agent/v1/session and no /validation routes exist on this TCP listener.
 upstream_host = "127.0.0.1"
 upstream_port = 18090

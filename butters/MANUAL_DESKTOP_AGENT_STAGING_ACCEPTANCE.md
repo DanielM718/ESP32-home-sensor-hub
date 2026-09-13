@@ -21,13 +21,20 @@ butters-agent-ingress-staging.service
        |
        | loopback HTTP/WebSocket :18090
        v
-butters-staging.service
-  AgentHub -> SkillRegistry -> PolicyValidator -> ActionCoordinator
-  /var/lib/butters-staging/actions.sqlite3
-       ^
-       | four fixed loopback-only validation routes
+butters-staging.service TCP machine upstream
+  /agent/v1/session only -> AgentHub
+
+authorized local operator in group butters-staging
        |
-desktop-agent-staging-validate
+       | /run/butters-staging/validation.sock
+       | root:butters-staging 0660 (no TCP validation routes)
+       v
+fixed staging validation runtime
+  -> SkillRegistry -> PolicyValidator -> ActionCoordinator
+  -> /var/lib/butters-staging/actions.sqlite3
+       ^
+       |
+desktop-agent-staging-validate (four fixed commands only)
   state | list-apps | status APP | launch APP
 
 Production /opt/butters, /etc/butters, /var/lib/butters, production units,
@@ -51,11 +58,24 @@ Both repository templates set these gates to `false`.
 | Configuration/secrets | `/etc/butters-staging` |
 | Persistent state | `/var/lib/butters-staging` |
 | Application unit | `butters-staging.service` |
+| Local control socket unit | `butters-staging-validation.socket` |
 | TLS ingress unit | `butters-agent-ingress-staging.service` |
-| Application listener | `127.0.0.1:18090` |
+| Machine-ingress upstream | `127.0.0.1:18090`, `/agent/v1/session` only |
+| Local validation API | `/run/butters-staging/validation.sock`, `root:butters-staging` `0660` |
 | Private LAN TLS listener | private staging-host address, port `18443` |
 | Windows data/DPAPI/log profile | `%LOCALAPPDATA%\ButtersAgentStaging` |
 | Machine identity | `desktop-staging` |
+
+The TCP machine upstream has no `/validation/...` routes. A bare loopback
+`curl` therefore cannot reach state, list, status, or launch. The Unix socket's
+filesystem ownership is the local-user authorization boundary: only root and
+members of the `butters-staging` group can connect. Add only named, trusted
+hardware-validation operators to that group; membership grants all four fixed
+validation operations, including the policy-coordinated launch.
+Systemd maintains the containing runtime directory as
+`butters-staging:butters-staging` mode `0750` and creates the socket itself as
+`root:butters-staging` mode `0660`; the daemon verifies the socket identity,
+type, mode, owner, and group before serving it.
 
 The validation daemon does not construct `BetaAssistantService`, browser
 sessions, passkeys, Admin routes, broker clients, or a generic AgentHub command
@@ -74,6 +94,9 @@ git rev-parse HEAD
 # Baseline production without restart or mutation.
 sudo ./butters/scripts/desktop-agent-staging-production-proof before
 
+# Read-only proof that both designated TCP ports and the Unix path are unused.
+sudo ./butters/scripts/desktop-agent-staging-preflight
+
 # Installs inert templates and separate units. It neither enables nor starts.
 sudo ./butters/scripts/install-desktop-agent-staging
 ```
@@ -87,6 +110,8 @@ illustrative operator steps for a private root shell:
 
 ```bash
 sudo -i
+set +o history
+export HISTFILE=/dev/null
 umask 077
 install -d -m 0750 -o root -g butters-staging /etc/butters-staging/desktop-agent
 STAGING_MACHINE_TOKEN="$(openssl rand -hex 32)"
@@ -112,7 +137,9 @@ Replace only the placeholder digest in
 `/etc/butters-staging/desktop-agent.toml`. Transfer the plaintext machine token,
 command key, and SPKI pin to Windows over an operator-approved private channel;
 do not store the plaintext token in the server TOML. Clear the shell variables
-and close the root shell after enrollment.
+with `unset STAGING_MACHINE_TOKEN STAGING_COMMAND_KEY STAGING_TOKEN_DIGEST
+STAGING_SPKI_PIN`, then close the root shell after enrollment. Do not pass any
+credential in argv or write it under `/tmp` or the repository.
 
 Review and set the private staging interface in
 `/etc/butters-staging/agent-ingress.toml`. Only after reviewing every path and
@@ -123,13 +150,22 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now butters-staging.service
 sudo systemctl enable --now butters-agent-ingress-staging.service
 sudo systemctl --no-pager --full status \
-  butters-staging.service butters-agent-ingress-staging.service
+  butters-staging.service butters-staging-validation.socket \
+  butters-agent-ingress-staging.service
 sudo ss -lntp | grep -E ':(18090|18443)[[:space:]]'
+sudo stat --format='%a %U:%G %n' /run/butters-staging/validation.sock
 ```
 
-Do not configure Tailscale Serve. Port `18090` must remain loopback-only, and
-port `18443` must resolve only to private IPv4 addresses on the configured LAN
+Do not configure Tailscale Serve. Port `18090` must remain loopback-only and
+serve only `/agent/v1/session`; validation remains Unix-socket-only. Port
+`18443` must resolve only to private IPv4 addresses on the configured LAN
 interfaces.
+
+The staging daemon's systemd IP policy denies all networking except loopback.
+The TLS proxy allows loopback and RFC1918 IPv4 space only. IPv6 is intentionally
+omitted because the ingress implementation resolves and binds private IPv4
+interfaces. `ProtectProc=invisible`, `ProcSubset=pid`, and
+`SystemCallFilter=@system-service` constrain both units.
 
 ## Windows staging profile
 
@@ -146,6 +182,7 @@ agent directory or its `config.toml`, `apps.toml`, task, DPAPI file, or logs.
    root:
 
    ```powershell
+   Set-PSReadLineOption -HistorySaveStyle SaveNothing
    $json = @{ token = '<STAGING_MACHINE_TOKEN>'; command_key = '<STAGING_COMMAND_KEY>' } | ConvertTo-Json -Compress
    $json | python -m butters_agent.provision --config .\config.toml
    python -m butters_agent --config .\config.toml
@@ -157,7 +194,8 @@ is rejected unless `profile = "staging"`.
 
 ## Validation CLI and authorization
 
-Run the installed CLI only on the staging host:
+Run the installed CLI only on the staging host as root or a deliberately
+authorized member of `butters-staging`:
 
 ```bash
 sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate state
@@ -177,9 +215,13 @@ command.
 The staging assertion differs from production browser authentication as follows:
 
 - identity and session are fixed constants, not browser-controlled fields;
-- it is minted only after a loopback request to this dedicated daemon;
+- it is minted only after an authorized Unix-socket request to this dedicated
+  daemon;
 - it expires after 30 seconds and has the normal typed `ELEVATED` level;
 - method is audited as `staging_local_host_assertion`;
+- it explicitly carries the frozen `plan.digest`; `ELEVATED` currently does not
+  require digest equality, but retaining the binding improves audit fidelity
+  and defense in depth without weakening coordinator policy;
 - there is no passkey record, browser cookie, browser origin, or production
   `security.sqlite3` access;
 - it does **not** bypass `PolicyValidator`, the action authorization, frozen
@@ -261,9 +303,10 @@ sudo /opt/butters-staging/scripts/desktop-agent-staging-production-proof after
 ```
 
 The `after` command compares the expected deployment identity, application tree
-digest, production service state, both production ingress gates, loopback
-health/readiness, private Admin endpoint status, and broker configuration hash
-(when present). Investigate any diff;
+digest, production service PID/start timestamp/state, production unit and
+configuration hashes, production TCP listeners, both production ingress gates,
+loopback health/readiness, private Admin endpoint status, and broker
+configuration hash (when present). Investigate any diff;
 never normalize it by reinstalling or restarting production.
 
 ## Rollback/removal
@@ -273,8 +316,10 @@ Stop and remove only staging artifacts:
 ```bash
 sudo systemctl disable --now butters-agent-ingress-staging.service
 sudo systemctl disable --now butters-staging.service
+sudo systemctl disable --now butters-staging-validation.socket
 sudo rm /etc/systemd/system/butters-agent-ingress-staging.service
 sudo rm /etc/systemd/system/butters-staging.service
+sudo rm /etc/systemd/system/butters-staging-validation.socket
 sudo systemctl daemon-reload
 sudo rm -rf -- /opt/butters-staging /opt/butters-staging.previous
 sudo rm -rf -- /etc/butters-staging /var/lib/butters-staging

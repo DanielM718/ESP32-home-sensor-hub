@@ -31,10 +31,21 @@ umask 077
     | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
   for unit in butters-web.service butters-agent-ingress.service; do
     if ! systemctl show "${unit}" \
-      --property=Id,LoadState,ActiveState,SubState,UnitFileState --no-pager; then
+      --property=Id,LoadState,ActiveState,SubState,UnitFileState,MainPID,ActiveEnterTimestamp --no-pager; then
       echo "unit_status_${unit}=unavailable"
     fi
+    fragment="$(systemctl show "${unit}" --property=FragmentPath --value 2>/dev/null || true)"
+    echo -n "unit_file_sha256_${unit}="
+    if [[ -n "${fragment}" && -f "${fragment}" ]]; then
+      sha256sum "${fragment}" | awk '{print $1}'
+    else
+      echo "absent"
+    fi
   done
+  echo -n "production_config_tree_sha256="
+  find /etc/butters -xdev -type f \
+    \( -name '*.toml' -o -name '*.env' -o -name '*.conf' \) -print0 \
+    | sort -z | xargs -0 -r sha256sum | sha256sum | awk '{print $1}'
   echo "application_ingress_gate=$(awk '
     /^\[agent_ingress\]/{inside=1; next}
     /^\[/{inside=0}
@@ -61,6 +72,14 @@ umask 077
   curl --output /dev/null --silent --show-error --max-time 5 \
     --write-out 'http=%{http_code}\n' \
     https://sensor-pi.tail9644cc.ts.net/admin || echo "unreachable"
+  production_ingress_port="$(awk '
+    /^[[:space:]]*port[[:space:]]*=/{print $3; exit}
+  ' /etc/butters/agent-ingress.toml 2>/dev/null || true)"
+  echo "production_tcp_listeners_begin"
+  ss -H -ltnp | awk -v web=8090 -v ingress="${production_ingress_port}" '
+    $4 ~ (":" web "$") || (ingress != "" && $4 ~ (":" ingress "$"))
+  ' | LC_ALL=C sort
+  echo "production_tcp_listeners_end"
 } >"${output}"
 
 chmod 0600 "${output}"

@@ -1,0 +1,16 @@
+[Unit]
+Description=Butters staging local validation control socket
+Documentation=file:/opt/butters-staging/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md
+PartOf=butters-staging.service
+
+[Socket]
+ListenStream=/run/butters-staging/validation.sock
+SocketUser=root
+SocketGroup=butters-staging
+SocketMode=0660
+DirectoryMode=0750
+RemoveOnStop=true
+Service=butters-staging.service
+
+[Install]
+WantedBy=sockets.target

@@ -15,6 +15,7 @@ state_root="/var/lib/butters-staging"
 runtime_root="/run/butters-staging"
 web_unit="butters-staging.service"
 ingress_unit="butters-agent-ingress-staging.service"
+validation_socket_unit="butters-staging-validation.socket"
 enable_services=0
 start_services=0
 
@@ -25,6 +26,10 @@ usage() {
 require_staging_target() {
   local candidate resolved
   candidate="$1"
+  [[ -n "${candidate}" && "${candidate}" == /* ]] || {
+    echo "Refusing non-absolute installation target" >&2
+    return 2
+  }
   resolved="$(readlink -m -- "${candidate}")"
   [[ "${resolved}" == "/opt/butters-staging" ]] || {
     echo "Refusing non-staging installation target: ${resolved}" >&2
@@ -40,6 +45,10 @@ require_isolated_path() {
   local candidate expected resolved
   candidate="$1"
   expected="$2"
+  [[ -n "${candidate}" && "${candidate}" == /* ]] || {
+    echo "Refusing non-absolute staging path" >&2
+    return 2
+  }
   resolved="$(readlink -m -- "${candidate}")"
   [[ "${resolved}" == "${expected}" ]] || {
     echo "Refusing unexpected staging path: ${resolved}" >&2
@@ -90,12 +99,12 @@ require_isolated_path "${state_root}" "/var/lib/butters-staging"
 require_isolated_path "${runtime_root}" "/run/butters-staging"
 [[ "${web_unit}" != "butters-web.service" ]]
 [[ "${ingress_unit}" != "butters-agent-ingress.service" ]]
-[[ -f "${butters_source}/requirements-web.txt" ]]
+[[ -f "${butters_source}/requirements-staging.txt" ]]
 [[ -f "${agent_source}/src/butters_agent/protocol.py" ]]
 
 echo "Desktop Agent STAGING installation target: ${install_root}"
 echo "Configuration: ${config_root}; state: ${state_root}"
-echo "Units: ${web_unit}, ${ingress_unit}"
+echo "Units: ${web_unit}, ${validation_socket_unit}, ${ingress_unit}"
 echo "Production services, broker configuration, and Tailscale Serve are out of scope."
 
 if ! getent group butters-staging >/dev/null; then
@@ -136,21 +145,21 @@ cleanup
 install -d -m 0750 -o root -g butters-staging "${staging_root}"
 install -d -m 0750 -o root -g butters-staging \
   "${staging_root}/src" "${staging_root}/scripts" "${staging_root}/systemd"
-# Curated staging payload: no normal installer, production configuration,
-# local config, model, runtime, static/Admin, or developer-secret file enters
-# the staging installation.
+# The full Python package is copied to avoid a fragile import allowlist. Only
+# the dedicated staging entrypoints/import graphs are reachable from these units;
+# no production config, runtime state, or developer-secret file is copied.
 rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
   "${butters_source}/src/butters/" "${staging_root}/src/butters/"
 install -m 0640 -o root -g butters-staging \
-  "${butters_source}/requirements-web.txt" "${staging_root}/requirements-web.txt"
+  "${butters_source}/requirements-staging.txt" "${staging_root}/requirements-staging.txt"
 install -m 0640 -o root -g butters-staging \
   "${butters_source}/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md" \
   "${staging_root}/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md"
-for script in desktop-agent-staging-validate desktop-agent-staging-production-proof; do
+for script in desktop-agent-staging-validate desktop-agent-staging-production-proof desktop-agent-staging-preflight; do
   install -m 0750 -o root -g butters-staging \
     "${butters_source}/scripts/${script}" "${staging_root}/scripts/${script}"
 done
-for unit in "${web_unit}" "${ingress_unit}"; do
+for unit in "${web_unit}" "${ingress_unit}" "${validation_socket_unit}"; do
   install -m 0640 -o root -g butters-staging \
     "${butters_source}/systemd/${unit}" "${staging_root}/systemd/${unit}"
 done
@@ -162,7 +171,7 @@ chown -h -R root:butters-staging "${staging_root}"
 /usr/bin/python3 -m venv "${staging_root}/.venv"
 "${staging_root}/.venv/bin/python" -m pip install \
   --no-input --disable-pip-version-check --quiet \
-  -r "${staging_root}/requirements-web.txt"
+  -r "${staging_root}/requirements-staging.txt"
 PYTHONPATH="${staging_root}/src:${staging_root}/agent-src" \
   "${staging_root}/.venv/bin/python" -c \
   'import butters.desktop_agent_staging, butters_agent.protocol'
@@ -194,6 +203,8 @@ install -m 0644 -o root -g root \
   "${install_root}/systemd/${web_unit}" "/etc/systemd/system/${web_unit}"
 install -m 0644 -o root -g root \
   "${install_root}/systemd/${ingress_unit}" "/etc/systemd/system/${ingress_unit}"
+install -m 0644 -o root -g root \
+  "${install_root}/systemd/${validation_socket_unit}" "/etc/systemd/system/${validation_socket_unit}"
 systemctl daemon-reload
 if [[ "${enable_services}" == 1 ]]; then
   systemctl enable "${web_unit}" "${ingress_unit}"

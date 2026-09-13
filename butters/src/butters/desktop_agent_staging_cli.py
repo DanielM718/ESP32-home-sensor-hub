@@ -3,16 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
+import socket
 import sys
 from pathlib import Path
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 from butters_agent.protocol import NAME
 
 from butters.desktop_agent_staging import (
+    STAGING_VALIDATION_SOCKET,
     load_staging_settings,
     validate_staging_settings,
 )
@@ -40,6 +41,40 @@ def parser() -> argparse.ArgumentParser:
     return result
 
 
+class UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, path: Path, timeout: float) -> None:
+        super().__init__("localhost", timeout=timeout)
+        self.unix_path = path
+
+    def connect(self) -> None:
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(self.timeout)
+        self.sock.connect(str(self.unix_path))
+
+
+def _selected_route(options: argparse.Namespace) -> tuple[str, str]:
+    if options.command == "state":
+        return "GET", "/validation/v1/state"
+    if options.command == "list-apps":
+        return "POST", "/validation/v1/list-apps"
+    if options.command == "status":
+        return "POST", f"/validation/v1/status/{options.app}"
+    return "POST", f"/validation/v1/launch/{options.app}"
+
+
+def _request(method: str, path: str, timeout: float) -> dict[str, object]:
+    connection = UnixHTTPConnection(STAGING_VALIDATION_SOCKET, timeout)
+    try:
+        connection.request(method, path, headers={"Content-Length": "0"})
+        response = connection.getresponse()
+        value = json.loads(response.read())
+        if not isinstance(value, dict):
+            raise TypeError("invalid staging response")
+        return value
+    finally:
+        connection.close()
+
+
 def main() -> int:
     options = parser().parse_args()
     config = Path(
@@ -49,26 +84,14 @@ def main() -> int:
     )
     settings = load_staging_settings(config)
     validate_staging_settings(config, settings)
-    paths = {
-        "state": ("GET", "/validation/v1/state"),
-        "list-apps": ("POST", "/validation/v1/list-apps"),
-        "status": ("POST", f"/validation/v1/status/{options.app}"),
-        "launch": ("POST", f"/validation/v1/launch/{options.app}"),
-    }
-    method, path = paths[options.command]
-    request = Request(
-        f"http://127.0.0.1:{settings.port}{path}",
-        method=method,
-        headers={"Content-Length": "0"},
-    )
+    method, path = _selected_route(options)
     try:
-        with urlopen(
-            request, timeout=settings.agent_ingress.request_timeout_seconds + 12
-        ) as response:
-            payload = json.load(response)
-    except HTTPError as exc:
-        payload = json.load(exc)
-    except (OSError, URLError, ValueError):
+        payload = _request(
+            method,
+            path,
+            settings.agent_ingress.request_timeout_seconds + 12,
+        )
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
         print(json.dumps({"ok": False, "error": "staging_unavailable"}))
         return 1
     print(json.dumps(payload, indent=2, sort_keys=True))

@@ -28,3 +28,33 @@ def test_fault_delays_cannot_activate_in_production_profile():
             "staging_fault_ack_delay_seconds": 4,
         }
     ) == (4.0, 0.0)
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        {
+            "profile": "production",
+            "agent_id": "desktop-staging",
+            "url": "wss://staging.lan:18443/agent/v1/session",
+        },
+        {
+            "profile": "staging",
+            "agent_id": "desktop-production",
+            "url": "wss://staging.lan:18443/agent/v1/session",
+        },
+        {
+            "profile": "staging",
+            "agent_id": "desktop-staging",
+            "url": "wss://staging.lan:18444/agent/v1/session",
+        },
+        {
+            "agent_id": "desktop-staging",
+            "url": "wss://staging.lan:18443/agent/v1/session",
+        },
+    ],
+)
+def test_nonzero_fault_delay_requires_all_staging_identity_parts(config):
+    config["staging_fault_result_delay_seconds"] = 3
+    with pytest.raises(ValueError):
+        staging_fault_delays(config)

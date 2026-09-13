@@ -1,17 +1,18 @@
-"""Local-only Desktop Agent hardware-validation surface.
+"""Separated Desktop Agent staging machine ingress and local validation APIs.
 
-This process deliberately does not construct the browser service or its Admin
-routes.  It owns one staging AgentHub and exposes four fixed validation calls
-on a loopback listener; the separate TLS proxy can forward only the machine
-WebSocket route.
+The loopback TCP listener contains only the machine WebSocket route.  The four
+fixed operator calls are served on a systemd-owned Unix socket and therefore
+inherit its local group authorization boundary.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
-import ipaddress
+import grp
 import os
+import socket
+import stat
 import time
 import uuid
 from dataclasses import asdict, dataclass, is_dataclass
@@ -39,6 +40,10 @@ from butters.skills.registry import SkillRegistry
 
 STAGING_CONFIG_ROOT = Path("/etc/butters-staging")
 STAGING_STATE_ROOT = Path("/var/lib/butters-staging")
+STAGING_MACHINE_HOST = "127.0.0.1"
+STAGING_MACHINE_PORT = 18090
+STAGING_VALIDATION_SOCKET = Path("/run/butters-staging/validation.sock")
+STAGING_SOCKET_GROUP = "butters-staging"
 STAGING_IDENTITY = "desktop-agent-staging-validator"
 STAGING_SESSION = "local-staging-hardware-validation"
 TERMINAL_STATES = frozenset({"completed", "failed", "cancelled", "expired"})
@@ -103,15 +108,6 @@ def load_staging_settings(path: Path) -> StagingSettings:
     )
 
 
-def _is_loopback(request: Request) -> bool:
-    if request.client is None:
-        return False
-    try:
-        return ipaddress.ip_address(request.client.host).is_loopback
-    except ValueError:
-        return False
-
-
 def _error(code: str, message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"ok": False, "error": code, "message": message}, status)
 
@@ -119,20 +115,26 @@ def _error(code: str, message: str, status: int = 400) -> JSONResponse:
 def validate_staging_settings(path: Path, settings: StagingSettings) -> None:
     """Fail closed before any state is opened or any listener is created."""
 
+    if not path.is_absolute():
+        raise ValueError("absolute_staging_config_required")
     resolved = path.resolve(strict=True)
-    if not resolved.is_relative_to(STAGING_CONFIG_ROOT):
+    if not resolved.is_relative_to(STAGING_CONFIG_ROOT.resolve(strict=True)):
         raise ValueError("staging_config_root_required")
-    if path.stat().st_mode & 0o022:
+    if resolved.stat().st_mode & 0o022:
         raise ValueError("unsafe_staging_configuration")
-    if settings.host not in {"127.0.0.1", "::1", "localhost"}:
+    if settings.host != STAGING_MACHINE_HOST:
         raise ValueError("staging_loopback_required")
-    if not 1024 <= settings.port <= 65535 or settings.port == 8090:
-        raise ValueError("production_web_port_refused")
+    if settings.port != STAGING_MACHINE_PORT:
+        raise ValueError("staging_machine_port_required")
+    if not settings.state_dir.is_absolute():
+        raise ValueError("absolute_staging_state_required")
     state = settings.state_dir.resolve(strict=False)
-    if not state.is_relative_to(STAGING_STATE_ROOT):
+    if not state.is_relative_to(STAGING_STATE_ROOT.resolve(strict=False)):
         raise ValueError("staging_state_root_required")
+    if not settings.agent_ingress.config_path.is_absolute():
+        raise ValueError("absolute_staging_agent_config_required")
     agent_config = settings.agent_ingress.config_path.resolve(strict=False)
-    if not agent_config.is_relative_to(STAGING_CONFIG_ROOT):
+    if not agent_config.is_relative_to(STAGING_CONFIG_ROOT.resolve(strict=True)):
         raise ValueError("staging_agent_config_root_required")
 
 
@@ -197,6 +199,7 @@ class StagingValidationRuntime:
                 STAGING_IDENTITY,
                 time.time() + 30,
                 "staging_local_host_assertion",
+                action_digest=plan.digest,
             )
             jobs = self.coordinator.execute(
                 plan.plan_id,
@@ -238,10 +241,8 @@ class StagingValidationRuntime:
             }
 
 
-def create_app(runtime: StagingValidationRuntime) -> Starlette:
+def create_validation_app(runtime: StagingValidationRuntime) -> Starlette:
     async def local_call(request: Request, operation: str) -> Response:
-        if not _is_loopback(request):
-            return _error("local_only", "staging validation is loopback-only", 403)
         if (
             request.headers.get("content-length") not in {None, "0"}
             or request.headers.get("transfer-encoding") is not None
@@ -250,6 +251,12 @@ def create_app(runtime: StagingValidationRuntime) -> Starlette:
         app = request.path_params.get("app")
         if operation == "state":
             return JSONResponse({"ok": True, "state": runtime.hub.status()})
+        if not runtime.settings.agent_ingress.enabled:
+            return _error(
+                "staging_gate_disabled",
+                "the staging machine-ingress gate is disabled",
+                503,
+            )
         if operation == "list":
             value = await asyncio.to_thread(runtime.observe, "desktop.app.list", {})
         elif operation == "status":
@@ -274,7 +281,6 @@ def create_app(runtime: StagingValidationRuntime) -> Starlette:
 
     return Starlette(
         routes=[
-            WebSocketRoute("/agent/v1/session", runtime.hub.socket),
             Route(
                 "/validation/v1/state",
                 state,
@@ -299,6 +305,66 @@ def create_app(runtime: StagingValidationRuntime) -> Starlette:
     )
 
 
+def create_machine_ingress_app(runtime: StagingValidationRuntime) -> Starlette:
+    """Return a TCP surface containing no local validation routes."""
+
+    routes = []
+    if runtime.settings.agent_ingress.enabled:
+        routes.append(WebSocketRoute("/agent/v1/session", runtime.hub.socket))
+    return Starlette(routes=routes)
+
+
+def systemd_validation_socket() -> socket.socket:
+    """Adopt and verify the single Unix listener supplied by systemd."""
+
+    if os.environ.get("LISTEN_PID") != str(os.getpid()) or os.environ.get(
+        "LISTEN_FDS"
+    ) != "1":
+        raise RuntimeError("staging_validation_socket_required")
+    inherited = socket.socket(fileno=3)
+    details = STAGING_VALIDATION_SOCKET.stat()
+    expected_gid = grp.getgrnam(STAGING_SOCKET_GROUP).gr_gid
+    if (
+        inherited.getsockname() != str(STAGING_VALIDATION_SOCKET)
+        or not stat.S_ISSOCK(details.st_mode)
+        or stat.S_IMODE(details.st_mode) != 0o660
+        or details.st_uid != 0
+        or details.st_gid != expected_gid
+    ):
+        inherited.close()
+        raise RuntimeError("unsafe_staging_validation_socket")
+    return inherited
+
+
+async def serve(runtime: StagingValidationRuntime, validation: socket.socket) -> None:
+    common = {
+        "workers": 1,
+        "proxy_headers": False,
+        "access_log": False,
+        "log_level": os.environ.get("BUTTERS_LOG_LEVEL", "info").lower(),
+    }
+    control = uvicorn.Server(uvicorn.Config(create_validation_app(runtime), **common))
+    if not runtime.settings.agent_ingress.enabled:
+        await control.serve(sockets=[validation])
+        return
+    machine = uvicorn.Server(
+        uvicorn.Config(
+            create_machine_ingress_app(runtime),
+            host=runtime.settings.host,
+            port=runtime.settings.port,
+            **common,
+        )
+    )
+    tasks = {
+        asyncio.create_task(machine.serve()),
+        asyncio.create_task(control.serve(sockets=[validation])),
+    }
+    await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    machine.should_exit = True
+    control.should_exit = True
+    await asyncio.gather(*tasks)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run isolated Desktop Agent staging")
     parser.add_argument(
@@ -314,15 +380,11 @@ def main() -> None:
     settings = load_staging_settings(options.config)
     validate_staging_settings(options.config, settings)
     runtime = StagingValidationRuntime(settings)
-    uvicorn.run(
-        create_app(runtime),
-        host=settings.host,
-        port=settings.port,
-        workers=1,
-        proxy_headers=False,
-        access_log=False,
-        log_level=os.environ.get("BUTTERS_LOG_LEVEL", "info").lower(),
-    )
+    validation = systemd_validation_socket()
+    try:
+        asyncio.run(serve(runtime, validation))
+    finally:
+        validation.close()
 
 
 if __name__ == "__main__":

@@ -1,8 +1,9 @@
-# Dedicated staging validation daemon. This is not a production/Admin config;
-# unknown tables or fields fail closed.
+# Dedicated staging daemon. This listener is the loopback machine-ingress
+# upstream and serves /agent/v1/session only. Local validation uses the fixed
+# /run/butters-staging/validation.sock Unix socket instead.
 [staging]
-host = "127.0.0.1"
-port = 18090
+host = "127.0.0.1" # exact staging loopback machine-upstream identity
+port = 18090        # not the private-LAN TLS port (18443)
 state_dir = "/var/lib/butters-staging"
 
 # Gate 1 of 2. Keep false in the repository template. Set true only in the
