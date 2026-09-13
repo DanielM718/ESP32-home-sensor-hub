@@ -14,6 +14,7 @@ import secrets
 import threading
 import time
 import uuid
+from collections import OrderedDict
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,10 +43,18 @@ class _PendingRequest:
     result: asyncio.Future[dict[str, object]]
 
 
+@dataclass(frozen=True, slots=True)
+class _TimedOutRequest:
+    action: str
+    expires_at: float
+
+
 class AgentHub:
     """Own one authenticated machine connection and three typed app operations."""
 
     _ACK_TIMEOUT_SECONDS = 3.0
+    _LATE_RESULT_TTL_SECONDS = 30.0
+    _LATE_RESULT_CAPACITY = 128
     _PUBLIC_ERRORS = frozenset(
         {
             "agent_action_failed",
@@ -101,6 +110,7 @@ class AgentHub:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._actions: tuple[str, ...] = ()
         self._pending: dict[str, _PendingRequest] = {}
+        self._timed_out: OrderedDict[tuple[str, str], _TimedOutRequest] = OrderedDict()
         self._app_catalog: dict[str, dict[str, object]] = {}
         self._catalog_connection_id: str | None = None
         self.connection_id: str | None = None
@@ -392,6 +402,7 @@ class AgentHub:
             timeout_seconds=timeout,
         )
         sent = False
+        timed_out = False
         try:
             await websocket.send_text(
                 protocol.canonical(
@@ -417,6 +428,7 @@ class AgentHub:
         except asyncio.CancelledError:
             raise
         except asyncio.TimeoutError:
+            timed_out = True
             return self._failure(action, "timeout")
         except Exception as exc:  # noqa: BLE001 - never format transport exceptions.
             code = (
@@ -428,6 +440,8 @@ class AgentHub:
         finally:
             if self._pending.get(request_id) is pending:
                 self._pending.pop(request_id, None)
+            if timed_out:
+                self._remember_timeout(connection_id, request_id, action)
             if (
                 sent
                 and not pending.result.done()
@@ -481,6 +495,7 @@ class AgentHub:
             current = True
             if old_connection_id is not None:
                 self._fail_pending(old_connection_id, "superseded_connection")
+                self._forget_timeouts(old_connection_id)
             if old is not None and old is not websocket:
                 await old.close(code=1012)
 
@@ -589,10 +604,12 @@ class AgentHub:
         except protocol.ProtocolError as exc:
             raise protocol.ProtocolError("wrong_request_id") from exc
         pending = self._pending.get(request_id)
-        if (
-            pending is None
-            or pending.connection_id != connection_id
-            or not self._is_current(websocket, connection_id)
+        if pending is None:
+            if self._ignore_late_terminal(frame, websocket, connection_id, request_id):
+                return
+            raise protocol.ProtocolError("wrong_request_id")
+        if pending.connection_id != connection_id or not self._is_current(
+            websocket, connection_id
         ):
             raise protocol.ProtocolError("wrong_request_id")
         base = {"type", "connection_id", "issued_at", "sig", "request_id"}
@@ -630,6 +647,72 @@ class AgentHub:
             pending.result.set_result(self._failure(pending.action, error))
             return
         raise protocol.ProtocolError("malformed_message")
+
+    def _remember_timeout(
+        self, connection_id: str, request_id: str, action: str
+    ) -> None:
+        self._prune_timeouts()
+        key = (connection_id, request_id)
+        self._timed_out[key] = _TimedOutRequest(
+            action, self._monotonic() + self._LATE_RESULT_TTL_SECONDS
+        )
+        self._timed_out.move_to_end(key)
+        while len(self._timed_out) > self._LATE_RESULT_CAPACITY:
+            self._timed_out.popitem(last=False)
+
+    def _ignore_late_terminal(
+        self,
+        frame: dict[str, object],
+        websocket: Any,
+        connection_id: str,
+        request_id: str,
+    ) -> bool:
+        """Ignore one valid terminal reply to a known timed-out current request."""
+
+        if not self._is_current(websocket, connection_id):
+            return False
+        self._prune_timeouts()
+        key = (connection_id, request_id)
+        timed_out = self._timed_out.get(key)
+        if timed_out is None:
+            return False
+        kind = frame.get("type")
+        base = {"type", "connection_id", "issued_at", "sig", "request_id"}
+        if kind == "result":
+            value = frame.get("result")
+            valid = (
+                set(frame) == base | {"result", "duplicate"}
+                and type(frame.get("duplicate")) is bool
+                and type(value) is dict
+                and type(value.get("success")) is bool
+                and value.get("action") == timed_out.action
+            )
+        elif kind == "error":
+            error = frame.get("error")
+            valid = (
+                set(frame) == base | {"error"}
+                and isinstance(error, str)
+                and bool(error)
+                and len(error) <= 64
+            )
+        else:
+            return False
+        if not valid:
+            raise self._protocol().ProtocolError("malformed_result")
+        self._timed_out.pop(key, None)
+        return True
+
+    def _prune_timeouts(self) -> None:
+        now = self._monotonic()
+        for key, value in tuple(self._timed_out.items()):
+            if value.expires_at > now:
+                break
+            self._timed_out.pop(key, None)
+
+    def _forget_timeouts(self, connection_id: str) -> None:
+        for key in tuple(self._timed_out):
+            if key[0] == connection_id:
+                self._timed_out.pop(key, None)
 
     def _authenticate_hello(self, hello: dict[str, object], schemas: object) -> None:
         token = hello.get("token")
@@ -684,6 +767,7 @@ class AgentHub:
             self.version = None
             self.reason = reason
         self._fail_pending(connection_id, "agent_disconnected")
+        self._forget_timeouts(connection_id)
 
     def _is_current(self, websocket: Any, connection_id: str) -> bool:
         with self._state_lock:

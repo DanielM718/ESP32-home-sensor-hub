@@ -30,10 +30,12 @@ symbolic actions and symbolic application names matching
 vectors, shell fragments, and caller-supplied PowerShell are unsupported.
 Executable paths exist only in the operator-controlled local `apps.toml`.
 
-Terminal results are cached in memory by request ID and idempotency key. A key
-reused for different work fails closed; the cache is neither durable nor a
-command queue. Application launch also observes already-running processes to
-avoid duplicate launches.
+Terminal results are cached in memory by request ID and idempotency key. The
+authorized coordinator launch caller derives a deterministic UUIDv4-shaped key
+from its stable job identity and fails closed when that identity is missing. A
+key reused for different work fails closed. The replay cache is neither durable
+nor a command queue and does not survive an agent process restart. Application
+launch also observes already-running processes to avoid duplicate launches.
 
 Rejected request frames carry their validated UUID request ID when available.
 Connection-level errors without a valid identity remain unbound and must not be

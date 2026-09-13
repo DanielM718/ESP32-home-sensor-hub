@@ -22,8 +22,13 @@ from butters.assistant_config import (
 )
 from butters.planner.model import PlannerError
 from butters.planner.validator import PlannerValidator
-from butters.skills.desktop_agent import register_desktop_agent_skills
+from butters.skills.desktop_agent import (
+    _job_idempotency_key,
+    _launch_timeout_seconds,
+    register_desktop_agent_skills,
+)
 from butters.skills.model import (
+    ActionAuthorization,
     ActionClass,
     AuthenticationContext,
     AuthenticationLevel,
@@ -246,6 +251,90 @@ def engine() -> Engine:
     return value
 
 
+def test_job_identity_derives_deterministic_protocol_valid_uuid4() -> None:
+    first = _job_idempotency_key("coordinator-job-one")
+    same = _job_idempotency_key("coordinator-job-one")
+    different = _job_idempotency_key("coordinator-job-two")
+
+    parsed = uuid.UUID(first)
+    assert parsed.version == 4
+    assert parsed.variant == uuid.RFC_4122
+    frame = sign(
+        envelope(
+            "request",
+            "c" * 64,
+            request_id=str(uuid.uuid4()),
+            action="desktop.app.launch",
+            target="desktop",
+            parameters={"app": "parsec"},
+            idempotency_key=first,
+            timeout_seconds=30,
+        ),
+        KEY,
+    )
+    validate_request(frame, target="desktop")
+    assert frame["idempotency_key"] == first
+    assert first == same
+    assert first != different
+
+
+def test_launch_without_stable_job_identity_fails_closed() -> None:
+    class Hub:
+        settings = SimpleNamespace(enabled=True, request_timeout_seconds=1)
+        configured = True
+        called = False
+
+        def launch_app(self, *_args, **_kwargs):
+            self.called = True
+            return {"success": True}
+
+    hub = Hub()
+    registry = SkillRegistry(
+        PolicyValidator(
+            allowed_actions=frozenset({ActionClass.READ_ONLY, ActionClass.ACTION})
+        )
+    )
+    register_desktop_agent_skills(registry, hub)  # type: ignore[arg-type]
+    execution = registry.execute(
+        "desktop.app.launch",
+        {"app": "parsec"},
+        administrator=True,
+        action_authorization=ActionAuthorization(
+            frozenset({"desktop.app.launch"}), "direct_user_request", True
+        ),
+        authentication_context=AuthenticationContext(
+            AuthenticationLevel.ELEVATED,
+            "session",
+            "identity",
+            time.time() + 30,
+            "unit_test",
+        ),
+        session_id="session",
+        identity="identity",
+        job_id=None,
+    )
+    assert execution.failure is not None
+    assert execution.failure.code == "internal_error"
+    assert "stable coordinator job identity" in execution.failure.message
+    assert hub.called is False
+
+
+def test_launch_timeout_covers_two_request_windows() -> None:
+    request_timeout = 30
+    configured = _launch_timeout_seconds(request_timeout)
+    hub = SimpleNamespace(
+        settings=SimpleNamespace(enabled=True, request_timeout_seconds=request_timeout),
+        configured=True,
+    )
+    registry = SkillRegistry()
+    register_desktop_agent_skills(registry, hub)
+    launch = registry.get("desktop.app.launch")
+    assert launch is not None
+    assert launch.timeout_seconds == configured
+    assert configured > 2 * request_timeout
+    assert configured == 62
+
+
 def test_app_list_status_launch_and_safe_projection(
     tmp_path: Path, engine: Engine
 ) -> None:
@@ -451,6 +540,84 @@ def test_request_timeout_and_disconnect_lifecycle(tmp_path: Path) -> None:
     asyncio.run(disconnect_scenario())
 
 
+def test_valid_late_terminal_after_timeout_is_ignored_and_timeout_stands(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path, timeout=1)
+        socket, task, connection_id = await _connected_server(hub)
+        first_call = asyncio.create_task(_call(hub.list_apps))
+        first_request = await _next_request(socket)
+        await socket.incoming.put(
+            _response("ack", connection_id, first_request["request_id"])
+        )
+        first_result = await first_call
+        assert first_result["error"] == "timeout"
+
+        # A well-formed late result is consumed only as a tombstoned terminal
+        # frame. It cannot alter the already-returned timeout.
+        await socket.incoming.put(
+            _response(
+                "result",
+                connection_id,
+                first_request["request_id"],
+                result={"action": "desktop.app.list", "success": True, "apps": []},
+                duplicate=False,
+            )
+        )
+        second_call = asyncio.create_task(_call(hub.list_apps))
+        for _ in range(1000):
+            requests = [
+                decode(raw)
+                for raw in socket.sent[1:]
+                if decode(raw).get("type") == "request"
+            ]
+            if len(requests) == 2:
+                break
+            await asyncio.sleep(0.001)
+        assert len(requests) == 2
+        second_request = requests[-1]
+        await socket.incoming.put(
+            _response("ack", connection_id, second_request["request_id"])
+        )
+        await socket.incoming.put(
+            _response(
+                "result",
+                connection_id,
+                second_request["request_id"],
+                result={"action": "desktop.app.list", "success": True, "apps": []},
+                duplicate=False,
+            )
+        )
+        assert (await second_call)["success"] is True
+        assert hub.status()["state"] == "connected"
+        assert first_result["error"] == "timeout"
+        await socket.incoming.put(None)
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_timed_out_request_tombstones_are_bounded_and_expire(
+    tmp_path: Path,
+) -> None:
+    now = [100.0]
+    hub = AgentHub(
+        AgentIngressSettings(
+            enabled=True,
+            config_path=_credentials(tmp_path),
+            request_timeout_seconds=1,
+        ).validated(),
+        monotonic=lambda: now[0],
+    )
+    for index in range(hub._LATE_RESULT_CAPACITY + 1):
+        hub._remember_timeout("connection", str(uuid.uuid4()), f"action-{index}")
+    assert len(hub._timed_out) == hub._LATE_RESULT_CAPACITY
+    now[0] += hub._LATE_RESULT_TTL_SECONDS + 0.001
+    hub._prune_timeouts()
+    assert not hub._timed_out
+
+
 def test_connection_supersession_fails_old_work_and_rejects_old_result(
     tmp_path: Path,
 ) -> None:
@@ -494,13 +661,57 @@ def test_catalog_from_superseded_connection_cannot_authorize_request(
 ) -> None:
     async def scenario() -> None:
         hub = _hub(tmp_path)
-        socket, task, _ = await _connected_server(hub)
-        hub._known_app = lambda _name: "superseded-catalog"  # type: ignore[method-assign]
-        result = await _call(hub.app_status, "parsec")
-        assert result["error"] == "superseded_connection"
-        assert [decode(raw)["type"] for raw in socket.sent] == ["welcome"]
-        await socket.incoming.put(None)
-        await task
+        old, old_task, old_id = await _connected_server(hub)
+        old_call = asyncio.create_task(_call(hub.list_apps))
+        old_request = await _next_request(old)
+        await old.incoming.put(_response("ack", old_id, old_request["request_id"]))
+        await old.incoming.put(
+            _response(
+                "result",
+                old_id,
+                old_request["request_id"],
+                result={
+                    "action": "desktop.app.list",
+                    "success": True,
+                    "apps": [{"app": "parsec", "installed": True, "running": False}],
+                },
+                duplicate=False,
+            )
+        )
+        assert (await old_call)["apps"][0]["app"] == "parsec"
+
+        new, new_task, new_id = await _connected_server(hub)
+        assert new_id != old_id
+        assert hub._app_catalog == {}
+        assert hub._catalog_connection_id is None
+        await old.incoming.put(None)
+        await old_task
+
+        status_call = asyncio.create_task(_call(hub.app_status, "parsec"))
+        new_request = await _next_request(new)
+        assert new_request["action"] == "desktop.app.list"
+        await new.incoming.put(_response("ack", new_id, new_request["request_id"]))
+        await new.incoming.put(
+            _response(
+                "result",
+                new_id,
+                new_request["request_id"],
+                result={
+                    "action": "desktop.app.list",
+                    "success": True,
+                    "apps": [{"app": "git_bash", "installed": True, "running": False}],
+                },
+                duplicate=False,
+            )
+        )
+        assert (await status_call)["error"] == "unknown_app"
+        assert [
+            decode(raw)["action"]
+            for raw in new.sent[1:]
+            if decode(raw).get("type") == "request"
+        ] == ["desktop.app.list"]
+        await new.incoming.put(None)
+        await new_task
 
     asyncio.run(scenario())
 
@@ -600,6 +811,85 @@ def test_idempotency_retry_and_conflict_fail_closed(
         conflict = await _call(hub.launch_app, "parsec", idempotency_key=key)
         assert first["success"] is True and replay["success"] is True
         assert conflict["error"] == "duplicate_request"
+        assert engine.platform.launches == 1
+        await _stop_pair(socket, server, agent)
+
+    asyncio.run(scenario())
+
+
+def test_real_coordinator_policy_to_hub_transport_seam(
+    tmp_path: Path, engine: Engine
+) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path, timeout=1)
+        socket, server, agent = await _connected_pair(hub, engine)
+        registry = SkillRegistry(
+            PolicyValidator(
+                allowed_actions=frozenset({ActionClass.READ_ONLY, ActionClass.ACTION})
+            )
+        )
+        register_desktop_agent_skills(registry, hub)
+
+        # Registry policy still refuses a launch that did not come through an
+        # authorized frozen ActionCoordinator plan, before the hub is called.
+        denied = registry.execute(
+            "desktop.app.launch",
+            {"app": "parsec"},
+            administrator=True,
+            job_id="not-an-authorized-coordinator-job",
+        )
+        assert denied.failure is not None
+        assert denied.failure.code == "action_confirmation_required"
+        assert [decode(raw)["type"] for raw in socket.sent] == ["welcome"]
+
+        store = ActionStateStore(tmp_path / "actions.sqlite3", ActionSettings())
+        coordinator = ActionCoordinator(registry, store)
+        plan = coordinator.freeze(
+            skill="desktop.app.launch",
+            arguments={"app": "parsec"},
+            summary="Launch allowlisted app through the real hub",
+            session_id="session",
+            identity="identity",
+            request_id=str(uuid.uuid4()),
+            source="direct_user_request",
+        )
+        jobs = coordinator.execute(
+            plan.plan_id,
+            session_id="session",
+            identity="identity",
+            authentication=AuthenticationContext(
+                AuthenticationLevel.ELEVATED,
+                "session",
+                "identity",
+                time.time() + 30,
+                "unit_test",
+            ),
+        )
+        job_id = str(jobs[0]["job_id"])
+        for _ in range(1000):
+            job = store.job(job_id, session_id="session", identity="identity")
+            if job["state"] in {"completed", "failed", "cancelled"}:
+                break
+            await asyncio.sleep(0.001)
+        assert job["state"] == "completed", job
+
+        connection_id = str(decode(socket.sent[0])["connection_id"])
+        requests = [
+            verify(decode(raw), KEY, connection_id)
+            for raw in socket.sent[1:]
+            if decode(raw).get("type") == "request"
+        ]
+        assert [frame["action"] for frame in requests] == [
+            "desktop.app.list",
+            "desktop.app.launch",
+        ]
+        for frame in requests:
+            validate_request(frame, target="desktop")
+        launch = requests[-1]
+        expected = _job_idempotency_key(job_id)
+        assert launch["idempotency_key"] == expected
+        assert _job_idempotency_key(job_id) == expected
+        assert uuid.UUID(str(launch["idempotency_key"])).version == 4
         assert engine.platform.launches == 1
         await _stop_pair(socket, server, agent)
 

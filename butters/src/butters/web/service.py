@@ -69,8 +69,9 @@ from butters.web.trace import ExecutionTrace, TraceBuffer, TraceStage
 # callable by a model, and derive_safe_tool_catalog still omits every ACTION.
 # PlannerValidator.catalog() additionally drops anything unregistered, disabled,
 # or unavailable, so a capability switched off in configuration never appears.
-# Interactive application launch is deliberately absent: the Desktop Agent that
-# would implement it is not part of this deployment.
+# Desktop Agent application actions exist in code but remain deliberately absent
+# here: ingress is default-disabled and no production deployment or hardware
+# validation of the request/result path has occurred.
 CONVERSATIONAL_PLANNER_ACTIONS = frozenset(
     {
         "get_desktop_status",

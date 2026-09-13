@@ -6,6 +6,7 @@ only and remain absent from both conversational catalogs.
 
 from __future__ import annotations
 
+import hashlib
 import uuid
 from collections.abc import Mapping
 from typing import cast
@@ -30,6 +31,39 @@ from butters.skills.registry import (
     required_string,
     strict_arguments,
 )
+
+_LAUNCH_TIMEOUT_OVERHEAD_SECONDS = 2.0
+
+
+def _job_idempotency_key(job_id: str | None) -> str:
+    """Map one stable coordinator job identity to an RFC-4122 UUIDv4 value."""
+
+    if (
+        not isinstance(job_id, str)
+        or not job_id
+        or job_id.strip() != job_id
+        or len(job_id) > 256
+        or not job_id.isascii()
+        or not job_id.isprintable()
+    ):
+        raise SkillError(
+            "internal_error", "stable coordinator job identity is required"
+        )
+    # Hash the domain-separated stable job ID, then force the RFC-4122 version
+    # and variant bits. This remains deterministic without weakening the wire
+    # protocol's UUIDv4-only validation.
+    value = bytearray(
+        hashlib.sha256(b"butters-action-job\0" + job_id.encode("ascii")).digest()[:16]
+    )
+    value[6] = (value[6] & 0x0F) | 0x40
+    value[8] = (value[8] & 0x3F) | 0x80
+    return str(uuid.UUID(bytes=bytes(value)))
+
+
+def _launch_timeout_seconds(request_timeout_seconds: float) -> float:
+    """Bound the catalog-plus-launch path with a small scheduling allowance."""
+
+    return 2 * request_timeout_seconds + _LAUNCH_TIMEOUT_OVERHEAD_SECONDS
 
 
 def _parse_list(values: Mapping[str, object]) -> SkillArguments:
@@ -69,12 +103,7 @@ class DesktopAgentSkillImplementations:
 
     def launch_app(self, arguments: SkillArguments) -> StructuredSkillResult:
         app = cast(DesktopAppArgs, arguments).app
-        job_id = current_job_id()
-        idempotency_key = (
-            str(uuid.uuid5(uuid.NAMESPACE_URL, "butters-action-job:" + job_id))
-            if job_id
-            else None
-        )
+        idempotency_key = _job_idempotency_key(current_job_id())
         return self._result(
             "desktop_app_launch",
             self.hub.launch_app(
@@ -149,7 +178,9 @@ def register_desktop_agent_skills(registry: SkillRegistry, hub: AgentHub) -> Non
             parse_arguments=_parse_app,
             authorize=allow_arguments,
             implementation=implementation.launch_app,
-            timeout_seconds=hub.settings.request_timeout_seconds + 2,
+            timeout_seconds=_launch_timeout_seconds(
+                hub.settings.request_timeout_seconds
+            ),
             version="1.0.0",
             category="desktop_agent",
             input_schema=app_schema,

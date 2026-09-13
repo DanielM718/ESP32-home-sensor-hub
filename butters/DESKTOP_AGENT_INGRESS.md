@@ -67,13 +67,18 @@ generic command/invoke/execute API.
 
 Requests use UUIDv4 request and idempotency identities, a configured deadline
 (30 seconds by default), a bounded acknowledgment phase, and signed terminal
-results. Timeout, disconnect, supersession, malformed/replayed response, and
-structured agent errors all terminate the request. Receipt/acknowledgment is
-not reported as launch success: success requires the agent's terminal
+results. The launch skill hashes its stable `ActionCoordinator` job identity,
+then explicitly sets the RFC-4122 version-4 and variant bits; the same job
+therefore derives the same protocol-valid key, while a missing job identity
+fails closed. Timeout, disconnect, supersession, malformed/replayed response,
+and structured agent errors all terminate the request. Receipt/acknowledgment
+is not reported as launch success: success requires the agent's terminal
 `running` or `already_running` observation. Launching an already-running app is
-successful and does not kill, restart, or duplicate the process. Redelivery
-with the same idempotency key returns the cached terminal result; reuse for
-different work fails closed.
+successful and does not kill, restart, or duplicate the process. The agent can
+return its cached terminal result when it receives the same key again, although
+the current `ActionCoordinator` does not automatically redeliver launch
+requests. Reuse for different work fails closed. The agent replay cache is
+in-memory only and does not survive an agent process restart.
 
 ## Configuration and installation
 
