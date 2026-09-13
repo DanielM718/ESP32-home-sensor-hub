@@ -667,7 +667,12 @@ class AgentHub:
         connection_id: str,
         request_id: str,
     ) -> bool:
-        """Ignore one valid terminal reply to a known timed-out current request."""
+        """Ignore valid late replies to a known timed-out current request.
+
+        An acknowledgment does not consume the tombstone so one subsequent
+        terminal reply can still be ignored. A valid terminal reply consumes
+        it, preserving the existing one-time terminal replay semantics.
+        """
 
         if not self._is_current(websocket, connection_id):
             return False
@@ -678,6 +683,10 @@ class AgentHub:
             return False
         kind = frame.get("type")
         base = {"type", "connection_id", "issued_at", "sig", "request_id"}
+        if kind == "ack":
+            if set(frame) != base:
+                raise self._protocol().ProtocolError("replayed_message")
+            return True
         if kind == "result":
             value = frame.get("result")
             valid = (

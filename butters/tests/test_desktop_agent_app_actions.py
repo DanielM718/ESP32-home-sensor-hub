@@ -132,13 +132,15 @@ def _hello() -> str:
     )
 
 
-def _heartbeat(connection_id: str, *, interactive: bool = True) -> str:
+def _heartbeat(
+    connection_id: str, *, interactive: bool = True, sequence: int = 0
+) -> str:
     return canonical(
         sign(
             envelope(
                 "heartbeat",
                 connection_id,
-                seq=0,
+                seq=sequence,
                 session={
                     "state": "ACTIVE" if interactive else "NONE",
                     "gui_launch": interactive,
@@ -594,6 +596,134 @@ def test_valid_late_terminal_after_timeout_is_ignored_and_timeout_stands(
         assert first_result["error"] == "timeout"
         await socket.incoming.put(None)
         await task
+
+    asyncio.run(scenario())
+
+
+def test_valid_late_ack_preserves_timeout_and_tombstone_for_late_terminal(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path, timeout=1)
+        hub._ACK_TIMEOUT_SECONDS = 0.01
+        socket, task, connection_id = await _connected_server(hub)
+        call = asyncio.create_task(_call(hub.list_apps))
+        request = await _next_request(socket)
+        request_id = str(request["request_id"])
+        result = await call
+        tombstone = (connection_id, request_id)
+        assert result["error"] == "timeout"
+        assert tombstone in hub._timed_out
+
+        initial_activity = hub.last_authenticated_activity
+        await socket.incoming.put(_response("ack", connection_id, request_id))
+        await socket.incoming.put(_heartbeat(connection_id, sequence=1))
+        for _ in range(100):
+            if hub.last_authenticated_activity != initial_activity:
+                break
+            await asyncio.sleep(0)
+        assert hub.last_authenticated_activity != initial_activity
+        assert not task.done()
+        assert hub.status()["state"] == "connected"
+        assert result["error"] == "timeout"
+        assert tombstone in hub._timed_out
+
+        await socket.incoming.put(
+            _response(
+                "result",
+                connection_id,
+                request_id,
+                result={"action": "desktop.app.list", "success": True, "apps": []},
+                duplicate=False,
+            )
+        )
+        for _ in range(100):
+            if tombstone not in hub._timed_out:
+                break
+            await asyncio.sleep(0)
+        assert tombstone not in hub._timed_out
+        assert not task.done()
+        assert hub.status()["state"] == "connected"
+        assert result["error"] == "timeout"
+        await socket.incoming.put(None)
+        await task
+
+    asyncio.run(scenario())
+
+
+def test_unknown_late_ack_is_rejected(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path)
+        socket, task, connection_id = await _connected_server(hub)
+        await socket.incoming.put(
+            _response("ack", connection_id, str(uuid.uuid4()))
+        )
+        await task
+        assert hub.reason == "wrong_request_id"
+        assert hub.status()["state"] == "disconnected"
+
+    asyncio.run(scenario())
+
+
+def test_malformed_late_ack_is_rejected(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path, timeout=1)
+        hub._ACK_TIMEOUT_SECONDS = 0.01
+        socket, task, connection_id = await _connected_server(hub)
+        call = asyncio.create_task(_call(hub.list_apps))
+        request = await _next_request(socket)
+        request_id = str(request["request_id"])
+        assert (await call)["error"] == "timeout"
+        malformed = envelope(
+            "ack", connection_id, request_id=request_id, unexpected=True
+        )
+        await socket.incoming.put(canonical(sign(malformed, KEY)).decode())
+        await task
+        assert hub.reason == "replayed_message"
+        assert hub.status()["state"] == "disconnected"
+
+    asyncio.run(scenario())
+
+
+def test_superseded_connection_late_ack_cannot_affect_current_connection(
+    tmp_path: Path,
+) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path, timeout=1)
+        hub._ACK_TIMEOUT_SECONDS = 0.01
+        old, old_task, old_id = await _connected_server(hub)
+        call = asyncio.create_task(_call(hub.list_apps))
+        request = await _next_request(old)
+        request_id = str(request["request_id"])
+        assert (await call)["error"] == "timeout"
+        assert (old_id, request_id) in hub._timed_out
+
+        new, new_task, new_id = await _connected_server(hub)
+        assert new_id != old_id
+        assert (old_id, request_id) not in hub._timed_out
+        await old.incoming.put(_response("ack", old_id, request_id))
+        await old_task
+        assert hub.connection_id == new_id
+        assert hub.status()["state"] == "connected"
+        await new.incoming.put(None)
+        await new_task
+
+    asyncio.run(scenario())
+
+
+def test_live_ack_replay_still_disconnects_agent(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path)
+        socket, task, connection_id = await _connected_server(hub)
+        call = asyncio.create_task(_call(hub.list_apps))
+        request = await _next_request(socket)
+        ack = _response("ack", connection_id, str(request["request_id"]))
+        await socket.incoming.put(ack)
+        await socket.incoming.put(ack)
+        await task
+        assert (await call)["success"] is False
+        assert hub.reason == "replayed_message"
+        assert hub.status()["state"] == "disconnected"
 
     asyncio.run(scenario())
 
