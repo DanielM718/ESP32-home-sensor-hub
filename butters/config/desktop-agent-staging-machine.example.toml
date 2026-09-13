@@ -1,0 +1,6 @@
+# Staging-only machine identity; never place plaintext token material here.
+schema_version = 1
+protocol_version = 1
+agent_id = "desktop-staging"
+token_sha256 = "REPLACE_WITH_STAGING_64_HEX_SHA256_TOKEN_DIGEST"
+command_key_file = "/etc/butters-staging/desktop-agent/command.key"

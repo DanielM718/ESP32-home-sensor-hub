@@ -1,0 +1,318 @@
+# Desktop Agent Staging Hardware Acceptance
+
+This runbook is for an isolated, real-Windows validation environment. It is
+not a production deployment, an Admin surface, or Slice 4 reintegration.
+
+> **Never run `butters/scripts/install-beta1` for this procedure.** Never copy
+> credentials, databases, configuration, systemd units, or Tailscale Serve
+> state from the production installation.
+
+## Isolation architecture
+
+```text
+Windows ButtersAgentStaging profile
+  (staging config + staging DPAPI credentials + staging apps.toml)
+       |
+       | pinned WSS, private LAN :18443
+       v
+butters-agent-ingress-staging.service
+  /etc/butters-staging/agent-ingress.toml
+  accepts only /agent/v1/session
+       |
+       | loopback HTTP/WebSocket :18090
+       v
+butters-staging.service
+  AgentHub -> SkillRegistry -> PolicyValidator -> ActionCoordinator
+  /var/lib/butters-staging/actions.sqlite3
+       ^
+       | four fixed loopback-only validation routes
+       |
+desktop-agent-staging-validate
+  state | list-apps | status APP | launch APP
+
+Production /opt/butters, /etc/butters, /var/lib/butters, production units,
+production ports, broker configuration, Tailscale Serve, browser authentication,
+and Admin routes are outside every staging write path.
+```
+
+The two explicit enable gates are:
+
+1. `[agent_ingress].enabled` in
+   `/etc/butters-staging/assistant.toml` (application/AgentHub gate).
+2. `enabled` in `/etc/butters-staging/agent-ingress.toml` (TLS transport gate).
+
+Both repository templates set these gates to `false`.
+
+## Fixed staging identities
+
+| Boundary | Staging value |
+|---|---|
+| Install root | `/opt/butters-staging` |
+| Configuration/secrets | `/etc/butters-staging` |
+| Persistent state | `/var/lib/butters-staging` |
+| Application unit | `butters-staging.service` |
+| TLS ingress unit | `butters-agent-ingress-staging.service` |
+| Application listener | `127.0.0.1:18090` |
+| Private LAN TLS listener | private staging-host address, port `18443` |
+| Windows data/DPAPI/log profile | `%LOCALAPPDATA%\ButtersAgentStaging` |
+| Machine identity | `desktop-staging` |
+
+The validation daemon does not construct `BetaAssistantService`, browser
+sessions, passkeys, Admin routes, broker clients, or a generic AgentHub command
+surface. Its only persistent database is staging `actions.sqlite3`.
+
+## NEXT task: installation and credential provisioning
+
+Do not run these commands during implementation review. After the branch is
+approved, start from its reviewed worktree:
+
+```bash
+cd /path/to/ESP32-home-sensor-hub-staging-worktree
+git status --short --branch
+git rev-parse HEAD
+
+# Baseline production without restart or mutation.
+sudo ./butters/scripts/desktop-agent-staging-production-proof before
+
+# Installs inert templates and separate units. It neither enables nor starts.
+sudo ./butters/scripts/install-desktop-agent-staging
+```
+
+Confirm the printed target is `/opt/butters-staging` and both unit names end in
+`staging.service`. Stop immediately if any target differs.
+
+Generate new staging-only material on the staging host. Do not paste these
+values into a shell history on shared systems; the variables below are
+illustrative operator steps for a private root shell:
+
+```bash
+sudo -i
+umask 077
+install -d -m 0750 -o root -g butters-staging /etc/butters-staging/desktop-agent
+STAGING_MACHINE_TOKEN="$(openssl rand -hex 32)"
+STAGING_COMMAND_KEY="$(openssl rand -hex 32)"
+printf '%s' "$STAGING_COMMAND_KEY" > /etc/butters-staging/desktop-agent/command.key
+chown root:butters-staging /etc/butters-staging/desktop-agent/command.key
+chmod 0640 /etc/butters-staging/desktop-agent/command.key
+STAGING_TOKEN_DIGEST="$(printf '%s' "$STAGING_MACHINE_TOKEN" | sha256sum | awk '{print $1}')"
+
+openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 30 \
+  -subj '/CN=butters-desktop-agent-staging' \
+  -keyout /etc/butters-staging/desktop-agent/tls.key \
+  -out /etc/butters-staging/desktop-agent/tls.crt
+chown root:butters-staging /etc/butters-staging/desktop-agent/tls.key \
+  /etc/butters-staging/desktop-agent/tls.crt
+chmod 0640 /etc/butters-staging/desktop-agent/tls.key
+chmod 0644 /etc/butters-staging/desktop-agent/tls.crt
+STAGING_SPKI_PIN="$(openssl x509 -in /etc/butters-staging/desktop-agent/tls.crt \
+  -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print $1}')"
+```
+
+Replace only the placeholder digest in
+`/etc/butters-staging/desktop-agent.toml`. Transfer the plaintext machine token,
+command key, and SPKI pin to Windows over an operator-approved private channel;
+do not store the plaintext token in the server TOML. Clear the shell variables
+and close the root shell after enrollment.
+
+Review and set the private staging interface in
+`/etc/butters-staging/agent-ingress.toml`. Only after reviewing every path and
+port, change both staging gates to `true`, then:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now butters-staging.service
+sudo systemctl enable --now butters-agent-ingress-staging.service
+sudo systemctl --no-pager --full status \
+  butters-staging.service butters-agent-ingress-staging.service
+sudo ss -lntp | grep -E ':(18090|18443)[[:space:]]'
+```
+
+Do not configure Tailscale Serve. Port `18090` must remain loopback-only, and
+port `18443` must resolve only to private IPv4 addresses on the configured LAN
+interfaces.
+
+## Windows staging profile
+
+Create a new administrator-owned staging directory. Do not replace the existing
+agent directory or its `config.toml`, `apps.toml`, task, DPAPI file, or logs.
+
+1. Copy `butters-agent/config.staging.example.toml` to that directory as
+   `config.toml`; set only its private staging host and SPKI pin. Keep
+   `profile = "staging"`, port `18443`, and `agent_id = "desktop-staging"`.
+2. Copy `butters-agent/apps.staging.example.toml` to `apps.toml`. Initial
+   acceptance exposes only `notepad`. Do not add Parsec or the production app
+   catalog.
+3. From the staging package, provision the new values into the distinct DPAPI
+   root:
+
+   ```powershell
+   $json = @{ token = '<STAGING_MACHINE_TOKEN>'; command_key = '<STAGING_COMMAND_KEY>' } | ConvertTo-Json -Compress
+   $json | python -m butters_agent.provision --config .\config.toml
+   python -m butters_agent --config .\config.toml
+   ```
+
+The default/production profile uses `%LOCALAPPDATA%\ButtersAgent`; the staging
+profile uses `%LOCALAPPDATA%\ButtersAgentStaging`. A nonzero staging fault delay
+is rejected unless `profile = "staging"`.
+
+## Validation CLI and authorization
+
+Run the installed CLI only on the staging host:
+
+```bash
+sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate state
+sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate list-apps
+sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate status notepad
+sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate launch notepad
+```
+
+`state`, `list-apps`, and `status` execute registered observation skills through
+`SkillRegistry` and `PolicyValidator`. `launch` freezes an immutable plan in the
+staging action store, creates an `AuthenticationContext`, and calls
+`ActionCoordinator.execute`; the worker performs the registered skill, policy,
+AgentHub, signed request/ACK/result sequence. The CLI cannot name a skill, send
+JSON, choose an AgentHub method, supply a path/argv, or issue an arbitrary agent
+command.
+
+The staging assertion differs from production browser authentication as follows:
+
+- identity and session are fixed constants, not browser-controlled fields;
+- it is minted only after a loopback request to this dedicated daemon;
+- it expires after 30 seconds and has the normal typed `ELEVATED` level;
+- method is audited as `staging_local_host_assertion`;
+- there is no passkey record, browser cookie, browser origin, or production
+  `security.sqlite3` access;
+- it does **not** bypass `PolicyValidator`, the action authorization, frozen
+  digest/state, or coordinator claim/job/audit handling.
+
+## Hardware acceptance checklist
+
+Leave every result unchecked until observed on real hardware. Save timestamps,
+CLI JSON, staging journal excerpts, and Windows staging logs beneath the staging
+evidence directory; never copy production databases into evidence.
+
+- [ ] **TLS/SPKI:** correct pin connects. With an intentionally wrong pin,
+  Windows logs `server_identity_mismatch` and sends no hello/token. Restore pin.
+- [ ] **Machine authentication:** correct staging token connects; a changed
+  token is rejected as `unauthorized`. Browser cookies/credentials are not
+  accepted by the machine ingress.
+- [ ] **Heartbeats:** observe `awaiting_heartbeat`, `connected`, then—by safely
+  interrupting real staging-agent heartbeats—`heartbeat_aging`,
+  `heartbeat_stale`, and `disconnected` where practical.
+- [ ] **Interactive session:** observe truthful `present`, `absent`, and
+  `unknown` under real unlocked, locked/noninteractive, and disconnected states.
+- [ ] **Catalog:** `list-apps` contains only symbolic names and bounded status.
+  Confirm no path, argv, cwd, PowerShell, PID, token, key, or local secret.
+- [ ] **Status:** record configured/not-running, configured/running, and unknown
+  symbolic-name rejection.
+- [ ] **Launch:** launch `notepad` through the CLI; visually confirm it appears.
+  Record `request_to_ack_ms`, `ack_to_result_ms`, and `request_to_result_ms` from
+  the job result.
+- [ ] **Already running:** repeat the same launch. Expect successful
+  `outcome=already_running`; do not kill or restart Notepad automatically.
+- [ ] **Idempotency:** the normal CLI intentionally creates a new coordinator
+  job per explicit launch and therefore does not offer a replay switch. Record
+  already-running behavior separately. Protocol replay/conflicting-key coverage
+  remains automated; do not claim a real same-job replay unless a separately
+  reviewed fixed coordinator replay harness is added.
+- [ ] **Agent restart limitation:** record that replay cache state disappears on
+  agent process restart. Do not claim exactly-once behavior across restarts.
+- [ ] **Locked session:** lock Windows and attempt launch. Record whether the
+  server rejects `interactive_session_unavailable` or the agent rejects
+  `session_inactive` after a state change. Do not weaken either check.
+- [ ] **Disconnect mid-request:** stop only the staging Windows agent during a
+  request. Confirm `agent_disconnected` (or the bounded equivalent), no waiter
+  remains, and staging state clears.
+- [ ] **ACK timing:** normal Windows ACK is under the fixed 3-second server
+  window. Do not change the timeout to make this pass.
+- [ ] **Late ACK:** temporarily set
+  `staging_fault_ack_delay_seconds = 4` in the Windows staging config and use a
+  read-only command. Confirm timeout, one ignored late ACK/terminal, and a
+  healthy connection. Restore zero.
+- [ ] **Timeout then late terminal:** temporarily set
+  `staging_fault_result_delay_seconds = 31` and use `status notepad`. Confirm the
+  caller remains timed out, one late terminal is ignored, and the connection
+  remains healthy. Restore zero. These fields cannot activate in a production
+  profile.
+- [ ] **Supersession:** start a second staging agent configuration with the same
+  staging identity/credentials. Confirm B supersedes A, A pending work fails
+  `superseded_connection`, A cannot complete B work, and B must send/list its own
+  catalog. Use only staging profiles and stop both afterward.
+
+The server exposes timing only after a completed signed terminal response.
+Timeout responses remain failures and cannot later become success.
+
+## Production non-contact proof
+
+The proof helper reads application/configuration status only. It never reads
+`security.sqlite3`, `actions.sqlite3`, audit rows, action history, or passkey
+records, and writes only `/var/lib/butters-staging/evidence`.
+
+Before installation/validation:
+
+```bash
+sudo ./butters/scripts/desktop-agent-staging-production-proof before
+```
+
+After all validation, without restarting production:
+
+```bash
+sudo /opt/butters-staging/scripts/desktop-agent-staging-production-proof after
+```
+
+The `after` command compares the expected deployment identity, application tree
+digest, production service state, both production ingress gates, loopback
+health/readiness, private Admin endpoint status, and broker configuration hash
+(when present). Investigate any diff;
+never normalize it by reinstalling or restarting production.
+
+## Rollback/removal
+
+Stop and remove only staging artifacts:
+
+```bash
+sudo systemctl disable --now butters-agent-ingress-staging.service
+sudo systemctl disable --now butters-staging.service
+sudo rm /etc/systemd/system/butters-agent-ingress-staging.service
+sudo rm /etc/systemd/system/butters-staging.service
+sudo systemctl daemon-reload
+sudo rm -rf -- /opt/butters-staging /opt/butters-staging.previous
+sudo rm -rf -- /etc/butters-staging /var/lib/butters-staging
+```
+
+On Windows, stop only the staging process/task and remove only the staging
+directory plus `%LOCALAPPDATA%\ButtersAgentStaging`. The production/default
+agent profile, if one exists, is not part of rollback.
+
+## Expected limitations
+
+- Agent replay/idempotency cache is in memory and disappears on agent restart.
+- The CLI has no generic console and no same-coordinator-job replay operation.
+- Only one live operation is accepted by the Windows agent.
+- Fault delays are Windows staging-profile-only and must be restored to zero.
+- Staging has no public UI, passkey enrollment, production Admin parity, planner
+  integration, Tailscale Serve endpoint, or production broker access.
+
+## Acceptance results (fill in after real hardware execution)
+
+**Run date:** _not run_
+
+**Reviewed commit:** _not run_
+
+**Windows version/agent version:** _not run_
+
+**Staging host/address:** _not run_
+
+**Evidence directory:** _not run_
+
+**Checklist result:** _not run_
+
+**Observed request/ACK/result timings:** _not run_
+
+**Observed rejection layers and error codes:** _not run_
+
+**Idempotency/restart observations:** _not run_
+
+**Production before/after comparison:** _not run_
+
+**Reviewer/sign-off:** _not run_

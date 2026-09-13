@@ -1,0 +1,12 @@
+schema_version = 1
+# Fixed profile name selects a separate DPAPI/log root. Do not remove this or
+# the agent will use its production/default Windows data root.
+profile = "staging"
+agent_id = "desktop-staging"
+url = "wss://REPLACE_WITH_PRIVATE_STAGING_HOST:18443/agent/v1/session"
+spki_sha256 = "REPLACE_WITH_STAGING_SERVER_SPKI_SHA256"
+
+# Staging-only fault injection. Leave both at zero for normal validation.
+# A production/default profile refuses nonzero values.
+staging_fault_ack_delay_seconds = 0
+staging_fault_result_delay_seconds = 0

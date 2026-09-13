@@ -14,6 +14,7 @@ import tomllib
 
 from .client import Client
 from .engine import Engine
+from .profile import local_data_root, profile_name, staging_fault_delays
 
 LOG = logging.getLogger("butters_agent")
 
@@ -54,7 +55,12 @@ def main():
     config = tomllib.loads(options.config.read_text(encoding="utf-8-sig"))
     if config.get("schema_version") != 1:
         raise SystemExit("invalid_configuration")
-    local = Path(os.environ["LOCALAPPDATA"]) / "ButtersAgent"
+    try:
+        profile_name(config)
+        staging_fault_delays(config)
+    except ValueError:
+        raise SystemExit("invalid_configuration") from None
+    local = local_data_root(os.environ["LOCALAPPDATA"], config)
     local.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
         local / "agent.jsonl",

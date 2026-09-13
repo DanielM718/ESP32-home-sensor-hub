@@ -237,6 +237,36 @@ async def _call(function, *args, **kwargs):
     return result[0]
 
 
+def test_completed_request_reports_ack_and_terminal_timing(tmp_path: Path) -> None:
+    async def scenario() -> None:
+        hub = _hub(tmp_path)
+        socket, task, connection_id = await _connected_server(hub)
+        call = asyncio.create_task(_call(hub.list_apps))
+        request = await _next_request(socket)
+        await asyncio.sleep(0.01)
+        await socket.incoming.put(
+            _response("ack", connection_id, request["request_id"])
+        )
+        await asyncio.sleep(0.01)
+        await socket.incoming.put(
+            _response(
+                "result",
+                connection_id,
+                request["request_id"],
+                result={"action": "desktop.app.list", "success": True, "apps": []},
+                duplicate=False,
+            )
+        )
+        result = await call
+        assert result["request_to_ack_ms"] >= 0
+        assert result["ack_to_result_ms"] >= 0
+        assert result["request_to_result_ms"] >= result["request_to_ack_ms"]
+        await socket.incoming.put(None)
+        await task
+
+    asyncio.run(scenario())
+
+
 @pytest.fixture
 def engine() -> Engine:
     value = Engine(Platform())

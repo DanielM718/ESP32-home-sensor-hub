@@ -84,6 +84,11 @@ hardware validation.
 protected standard input and stores them using user-scoped DPAPI. It is
 create-only and does not deploy the agent or configure Butters.
 
+For isolated staging, pass `--config <staging-config>` where that config sets
+`profile = "staging"`. This selects `%LOCALAPPDATA%\ButtersAgentStaging` for
+credentials and logs; the production/default profile remains in
+`%LOCALAPPDATA%\ButtersAgent`. The profiles never share DPAPI material.
+
 `python -m butters_agent.selftest` exercises only locally registered
 applications in the current interactive Windows session and records that
 physical visual confirmation has not been performed. Installation and task

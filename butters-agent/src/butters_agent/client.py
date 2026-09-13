@@ -17,6 +17,7 @@ from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from websockets.asyncio.client import connect
 
 from . import AGENT_VERSION
+from .profile import staging_fault_delays
 from .protocol import (
     MAX_FRAME,
     SCHEMAS,
@@ -54,6 +55,7 @@ class Client:
         self.key = bytes.fromhex(credentials["command_key"])
         self.cache = ReplayCache()
         self.connection_count = 0
+        self.ack_delay, self.result_delay = staging_fault_delays(config)
 
     async def run(self):
         delay = 1
@@ -190,6 +192,8 @@ class Client:
                         cancel,
                     )
                     self.cache.put(frame, result)
+                if self.result_delay:
+                    await asyncio.sleep(self.result_delay)
                 await send(
                     "result",
                     request_id=request_id,
@@ -251,6 +255,8 @@ class Client:
                     # One live operation: no queued side effects or racing keys.
                     if active:
                         raise ProtocolError("busy")
+                    if self.ack_delay:
+                        await asyncio.sleep(self.ack_delay)
                     await send("ack", request_id=request_id)
                     cancel = threading.Event()
                     active[request_id] = (frame, cancel)

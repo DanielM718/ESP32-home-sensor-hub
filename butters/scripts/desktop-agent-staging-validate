@@ -1,0 +1,6 @@
+#!/bin/sh
+set -eu
+
+install_root=/opt/butters-staging
+export PYTHONPATH="${install_root}/src:${install_root}/agent-src"
+exec "${install_root}/.venv/bin/python" -m butters.desktop_agent_staging_cli "$@"

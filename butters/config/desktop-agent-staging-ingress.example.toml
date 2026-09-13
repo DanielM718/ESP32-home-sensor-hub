@@ -1,0 +1,15 @@
+# Gate 2 of 2. This transport template is inert until explicitly enabled.
+enabled = false
+
+# Bind only private IPv4 addresses assigned to the named staging-host LAN
+# interfaces. The port is staging-only and distinct from production.
+bind_interfaces = ["eth0", "wlan0"]
+port = 18443
+
+certificate = "/etc/butters-staging/desktop-agent/tls.crt"
+private_key = "/etc/butters-staging/desktop-agent/tls.key"
+
+# Only the validation daemon is reachable here. The proxy itself accepts only
+# /agent/v1/session and strips browser/authentication headers.
+upstream_host = "127.0.0.1"
+upstream_port = 18090

@@ -1,0 +1,50 @@
+[Unit]
+Description=Butters isolated Desktop Agent staging TLS ingress
+Documentation=file:/opt/butters-staging/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md
+After=network-online.target butters-staging.service
+Wants=network-online.target butters-staging.service
+ConditionPathExists=/etc/butters-staging/agent-ingress.toml
+
+[Service]
+Type=exec
+User=butters-staging
+Group=butters-staging
+WorkingDirectory=/opt/butters-staging
+EnvironmentFile=-/etc/butters-staging/butters-staging.env
+Environment=PYTHONPATH=/opt/butters-staging/src:/opt/butters-staging/agent-src
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+Environment=BUTTERS_AGENT_INGRESS_CONFIG=/etc/butters-staging/agent-ingress.toml
+ExecStart=/opt/butters-staging/.venv/bin/python -m butters.actions.agent_ingress
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+UMask=0077
+
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+LockPersonality=true
+RestrictNamespaces=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+RuntimeDirectory=butters-agent-ingress-staging
+RuntimeDirectoryMode=0700
+StateDirectory=butters-agent-ingress-staging
+StateDirectoryMode=0700
+TasksMax=32
+MemoryMax=128M
+
+[Install]
+WantedBy=multi-user.target

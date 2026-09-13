@@ -41,6 +41,8 @@ class _PendingRequest:
     action: str
     acknowledged: asyncio.Event
     result: asyncio.Future[dict[str, object]]
+    sent_at: float | None = None
+    acknowledged_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -404,13 +406,14 @@ class AgentHub:
         sent = False
         timed_out = False
         try:
+            started = loop.time()
+            pending.sent_at = started
             await websocket.send_text(
                 protocol.canonical(
                     protocol.sign(frame, self._credentials.command_key)
                 ).decode("ascii")
             )
             sent = True
-            started = loop.time()
             await asyncio.wait_for(
                 pending.acknowledged.wait(), min(self._ACK_TIMEOUT_SECONDS, timeout)
             )
@@ -418,12 +421,23 @@ class AgentHub:
             if remaining <= 0:
                 raise asyncio.TimeoutError
             result = await asyncio.wait_for(asyncio.shield(pending.result), remaining)
+            completed = loop.time()
+            acknowledged_at = pending.acknowledged_at or completed
             return {
                 **result,
                 "request_id": request_id,
                 "idempotency_key": idempotency_key,
                 "connection_id": connection_id,
                 "transport": "desktop_agent_wss",
+                "request_to_ack_ms": round(
+                    max(0.0, acknowledged_at - started) * 1000, 3
+                ),
+                "ack_to_result_ms": round(
+                    max(0.0, completed - acknowledged_at) * 1000, 3
+                ),
+                "request_to_result_ms": round(
+                    max(0.0, completed - started) * 1000, 3
+                ),
             }
         except asyncio.CancelledError:
             raise
@@ -616,6 +630,7 @@ class AgentHub:
         if kind == "ack":
             if set(frame) != base or pending.acknowledged.is_set():
                 raise protocol.ProtocolError("replayed_message")
+            pending.acknowledged_at = asyncio.get_running_loop().time()
             pending.acknowledged.set()
             return
         if kind == "result":
@@ -643,6 +658,8 @@ class AgentHub:
                 or pending.result.done()
             ):
                 raise protocol.ProtocolError("malformed_result")
+            if not pending.acknowledged.is_set():
+                pending.acknowledged_at = asyncio.get_running_loop().time()
             pending.acknowledged.set()
             pending.result.set_result(self._failure(pending.action, error))
             return
@@ -831,7 +848,14 @@ class AgentHub:
     def _transport_metadata(result: dict[str, object]) -> dict[str, object]:
         return {
             key: result[key]
-            for key in ("request_id", "idempotency_key", "transport")
+            for key in (
+                "request_id",
+                "idempotency_key",
+                "transport",
+                "request_to_ack_ms",
+                "ack_to_result_ms",
+                "request_to_result_ms",
+            )
             if key in result
         } | ({"transport_state": "completed"} if result.get("success") else {})
 

@@ -1,0 +1,22 @@
+# Dedicated staging validation daemon. This is not a production/Admin config;
+# unknown tables or fields fail closed.
+[staging]
+host = "127.0.0.1"
+port = 18090
+state_dir = "/var/lib/butters-staging"
+
+# Gate 1 of 2. Keep false in the repository template. Set true only in the
+# root-owned local staging copy after credentials have been provisioned.
+[agent_ingress]
+enabled = false
+config_path = "/etc/butters-staging/desktop-agent.toml"
+protocol_version = 1
+hello_timeout_seconds = 5.0
+socket_idle_seconds = 60.0
+heartbeat_aging_seconds = 30.0
+heartbeat_stale_seconds = 45.0
+request_timeout_seconds = 30
+
+[actions]
+audit_capacity = 1000
+job_capacity = 256

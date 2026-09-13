@@ -1,0 +1,74 @@
+#!/usr/bin/env bash
+# Read-only production baseline/after snapshot. Writes only staging evidence and
+# deliberately never reads production state databases or passkey/action data.
+set -Eeuo pipefail
+
+label="${1:-}"
+[[ "${label}" =~ ^(before|after)$ ]] || {
+  echo "Usage: sudo desktop-agent-staging-production-proof before|after" >&2
+  exit 2
+}
+[[ "${EUID}" -eq 0 ]] || { echo "Run with sudo." >&2; exit 2; }
+
+evidence_root="/var/lib/butters-staging/evidence"
+output="${evidence_root}/production-${label}.txt"
+install -d -m 0700 -o root -g root "${evidence_root}"
+umask 077
+
+{
+  echo "captured_at=$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
+  echo "expected_branch=feature/desktop-remote-management-v2"
+  echo "expected_commit=5c66593ee84212e1757e1a2bdd948c38a43ffa6a"
+  if [[ -f /opt/butters/DEPLOYMENT ]]; then
+    echo -n "deployment_record_sha256="
+    sha256sum /opt/butters/DEPLOYMENT | awk '{print $1}'
+  else
+    echo "deployment_record_sha256=absent"
+  fi
+  echo -n "application_tree_sha256="
+  find /opt/butters -xdev -type f \
+    ! -name '*.pyc' ! -path '*/__pycache__/*' -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+  for unit in butters-web.service butters-agent-ingress.service; do
+    if ! systemctl show "${unit}" \
+      --property=Id,LoadState,ActiveState,SubState,UnitFileState --no-pager; then
+      echo "unit_status_${unit}=unavailable"
+    fi
+  done
+  echo "application_ingress_gate=$(awk '
+    /^\[agent_ingress\]/{inside=1; next}
+    /^\[/{inside=0}
+    inside && /^[[:space:]]*enabled[[:space:]]*=/{print $3; exit}
+  ' /opt/butters/config/assistant.toml)"
+  echo "transport_ingress_gate=$(awk '
+    /^[[:space:]]*enabled[[:space:]]*=/{print $3; exit}
+  ' /etc/butters/agent-ingress.toml 2>/dev/null || echo absent)"
+  echo -n "broker_config_sha256="
+  if [[ -f /etc/butters/action-broker.toml ]]; then
+    sha256sum /etc/butters/action-broker.toml | awk '{print $1}'
+  else
+    echo "absent"
+  fi
+  echo -n "application_health="
+  curl --output /dev/null --silent --show-error --max-time 5 \
+    --write-out 'http=%{http_code}\n' \
+    http://127.0.0.1:8090/healthz || echo "unreachable"
+  echo -n "application_readiness="
+  curl --output /dev/null --silent --show-error --max-time 5 \
+    --write-out 'http=%{http_code}\n' \
+    http://127.0.0.1:8090/readyz || echo "unreachable"
+  echo -n "admin_health="
+  curl --output /dev/null --silent --show-error --max-time 5 \
+    --write-out 'http=%{http_code}\n' \
+    https://sensor-pi.tail9644cc.ts.net/admin || echo "unreachable"
+} >"${output}"
+
+chmod 0600 "${output}"
+echo "Wrote read-only production ${label} proof to ${output}"
+if [[ "${label}" == "after" ]]; then
+  before="${evidence_root}/production-before.txt"
+  [[ -f "${before}" ]] || { echo "Missing before snapshot." >&2; exit 3; }
+  # captured_at is expected to differ; all other evidence must be byte-identical.
+  diff -u <(tail -n +2 "${before}") <(tail -n +2 "${output}")
+  echo "Production before/after evidence matches."
+fi

@@ -1,0 +1,9 @@
+schema_version = 1
+
+# Initial hardware validation intentionally exposes one harmless built-in app.
+# Add calc only after confirming the executable/image paths on the test host;
+# Windows Calculator packaging differs by OS release.
+[apps.notepad]
+path = 'C:\Windows\System32\notepad.exe'
+images = ['C:\Windows\System32\notepad.exe']
+require_visible = true

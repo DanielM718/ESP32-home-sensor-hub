@@ -1,0 +1,206 @@
+#!/usr/bin/env bash
+# Install only the isolated Desktop Agent staging validator. Repository
+# templates remain disabled; no service is enabled or started by default.
+set -Eeuo pipefail
+
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+butters_source="$(dirname "${script_dir}")"
+repository_source="$(dirname "${butters_source}")"
+agent_source="${repository_source}/butters-agent"
+install_root="/opt/butters-staging"
+staging_root="/opt/butters-staging.installing.$$"
+previous_root="/opt/butters-staging.previous"
+config_root="/etc/butters-staging"
+state_root="/var/lib/butters-staging"
+runtime_root="/run/butters-staging"
+web_unit="butters-staging.service"
+ingress_unit="butters-agent-ingress-staging.service"
+enable_services=0
+start_services=0
+
+usage() {
+  echo "Usage: sudo ./butters/scripts/install-desktop-agent-staging [--enable] [--start]"
+}
+
+require_staging_target() {
+  local candidate resolved
+  candidate="$1"
+  resolved="$(readlink -m -- "${candidate}")"
+  [[ "${resolved}" == "/opt/butters-staging" ]] || {
+    echo "Refusing non-staging installation target: ${resolved}" >&2
+    return 2
+  }
+  [[ "${resolved}" != "/opt/butters" && "${resolved}" != /opt/butters/* ]] || {
+    echo "Refusing production installation target: ${resolved}" >&2
+    return 2
+  }
+}
+
+require_isolated_path() {
+  local candidate expected resolved
+  candidate="$1"
+  expected="$2"
+  resolved="$(readlink -m -- "${candidate}")"
+  [[ "${resolved}" == "${expected}" ]] || {
+    echo "Refusing unexpected staging path: ${resolved}" >&2
+    return 2
+  }
+}
+
+normalize_tree() {
+  local root="$1"
+  [[ -n "${root}" && "${root}" != "/" && -d "${root}" ]] || return 2
+  chown -h -R root:butters-staging "${root}"
+  find "${root}" -type d -exec chmod 0750 {} +
+  find "${root}" -type f -perm /111 -exec chmod 0750 {} +
+  find "${root}" -type f ! -perm /111 -exec chmod 0640 {} +
+}
+
+cleanup() {
+  [[ "${staging_root}" == /opt/butters-staging.installing.* ]] || return 2
+  rm -rf -- "${staging_root}"
+}
+
+# Tests source this file to exercise the refusal guards without installation.
+(return 0 2>/dev/null) && return 0
+trap cleanup EXIT
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --enable) enable_services=1 ;;
+    --start) enable_services=1; start_services=1 ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown option: $1" >&2; exit 2 ;;
+  esac
+  shift
+done
+
+[[ "${EUID}" -eq 0 ]] || { echo "Run this installer with sudo." >&2; exit 2; }
+command -v rsync >/dev/null || { echo "rsync is required." >&2; exit 2; }
+command -v readlink >/dev/null || { echo "readlink is required." >&2; exit 2; }
+[[ -x /usr/bin/python3 ]] || { echo "/usr/bin/python3 is required." >&2; exit 2; }
+/usr/bin/python3 -c 'import ensurepip, venv' 2>/dev/null || {
+  echo "python3 venv/ensurepip are required." >&2
+  exit 2
+}
+
+require_staging_target "${install_root}"
+require_isolated_path "${config_root}" "/etc/butters-staging"
+require_isolated_path "${state_root}" "/var/lib/butters-staging"
+require_isolated_path "${runtime_root}" "/run/butters-staging"
+[[ "${web_unit}" != "butters-web.service" ]]
+[[ "${ingress_unit}" != "butters-agent-ingress.service" ]]
+[[ -f "${butters_source}/requirements-web.txt" ]]
+[[ -f "${agent_source}/src/butters_agent/protocol.py" ]]
+
+echo "Desktop Agent STAGING installation target: ${install_root}"
+echo "Configuration: ${config_root}; state: ${state_root}"
+echo "Units: ${web_unit}, ${ingress_unit}"
+echo "Production services, broker configuration, and Tailscale Serve are out of scope."
+
+if ! getent group butters-staging >/dev/null; then
+  groupadd --system butters-staging
+fi
+if ! id butters-staging >/dev/null 2>&1; then
+  useradd --system --gid butters-staging --home-dir "${state_root}" \
+    --shell /usr/sbin/nologin butters-staging
+fi
+install -d -m 0700 -o butters-staging -g butters-staging "${state_root}"
+install -d -m 0750 -o root -g butters-staging \
+  "${config_root}" "${config_root}/desktop-agent"
+
+# Local configuration is create-only so repeat installs never replace enabled
+# gates or locally provisioned credentials.
+if [[ ! -e "${config_root}/assistant.toml" ]]; then
+  install -m 0640 -o root -g butters-staging \
+    "${butters_source}/config/desktop-agent-staging-assistant.example.toml" \
+    "${config_root}/assistant.toml"
+fi
+if [[ ! -e "${config_root}/agent-ingress.toml" ]]; then
+  install -m 0640 -o root -g butters-staging \
+    "${butters_source}/config/desktop-agent-staging-ingress.example.toml" \
+    "${config_root}/agent-ingress.toml"
+fi
+if [[ ! -e "${config_root}/desktop-agent.toml" ]]; then
+  install -m 0640 -o root -g butters-staging \
+    "${butters_source}/config/desktop-agent-staging-machine.example.toml" \
+    "${config_root}/desktop-agent.toml"
+fi
+if [[ ! -e "${config_root}/butters-staging.env" ]]; then
+  install -m 0640 -o root -g butters-staging \
+    "${butters_source}/config/butters-staging.env.example" \
+    "${config_root}/butters-staging.env"
+fi
+
+cleanup
+install -d -m 0750 -o root -g butters-staging "${staging_root}"
+install -d -m 0750 -o root -g butters-staging \
+  "${staging_root}/src" "${staging_root}/scripts" "${staging_root}/systemd"
+# Curated staging payload: no normal installer, production configuration,
+# local config, model, runtime, static/Admin, or developer-secret file enters
+# the staging installation.
+rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
+  "${butters_source}/src/butters/" "${staging_root}/src/butters/"
+install -m 0640 -o root -g butters-staging \
+  "${butters_source}/requirements-web.txt" "${staging_root}/requirements-web.txt"
+install -m 0640 -o root -g butters-staging \
+  "${butters_source}/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md" \
+  "${staging_root}/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md"
+for script in desktop-agent-staging-validate desktop-agent-staging-production-proof; do
+  install -m 0750 -o root -g butters-staging \
+    "${butters_source}/scripts/${script}" "${staging_root}/scripts/${script}"
+done
+for unit in "${web_unit}" "${ingress_unit}"; do
+  install -m 0640 -o root -g butters-staging \
+    "${butters_source}/systemd/${unit}" "${staging_root}/systemd/${unit}"
+done
+install -d -m 0750 -o root -g butters-staging "${staging_root}/agent-src"
+rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
+  "${agent_source}/src/" "${staging_root}/agent-src/"
+chown -h -R root:butters-staging "${staging_root}"
+
+/usr/bin/python3 -m venv "${staging_root}/.venv"
+"${staging_root}/.venv/bin/python" -m pip install \
+  --no-input --disable-pip-version-check --quiet \
+  -r "${staging_root}/requirements-web.txt"
+PYTHONPATH="${staging_root}/src:${staging_root}/agent-src" \
+  "${staging_root}/.venv/bin/python" -c \
+  'import butters.desktop_agent_staging, butters_agent.protocol'
+"${staging_root}/.venv/bin/python" -m compileall -q \
+  "${staging_root}/src" "${staging_root}/agent-src"
+
+# Fix venv text entry points built under the temporary path before publication.
+for entry in "${staging_root}"/.venv/bin/*; do
+  [[ -f "${entry}" && ! -L "${entry}" ]] || continue
+  head -c 2 "${entry}" 2>/dev/null | grep -q '^#!' || continue
+  sed -i "1s|^#!${staging_root}/|#!${install_root}/|" "${entry}"
+done
+sed -i "s|${staging_root}/|${install_root}/|g" "${staging_root}/.venv/pyvenv.cfg"
+normalize_tree "${staging_root}"
+
+trap - EXIT
+if [[ -d "${install_root}" ]]; then
+  rm -rf -- "${previous_root}"
+  mv -- "${install_root}" "${previous_root}"
+fi
+if ! mv -- "${staging_root}" "${install_root}"; then
+  [[ -d "${previous_root}" ]] && mv -- "${previous_root}" "${install_root}"
+  echo "Staging publication failed; the previous staging tree was restored." >&2
+  exit 3
+fi
+trap cleanup EXIT
+
+install -m 0644 -o root -g root \
+  "${install_root}/systemd/${web_unit}" "/etc/systemd/system/${web_unit}"
+install -m 0644 -o root -g root \
+  "${install_root}/systemd/${ingress_unit}" "/etc/systemd/system/${ingress_unit}"
+systemctl daemon-reload
+if [[ "${enable_services}" == 1 ]]; then
+  systemctl enable "${web_unit}" "${ingress_unit}"
+fi
+if [[ "${start_services}" == 1 ]]; then
+  systemctl start "${web_unit}" "${ingress_unit}"
+fi
+
+echo "Staging artifacts installed. Both committed ingress gates remain unchanged."
+echo "No production unit was enabled and no Tailscale or broker configuration was touched."
