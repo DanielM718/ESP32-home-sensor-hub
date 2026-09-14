@@ -325,7 +325,12 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
         assert len(matches) == 1, f"expected exactly one {needle!r}, got {matches}"
         return matches[0]
 
-    rsync = index_of("rsync -a --delete")
+    # Two staging copies now: the application tree, then the shared
+    # butters_agent protocol package from the sibling checkout. Both must land
+    # before the freeze, so take the last of them.
+    staging_copies = [i for i, line in enumerate(lines) if "rsync -a --delete" in line]
+    assert len(staging_copies) == 2, staging_copies
+    rsync = max(staging_copies)
     freeze = index_of('chown -h -R root:butters "${staging_dir}"')
     compile_step = index_of("-m compileall")
     seal = index_of('normalize_application_tree "${staging_dir}"')
