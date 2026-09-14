@@ -13,7 +13,7 @@ max_response_bytes = 2097152
 [desktop]
 enabled = true
 machine = "desktop"
-host = "192.168.1.209"
+host = "DESKTOP-G4CFVL1.local"
 ssh_port = 22
 network_timeout_seconds = 45.0
 ssh_timeout_seconds = 90.0
@@ -25,15 +25,21 @@ wake_enabled = true
 # switches. The root broker retains a separate, default-off gate for each.
 headless_enabled = true
 monitors_enabled = true
-# Fixed Parsec support is present in source but remains disabled until the
-# reviewed feature branch and Windows helper are deployed together.
-parsec_status_enabled = false
-parsec_ensure_enabled = false
+# Fixed Parsec support: status and idempotent ensure are validated against the
+# real desktop and are the state production has been running, so they stay
+# enabled here. Shipping main's defaults over them would silently disable
+# working Parsec control on the first deployment of this branch.
+parsec_status_enabled = true
+parsec_ensure_enabled = true
 parsec_restart_enabled = false
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false
-shutdown_enabled = false
+# Shutdown is exposed in Admin -> Tools and is the state production runs. It
+# stays behind FRESH passkey authentication bound to a frozen plan plus explicit
+# confirmation, so enabling the capability is not a one-click action.
+# host_shutdown_enabled, which powers off Butters itself, stays off.
+shutdown_enabled = true
 
 # Passkey trust values are server-known constants, never derived from proxy
 # headers. Authentication is a step-up inside the private tailnet boundary.
@@ -83,8 +89,8 @@ host_reboot_enabled = false
 host_shutdown_enabled = false
 
 [actions.nas]
-enabled = false
-configured = false
+enabled = true
+configured = true
 maximum_duration_minutes = 1
 local_console_allowed = false
 require_fresh_sensor = false
@@ -313,16 +319,17 @@ groups = ["filament_boxes"]
 # partner portal, or an action request: the status observer and the redirect
 # read only this table.
 [nas]
-lan_host = ""
+# Reserved/persistent LAN address of the one configured NAS.
+lan_host = "192.168.1.240"
 # TrueNAS middleware base URL, used for the OS/API reachability probe only.
-api_url = ""
+api_url = "https://192.168.1.240"
 api_port = 443
 # MagicDNS name of the NAS's own Tailscale node.
-tailscale_host = ""
+tailscale_host = "truenas-scale.tail9644cc.ts.net"
 tailscale_probe_port = 443
 # The two, and only two, destinations the portal may ever redirect to.
-jellyfin_lan_url = ""
-jellyfin_tailscale_url = ""
+jellyfin_lan_url = "http://192.168.1.240:8096"
+jellyfin_tailscale_url = "http://truenas-scale.tail9644cc.ts.net:8096"
 jellyfin_readiness_path = "/health"
 probe_timeout_seconds = 2.0
 total_probe_seconds = 6.0
@@ -334,17 +341,17 @@ wake_grace_seconds = 180.0
 # process and the one canonical control origin, but exposes only NAS status,
 # Wake NAS, wake progress, and the server-chosen Jellyfin redirect.
 [portal]
-enabled = false
+enabled = true
 # Home networks whose clients may be sent to the LAN Jellyfin URL. Anything
 # else, and anything that cannot be classified, fails safe to the Tailscale
 # destination. See butters.web.locality for the exact trust boundary.
-lan_networks = []
+lan_networks = ["192.168.1.0/24"]
 # Optional. Locality stated by a reviewed LOCAL ingress, honoured only when the
 # request arrives from a trusted loopback peer. Empty disables it entirely.
 locality_header = ""
 # Optional bounded read of this host's own tailscaled, used to locate the
 # calling identity's active peer. Local daemon state, never client input.
-tailscale_status_command = []
+tailscale_status_command = ["/usr/bin/tailscale", "status", "--json"]
 session_ttl_seconds = 900.0
 wake_rate_per_minute = 3.0
 wake_burst = 2
