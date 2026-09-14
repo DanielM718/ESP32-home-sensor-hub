@@ -39,10 +39,23 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         raise ValueError("desktop broker fields are invalid")
     if set(home_assistant) != {"url"}:
         raise ValueError("Home Assistant broker fields are invalid")
-    if set(nas) != {"mac", "broadcast", "api_url", "api_key"}:
+    # The shutdown transport fields are optional so that a configuration written
+    # before they existed still parses. An unknown field is still refused, so
+    # this loosens nothing except the flag day: adding a privileged operation to
+    # the enum must not make every already-deployed broker configuration invalid
+    # and take the whole privileged surface down until a root file is edited.
+    if not {"mac", "broadcast"} <= set(nas) <= {
+        "mac",
+        "broadcast",
+        "api_url",
+        "api_key",
+    }:
         raise ValueError("NAS broker fields are invalid")
     expected_operations = {item.value for item in BrokerOperation}
-    if set(operations) != expected_operations or not all(
+    # Same reasoning, and it stays fail-closed: an operation the file does not
+    # mention is disabled, never enabled. Only an unknown or non-boolean gate is
+    # an error.
+    if not set(operations) <= expected_operations or not all(
         isinstance(value, bool) for value in operations.values()
     ):
         raise ValueError("broker operation gates are invalid")
@@ -77,8 +90,8 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         "::1",
     }:
         raise ValueError("plain HTTP Home Assistant access is restricted to loopback")
-    nas_api_url = str(nas["api_url"]).rstrip("/")
-    nas_api_key_path = str(nas["api_key"])
+    nas_api_url = str(nas.get("api_url", "")).rstrip("/")
+    nas_api_key_path = str(nas.get("api_key", ""))
     if nas_api_url:
         parsed_nas = urlparse(nas_api_url)
         if parsed_nas.scheme != "https" or not parsed_nas.hostname:

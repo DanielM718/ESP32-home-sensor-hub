@@ -96,7 +96,10 @@ enabled = false
 configured = false
 ```
 
-`/etc/butters/action-broker.toml`:
+`/etc/butters/action-broker.toml` — **no edit is required to deploy.** The
+parser treats the shutdown transport fields and the `nas.shutdown` gate as
+optional, and an absent gate is disabled, so the configuration already deployed
+keeps every gate it has. Edit this file only when enabling shutdown:
 
 ```toml
 [nas]

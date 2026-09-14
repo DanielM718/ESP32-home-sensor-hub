@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import getpass
 from dataclasses import replace
 
 import httpx
@@ -502,3 +503,81 @@ def test_nas_shutdown_transport_sends_one_fixed_request_with_no_caller_input() -
 def test_nas_actions_are_absent_from_every_planner_catalog() -> None:
     assert "wake_nas" not in CONVERSATIONAL_PLANNER_ACTIONS
     assert "shutdown_nas" not in CONVERSATIONAL_PLANNER_ACTIONS
+
+
+def test_broker_configuration_written_before_nas_shutdown_still_parses(tmp_path) -> None:
+    """Adding a privileged operation must not invalidate deployed configuration.
+
+    The deployed /etc/butters/action-broker.toml predates both the shutdown
+    transport fields and the nas.shutdown gate. If the parser demanded them, the
+    first broker start after a deploy would fail and take every privileged
+    operation with it -- desktop wake, shutdown and monitor control included --
+    until a root-owned file was hand-edited. Absent means disabled, not invalid.
+    """
+
+    from butters.actions import broker_main
+
+    legacy = tmp_path / "action-broker.toml"
+    gates = "\n".join(
+        f'"{item.value}" = {"true" if item is BrokerOperation.DESKTOP_WAKE else "false"}'
+        for item in BrokerOperation
+        if item is not BrokerOperation.NAS_SHUTDOWN
+    )
+    legacy.write_text(
+        "[broker]\n"
+        f'service_user = "{getpass.getuser()}"\n'
+        "[desktop]\n"
+        'host = "192.168.1.209"\n'
+        'user = "Daniel"\n'
+        'mac = "34:5A:60:D7:4C:2C"\n'
+        'broadcast = "192.168.1.255"\n'
+        'key = "/etc/butters/action-broker/windows_remote_mode"\n'
+        "[home_assistant]\n"
+        'url = "http://127.0.0.1:8123"\n'
+        "[nas]\n"
+        'mac = "00:e2:69:7d:40:cd"\n'
+        'broadcast = "192.168.1.255"\n'
+        "[operations]\n" + gates + "\n"
+    )
+    original = broker_main._require_root_private
+    broker_main._require_root_private = lambda *_a, **_k: None
+    try:
+        _uid, config = broker_main._configuration(legacy)
+    finally:
+        broker_main._require_root_private = original
+
+    assert BrokerOperation.DESKTOP_WAKE in config.enabled_operations
+    assert BrokerOperation.NAS_SHUTDOWN not in config.enabled_operations
+    assert config.nas_api_url == ""
+    # Absent transport leaves the handler unregistered, so it is unreachable.
+    assert BrokerOperation.NAS_SHUTDOWN not in FixedBrokerOperations(config).handlers()
+
+
+def test_unknown_broker_operation_gate_is_still_refused(tmp_path) -> None:
+    """Loosening the flag day must not loosen what a gate may name."""
+
+    from butters.actions import broker_main
+
+    config = tmp_path / "action-broker.toml"
+    config.write_text(
+        "[broker]\n"
+        f'service_user = "{getpass.getuser()}"\n'
+        "[desktop]\n"
+        'host = "h"\nuser = "u"\nmac = "34:5A:60:D7:4C:2C"\n'
+        'broadcast = "192.168.1.255"\nkey = "/etc/butters/action-broker/k"\n'
+        "[home_assistant]\n"
+        'url = "http://127.0.0.1:8123"\n'
+        "[nas]\n"
+        'mac = ""\nbroadcast = ""\n'
+        "[operations]\n"
+        '"nas.obliterate" = true\n'
+    )
+    original = broker_main._require_root_private
+    broker_main._require_root_private = lambda *_a, **_k: None
+    try:
+        import pytest
+
+        with pytest.raises(ValueError, match="operation gates are invalid"):
+            broker_main._configuration(config)
+    finally:
+        broker_main._require_root_private = original
