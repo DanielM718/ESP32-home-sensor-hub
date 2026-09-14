@@ -1251,6 +1251,7 @@ class BetaAssistantService:
                 "agent": agent["configured"],
                 "wake": self.settings.desktop.wake_enabled,
                 "shutdown": self.settings.desktop.shutdown_enabled,
+                "streaming": self.settings.desktop.parsec_ensure_enabled,
             },
             "observed": observed,
             "agent_detail": agent,
@@ -1343,6 +1344,19 @@ class BetaAssistantService:
             skill="shutdown_desktop",
             arguments={"machine": "desktop"},
             summary="Shut down the configured desktop",
+            subject="desktop",
+        )
+
+    def start_admin_desktop_streaming(
+        self, session: BrowserSession
+    ) -> dict[str, object]:
+        """Run the reviewed wake / SSH / Parsec / headless readiness workflow."""
+
+        return self._start_admin_action(
+            session,
+            skill="start_remote_desktop_session",
+            arguments={"machine": "desktop"},
+            summary="Prepare the configured desktop for streaming",
             subject="desktop",
         )
 

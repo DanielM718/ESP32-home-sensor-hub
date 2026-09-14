@@ -10,6 +10,7 @@ separate, and an old wake record cannot relabel an authoritative agent report.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -50,11 +51,53 @@ def test_admin_tools_contains_every_production_desktop_control() -> None:
         'id="desktop-apps"',
         'id="desktop-vms"',
         'id="desktop-compute-note"',
+        'id="desktop-streaming"',
         'id="desktop-shutdown"',
         'id="desktop-shutdown-confirm"',
         'id="desktop-result"',
     ):
         assert element in ADMIN_HTML, element
+
+
+def test_every_production_desktop_control_is_present_or_deliberately_replaced() -> None:
+    """Guard the parity set itself, so a control cannot quietly disappear again.
+
+    The two progress lists and the compute project selector are absent by
+    decision, not by accident: the stage lists were the stale-workflow display
+    this change replaced with a single last-operation line, and the compute
+    selector drove the unregistered generic SSH execution path. Everything else
+    the previous production deployment offered must still be here.
+    """
+
+    carried_over = {
+        "desktop-status",
+        "desktop-summary",
+        "desktop-refresh",
+        "desktop-ssh-test",
+        "desktop-wake",
+        "desktop-agent-status",
+        "desktop-apps",
+        "desktop-vms",
+        "desktop-streaming",
+        "desktop-compute-note",
+        "desktop-result",
+        "desktop-result-summary",
+        "desktop-result-details",
+        "desktop-shutdown",
+        "desktop-shutdown-confirm",
+    }
+    replaced = {
+        # stale stage lists -> one last-operation line per card
+        "desktop-wake-progress": "desktop-last-operation",
+        "desktop-shutdown-progress": "desktop-shutdown-status",
+        # generic SSH compute path -> an explicit unavailability note
+        "desktop-project": "desktop-compute-note",
+    }
+    present = set(re.findall(r'id="(desktop-[a-z-]+)"', ADMIN_HTML))
+    assert carried_over <= present, carried_over - present
+    for removed, replacement in replaced.items():
+        assert removed not in present
+        assert replacement in present
 
 
 def test_admin_tools_exposes_the_named_interactive_applications() -> None:

@@ -202,6 +202,7 @@ async function refreshDesktop() {
     renderDesktopApps(state.apps);
     document.querySelector("#desktop-vms").textContent=`${state.vm.headline}. ${state.vm.detail}`;
     document.querySelector("#desktop-shutdown").disabled=!state.configured.shutdown;
+    document.querySelector("#desktop-streaming").disabled=!state.configured.streaming;
     document.querySelector("#desktop-wake").disabled=!state.configured.wake;
   } catch(error) { summary.textContent=`Desktop status unavailable: ${error.message||"unknown error"}`; }
 }
@@ -383,6 +384,7 @@ document.querySelector("#desktop-ssh-test").addEventListener("click",async()=>{
   await refreshDesktop();
 });
 document.querySelector("#desktop-wake").addEventListener("click",()=>runDesktopAction("Wake Desktop",()=>api("/api/admin/tools/desktop/wake",{method:"POST",body:JSON.stringify({})})));
+document.querySelector("#desktop-streaming").addEventListener("click",()=>runDesktopAction("Prepare for Streaming",()=>api("/api/admin/tools/desktop/streaming",{method:"POST",body:JSON.stringify({})})));
 document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#desktop-shutdown-confirm"),
     "This ends every interactive desktop session, including Parsec, and any running build.",

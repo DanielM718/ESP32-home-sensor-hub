@@ -99,6 +99,8 @@
         <p id="desktop-agent-status" class="tool-note" role="status">Agent state has not been checked.</p>
         <div id="desktop-apps" class="app-grid"></div>
         <p class="tool-note">Application launches require a connected Desktop Agent and an active unlocked Windows session. Butters holds no executable path: the agent resolves every name against its own local allowlist.</p>
+        <div class="button-row"><button id="desktop-streaming" class="primary-button" type="button">Prepare for Streaming</button></div>
+        <p class="tool-note">Runs the reviewed workflow: wake, wait for SSH, start the fixed Parsec service on demand, verify readiness, then turn the two physical monitors off. Requires a fresh passkey assertion bound to this exact action.</p>
 
         <h3>Virtual machines</h3>
         <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>

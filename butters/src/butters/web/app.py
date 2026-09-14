@@ -717,6 +717,11 @@ def create_app(
             request, runtime.start_admin_desktop_shutdown, "desktop shutdown"
         )
 
+    async def desktop_tool_streaming(request: Request) -> Response:
+        return await _admin_fixed_action(
+            request, runtime.start_admin_desktop_streaming, "streaming preparation"
+        )
+
     async def desktop_tool_launch(request: Request) -> Response:
         """Launch one symbolic application through the registered Slice 3 action.
 
@@ -1943,6 +1948,11 @@ def create_app(
         Route(
             "/api/admin/tools/desktop/shutdown",
             desktop_tool_shutdown,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/tools/desktop/streaming",
+            desktop_tool_streaming,
             methods=["POST"],
         ),
         Route(
