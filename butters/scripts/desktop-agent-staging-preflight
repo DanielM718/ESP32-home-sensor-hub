@@ -24,9 +24,26 @@ for port in "${machine_port}" "${lan_tls_port}"; do
 done
 
 if [[ -e "${validation_socket}" || -L "${validation_socket}" ]]; then
-  echo "FAIL: stale or active validation socket exists: ${validation_socket}" >&2
+  echo "FAIL: validation socket path already exists: ${validation_socket}" >&2
   stat --format='type=%F mode=%a owner=%U group=%G path=%n' \
     "${validation_socket}" >&2 || true
+  if systemctl is-active --quiet butters-staging-validation.socket; then
+    echo "socket-unit-active=yes (butters-staging-validation.socket)" >&2
+  else
+    echo "socket-unit-active=no (butters-staging-validation.socket)" >&2
+  fi
+  if unix_listeners="$(ss -H -lxnp 2>&1)"; then
+    matching_listener="$(printf '%s\n' "${unix_listeners}" | grep -F -- "${validation_socket}" || true)"
+    if [[ -n "${matching_listener}" ]]; then
+      echo "Unix listener evidence:" >&2
+      echo "${matching_listener}" >&2
+    else
+      echo "Unix listener evidence: no matching listener reported by ss" >&2
+    fi
+  else
+    echo "Unix listener evidence unavailable: ${unix_listeners}" >&2
+  fi
+  echo "Do not delete or unlink this path blindly; identify and stop its owner first." >&2
   failed=1
 else
   echo "PASS: validation socket path is absent: ${validation_socket}"

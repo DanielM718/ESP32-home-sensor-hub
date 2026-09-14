@@ -24,10 +24,10 @@ butters-agent-ingress-staging.service
 butters-staging.service TCP machine upstream
   /agent/v1/session only -> AgentHub
 
-authorized local operator in group butters-staging
+authorized local operator in group butters-staging-ops
        |
        | /run/butters-staging/validation.sock
-       | root:butters-staging 0660 (no TCP validation routes)
+       | root:butters-staging-ops 0660 (no TCP validation routes)
        v
 fixed staging validation runtime
   -> SkillRegistry -> PolicyValidator -> ActionCoordinator
@@ -61,7 +61,9 @@ Both repository templates set these gates to `false`.
 | Local control socket unit | `butters-staging-validation.socket` |
 | TLS ingress unit | `butters-agent-ingress-staging.service` |
 | Machine-ingress upstream | `127.0.0.1:18090`, `/agent/v1/session` only |
-| Local validation API | `/run/butters-staging/validation.sock`, `root:butters-staging` `0660` |
+| Service identity | user/group `butters-staging`; no human members |
+| Validation operator group | `butters-staging-ops`; fixed CLI/socket access only |
+| Local validation API | `/run/butters-staging/validation.sock`, `root:butters-staging-ops` `0660` |
 | Private LAN TLS listener | private staging-host address, port `18443` |
 | Windows data/DPAPI/log profile | `%LOCALAPPDATA%\ButtersAgentStaging` |
 | Machine identity | `desktop-staging` |
@@ -69,13 +71,19 @@ Both repository templates set these gates to `false`.
 The TCP machine upstream has no `/validation/...` routes. A bare loopback
 `curl` therefore cannot reach state, list, status, or launch. The Unix socket's
 filesystem ownership is the local-user authorization boundary: only root and
-members of the `butters-staging` group can connect. Add only named, trusted
-hardware-validation operators to that group; membership grants all four fixed
-validation operations, including the policy-coordinated launch.
-Systemd maintains the containing runtime directory as
-`butters-staging:butters-staging` mode `0750` and creates the socket itself as
-`root:butters-staging` mode `0660`; the daemon verifies the socket identity,
-type, mode, owner, and group before serving it.
+members of the `butters-staging-ops` group can connect. Membership grants only
+the four fixed validation operations, including the policy-coordinated launch;
+it does not grant staging-secret access. `butters-staging` is the daemon and
+ingress service identity/group and must not contain human members. Staging HMAC
+and TLS private credentials are owned by `butters-staging:root`, are readable
+only by their service-account owner, and are not readable by operators.
+
+The tmpfiles policy exclusively maintains the containing runtime directory as
+`butters-staging:butters-staging-ops` mode `0750`. This lets operators traverse
+only as needed to reach the socket. The socket unit creates and removes only the
+socket itself as `root:butters-staging-ops` mode `0660`; the service unit does
+not use `RuntimeDirectory=` for this shared path. The daemon verifies the socket
+identity, type, mode, owner, and operator-group GID before serving it.
 
 The validation daemon does not construct `BetaAssistantService`, browser
 sessions, passkeys, Admin routes, broker clients, or a generic AgentHub command
@@ -104,6 +112,15 @@ sudo ./butters/scripts/install-desktop-agent-staging
 Confirm the printed target is `/opt/butters-staging` and both unit names end in
 `staging.service`. Stop immediately if any target differs.
 
+Authorize a named human only when hardware validation is ready, then require a
+new login/session for supplementary-group membership to take effect:
+
+```bash
+sudo usermod -aG butters-staging-ops VALIDATION_OPERATOR
+```
+
+Never add a human to `butters-staging`.
+
 Generate new staging-only material on the staging host. Do not paste these
 values into a shell history on shared systems; the variables below are
 illustrative operator steps for a private root shell:
@@ -113,22 +130,22 @@ sudo -i
 set +o history
 export HISTFILE=/dev/null
 umask 077
-install -d -m 0750 -o root -g butters-staging /etc/butters-staging/desktop-agent
+install -d -m 0700 -o butters-staging -g root /etc/butters-staging/desktop-agent
 STAGING_MACHINE_TOKEN="$(openssl rand -hex 32)"
 STAGING_COMMAND_KEY="$(openssl rand -hex 32)"
 printf '%s' "$STAGING_COMMAND_KEY" > /etc/butters-staging/desktop-agent/command.key
-chown root:butters-staging /etc/butters-staging/desktop-agent/command.key
-chmod 0640 /etc/butters-staging/desktop-agent/command.key
+chown butters-staging:root /etc/butters-staging/desktop-agent/command.key
+chmod 0400 /etc/butters-staging/desktop-agent/command.key
 STAGING_TOKEN_DIGEST="$(printf '%s' "$STAGING_MACHINE_TOKEN" | sha256sum | awk '{print $1}')"
 
 openssl req -x509 -newkey rsa:3072 -sha256 -nodes -days 30 \
   -subj '/CN=butters-desktop-agent-staging' \
   -keyout /etc/butters-staging/desktop-agent/tls.key \
   -out /etc/butters-staging/desktop-agent/tls.crt
-chown root:butters-staging /etc/butters-staging/desktop-agent/tls.key \
+chown butters-staging:root /etc/butters-staging/desktop-agent/tls.key \
   /etc/butters-staging/desktop-agent/tls.crt
-chmod 0640 /etc/butters-staging/desktop-agent/tls.key
-chmod 0644 /etc/butters-staging/desktop-agent/tls.crt
+chmod 0400 /etc/butters-staging/desktop-agent/tls.key
+chmod 0400 /etc/butters-staging/desktop-agent/tls.crt
 STAGING_SPKI_PIN="$(openssl x509 -in /etc/butters-staging/desktop-agent/tls.crt \
   -pubkey -noout | openssl pkey -pubin -outform DER | sha256sum | awk '{print $1}')"
 ```
@@ -140,10 +157,23 @@ do not store the plaintext token in the server TOML. Clear the shell variables
 with `unset STAGING_MACHINE_TOKEN STAGING_COMMAND_KEY STAGING_TOKEN_DIGEST
 STAGING_SPKI_PIN`, then close the root shell after enrollment. Do not pass any
 credential in argv or write it under `/tmp` or the repository.
+Keep `assistant.toml`, `agent-ingress.toml`, `desktop-agent.toml`, and
+`butters-staging.env` as `butters-staging:root` mode `0600`. If a plaintext
+machine-token file is ever temporarily required by a separately reviewed
+provisioner, keep it `butters-staging:root` mode `0400` and remove it as soon as
+provisioning completes.
 
 Review and set the private staging interface in
 `/etc/butters-staging/agent-ingress.toml`. Only after reviewing every path and
-port, change both staging gates to `true`, then:
+port, change both staging gates to `true`. Because a root editor may replace a
+file, reassert the service-only configuration ownership before activation:
+
+```bash
+chown butters-staging:root /etc/butters-staging/{assistant.toml,agent-ingress.toml,desktop-agent.toml,butters-staging.env}
+chmod 0600 /etc/butters-staging/{assistant.toml,agent-ingress.toml,desktop-agent.toml,butters-staging.env}
+```
+
+Then:
 
 ```bash
 sudo systemctl daemon-reload
@@ -183,8 +213,21 @@ agent directory or its `config.toml`, `apps.toml`, task, DPAPI file, or logs.
 
    ```powershell
    Set-PSReadLineOption -HistorySaveStyle SaveNothing
-   $json = @{ token = '<STAGING_MACHINE_TOKEN>'; command_key = '<STAGING_COMMAND_KEY>' } | ConvertTo-Json -Compress
-   $json | python -m butters_agent.provision --config .\config.toml
+   $credentialJson = @{ token = '<STAGING_MACHINE_TOKEN>'; command_key = '<STAGING_COMMAND_KEY>' } | ConvertTo-Json -Compress
+   try {
+       $credentialJson | python -m butters_agent.provision --config .\config.toml
+   } finally {
+       Clear-Variable credentialJson -ErrorAction SilentlyContinue
+       Remove-Variable credentialJson -ErrorAction SilentlyContinue
+   }
+   ```
+
+   Close that PowerShell window immediately after provisioning so credential
+   input is neither retained in session memory nor later written to PSReadLine
+   history. Start the staging agent from a fresh window with intentional normal
+   history behavior:
+
+   ```powershell
    python -m butters_agent --config .\config.toml
    ```
 
@@ -195,13 +238,14 @@ is rejected unless `profile = "staging"`.
 ## Validation CLI and authorization
 
 Run the installed CLI only on the staging host as root or a deliberately
-authorized member of `butters-staging`:
+authorized member of `butters-staging-ops` (shown below from that operator's
+new login session):
 
 ```bash
-sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate state
-sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate list-apps
-sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate status notepad
-sudo -u butters-staging /opt/butters-staging/scripts/desktop-agent-staging-validate launch notepad
+/opt/butters-staging/scripts/desktop-agent-staging-validate state
+/opt/butters-staging/scripts/desktop-agent-staging-validate list-apps
+/opt/butters-staging/scripts/desktop-agent-staging-validate status notepad
+/opt/butters-staging/scripts/desktop-agent-staging-validate launch notepad
 ```
 
 `state`, `list-apps`, and `status` execute registered observation skills through
@@ -320,6 +364,7 @@ sudo systemctl disable --now butters-staging-validation.socket
 sudo rm /etc/systemd/system/butters-agent-ingress-staging.service
 sudo rm /etc/systemd/system/butters-staging.service
 sudo rm /etc/systemd/system/butters-staging-validation.socket
+sudo rm /etc/tmpfiles.d/butters-staging.conf
 sudo systemctl daemon-reload
 sudo rm -rf -- /opt/butters-staging /opt/butters-staging.previous
 sudo rm -rf -- /etc/butters-staging /var/lib/butters-staging

@@ -35,6 +35,7 @@ CLI = BUTTERS / "scripts" / "desktop-agent-staging-validate"
 WEB_UNIT = BUTTERS / "systemd" / "butters-staging.service"
 INGRESS_UNIT = BUTTERS / "systemd" / "butters-agent-ingress-staging.service"
 SOCKET_UNIT = BUTTERS / "systemd" / "butters-staging-validation.socket"
+TMPFILES = BUTTERS / "tmpfiles.d" / "butters-staging.conf"
 PREFLIGHT = BUTTERS / "scripts" / "desktop-agent-staging-preflight"
 STAGING_REQUIREMENTS = BUTTERS / "requirements-staging.txt"
 ASSISTANT_TEMPLATE = (
@@ -116,8 +117,7 @@ def test_staging_units_paths_and_ports_are_distinct():
     assert INGRESS_UNIT.name != "butters-agent-ingress.service"
     assert "StateDirectory=butters-staging" in web
     assert "Requires=butters-staging-validation.socket" in web
-    assert "RuntimeDirectory=butters-staging" in web
-    assert "RuntimeDirectoryMode=0750" in web
+    assert "RuntimeDirectory=butters-staging" not in web
     assert "StateDirectory=butters-agent-ingress-staging" in ingress
     assert "RuntimeDirectory=butters-agent-ingress-staging" in ingress
     assert 'state_dir = "/var/lib/butters-staging"' in assistant
@@ -127,18 +127,98 @@ def test_staging_units_paths_and_ports_are_distinct():
     assert 'install_root="/opt/butters-staging"' in installer
     assert "ListenStream=/run/butters-staging/validation.sock" in SOCKET_UNIT.read_text()
     assert "SocketUser=root" in SOCKET_UNIT.read_text()
-    assert "SocketGroup=butters-staging" in SOCKET_UNIT.read_text()
+    assert "SocketGroup=butters-staging-ops" in SOCKET_UNIT.read_text()
     assert "SocketMode=0660" in SOCKET_UNIT.read_text()
+    assert "ConditionPathIsDirectory=/run/butters-staging" in SOCKET_UNIT.read_text()
+    assert (
+        "d /run/butters-staging 0750 butters-staging butters-staging-ops -"
+        in TMPFILES.read_text()
+    )
+    assert 'tmpfiles_name="butters-staging.conf"' in installer
+    assert "systemd-tmpfiles --create" in installer
     assert "enable_services=0" in installer
     assert 'if [[ "${enable_services}" == 1 ]]' in installer
     preflight = PREFLIGHT.read_text()
     assert "machine_port=18090" in preflight
     assert "lan_tls_port=18443" in preflight
     assert "validation_socket=/run/butters-staging/validation.sock" in preflight
+    assert "socket-unit-active=" in preflight
+    assert "Unix listener evidence" in preflight
+    assert "Do not delete or unlink this path blindly" in preflight
     requirements = STAGING_REQUIREMENTS.read_text()
     assert "websockets==15.0.1" in requirements
     assert "webauthn" not in requirements
     assert "requirements-staging.txt" in installer
+
+
+def _can_read(
+    mode: int,
+    *,
+    file_uid: int,
+    file_gid: int,
+    actor_uid: int,
+    actor_gids: set[int],
+) -> bool:
+    if actor_uid == 0:
+        return True
+    if actor_uid == file_uid:
+        return bool(mode & stat.S_IRUSR)
+    if file_gid in actor_gids:
+        return bool(mode & stat.S_IRGRP)
+    return bool(mode & stat.S_IROTH)
+
+
+def test_service_secrets_are_owner_only_and_operator_group_is_distinct():
+    installer = INSTALLER.read_text()
+    assert "groupadd --system butters-staging-ops" in installer
+    assert "useradd --system --gid butters-staging" in installer
+    assert "--gid butters-staging-ops" not in installer
+    assert (
+        'chmod 0400 "${config_root}/desktop-agent/${private_credential}"'
+        in installer
+    )
+    assert 'chmod 0600 "${config_root}/${staging_config}"' in installer
+    assert 'chown butters-staging:root' in installer
+
+    service_uid = 991
+    service_gid = 991
+    operator_uid = 1000
+    operator_gid = 992
+    assert _can_read(
+        0o400,
+        file_uid=service_uid,
+        file_gid=0,
+        actor_uid=service_uid,
+        actor_gids={service_gid},
+    )
+    assert not _can_read(
+        0o400,
+        file_uid=service_uid,
+        file_gid=0,
+        actor_uid=operator_uid,
+        actor_gids={operator_gid},
+    )
+    assert service_gid not in {operator_gid}
+
+
+def test_sensitive_staging_configs_are_service_owned_and_not_operator_readable():
+    service_uid = 991
+    operator_uid = 1000
+    operator_gid = 992
+    assert _can_read(
+        0o600,
+        file_uid=service_uid,
+        file_gid=0,
+        actor_uid=service_uid,
+        actor_gids=set(),
+    )
+    assert not _can_read(
+        0o600,
+        file_uid=service_uid,
+        file_gid=0,
+        actor_uid=operator_uid,
+        actor_gids={operator_gid},
+    )
 
 
 def test_port_preflight_fails_closed_when_listener_inventory_fails(tmp_path):
@@ -414,15 +494,93 @@ def test_daemon_accepts_only_verified_systemd_socket(monkeypatch):
     monkeypatch.setenv("LISTEN_PID", str(staging_module.os.getpid()))
     monkeypatch.setenv("LISTEN_FDS", "1")
     monkeypatch.setattr(staging_module, "STAGING_VALIDATION_SOCKET", SocketPath())
+    requested_groups = []
     monkeypatch.setattr(
         staging_module.grp,
         "getgrnam",
-        lambda _name: SimpleNamespace(gr_gid=123),
+        lambda name: requested_groups.append(name) or SimpleNamespace(gr_gid=123),
     )
     monkeypatch.setattr(
         staging_module.socket, "socket", lambda *, fileno: inherited
     )
     assert staging_module.systemd_validation_socket() is inherited
+    assert requested_groups == ["butters-staging-ops"]
+
+
+@pytest.mark.parametrize(
+    ("listen_pid", "listen_fds"),
+    [
+        ("wrong", "1"),
+        (None, "1"),
+        ("current", "0"),
+        ("current", "2"),
+        ("current", None),
+    ],
+)
+def test_daemon_rejects_mismatched_systemd_activation_environment(
+    monkeypatch, listen_pid, listen_fds
+):
+    pid = str(staging_module.os.getpid()) if listen_pid == "current" else listen_pid
+    if pid is None:
+        monkeypatch.delenv("LISTEN_PID", raising=False)
+    else:
+        monkeypatch.setenv("LISTEN_PID", pid)
+    if listen_fds is None:
+        monkeypatch.delenv("LISTEN_FDS", raising=False)
+    else:
+        monkeypatch.setenv("LISTEN_FDS", listen_fds)
+    with pytest.raises(RuntimeError, match="staging_validation_socket_required"):
+        staging_module.systemd_validation_socket()
+
+
+@pytest.mark.parametrize(
+    ("path_mode", "path_uid", "path_gid"),
+    [
+        (stat.S_IFREG | 0o660, 0, 123),
+        (stat.S_IFSOCK | 0o660, 1, 123),
+        (stat.S_IFSOCK | 0o660, 0, 124),
+        (stat.S_IFSOCK | 0o666, 0, 123),
+        (stat.S_IFSOCK | 0o662, 0, 123),
+    ],
+)
+def test_daemon_rejects_unsafe_validation_path_metadata(
+    monkeypatch, path_mode, path_uid, path_gid
+):
+    expected_path = "/run/butters-staging/validation.sock"
+
+    class SocketPath:
+        def __str__(self):
+            return expected_path
+
+        def stat(self):
+            return SimpleNamespace(
+                st_mode=path_mode,
+                st_uid=path_uid,
+                st_gid=path_gid,
+            )
+
+    class InheritedSocket:
+        closed = False
+
+        def getsockname(self):
+            return expected_path
+
+        def close(self):
+            self.closed = True
+
+    inherited = InheritedSocket()
+    monkeypatch.setenv("LISTEN_PID", str(staging_module.os.getpid()))
+    monkeypatch.setenv("LISTEN_FDS", "1")
+    monkeypatch.setattr(staging_module, "STAGING_VALIDATION_SOCKET", SocketPath())
+    monkeypatch.setattr(
+        staging_module.grp,
+        "getgrnam",
+        lambda name: SimpleNamespace(gr_gid=123),
+    )
+    monkeypatch.setattr(staging_module.socket, "socket", lambda *, fileno: inherited)
+    with pytest.raises(RuntimeError, match="unsafe_staging_validation_socket"):
+        staging_module.systemd_validation_socket()
+    assert inherited.closed is True
 
 
 class RecordingPolicy(PolicyValidator):

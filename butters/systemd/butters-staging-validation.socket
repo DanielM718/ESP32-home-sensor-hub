@@ -2,13 +2,15 @@
 Description=Butters staging local validation control socket
 Documentation=file:/opt/butters-staging/MANUAL_DESKTOP_AGENT_STAGING_ACCEPTANCE.md
 PartOf=butters-staging.service
+Requires=systemd-tmpfiles-setup.service
+After=systemd-tmpfiles-setup.service
+ConditionPathIsDirectory=/run/butters-staging
 
 [Socket]
 ListenStream=/run/butters-staging/validation.sock
 SocketUser=root
-SocketGroup=butters-staging
+SocketGroup=butters-staging-ops
 SocketMode=0660
-DirectoryMode=0750
 RemoveOnStop=true
 Service=butters-staging.service
 

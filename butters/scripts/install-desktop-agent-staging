@@ -16,6 +16,7 @@ runtime_root="/run/butters-staging"
 web_unit="butters-staging.service"
 ingress_unit="butters-agent-ingress-staging.service"
 validation_socket_unit="butters-staging-validation.socket"
+tmpfiles_name="butters-staging.conf"
 enable_services=0
 start_services=0
 
@@ -59,10 +60,10 @@ require_isolated_path() {
 normalize_tree() {
   local root="$1"
   [[ -n "${root}" && "${root}" != "/" && -d "${root}" ]] || return 2
-  chown -h -R root:butters-staging "${root}"
-  find "${root}" -type d -exec chmod 0750 {} +
-  find "${root}" -type f -perm /111 -exec chmod 0750 {} +
-  find "${root}" -type f ! -perm /111 -exec chmod 0640 {} +
+  chown -h -R root:root "${root}"
+  find "${root}" -type d -exec chmod 0755 {} +
+  find "${root}" -type f -perm /111 -exec chmod 0755 {} +
+  find "${root}" -type f ! -perm /111 -exec chmod 0644 {} +
 }
 
 cleanup() {
@@ -110,41 +111,57 @@ echo "Production services, broker configuration, and Tailscale Serve are out of 
 if ! getent group butters-staging >/dev/null; then
   groupadd --system butters-staging
 fi
+if ! getent group butters-staging-ops >/dev/null; then
+  groupadd --system butters-staging-ops
+fi
 if ! id butters-staging >/dev/null 2>&1; then
   useradd --system --gid butters-staging --home-dir "${state_root}" \
     --shell /usr/sbin/nologin butters-staging
 fi
 install -d -m 0700 -o butters-staging -g butters-staging "${state_root}"
 install -d -m 0750 -o root -g butters-staging \
-  "${config_root}" "${config_root}/desktop-agent"
+  "${config_root}"
+install -d -m 0700 -o butters-staging -g root \
+  "${config_root}/desktop-agent"
 
 # Local configuration is create-only so repeat installs never replace enabled
 # gates or locally provisioned credentials.
 if [[ ! -e "${config_root}/assistant.toml" ]]; then
-  install -m 0640 -o root -g butters-staging \
+  install -m 0600 -o butters-staging -g root \
     "${butters_source}/config/desktop-agent-staging-assistant.example.toml" \
     "${config_root}/assistant.toml"
 fi
 if [[ ! -e "${config_root}/agent-ingress.toml" ]]; then
-  install -m 0640 -o root -g butters-staging \
+  install -m 0600 -o butters-staging -g root \
     "${butters_source}/config/desktop-agent-staging-ingress.example.toml" \
     "${config_root}/agent-ingress.toml"
 fi
 if [[ ! -e "${config_root}/desktop-agent.toml" ]]; then
-  install -m 0640 -o root -g butters-staging \
+  install -m 0600 -o butters-staging -g root \
     "${butters_source}/config/desktop-agent-staging-machine.example.toml" \
     "${config_root}/desktop-agent.toml"
 fi
 if [[ ! -e "${config_root}/butters-staging.env" ]]; then
-  install -m 0640 -o root -g butters-staging \
+  install -m 0600 -o butters-staging -g root \
     "${butters_source}/config/butters-staging.env.example" \
     "${config_root}/butters-staging.env"
 fi
+for staging_config in assistant.toml agent-ingress.toml desktop-agent.toml butters-staging.env; do
+  chown butters-staging:root "${config_root}/${staging_config}"
+  chmod 0600 "${config_root}/${staging_config}"
+done
+for private_credential in command.key tls.key tls.crt machine.token; do
+  if [[ -f "${config_root}/desktop-agent/${private_credential}" ]]; then
+    chown butters-staging:root "${config_root}/desktop-agent/${private_credential}"
+    chmod 0400 "${config_root}/desktop-agent/${private_credential}"
+  fi
+done
 
 cleanup
 install -d -m 0750 -o root -g butters-staging "${staging_root}"
 install -d -m 0750 -o root -g butters-staging \
-  "${staging_root}/src" "${staging_root}/scripts" "${staging_root}/systemd"
+  "${staging_root}/src" "${staging_root}/scripts" "${staging_root}/systemd" \
+  "${staging_root}/tmpfiles.d"
 # The full Python package is copied to avoid a fragile import allowlist. Only
 # the dedicated staging entrypoints/import graphs are reachable from these units;
 # no production config, runtime state, or developer-secret file is copied.
@@ -163,6 +180,9 @@ for unit in "${web_unit}" "${ingress_unit}" "${validation_socket_unit}"; do
   install -m 0640 -o root -g butters-staging \
     "${butters_source}/systemd/${unit}" "${staging_root}/systemd/${unit}"
 done
+install -m 0644 -o root -g root \
+  "${butters_source}/tmpfiles.d/${tmpfiles_name}" \
+  "${staging_root}/tmpfiles.d/${tmpfiles_name}"
 install -d -m 0750 -o root -g butters-staging "${staging_root}/agent-src"
 rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
   "${agent_source}/src/" "${staging_root}/agent-src/"
@@ -205,6 +225,9 @@ install -m 0644 -o root -g root \
   "${install_root}/systemd/${ingress_unit}" "/etc/systemd/system/${ingress_unit}"
 install -m 0644 -o root -g root \
   "${install_root}/systemd/${validation_socket_unit}" "/etc/systemd/system/${validation_socket_unit}"
+install -m 0644 -o root -g root \
+  "${install_root}/tmpfiles.d/${tmpfiles_name}" "/etc/tmpfiles.d/${tmpfiles_name}"
+systemd-tmpfiles --create "/etc/tmpfiles.d/${tmpfiles_name}"
 systemctl daemon-reload
 if [[ "${enable_services}" == 1 ]]; then
   systemctl enable "${web_unit}" "${ingress_unit}"
