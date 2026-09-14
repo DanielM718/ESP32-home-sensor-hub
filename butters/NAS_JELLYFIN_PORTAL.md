@@ -70,20 +70,29 @@ one of `nas.jellyfin_lan_url` or `nas.jellyfin_tailscale_url`.
 
 `/opt/butters/config/assistant.toml`:
 
+All of these were observed on 2026-09-14 and need only confirming, except the
+DHCP reservation, which must be checked on the router:
+
 ```toml
 [nas]
-lan_host = "192.168.1.<nas>"
-api_url = "https://192.168.1.<nas>"
-tailscale_host = "<nas>.tail9644cc.ts.net"
-jellyfin_lan_url = "http://192.168.1.<nas>:8096"
-jellyfin_tailscale_url = "https://<nas>.tail9644cc.ts.net"
+# 192.168.1.240 is where the NAS answers today (ARP for 00:e2:69:7d:40:cd).
+# CONFIRM this is a DHCP *reservation*; a lease that moves breaks LAN probing.
+lan_host = "192.168.1.240"
+# TrueNAS middleware; tcp/443 confirmed open.
+api_url = "https://192.168.1.240"
+tailscale_host = "truenas-scale.tail9644cc.ts.net"
+# Both confirmed answering /health with 200.
+jellyfin_lan_url = "http://192.168.1.240:8096"
+jellyfin_tailscale_url = "http://truenas-scale.tail9644cc.ts.net:8096"
 
 [portal]
 enabled = true
 lan_networks = ["192.168.1.0/24"]
 # Optional; leave empty unless a reviewed local ingress sets it.
 locality_header = ""
-# Optional; enables endpoint-based classification.
+# Optional; enables endpoint-based classification. The butters service user can
+# already read tailscaled, and peers on the home LAN do report a CurAddr of the
+# form 192.168.1.x:41641, so this classifier has real data to work with.
 tailscale_status_command = ["/usr/bin/tailscale", "status", "--json"]
 
 [actions.nas]
@@ -166,3 +175,11 @@ credential is revoked separately through the normal credential path.
    appears on it.
 4. Enroll the partner **only with them present**.
 5. NAS shutdown stays off until its destructive test is separately approved.
+
+## Note on the Tailscale Jellyfin URL
+
+`jellyfin_tailscale_url` is plain `http://` on port 8096. The tailnet itself is
+encrypted by WireGuard, so nothing travels in clear over the network, but the
+browser still treats the page as a non-secure context. If that matters, run
+`tailscale serve` on the NAS to front Jellyfin with HTTPS and change this one
+value; nothing else in the design depends on the scheme.
