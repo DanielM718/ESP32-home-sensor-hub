@@ -26,6 +26,7 @@ from butters.integrations.dashboard import DashboardSensorAdapter
 from butters.integrations.desktop import DesktopWorkflow
 from butters.integrations.history import DashboardHistoryAdapter
 from butters.integrations.model import PrinterSnapshotProvider
+from butters.integrations.nas_status import NasStatusObserver
 from butters.integrations.printer import DashboardPrinterAdapter
 from butters.integrations.project import ProjectInspectionAdapter
 from butters.integrations.server_health import LocalServerHealthAdapter
@@ -88,6 +89,7 @@ class DeterministicAssistant:
         diagnostic_engine: DiagnosticEngine | None = None,
         project_adapter: ProjectInspectionAdapter | None = None,
         environment_adapter: EnvironmentControlAdapter | None = None,
+        nas_adapter: NasAdapter | None = None,
     ) -> None:
         self.router = router
         self.skills = skills
@@ -103,6 +105,9 @@ class DeterministicAssistant:
         self.diagnostic_engine = diagnostic_engine
         self.project_adapter = project_adapter
         self.environment_adapter = environment_adapter
+        # Exposed so the administrator and portal surfaces can read the one
+        # configured NAS without reaching for a second adapter instance.
+        self.nas_adapter = nas_adapter
 
     def preview_route(self, raw_text: str) -> RoutedIntent:
         """Classify locally without executing a skill or invoking a model."""
@@ -451,6 +456,7 @@ def create_assistant(
         DesktopWorkflow(settings.desktop, broker_settings=settings.broker),
     )
     environment_actions = None
+    nas_adapter = None
     if action_state is not None:
         broker_client = BrokerClient(settings.broker)
         fixed_actions = FixedActionAdapter(broker_client)
@@ -460,6 +466,12 @@ def create_assistant(
             action_state,
             sensor_provider,
         )
+        nas_adapter = NasAdapter(
+            settings.actions.nas,
+            fixed_actions,
+            observer=NasStatusObserver(settings.nas_endpoints),
+            shutdown_settings=settings.actions.nas_shutdown,
+        )
         register_action_skills(
             skills,
             desktop=settings.desktop,
@@ -467,7 +479,7 @@ def create_assistant(
             actions=settings.actions,
             host=HostStatusAdapter(settings.broker),
             action_adapter=fixed_actions,
-            nas=NasAdapter(settings.actions.nas, fixed_actions),
+            nas=nas_adapter,
             environment=environment_actions,
         )
     project_adapter = ProjectInspectionAdapter(
@@ -513,6 +525,7 @@ def create_assistant(
         diagnostic_engine=diagnostic_engine,
         project_adapter=project_adapter,
         environment_adapter=environment_actions,
+        nas_adapter=nas_adapter,
     )
 
 

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ipaddress
 import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -11,6 +13,8 @@ from urllib.parse import urlparse
 import tomllib
 
 from butters.config import ConfigError, subsystem_root
+
+_HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
 
 
 def default_assistant_config_path() -> Path:
@@ -190,6 +194,105 @@ class KnownDeviceSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class NasEndpointSettings:
+    """Server-owned NAS observation targets and Jellyfin destinations.
+
+    Every field here is operator configuration read at start-up. No browser,
+    portal, or action request may supply, override, or influence any of these
+    values: the status observer and the redirect both read only this table.
+    """
+
+    lan_host: str = ""
+    api_url: str = ""
+    tailscale_host: str = ""
+    jellyfin_lan_url: str = ""
+    jellyfin_tailscale_url: str = ""
+    jellyfin_readiness_path: str = "/health"
+    api_port: int = 443
+    tailscale_probe_port: int = 443
+    probe_timeout_seconds: float = 2.0
+    total_probe_seconds: float = 6.0
+    cache_seconds: float = 2.0
+    wake_grace_seconds: float = 180.0
+
+    @property
+    def configured(self) -> bool:
+        return bool(self.lan_host or self.tailscale_host)
+
+    def validated(self) -> NasEndpointSettings:
+        for label, value in (
+            ("nas.api_url", self.api_url),
+            ("nas.jellyfin_lan_url", self.jellyfin_lan_url),
+            ("nas.jellyfin_tailscale_url", self.jellyfin_tailscale_url),
+        ):
+            if value and not value.startswith(("http://", "https://")):
+                raise ConfigError(f"{label} must be an absolute http(s) URL")
+        if not self.jellyfin_readiness_path.startswith("/"):
+            raise ConfigError("nas.jellyfin_readiness_path must start with /")
+        if not 1 <= self.api_port <= 65535:
+            raise ConfigError("nas.api_port must be between 1 and 65535")
+        if not 1 <= self.tailscale_probe_port <= 65535:
+            raise ConfigError("nas.tailscale_probe_port must be between 1 and 65535")
+        if not 0.2 <= self.probe_timeout_seconds <= 10:
+            raise ConfigError("nas.probe_timeout_seconds must be 0.2 to 10")
+        if not 1 <= self.total_probe_seconds <= 30:
+            raise ConfigError("nas.total_probe_seconds must be 1 to 30")
+        if not 0 <= self.cache_seconds <= 60:
+            raise ConfigError("nas.cache_seconds must be 0 to 60")
+        if not 30 <= self.wake_grace_seconds <= 1800:
+            raise ConfigError("nas.wake_grace_seconds must be 30 to 1800")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
+class PortalSettings:
+    """Separate passkey-authenticated NAS/Jellyfin access surface.
+
+    The portal shares this process and the canonical control origin but not the
+    administrator surface: it exposes only NAS status, Wake NAS, wake progress,
+    and the server-selected Jellyfin redirect.
+    """
+
+    enabled: bool = False
+    # Server-side locality classification. `lan_networks` are the home networks
+    # whose clients may be sent to the LAN Jellyfin URL; everything else, and
+    # anything unclassifiable, fails safe to the Tailscale destination.
+    lan_networks: tuple[str, ...] = ()
+    # Only a reviewed local ingress may state locality, and only from a trusted
+    # loopback peer. Empty disables header-stated locality entirely.
+    locality_header: str = ""
+    tailscale_status_command: tuple[str, ...] = ()
+    session_ttl_seconds: float = 900.0
+    wake_rate_per_minute: float = 3.0
+    wake_burst: int = 2
+    status_rate_per_minute: float = 120.0
+    status_burst: int = 30
+    max_poll_seconds: float = 300.0
+    invite_ttl_seconds: float = 1800.0
+    max_identities: int = 16
+
+    def validated(self) -> PortalSettings:
+        for value in self.lan_networks:
+            try:
+                ipaddress.ip_network(value, strict=False)
+            except ValueError as exc:
+                raise ConfigError(
+                    "portal.lan_networks entries must be CIDR networks"
+                ) from exc
+        if self.locality_header and not _HEADER_NAME.fullmatch(self.locality_header):
+            raise ConfigError("portal.locality_header must be a valid header name")
+        if not 60 <= self.session_ttl_seconds <= 86400:
+            raise ConfigError("portal.session_ttl_seconds must be 60 to 86400")
+        if not 60 <= self.max_poll_seconds <= 3600:
+            raise ConfigError("portal.max_poll_seconds must be 60 to 3600")
+        if not 60 <= self.invite_ttl_seconds <= 86400:
+            raise ConfigError("portal.invite_ttl_seconds must be 60 to 86400")
+        if not 1 <= self.max_identities <= 128:
+            raise ConfigError("portal.max_identities must be 1 to 128")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class ActionSettings:
     audit_capacity: int = 1000
     job_capacity: int = 256
@@ -197,6 +300,8 @@ class ActionSettings:
     host_reboot_enabled: bool = False
     host_shutdown_enabled: bool = False
     nas: KnownDeviceSettings = KnownDeviceSettings()
+    # Powering the NAS off is gated independently of waking it.
+    nas_shutdown: KnownDeviceSettings = KnownDeviceSettings()
     heater: KnownDeviceSettings = KnownDeviceSettings()
     dehumidifier: KnownDeviceSettings = KnownDeviceSettings()
     ventilation: KnownDeviceSettings = KnownDeviceSettings()
@@ -207,6 +312,7 @@ class ActionSettings:
         if not 32 <= self.job_capacity <= 2048:
             raise ConfigError("actions.job_capacity must be 32 to 2048")
         self.nas.validated("actions.nas")
+        self.nas_shutdown.validated("actions.nas_shutdown")
         self.heater.validated("actions.heater")
         self.dehumidifier.validated("actions.dehumidifier")
         self.ventilation.validated("actions.ventilation")
@@ -600,6 +706,8 @@ class AssistantSettings:
     agent_ingress: AgentIngressSettings = AgentIngressSettings()
     actions: ActionSettings = ActionSettings()
     planner: PlannerSettings = PlannerSettings()
+    nas_endpoints: NasEndpointSettings = NasEndpointSettings()
+    portal: PortalSettings = PortalSettings()
 
 
 def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
@@ -824,9 +932,58 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         host_reboot_enabled=bool(actions_table.get("host_reboot_enabled", False)),
         host_shutdown_enabled=bool(actions_table.get("host_shutdown_enabled", False)),
         nas=device_settings("nas"),
+        nas_shutdown=device_settings("nas_shutdown"),
         heater=device_settings("heater"),
         dehumidifier=device_settings("dehumidifier"),
         ventilation=device_settings("ventilation"),
+    ).validated()
+
+    nas_endpoint_table = _table(data, "nas")
+    nas_endpoints = NasEndpointSettings(
+        lan_host=str(nas_endpoint_table.get("lan_host", "")).strip(),
+        api_url=str(nas_endpoint_table.get("api_url", "")).strip().rstrip("/"),
+        tailscale_host=str(nas_endpoint_table.get("tailscale_host", "")).strip(),
+        jellyfin_lan_url=str(nas_endpoint_table.get("jellyfin_lan_url", ""))
+        .strip()
+        .rstrip("/"),
+        jellyfin_tailscale_url=str(nas_endpoint_table.get("jellyfin_tailscale_url", ""))
+        .strip()
+        .rstrip("/"),
+        jellyfin_readiness_path=str(
+            nas_endpoint_table.get("jellyfin_readiness_path", "/health")
+        ).strip(),
+        api_port=int(nas_endpoint_table.get("api_port", 443)),
+        tailscale_probe_port=int(nas_endpoint_table.get("tailscale_probe_port", 443)),
+        probe_timeout_seconds=float(
+            nas_endpoint_table.get("probe_timeout_seconds", 2.0)
+        ),
+        total_probe_seconds=float(nas_endpoint_table.get("total_probe_seconds", 6.0)),
+        cache_seconds=float(nas_endpoint_table.get("cache_seconds", 2.0)),
+        wake_grace_seconds=float(nas_endpoint_table.get("wake_grace_seconds", 180.0)),
+    ).validated()
+
+    portal_table = _table(data, "portal")
+    portal = PortalSettings(
+        enabled=bool(portal_table.get("enabled", False)),
+        lan_networks=tuple(
+            str(item).strip()
+            for item in portal_table.get("lan_networks", [])
+            if str(item).strip()
+        ),
+        locality_header=str(portal_table.get("locality_header", "")).strip(),
+        tailscale_status_command=tuple(
+            str(item)
+            for item in portal_table.get("tailscale_status_command", [])
+            if str(item)
+        ),
+        session_ttl_seconds=float(portal_table.get("session_ttl_seconds", 900.0)),
+        wake_rate_per_minute=float(portal_table.get("wake_rate_per_minute", 3.0)),
+        wake_burst=int(portal_table.get("wake_burst", 2)),
+        status_rate_per_minute=float(portal_table.get("status_rate_per_minute", 120.0)),
+        status_burst=int(portal_table.get("status_burst", 30)),
+        max_poll_seconds=float(portal_table.get("max_poll_seconds", 300.0)),
+        invite_ttl_seconds=float(portal_table.get("invite_ttl_seconds", 1800.0)),
+        max_identities=int(portal_table.get("max_identities", 16)),
     ).validated()
 
     llm_table = _table(data, "llm")
@@ -970,6 +1127,8 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         agent_ingress=agent_ingress,
         actions=actions,
         planner=planner,
+        nas_endpoints=nas_endpoints,
+        portal=portal,
     )
 
 

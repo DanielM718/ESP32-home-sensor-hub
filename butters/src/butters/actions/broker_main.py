@@ -39,7 +39,7 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         raise ValueError("desktop broker fields are invalid")
     if set(home_assistant) != {"url"}:
         raise ValueError("Home Assistant broker fields are invalid")
-    if set(nas) != {"mac", "broadcast"}:
+    if set(nas) != {"mac", "broadcast", "api_url", "api_key"}:
         raise ValueError("NAS broker fields are invalid")
     expected_operations = {item.value for item in BrokerOperation}
     if set(operations) != expected_operations or not all(
@@ -77,6 +77,22 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         "::1",
     }:
         raise ValueError("plain HTTP Home Assistant access is restricted to loopback")
+    nas_api_url = str(nas["api_url"]).rstrip("/")
+    nas_api_key_path = str(nas["api_key"])
+    if nas_api_url:
+        parsed_nas = urlparse(nas_api_url)
+        if parsed_nas.scheme != "https" or not parsed_nas.hostname:
+            raise ValueError("NAS API URL must be HTTPS")
+        if not nas_api_key_path:
+            raise ValueError("NAS API access requires a credential file")
+    if nas_api_key_path:
+        if not Path(nas_api_key_path).is_absolute():
+            raise ValueError("NAS API credential path must be absolute")
+        _require_root_private(Path(nas_api_key_path), "NAS API credential")
+    if BrokerOperation.NAS_SHUTDOWN in enabled_operations and not (
+        nas_api_url and nas_api_key_path
+    ):
+        raise ValueError("enabled NAS shutdown operation requires a fixed transport")
     return uid, FixedBrokerConfig(
         desktop_host=str(desktop["host"]),
         desktop_user=str(desktop["user"]),
@@ -85,9 +101,29 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         desktop_key=key,
         nas_mac=str(nas["mac"]),
         nas_broadcast=str(nas["broadcast"]),
+        nas_api_url=nas_api_url,
         enabled_operations=enabled_operations,
         home_assistant_url=home_assistant_url,
     )
+
+
+def _nas_api_key(config_path: Path) -> str:
+    """Read the root-owned TrueNAS credential without exposing its path later.
+
+    The broker runs as root and the service user never sees this file, so the
+    secret exists only in the broker process. An unreadable or empty file leaves
+    the shutdown handler unregistered rather than half-configured.
+    """
+
+    with config_path.open("rb") as source:
+        raw = tomllib.load(source)
+    key_path = str(raw.get("nas", {}).get("api_key", ""))
+    if not key_path:
+        return ""
+    value = Path(key_path).read_text(encoding="utf-8").strip()
+    if len(value) > 4096:
+        raise ValueError("NAS API credential is too large")
+    return value
 
 
 def _require_root_private(path: Path, label: str) -> None:
@@ -118,10 +154,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     try:
         expected_uid, configuration = _configuration(args.config)
+        nas_api_key = _nas_api_key(args.config)
         server = BrokerServer(
             FixedBrokerOperations(
                 configuration,
                 home_assistant_token=os.environ.get("HOME_ASSISTANT_TOKEN", ""),
+                nas_api_key=nas_api_key,
             ).handlers(),
             expected_uid=expected_uid,
         )

@@ -8,7 +8,12 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 
 from butters.assistant_config import AuthenticationSettings
-from butters.auth.store import AuthStateError, AuthStateStore, CredentialRecord
+from butters.auth.store import (
+    PORTAL_ROLES,
+    AuthStateError,
+    AuthStateStore,
+    CredentialRecord,
+)
 from butters.skills.model import AuthenticationContext, AuthenticationLevel
 
 
@@ -41,6 +46,9 @@ class AuthenticationOutcome:
     purpose: str
     pending_action_id: str | None = None
     fresh_grant: str | None = None
+    # Only ever populated for the portal purpose; an administrator ceremony
+    # never carries roles, and a portal ceremony never produces an elevation.
+    portal_roles: frozenset[str] = frozenset()
 
 
 class WebAuthnBackend(Protocol):
@@ -217,6 +225,11 @@ class PasskeyManager:
     PURPOSES = frozenset(
         {"elevation", "pending_action", "register_passkey", "revoke_passkey"}
     )
+    # The portal's own sign-in purpose. It is deliberately not in PURPOSES: the
+    # administrator endpoints validate against PURPOSES, so a portal ceremony
+    # cannot be started through them, and this ceremony can never yield an
+    # administrator elevation or authorize a pending administrator action.
+    PORTAL_PURPOSE = "portal_session"
 
     def __init__(
         self,
@@ -313,9 +326,21 @@ class PasskeyManager:
             device_type=verified.device_type,
             backed_up=verified.backed_up,
         )
+        roles = frozenset(
+            str(item) for item in ceremony.metadata.get("portal_roles", [])
+        )
+        if roles:
+            self._store_call(
+                self.store.grant_portal_roles,
+                identity,
+                str(ceremony.metadata["label"]),
+                roles & PORTAL_ROLES,
+                maximum=self.settings.max_credentials,
+            )
         return {
             **record.safe_dict(),
             "authorization_method": ceremony.metadata["authorization_method"],
+            "portal_roles": sorted(roles),
         }
 
     def begin_authentication(
@@ -374,31 +399,12 @@ class PasskeyManager:
             session_id=session_id,
             identity=identity,
         )
-        encoded_id = credential.get("id")
-        if not isinstance(encoded_id, str):
-            raise WebAuthnError("malformed_credential", "credential ID is required")
-        record = self._store_call(self.store.credential_by_encoded_id, encoded_id)
-        if record.identity != identity:
-            raise WebAuthnError(
-                "credential_identity_denied", "credential belongs to another identity"
-            )
-        verified = self.backend.verify_authentication(
-            credential,
-            settings=self.settings,
-            challenge=ceremony.challenge,
-            record=record,
-        )
-        if not verified.user_verified:
-            raise WebAuthnError(
-                "user_verification_required", "user verification is required"
-            )
-        self.store.update_credential_use(
-            record.record_id,
-            sign_count=verified.sign_count,
-            device_type=verified.device_type,
-            backed_up=verified.backed_up,
-        )
         purpose = str(ceremony.metadata.get("purpose"))
+        # A portal ceremony must never be completed through the administrator
+        # endpoint: it would otherwise fall through to the fresh-grant branch.
+        if purpose not in self.PURPOSES:
+            raise WebAuthnError("purpose_denied", "authentication purpose is invalid")
+        self._verified_record(ceremony, session_id, identity, credential)
         required = AuthenticationLevel(
             str(ceremony.metadata.get("required_level", "elevated"))
         )
@@ -430,6 +436,150 @@ class PasskeyManager:
             str(ceremony.metadata.get("subject") or "") or None,
         )
         return AuthenticationOutcome(None, purpose, fresh_grant=grant)
+
+
+    # ----- portal (non-administrator) ceremonies ----------------------------
+
+    def begin_portal_registration(
+        self,
+        *,
+        session_id: str,
+        identity: str,
+        label: str,
+        invite_token: str,
+    ) -> dict[str, object]:
+        """Register a portal credential against a single-use admin invite.
+
+        There is no unauthenticated path into this method: without a valid,
+        unexpired invite minted for exactly this identity, no ceremony starts.
+        """
+
+        if not self.settings.enabled:
+            raise WebAuthnError("webauthn_disabled", "passkey support is disabled")
+        if not invite_token:
+            raise WebAuthnError("invite_required", "an enrollment invitation is required")
+        roles = self._store_call(
+            self.store.consume_portal_invite, invite_token, identity
+        )
+        user_id = secrets.token_bytes(32)
+        ceremony = self.store.create_ceremony(
+            kind="registration",
+            session_id=session_id,
+            identity=identity,
+            metadata={
+                "label": label,
+                "user_id": user_id.hex(),
+                "authorization_method": "portal_invite",
+                "portal_roles": sorted(roles),
+            },
+        )
+        options = self.backend.registration_options(
+            settings=self.settings,
+            challenge=ceremony.challenge,
+            user_id=user_id,
+            identity=identity,
+            exclude_credentials=tuple(
+                item.credential_id
+                for item in self.store.credentials(identity)
+                if not item.revoked
+            ),
+        )
+        return {"ceremony_id": ceremony.ceremony_id, "publicKey": options}
+
+    def begin_portal_authentication(
+        self, *, session_id: str, identity: str
+    ) -> dict[str, object]:
+        credentials = tuple(
+            item for item in self.store.credentials(identity) if not item.revoked
+        )
+        if not credentials:
+            raise WebAuthnError("no_passkeys", "no active passkey is registered")
+        if not self.store.portal_roles(identity):
+            raise WebAuthnError("role_denied", "identity holds no portal role")
+        ceremony = self.store.create_ceremony(
+            kind="authentication",
+            session_id=session_id,
+            identity=identity,
+            metadata={"purpose": self.PORTAL_PURPOSE},
+        )
+        options = self.backend.authentication_options(
+            settings=self.settings,
+            challenge=ceremony.challenge,
+            allow_credentials=tuple(item.credential_id for item in credentials),
+        )
+        return {"ceremony_id": ceremony.ceremony_id, "publicKey": options}
+
+    def finish_portal_authentication(
+        self,
+        *,
+        ceremony_id: str,
+        session_id: str,
+        identity: str,
+        credential: dict[str, object],
+        ttl_seconds: float,
+    ) -> AuthenticationOutcome:
+        ceremony = self._store_call(
+            self.store.consume_ceremony,
+            ceremony_id,
+            kind="authentication",
+            session_id=session_id,
+            identity=identity,
+        )
+        if str(ceremony.metadata.get("purpose")) != self.PORTAL_PURPOSE:
+            raise WebAuthnError("purpose_denied", "authentication purpose is invalid")
+        record = self._verified_record(ceremony, session_id, identity, credential)
+        assert record is not None
+        roles = self._store_call(
+            self.store.open_portal_session, session_id, identity, ttl_seconds
+        )
+        # No AuthenticationContext is produced here at all: a portal sign-in
+        # carries no elevation and cannot authorize a frozen action plan.
+        return AuthenticationOutcome(None, self.PORTAL_PURPOSE, portal_roles=roles)
+
+    def _verified_record(
+        self,
+        ceremony: Any,
+        session_id: str,
+        identity: str,
+        credential: dict[str, object],
+    ) -> CredentialRecord:
+        encoded_id = credential.get("id")
+        if not isinstance(encoded_id, str):
+            raise WebAuthnError("malformed_credential", "credential ID is required")
+        record = self._store_call(self.store.credential_by_encoded_id, encoded_id)
+        if record.identity != identity:
+            raise WebAuthnError(
+                "credential_identity_denied", "credential belongs to another identity"
+            )
+        verified = self.backend.verify_authentication(
+            credential,
+            settings=self.settings,
+            challenge=ceremony.challenge,
+            record=record,
+        )
+        if not verified.user_verified:
+            raise WebAuthnError(
+                "user_verification_required", "user verification is required"
+            )
+        self.store.update_credential_use(
+            record.record_id,
+            sign_count=verified.sign_count,
+            device_type=verified.device_type,
+            backed_up=verified.backed_up,
+        )
+        return record
+
+    def portal_status(self, session_id: str, identity: str) -> dict[str, object]:
+        roles = self.store.portal_session_roles(session_id, identity)
+        granted = self.store.portal_roles(identity)
+        return {
+            "authenticated": bool(roles),
+            "roles": sorted(roles),
+            "enrolled": bool(granted),
+            "passkey_count": len(
+                [item for item in self.store.credentials(identity) if not item.revoked]
+            ),
+        }
 
     def status(self, session_id: str, identity: str) -> dict[str, object]:
         context = self.store.elevation(session_id, identity)

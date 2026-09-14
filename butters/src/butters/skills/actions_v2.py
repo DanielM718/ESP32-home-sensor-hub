@@ -137,6 +137,11 @@ class ActionSkillImplementations:
             "action_result", self.nas.wake(current_cancel_event())
         )
 
+    def shutdown_nas(self, _arguments: SkillArguments) -> SkillResult:
+        return StructuredSkillResult(
+            "action_result", self.nas.shutdown(current_cancel_event())
+        )
+
     def set_environment(self, device: str, arguments: SkillArguments) -> SkillResult:
         args = cast(EnvironmentActionArgs, arguments)
         result = self.environment.set(
@@ -365,6 +370,19 @@ def register_action_skills(
         authentication=AuthenticationLevel.ELEVATED,
         available=actions.nas.enabled and actions.nas.configured,
         local_console=actions.nas.local_console_allowed,
+        schema=empty_schema,
+        parser=_parse_none,
+    )
+    action(
+        "shutdown_nas",
+        "Shut down the one configured NAS.",
+        impl.shutdown_nas,
+        authentication=AuthenticationLevel.FRESH,
+        available=actions.nas_shutdown.enabled and actions.nas_shutdown.configured,
+        # Powering the NAS off is never a local-console convenience, and it is
+        # deliberately absent from every conversational planner catalog: see
+        # CONVERSATIONAL_PLANNER_ACTIONS in butters.web.service.
+        local_console=False,
         schema=empty_schema,
         parser=_parse_none,
     )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import secrets
 import threading
 import time
@@ -72,6 +73,10 @@ from butters.web.trace import ExecutionTrace, TraceBuffer, TraceStage
 # Desktop Agent application actions exist in code but remain deliberately absent
 # here: ingress is default-disabled and no production deployment or hardware
 # validation of the request/result path has occurred.
+# NAS actions are absent here on purpose and stay absent. `wake_nas` has no
+# reviewed planner behaviour on this lineage, and `shutdown_nas` is
+# planner-hidden by policy: powering the NAS off is reachable only from the
+# administrator surface, under FRESH authentication and explicit confirmation.
 CONVERSATIONAL_PLANNER_ACTIONS = frozenset(
     {
         "get_desktop_status",
@@ -234,6 +239,11 @@ class BetaAssistantService:
         # permit/call/record sequence prevents concurrent requests from all
         # passing a stale daily or monthly budget check.
         self._paid_operation_gate = threading.Lock()
+        # LAST OPERATION, kept strictly apart from observed state. Bounded to
+        # one record per subject: this is a status line, not an audit log --
+        # the durable audit trail lives in ActionStateStore.
+        self._last_operations: dict[str, dict[str, object]] = {}
+        self._operation_lock = threading.Lock()
         self._wire_diagnostic_cloud()
 
     def plan_conversation(
@@ -1107,6 +1117,335 @@ class BetaAssistantService:
             pending_action=plan.safe_dict(),
             stopping_reason="authentication_required",
         )
+
+
+    # ================= Administrator Tools: Desktop and NAS =================
+    #
+    # These endpoints exist so the administrator surface can drive the reviewed
+    # deterministic architecture directly. Each one names ONE registered skill
+    # in server code. There is no endpoint here that accepts a skill name, an
+    # action name, a host, a command, or a broker operation from a caller: the
+    # historical generic desktop execution path is deliberately not restored.
+
+    def _record_operation(
+        self, subject: str, operation: str, outcome: str, detail: str = ""
+    ) -> dict[str, object]:
+        """Record LAST OPERATION, which is never mixed into observed state.
+
+        The UI and the API keep these apart on purpose. A wake requested two
+        minutes ago is a fact about history; whether the agent is connected
+        right now is a fact about the present, and the second is never derived
+        from the first.
+        """
+
+        record = {
+            "subject": subject,
+            "operation": operation,
+            "outcome": outcome,
+            "detail": detail,
+            "at": time.time(),
+        }
+        with self._operation_lock:
+            self._last_operations[subject] = record
+        return dict(record)
+
+    def last_operation(self, subject: str) -> dict[str, object] | None:
+        with self._operation_lock:
+            record = self._last_operations.get(subject)
+        if record is None:
+            return None
+        record = dict(record)
+        record["age_seconds"] = max(0.0, time.time() - float(record["at"]))
+        return record
+
+    def _start_admin_action(
+        self,
+        session: BrowserSession,
+        *,
+        skill: str,
+        arguments: dict[str, object],
+        summary: str,
+        subject: str,
+        source: str = "admin_tools",
+    ) -> dict[str, object]:
+        """Freeze and start one server-named registered action.
+
+        `skill` is a literal in the calling method. Nothing a browser sends can
+        reach it, and `arguments` is either empty or built here from a value the
+        registered schema has already constrained.
+        """
+
+        self._require_action_admin(session)
+        plan = self.actions.freeze(
+            skill=skill,
+            arguments=arguments,
+            summary=summary,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            request_id="admin-tools-" + secrets.token_urlsafe(12),
+            source=source,
+        )
+        elevation = self.auth_state.elevation(session.session_id, session.peer_key)
+        if (
+            plan.authentication is not AuthenticationLevel.ELEVATED
+            or elevation is None
+        ):
+            self.action_state.audit(
+                identity=session.peer_key,
+                session_id=session.session_id,
+                skill=skill,
+                authentication=plan.authentication,
+                method="pending_webauthn",
+                arguments=arguments,
+                outcome="pending_auth",
+                job_id=None,
+            )
+            self._record_operation(
+                subject, skill, "authentication_required", plan.authentication.value
+            )
+            return {
+                "status": "authentication_required",
+                "authentication_required": plan.authentication.value,
+                "pending_action": plan.safe_dict(),
+                "jobs": [],
+            }
+        jobs = self.actions.execute(
+            plan.plan_id,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            authentication=elevation,
+        )
+        self._record_operation(subject, skill, "queued")
+        return {"status": "queued", "jobs": list(jobs)}
+
+    # ----- Desktop -----------------------------------------------------------
+
+    def desktop_admin_status(self, *, refresh: bool = False) -> dict[str, object]:
+        """CURRENT OBSERVED STATE for the desktop, plus LAST OPERATION beside it.
+
+        Every field under `observed` comes from a live read performed for this
+        call. Nothing here is derived from a past wake or shutdown request, so a
+        stale workflow can no longer contradict an authoritative agent report:
+        if the agent says connected with a recent heartbeat and an active
+        session, that is what this returns, regardless of what was requested
+        earlier.
+        """
+
+        agent = self.desktop_agent.status()
+        reachability = self._read_skill("get_desktop_status", {"machine": "desktop"})
+        observed: dict[str, object] = {
+            "power_network": _reach_value(reachability, "network_reachable"),
+            "ssh": _reach_value(reachability, "ssh_ready"),
+            "parsec": _reach_value(reachability, "parsec_ready"),
+            "agent": agent["state"],
+            "agent_connected": agent["agent_connected"],
+            "agent_heartbeat_age_seconds": agent[
+                "last_authenticated_activity_age_seconds"
+            ],
+            "windows_session": agent["interactive_session"],
+            "observed_at": time.time(),
+        }
+        apps = self._desktop_apps(bool(agent["agent_connected"]))
+        return {
+            "configured": {
+                "agent": agent["configured"],
+                "wake": self.settings.desktop.wake_enabled,
+                "shutdown": self.settings.desktop.shutdown_enabled,
+            },
+            "observed": observed,
+            "agent_detail": agent,
+            "apps": apps,
+            "vm": self._desktop_vm_presentation(),
+            "summary": _desktop_summary(observed),
+            "last_operation": self.last_operation("desktop"),
+        }
+
+    def _desktop_apps(self, connected: bool) -> dict[str, object]:
+        """Present the agent's own allowlist; Butters never invents app names."""
+
+        if not connected:
+            return {
+                "observed": False,
+                "reason": "agent_not_connected",
+                "apps": [],
+            }
+        execution = self.assistant.skills.execute(
+            "desktop.app.list", {}, administrator=True
+        )
+        if not execution.ok or execution.result is None:
+            return {
+                "observed": False,
+                "reason": getattr(execution.failure, "code", "unavailable"),
+                "apps": [],
+            }
+        data = getattr(execution.result, "data", {})
+        raw = data.get("apps") if isinstance(data, dict) else None
+        return {
+            "observed": True,
+            "reason": None,
+            "apps": list(raw) if isinstance(raw, list) else [],
+        }
+
+    def _desktop_vm_presentation(self) -> dict[str, object]:
+        """Say plainly that VM state is not observed on this architecture.
+
+        The historical surface rendered an empty list with no explanation, which
+        read as "no VMs exist". No VM inventory capability is registered here,
+        so the honest presentation is that nothing is being observed.
+        """
+
+        return {
+            "observed": False,
+            "supported": False,
+            "headline": "Virtual machines are not monitored",
+            "detail": (
+                "Butters has no registered VM inventory capability on this "
+                "deployment, so it reports nothing rather than an empty list. "
+                "This is not a statement that the desktop has no VMs."
+            ),
+        }
+
+    def desktop_ssh_test(self) -> dict[str, object]:
+        """Passive TCP reachability probe; it starts no work on the desktop.
+
+        This opens and immediately closes a connection to the configured SSH
+        port. No session is negotiated, nothing authenticates, and no command
+        runs, so it imposes no measurable load on the desktop.
+        """
+
+        reachability = self._read_skill("get_desktop_status", {"machine": "desktop"})
+        ssh = _reach_value(reachability, "ssh_ready")
+        record = self._record_operation(
+            "desktop", "desktop_ssh_test", "completed", f"ssh={ssh}"
+        )
+        return {
+            "status": "completed",
+            "probe": "tcp_connect",
+            "ssh": ssh,
+            "network": _reach_value(reachability, "network_reachable"),
+            "last_operation": record,
+        }
+
+    def start_admin_desktop_wake(self, session: BrowserSession) -> dict[str, object]:
+        return self._start_admin_action(
+            session,
+            skill="wake_desktop",
+            arguments={"machine": "desktop"},
+            summary="Wake the configured desktop",
+            subject="desktop",
+        )
+
+    def start_admin_desktop_shutdown(
+        self, session: BrowserSession
+    ) -> dict[str, object]:
+        return self._start_admin_action(
+            session,
+            skill="shutdown_desktop",
+            arguments={"machine": "desktop"},
+            summary="Shut down the configured desktop",
+            subject="desktop",
+        )
+
+    def start_admin_desktop_app_launch(
+        self, session: BrowserSession, app: str
+    ) -> dict[str, object]:
+        """Launch one symbolic app through the reviewed Slice 3 action.
+
+        The skill name is fixed here. `app` is a symbolic identifier that the
+        registered schema constrains and that the agent resolves against its own
+        local allowlist -- Butters holds no executable path, argv, or command
+        line for any application.
+        """
+
+        if not isinstance(app, str) or not _APP_NAME.fullmatch(app):
+            raise ValueError("app must be a symbolic identifier")
+        return self._start_admin_action(
+            session,
+            skill="desktop.app.launch",
+            arguments={"app": app},
+            summary=f"Launch the {app} application on the desktop",
+            subject="desktop",
+        )
+
+    # ----- NAS ---------------------------------------------------------------
+
+    def nas_admin_status(self, *, refresh: bool = False) -> dict[str, object]:
+        """Independent NAS observations plus the separate last-operation record."""
+
+        adapter = self.assistant.nas_adapter
+        capability = {
+            "wake_configured": self.settings.actions.nas.configured
+            and self.settings.actions.nas.enabled,
+            "shutdown_configured": self.settings.actions.nas_shutdown.configured
+            and self.settings.actions.nas_shutdown.enabled,
+            "observation_configured": self.settings.nas_endpoints.configured,
+        }
+        last = self.last_operation("nas")
+        wake_at = None
+        if last is not None and last.get("operation") == "wake_nas":
+            wake_at = float(last["at"])
+        if adapter is None or not self.settings.nas_endpoints.configured:
+            return {
+                "capability": capability,
+                "observations": {
+                    "lan": "not_observed",
+                    "nas_api": "not_observed",
+                    "tailscale": "not_observed",
+                    "jellyfin": "not_observed",
+                },
+                "aggregate": "UNKNOWN",
+                "observed_at": time.time(),
+                "last_operation": last,
+            }
+        observation = adapter.observe(wake_requested_at=wake_at, refresh=refresh)
+        return {"capability": capability, **observation, "last_operation": last}
+
+    def start_admin_nas_wake(self, session: BrowserSession) -> dict[str, object]:
+        """Start the fixed NAS wake. Success means one packet left this host."""
+
+        return self._start_admin_action(
+            session,
+            skill="wake_nas",
+            arguments={},
+            summary="Wake the configured NAS",
+            subject="nas",
+        )
+
+    def start_admin_nas_shutdown(
+        self, session: BrowserSession, *, confirmed: bool
+    ) -> dict[str, object]:
+        """Start the fixed NAS shutdown.
+
+        Three separate gates stand in front of the broker: the action is
+        registered FRESH so a live elevation is never enough, this method
+        requires an explicit confirmation flag from the administrator surface,
+        and the broker keeps its own `nas.shutdown` gate, shipped false.
+        """
+
+        self._require_action_admin(session)
+        if confirmed is not True:
+            raise ActionCoordinatorError(
+                "confirmation_required",
+                "NAS shutdown requires explicit confirmation",
+            )
+        return self._start_admin_action(
+            session,
+            skill="shutdown_nas",
+            arguments={},
+            summary="Shut down the configured NAS",
+            subject="nas",
+        )
+
+    def _read_skill(
+        self, skill: str, arguments: dict[str, object]
+    ) -> dict[str, object] | None:
+        execution = self.assistant.skills.execute(
+            skill, arguments, administrator=True
+        )
+        if not execution.ok or execution.result is None:
+            return None
+        data = getattr(execution.result, "data", None)
+        return data if isinstance(data, dict) else None
 
     def authentication_status(self, session: BrowserSession) -> dict[str, object]:
         return self.passkeys.status(session.session_id, session.peer_key)
@@ -2483,6 +2822,43 @@ class BetaAssistantService:
             routing_path="unsupported",
             policy_status=code,
         )
+
+
+
+_APP_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def _reach_value(data: dict[str, object] | None, field: str) -> str:
+    """Three-valued reachability. `unknown` never masquerades as `no`."""
+
+    if data is None or field not in data:
+        return "unknown"
+    value = data[field]
+    if value is None:
+        return "unknown"
+    return "yes" if bool(value) else "no"
+
+
+def _desktop_summary(observed: dict[str, object]) -> str:
+    """One headline derived only from what was observed for this request.
+
+    Deliberately ordered so the most authoritative signal wins. A connected
+    agent reporting an active Windows session is the strongest evidence
+    available, so nothing weaker -- and certainly nothing historical -- can
+    override it into an OFFLINE headline.
+    """
+
+    if observed.get("agent_connected") and observed.get("windows_session") == "present":
+        return "Desktop online · agent connected · Windows session active"
+    if observed.get("agent_connected"):
+        return "Desktop online · agent connected · Windows session unknown"
+    if observed.get("ssh") == "yes":
+        return "Desktop reachable over SSH · Desktop Agent not connected"
+    if observed.get("power_network") == "yes":
+        return "Desktop responding on the network · SSH and agent unavailable"
+    if observed.get("power_network") == "no":
+        return "Desktop not responding · appears powered off or disconnected"
+    return "Desktop state unknown"
 
 
 def _denied_features(normalized: str) -> dict[str, object]:

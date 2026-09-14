@@ -66,6 +66,12 @@ MONITOR_OPERATION_DEADLINE_SECONDS = 25.0
 HOME_ASSISTANT_DEADLINE_SECONDS = 10.0
 HOME_ASSISTANT_READ_CHUNK_BYTES = 8192
 HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
+# The NAS shutdown transport is one fixed TrueNAS middleware call. It is
+# bounded exactly like the Home Assistant exchange so a hung NAS cannot hold
+# the serial broker open.
+NAS_API_DEADLINE_SECONDS = 10.0
+NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
+
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -109,6 +115,7 @@ class BrokerOperation(str, Enum):
     HOST_REBOOT = "host.reboot"
     HOST_SHUTDOWN = "host.shutdown"
     NAS_WAKE = "nas.wake"
+    NAS_SHUTDOWN = "nas.shutdown"
     HEATER_ON = "environment.heater_on"
     HEATER_OFF = "environment.heater_off"
     DEHUMIDIFIER_ON = "environment.dehumidifier_on"
@@ -399,6 +406,7 @@ class FixedBrokerConfig:
     desktop_key: Path
     nas_mac: str = ""
     nas_broadcast: str = ""
+    nas_api_url: str = ""
     enabled_operations: frozenset[BrokerOperation] = frozenset()
     home_assistant_url: str = "http://127.0.0.1:8123"
 
@@ -429,6 +437,7 @@ class FixedBrokerOperations:
         *,
         runner: Callable[..., Any] = subprocess.run,
         home_assistant_token: str = "",
+        nas_api_key: str = "",
         opener: Callable[..., Any] = _HOME_ASSISTANT_OPENER,
         sleeper: Callable[[float], None] = time.sleep,
         monotonic: Callable[[], float] = time.monotonic,
@@ -437,6 +446,7 @@ class FixedBrokerOperations:
         self.config = config
         self.runner = runner
         self.home_assistant_token = home_assistant_token.strip()
+        self.nas_api_key = nas_api_key.strip()
         self.opener = opener
         # Seams for the settling tests only, alongside runner/opener. The
         # deadline and interval themselves stay fixed module constants.
@@ -471,6 +481,8 @@ class FixedBrokerOperations:
         }
         if self.config.nas_mac and self.config.nas_broadcast:
             candidates[BrokerOperation.NAS_WAKE] = self.nas_wake
+        if self.config.nas_api_url and self.nas_api_key:
+            candidates[BrokerOperation.NAS_SHUTDOWN] = self.nas_shutdown
         return {
             operation: handler
             for operation, handler in candidates.items()
@@ -714,6 +726,68 @@ class FixedBrokerOperations:
             ],
             10,
         )
+
+    def nas_shutdown(self) -> dict[str, object]:
+        """Power the one configured NAS off through its own middleware API.
+
+        This is deliberately not an SSH session. The TrueNAS middleware exposes
+        ``system.shutdown`` as a fixed endpoint that takes no argument the
+        broker needs to supply, so there is no shell, no argv, no remote command
+        string, and nothing a caller could influence even if the socket request
+        carried a field -- which it does not. The URL and the credential are
+        root-owned configuration loaded at start-up.
+        """
+
+        if not self.config.nas_api_url or not self.nas_api_key:
+            raise BrokerError(
+                "nas_api_unconfigured", "NAS shutdown transport is not configured"
+            )
+        payload = self._nas_api_request(NAS_SHUTDOWN_PATH)
+        return {
+            "accepted": True,
+            "transport": "truenas_api",
+            # TrueNAS answers with a job identifier or null; never echo the body.
+            "job_accepted": payload is not None,
+        }
+
+    def _nas_api_request(self, path: str) -> object:
+        request = Request(
+            self.config.nas_api_url.rstrip("/") + path,
+            data=b"{}",
+            method="POST",
+            headers={
+                "Accept": "application/json",
+                "Content-Type": "application/json",
+                "Authorization": f"Bearer {self.nas_api_key}",
+            },
+        )
+        budget = NAS_API_DEADLINE_SECONDS
+        read_deadline = self.monotonic() + budget
+
+        def exchange() -> bytes:
+            with self.opener(request, timeout=5.0) as response:
+                if getattr(response, "status", 200) not in {200, 201, 202, 204}:
+                    raise BrokerError("nas_api_failed", "NAS shutdown was refused")
+                return _read_bounded(response, read_deadline, self.monotonic)
+
+        try:
+            raw = self._bounded_exchange(exchange, budget)
+        except HTTPError as exc:
+            if exc.code in {401, 403}:
+                raise BrokerError(
+                    "nas_api_auth_failed", "NAS shutdown credential was rejected"
+                ) from None
+            raise BrokerError("nas_api_failed", "NAS shutdown was refused") from None
+        except (URLError, TimeoutError, OSError):
+            raise BrokerError("nas_api_unavailable", "NAS API is unavailable") from None
+        if len(raw) > HOME_ASSISTANT_MAX_RESPONSE_BYTES:
+            raise BrokerError("nas_api_failed", "NAS response exceeded its limit")
+        if not raw:
+            return None
+        try:
+            return json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise BrokerError("nas_api_failed", "NAS returned malformed JSON") from None
 
     def restart_butters(self) -> dict[str, object]:
         unit = "butters-web-restart-" + secrets.token_hex(6)

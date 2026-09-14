@@ -20,8 +20,17 @@ key = "/etc/butters/action-broker/windows_remote_mode"
 url = "http://127.0.0.1:8123"
 
 [nas]
-mac = ""
-broadcast = ""
+# Fixed, manually validated TrueNAS Wake-on-LAN target. These values are read
+# only by the root broker and are never accepted from a browser/action request.
+mac = "00:e2:69:7d:40:cd"
+broadcast = "192.168.1.255"
+# Narrowest reviewed shutdown transport: the TrueNAS middleware's own fixed
+# system.shutdown endpoint. No SSH session, no shell, and no remote command
+# string exists on this path. api_key is the path to a root:root 0600 file
+# holding one TrueNAS API key; the service user never reads it. Leave both
+# empty to leave the shutdown handler unregistered entirely.
+api_url = ""
+api_key = ""
 
 # Every privileged operation has a second, broker-local gate. Keep all values
 # false until its fixed target, credential, and operation have been reviewed.
@@ -40,6 +49,7 @@ broadcast = ""
 "host.reboot" = false
 "host.shutdown" = false
 "nas.wake" = false
+"nas.shutdown" = false
 "environment.heater_on" = false
 "environment.heater_off" = false
 "environment.dehumidifier_on" = false

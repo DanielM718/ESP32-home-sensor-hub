@@ -1,0 +1,190 @@
+"use strict";
+
+/* Jellyfin access portal.
+ *
+ * This client can do four things: sign in, read status, POST one wake, and
+ * follow the destination the server chooses. It never names a host, an address,
+ * an action, or a redirect target. The only URL it will ever navigate to is the
+ * one the server returns from /api/portal/destination, and the server returns
+ * that only when Jellyfin's own readiness probe currently passes.
+ */
+
+let csrf = "";
+let pollTimer = null;
+let pollStartedAt = null;
+let maxPollSeconds = 300;
+
+async function api(path, options = {}) {
+  const headers = new Headers(options.headers || {});
+  if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+  if (options.method && options.method !== "GET") headers.set("X-Butters-CSRF", csrf);
+  const response = await fetch(path, {...options, headers, credentials: "same-origin"});
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.message || `Request failed: ${response.status}`);
+  return value;
+}
+
+function decodeBase64url(value){const padded=value.replace(/-/g,"+").replace(/_/g,"/");const raw=atob(padded+"=".repeat((4-padded.length%4)%4));return Uint8Array.from(raw,character=>character.charCodeAt(0));}
+function encodeBase64url(buffer){return btoa(String.fromCharCode(...new Uint8Array(buffer))).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/,"");}
+function authOptions(value){const options={...value,challenge:decodeBase64url(value.challenge)};if(Array.isArray(value.allowCredentials))options.allowCredentials=value.allowCredentials.map(item=>({...item,id:decodeBase64url(item.id)}));return options;}
+function registrationOptions(value){const options={...value,challenge:decodeBase64url(value.challenge),user:{...value.user,id:decodeBase64url(value.user.id)}};if(Array.isArray(value.excludeCredentials))options.excludeCredentials=value.excludeCredentials.map(item=>({...item,id:decodeBase64url(item.id)}));return options;}
+function assertionJson(c){return{id:c.id,rawId:encodeBase64url(c.rawId),type:c.type,authenticatorAttachment:c.authenticatorAttachment||null,clientExtensionResults:c.getClientExtensionResults(),response:{authenticatorData:encodeBase64url(c.response.authenticatorData),clientDataJSON:encodeBase64url(c.response.clientDataJSON),signature:encodeBase64url(c.response.signature),userHandle:c.response.userHandle?encodeBase64url(c.response.userHandle):null}};}
+function registrationJson(c){const transports=typeof c.response.getTransports==="function"?c.response.getTransports():[];return{id:c.id,rawId:encodeBase64url(c.rawId),type:c.type,authenticatorAttachment:c.authenticatorAttachment||null,clientExtensionResults:c.getClientExtensionResults(),response:{attestationObject:encodeBase64url(c.response.attestationObject),clientDataJSON:encodeBase64url(c.response.clientDataJSON),transports}};}
+
+const TONE={reachable:"good",ready:"good",unreachable:"bad",unavailable:"bad",starting:"warn",not_observed:"muted"};
+const TEXT={reachable:"Reachable",unreachable:"Unreachable",ready:"Ready",starting:"Starting",unavailable:"Unavailable",not_observed:"Not observed"};
+
+function axis(container, entries){
+  container.replaceChildren();
+  for(const [label,raw] of entries){
+    const cell=document.createElement("article"); cell.className=`axis-cell axis-${TONE[raw]||"muted"}`;
+    const name=document.createElement("small"); name.textContent=label;
+    const value=document.createElement("strong"); value.textContent=TEXT[raw]||String(raw);
+    cell.append(name,value); container.append(cell);
+  }
+}
+
+function ago(seconds){if(seconds===null||seconds===undefined)return "";const value=Math.round(seconds);if(value<60)return `${value} second${value===1?"":"s"} ago`;const minutes=Math.round(value/60);return `${minutes} minute${minutes===1?"":"s"} ago`;}
+
+function show(section){
+  document.querySelector("#portal-signin").hidden = section!=="signin";
+  document.querySelector("#portal-main").hidden = section!=="main";
+}
+
+async function initialize(){
+  try{
+    const session=await fetch("/api/session",{credentials:"same-origin"});
+    const data=await session.json();
+    if(!session.ok)throw new Error(data.message);
+    csrf=data.csrf_token;
+    const status=await api("/api/portal/status");
+    document.querySelector("#portal-identity-line").textContent=
+      status.authenticated?`Signed in as ${status.identity}`:`You are ${status.identity}`;
+    if(status.authenticated){show("main"); await refreshState();}
+    else{
+      show("signin");
+      document.querySelector("#portal-signin-status").textContent=
+        status.enrolled?"":"This identity has no access yet. Ask for an enrollment invitation.";
+    }
+  }catch(error){
+    document.querySelector("#portal-identity-line").textContent=error.message||"Unavailable";
+    show("signin");
+  }
+}
+
+async function signIn(){
+  const status=document.querySelector("#portal-signin-status");
+  try{
+    if(!window.PublicKeyCredential||!navigator.credentials)throw new Error("Passkeys are unavailable in this browser");
+    status.textContent="Waiting for your passkey…";
+    const begin=(await api("/api/portal/authenticate/options",{method:"POST",body:JSON.stringify({})})).value;
+    const credential=await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});
+    if(!credential)throw new Error("Sign-in cancelled");
+    await api("/api/portal/authenticate/verify",{method:"POST",body:JSON.stringify({ceremony_id:begin.ceremony_id,credential:assertionJson(credential)})});
+    status.textContent="";
+    show("main"); await refreshState();
+  }catch(error){status.textContent=error.message||"Sign-in failed";}
+}
+
+async function register(){
+  const status=document.querySelector("#portal-signin-status");
+  const label=document.querySelector("#portal-enroll-label").value.trim();
+  const token=document.querySelector("#portal-enroll-token").value.trim();
+  if(!label||!token){status.textContent="A label and an invitation are both required.";return;}
+  try{
+    status.textContent="Registering this device…";
+    const begin=(await api("/api/portal/register/options",{method:"POST",body:JSON.stringify({label,invite_token:token})})).value;
+    const credential=await navigator.credentials.create({publicKey:registrationOptions(begin.publicKey)});
+    if(!credential)throw new Error("Registration cancelled");
+    await api("/api/portal/register/verify",{method:"POST",body:JSON.stringify({ceremony_id:begin.ceremony_id,credential:registrationJson(credential)})});
+    document.querySelector("#portal-enroll-token").value="";
+    status.textContent="Registered. Now sign in with your passkey.";
+  }catch(error){status.textContent=error.message||"Registration failed";}
+}
+
+async function refreshState(){
+  try{
+    const state=await api("/api/portal/nas?refresh=1");
+    maxPollSeconds=state.max_poll_seconds||maxPollSeconds;
+    document.querySelector("#portal-headline").textContent=state.headline;
+    document.querySelector("#portal-detail").textContent=state.detail;
+    axis(document.querySelector("#portal-observations"),[
+      ["NAS (LAN)",state.observations.lan],
+      ["NAS OS / API",state.observations.nas_api],
+      ["Tailscale",state.observations.tailscale],
+      ["Jellyfin",state.observations.jellyfin],
+    ]);
+    // Last operation is rendered on its own line and never changes the lines above.
+    const last=document.querySelector("#portal-last-operation");
+    last.textContent=state.last_operation
+      ? `Wake packet sent ${ago(state.last_operation.age_seconds)}`
+      : "Nothing has been requested yet.";
+    const wake=document.querySelector("#portal-wake");
+    // Wake Again only when it is actually appropriate, and never automatically.
+    wake.hidden=!state.can_wake;
+    if(state.jellyfin_ready){await enterJellyfin();return;}
+    if(state.poll_expired){
+      stopPolling();
+      document.querySelector("#portal-action-status").textContent=
+        `Jellyfin did not become ready within ${Math.round(maxPollSeconds/60)} minutes. The observations above are current. You can retry the status check, or wake again.`;
+      return;
+    }
+    if(pollStartedAt!==null){
+      document.querySelector("#portal-action-status").textContent=
+        `Waiting… ${ago((Date.now()-pollStartedAt)/1000)||"just now"}`.replace(" ago","");
+    }
+  }catch(error){
+    document.querySelector("#portal-action-status").textContent=error.message||"Status unavailable";
+  }
+}
+
+async function enterJellyfin(){
+  stopPolling();
+  const status=document.querySelector("#portal-action-status");
+  try{
+    const destination=await api("/api/portal/destination");
+    if(!destination.ready||!destination.destination){
+      status.textContent="Jellyfin is ready but no destination is configured.";
+      return;
+    }
+    status.textContent="Opening Jellyfin…";
+    window.location.assign(destination.destination);
+  }catch(error){status.textContent=error.message||"Could not open Jellyfin";}
+}
+
+function startPolling(){
+  stopPolling();
+  pollStartedAt=Date.now();
+  // Polls status only. It never re-sends a wake packet.
+  pollTimer=window.setInterval(refreshState,4000);
+}
+
+function stopPolling(){
+  if(pollTimer!==null){window.clearInterval(pollTimer);pollTimer=null;}
+}
+
+async function wake(){
+  const button=document.querySelector("#portal-wake");
+  const status=document.querySelector("#portal-action-status");
+  button.disabled=true;
+  try{
+    const result=await api("/api/portal/wake",{method:"POST",body:JSON.stringify({})});
+    // The server's wording, kept verbatim: a packet was sent, nothing more.
+    status.textContent=`${result.message}. Waiting for NAS…`;
+    startPolling();
+    await refreshState();
+  }catch(error){status.textContent=error.message||"Wake failed";}
+  finally{button.disabled=false;}
+}
+
+document.querySelector("#portal-authenticate").addEventListener("click",signIn);
+document.querySelector("#portal-register").addEventListener("click",register);
+document.querySelector("#portal-wake").addEventListener("click",wake);
+document.querySelector("#portal-retry").addEventListener("click",refreshState);
+document.querySelector("#portal-signout").addEventListener("click",async()=>{
+  stopPolling();
+  try{await api("/api/portal/sign-out",{method:"POST",body:JSON.stringify({})});}catch(error){void error;}
+  show("signin");
+});
+
+initialize();

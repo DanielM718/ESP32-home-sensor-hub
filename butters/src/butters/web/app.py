@@ -33,6 +33,8 @@ from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
 from butters.remediation.skill_builder import SkillAuthoringError
 from butters.stt.normalization import DomainVocabulary, load_domain_vocabulary
 from butters.web.audio import BrowserAudioError, BrowserAudioStream
+from butters.web.locality import LocalityClassifier
+from butters.web.portal import PortalError, PortalService
 from butters.web.security import AuthPolicy, RateLimiter, SecurityError
 from butters.web.service import BetaAssistantService, RouteOverride
 from butters.web.sessions import BrowserSession, SessionError
@@ -103,6 +105,25 @@ def create_app(
     domain_vocabulary = vocabulary or load_domain_vocabulary(default_vocabulary_path())
     runtime = service or BetaAssistantService(configured, domain_vocabulary)
     auth = AuthPolicy(configured.web, trusted_peers=trusted_peers)
+    portal = PortalService(
+        runtime,
+        configured.portal,
+        configured.nas_endpoints,
+        LocalityClassifier(
+            configured.portal,
+            # The portal trusts exactly the peers the rest of the policy
+            # trusts for proxy-supplied identity, and nothing else.
+            trusted_peers=auth.trusted_peers,
+        ),
+    )
+    portal_wake_rate = RateLimiter(
+        rate_per_minute=configured.portal.wake_rate_per_minute,
+        burst=configured.portal.wake_burst,
+    )
+    portal_status_rate = RateLimiter(
+        rate_per_minute=configured.portal.status_rate_per_minute,
+        burst=configured.portal.status_burst,
+    )
     if not configured.web.production_origin_configured:
         LOGGER.warning(
             "web.allowed_origins is empty; mutations and session allocation stay "
@@ -141,6 +162,7 @@ def create_app(
     # the invariant that admin/index HTML is never public under /assets.
     index_document = (STATIC_ROOT / "index.html").read_bytes()
     admin_document = (STATIC_ROOT / "admin.html").read_bytes()
+    portal_document = (STATIC_ROOT / "portal.html").read_bytes()
     public_assets = {
         "styles.css": (
             (ASSET_ROOT / "styles.css").read_bytes(),
@@ -156,6 +178,10 @@ def create_app(
         ),
         "admin.js": (
             (ASSET_ROOT / "admin.js").read_bytes(),
+            "text/javascript",
+        ),
+        "portal.js": (
+            (ASSET_ROOT / "portal.js").read_bytes(),
             "text/javascript",
         ),
     }
@@ -658,6 +684,325 @@ def create_app(
             )
             return JSONResponse({"tools": items, "count": len(items)})
         except SecurityError as exc:
+            return _exception_response(exc)
+
+
+    # ===================== Administrator Tools: Desktop =====================
+    #
+    # One endpoint per reviewed operation. None of them accepts a skill name,
+    # action name, host, command, or broker operation: the generic desktop
+    # execution path is not restored here.
+
+    async def desktop_tool_status(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            return JSONResponse(await run_blocking(runtime.desktop_admin_status))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def desktop_tool_ssh_test(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            return JSONResponse(await run_blocking(runtime.desktop_ssh_test))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def desktop_tool_wake(request: Request) -> Response:
+        return await _admin_fixed_action(
+            request, runtime.start_admin_desktop_wake, "desktop wake"
+        )
+
+    async def desktop_tool_shutdown(request: Request) -> Response:
+        return await _admin_fixed_action(
+            request, runtime.start_admin_desktop_shutdown, "desktop shutdown"
+        )
+
+    async def desktop_tool_launch(request: Request) -> Response:
+        """Launch one symbolic application through the registered Slice 3 action.
+
+        The only caller-supplied value is `app`, a symbolic identifier. It is
+        matched against the registered schema and then resolved by the agent
+        against its own local allowlist; no executable path or command line
+        exists on this side of the boundary.
+        """
+
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"app"}:
+                raise ValueError("launch accepts only an app identifier")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.start_admin_desktop_app_launch,
+                    session,
+                    _string_field(payload, "app"),
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    # ======================= Administrator Tools: NAS =======================
+
+    async def nas_tool_status(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            refresh = request.query_params.get("refresh") == "1"
+            return JSONResponse(
+                await run_blocking(runtime.nas_admin_status, refresh=refresh)
+            )
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def wake_nas_tool(request: Request) -> Response:
+        return await _admin_fixed_action(
+            request, runtime.start_admin_nas_wake, "NAS wake"
+        )
+
+    async def shutdown_nas_tool(request: Request) -> Response:
+        """Start the fixed NAS shutdown after an explicit confirmation flag.
+
+        The body carries one boolean and nothing else. No IP, host, username,
+        remote command, shell, argv, API URL, API token, or shutdown argument
+        can be expressed in this request model at all.
+        """
+
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"confirm"}:
+                raise ValueError("NAS shutdown accepts only an explicit confirmation")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.start_admin_nas_shutdown,
+                    session,
+                    confirmed=payload["confirm"] is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def _admin_fixed_action(
+        request: Request, starter: Any, label: str
+    ) -> Response:
+        """Shared shape for the parameterless administrator tool actions."""
+
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if payload:
+                raise ValueError(f"{label} accepts no parameters")
+            return JSONResponse(await run_blocking(starter, session))
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    # ================ Administrator: portal enrollment / RBAC ================
+
+    async def portal_identities(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            return JSONResponse(await run_blocking(portal.identities))
+        except (SecurityError, SessionError, PortalError) as exc:
+            return _exception_response(exc)
+
+    async def portal_invite(request: Request) -> Response:
+        """Mint one single-use enrollment authorization for a named identity."""
+
+        try:
+            _admin_mutation(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"identity", "label"}:
+                raise ValueError("an invitation names one identity and one label")
+            return JSONResponse(
+                await run_blocking(
+                    portal.create_invite,
+                    _string_field(payload, "identity"),
+                    _string_field(payload, "label"),
+                )
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def portal_revoke(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"identity"}:
+                raise ValueError("revocation names one identity")
+            return JSONResponse(
+                await run_blocking(
+                    portal.revoke_identity, _string_field(payload, "identity")
+                )
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+
+    # ========================= Partner access portal =========================
+
+    async def portal_page(_request: Request) -> Response:
+        if not configured.portal.enabled:
+            return Response(status_code=404)
+        return Response(portal_document, media_type="text/html")
+
+    async def portal_status(request: Request) -> Response:
+        try:
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(portal.status(session))
+        except (SecurityError, SessionError, PortalError) as exc:
+            return _exception_response(exc)
+
+    async def portal_auth_options(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            await _json_body(request, configured.web.max_request_bytes)
+            return JSONResponse(
+                {"value": await run_blocking(portal.begin_authentication, session)}
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+        except WebAuthnError as exc:
+            return _exception_response(exc)
+
+    async def portal_auth_verify(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            ceremony_id, credential = _ceremony_body(payload)
+            return JSONResponse(
+                {
+                    "value": await run_blocking(
+                        portal.finish_authentication,
+                        session,
+                        ceremony_id=ceremony_id,
+                        credential=credential,
+                    )
+                }
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+        except WebAuthnError as exc:
+            return _exception_response(exc)
+
+    async def portal_register_options(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"label", "invite_token"}:
+                raise ValueError("enrollment requires a label and an invitation")
+            return JSONResponse(
+                {
+                    "value": await run_blocking(
+                        portal.begin_registration,
+                        session,
+                        label=_string_field(payload, "label"),
+                        invite_token=_string_field(payload, "invite_token"),
+                    )
+                }
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+        except WebAuthnError as exc:
+            return _exception_response(exc)
+
+    async def portal_register_verify(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            ceremony_id, credential = _ceremony_body(payload)
+            return JSONResponse(
+                {
+                    "value": await run_blocking(
+                        portal.finish_registration,
+                        session,
+                        ceremony_id=ceremony_id,
+                        credential=credential,
+                    )
+                }
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+        except WebAuthnError as exc:
+            return _exception_response(exc)
+
+    async def portal_sign_out(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            return JSONResponse(portal.sign_out(session))
+        except (SecurityError, SessionError, PortalError) as exc:
+            return _exception_response(exc)
+
+    async def portal_nas_status(request: Request) -> Response:
+        try:
+            session = _bound_session(request, runtime, auth)
+            if not portal_status_rate.check("portal-status:" + session.peer_key):
+                return _error("rate_limited", "status rate limit exceeded", 429)
+            refresh = request.query_params.get("refresh") == "1"
+            return JSONResponse(
+                await run_blocking(portal.nas_state, session, refresh=refresh)
+            )
+        except (SecurityError, SessionError, PortalError) as exc:
+            return _exception_response(exc)
+
+    async def portal_wake(request: Request) -> Response:
+        """POST only, authenticated, CSRF-checked, same-origin, rate-limited.
+
+        Wake is never reachable by GET, so a prefetch, crawler, link preview,
+        `<img>` tag, or plain link cannot send a magic packet. `_mutation_session`
+        additionally requires the allow-listed HTTPS Origin and the per-session
+        CSRF header, so a cross-origin form POST cannot reach it either.
+        """
+
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if payload:
+                raise ValueError("wake accepts no parameters")
+            if not portal_wake_rate.check("portal-wake:" + session.peer_key):
+                return _error("rate_limited", "wake rate limit exceeded", 429)
+            return JSONResponse(await run_blocking(portal.wake, session))
+        except (
+            SecurityError,
+            SessionError,
+            PortalError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def portal_destination(request: Request) -> Response:
+        """Report the server-chosen Jellyfin URL, or nothing at all.
+
+        Query parameters are ignored entirely. `redirect=`, `host=`, `ip=`,
+        `local=true`, `remote=true` and any other override are not read here,
+        and the returned URL is always one of the two configured destinations.
+        """
+
+        try:
+            session = _bound_session(request, runtime, auth)
+            client = request.client.host if request.client else None
+            return JSONResponse(
+                await run_blocking(
+                    portal.destination, session, request.headers, client
+                )
+            )
+        except (SecurityError, SessionError, PortalError) as exc:
             return _exception_response(exc)
 
     async def usage(request: Request) -> Response:
@@ -1588,6 +1933,42 @@ def create_app(
         Route("/api/admin/skills/toggle", skill_toggle, methods=["POST"]),
         Route("/api/admin/skills/test", skill_test, methods=["POST"]),
         Route("/api/admin/tools", tools),
+        Route("/api/admin/tools/desktop", desktop_tool_status),
+        Route(
+            "/api/admin/tools/desktop/ssh-test",
+            desktop_tool_ssh_test,
+            methods=["POST"],
+        ),
+        Route("/api/admin/tools/desktop/wake", desktop_tool_wake, methods=["POST"]),
+        Route(
+            "/api/admin/tools/desktop/shutdown",
+            desktop_tool_shutdown,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/tools/desktop/launch-app",
+            desktop_tool_launch,
+            methods=["POST"],
+        ),
+        Route("/api/admin/tools/nas", nas_tool_status),
+        Route("/api/admin/tools/wake-nas", wake_nas_tool, methods=["POST"]),
+        Route("/api/admin/tools/shutdown-nas", shutdown_nas_tool, methods=["POST"]),
+        Route("/api/admin/portal/identities", portal_identities),
+        Route("/api/admin/portal/invite", portal_invite, methods=["POST"]),
+        Route("/api/admin/portal/revoke", portal_revoke, methods=["POST"]),
+        Route("/portal", portal_page),
+        Route("/api/portal/status", portal_status),
+        Route(
+            "/api/portal/authenticate/options", portal_auth_options, methods=["POST"]
+        ),
+        Route("/api/portal/authenticate/verify", portal_auth_verify, methods=["POST"]),
+        Route("/api/portal/register/options", portal_register_options, methods=["POST"]),
+        Route("/api/portal/register/verify", portal_register_verify, methods=["POST"]),
+        Route("/api/portal/sign-out", portal_sign_out, methods=["POST"]),
+        Route("/api/portal/nas", portal_nas_status),
+        # Wake is POST-only by construction: there is no GET route for it.
+        Route("/api/portal/wake", portal_wake, methods=["POST"]),
+        Route("/api/portal/destination", portal_destination),
         Route("/api/admin/usage", usage),
         Route("/api/admin/security", security_status),
         Route("/api/admin/actions", admin_actions),
@@ -1737,6 +2118,23 @@ def _broker_check(configured: AssistantSettings) -> str:
         return "ready" if Path(configured.broker.socket_path).exists() else "unavailable"
     except OSError:
         return "unavailable"
+
+
+def _string_field(payload: dict[str, object], key: str) -> str:
+    """Require one non-empty string field, reported as a 400 by the boundary."""
+
+    value = payload.get(key)
+    if isinstance(value, str) and value:
+        return value
+    raise ValueError(f"{key} must be a non-empty string")
+
+
+def _ceremony_body(payload: dict[str, object]) -> tuple[str, dict[str, object]]:
+    ceremony_id = _string_field(payload, "ceremony_id")
+    credential = payload.get("credential")
+    if isinstance(credential, dict):
+        return ceremony_id, credential
+    raise ValueError("credential is required")
 
 
 def _admin(request: Request, auth: AuthPolicy) -> str:
@@ -1937,6 +2335,8 @@ def _exception_response(
             exc.status_code,
             safe_to_retry=safe_to_retry and exc.code == "invalid_session",
         )
+    if isinstance(exc, PortalError):
+        return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SpeechProviderError):
         return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)
     if isinstance(exc, SkillAuthoringError):
