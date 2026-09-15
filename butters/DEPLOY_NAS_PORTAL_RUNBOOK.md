@@ -95,6 +95,30 @@ No root-owned configuration needs editing for this deploy.
 `/etc/butters/action-broker.toml` keeps all seven of its current gates and
 parses unchanged — this was verified against a byte-exact copy of the live file.
 
+## Step 3b — enable the Desktop Agent ingress (migration only)
+
+The repository template ships both agent gates **off**, and reviewed tests
+assert that, so a checkout can never carry a live machine ingress into a new
+deployment. Enabling them is a deliberate step on the deployed, root-owned
+copies, performed only when migrating the Desktop Agent to this architecture.
+
+Gate 1 is the application/AgentHub gate in
+`/opt/butters/config/assistant.toml`: change `[agent_ingress]` `enabled` from
+`false` to `true`.
+
+Gate 2 is the TLS transport gate in `/etc/butters/agent-ingress.toml`. The
+deployed file predates this key entirely, so the key must be added as
+`enabled = true`; without it the new ingress loads with the gate off and binds
+no listener at all.
+
+The machine credential file named by `config_path`
+(`/etc/butters/desktop-agent.toml`) must already exist, root-owned and 0600,
+before either gate is turned on.
+
+**Re-apply Gate 1 after every subsequent `install-beta1`**, because the
+installer rsyncs `config/` from the checkout and resets it to the template
+value.
+
 ## Step 4 — restart only `butters-web`
 
 ```bash
