@@ -10,6 +10,7 @@ import asyncio
 import concurrent.futures
 import hashlib
 import hmac
+import re
 import secrets
 import threading
 import time
@@ -25,6 +26,9 @@ import tomllib
 from butters.actions.file_security import require_private_regular_file
 from butters.assistant_config import AgentIngressSettings
 from butters.state import StateFacet, StateSnapshot
+
+# A single symbolic machine identity, e.g. "desktop" or "desktop-staging".
+_AGENT_ID = re.compile(r"[a-z][a-z0-9_-]{0,63}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -905,16 +909,26 @@ class AgentHub:
             require_private_regular_file(key_path, "command_key")
             key = bytes.fromhex(key_path.read_text(encoding="utf-8").strip())
             token_hash = data["token_sha256"]
+            agent_id = data.get("agent_id")
             if (
                 data.get("schema_version") != 1
                 or data.get("protocol_version") != 1
-                or data.get("agent_id") != "desktop"
+                # One fixed machine identity per deployment, named by the
+                # root/service-owned configuration rather than by a literal
+                # here. Hard-coding "desktop" made the reviewed staging
+                # identity `desktop-staging` permanently unloadable, so the
+                # isolated environment could never authenticate an agent at
+                # all. The identity is still fixed at load time, still comes
+                # from a 0600 file the service user alone can read, and the
+                # hello must still match it exactly; only the literal moves.
+                or not isinstance(agent_id, str)
+                or _AGENT_ID.fullmatch(agent_id) is None
                 or not isinstance(token_hash, str)
                 or len(token_hash) != 64
                 or len(key) != 32
             ):
                 raise ValueError("invalid_agent_configuration")
             int(token_hash, 16)
-            return _MachineCredentials("desktop", token_hash.lower(), key, 1)
+            return _MachineCredentials(agent_id, token_hash.lower(), key, 1)
         except (OSError, ValueError, KeyError, TypeError, tomllib.TOMLDecodeError):
             return None

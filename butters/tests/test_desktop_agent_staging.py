@@ -921,3 +921,100 @@ def test_operator_cli_still_validates_configuration_it_can_read(
     with pytest.raises(ValueError, match="staging_loopback_required"):
         _request_timeout_seconds(tmp_path / "assistant.toml")
     assert calls == ["load"]
+
+
+def _agent_config(tmp_path, agent_id: str):
+    # A fresh directory per call: the key is chmod 0400, so reusing the path
+    # would make the second write fail rather than exercise the loader.
+    tmp_path = tmp_path / f"id-{abs(hash(agent_id))}"
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    key = tmp_path / "command.key"
+    key.write_text("a" * 64)
+    key.chmod(0o400)
+    config = tmp_path / "desktop-agent.toml"
+    config.write_text(
+        "schema_version = 1\n"
+        "protocol_version = 1\n"
+        f'agent_id = "{agent_id}"\n'
+        f'token_sha256 = "{"b" * 64}"\n'
+        f'command_key_file = "{key}"\n'
+    )
+    config.chmod(0o600)
+    return config
+
+
+def test_configured_staging_identity_loads(tmp_path) -> None:
+    """The isolated environment's own identity must be usable.
+
+    The loader previously required the literal "desktop", so the reviewed
+    staging identity `desktop-staging` could never load and the staging
+    environment reported agent_not_configured no matter how it was provisioned.
+    """
+
+    from butters.actions.agent import AgentHub
+
+    credentials = AgentHub._load_credentials(_agent_config(tmp_path, "desktop-staging"))
+    assert credentials is not None
+    assert credentials.agent_id == "desktop-staging"
+
+    production = AgentHub._load_credentials(_agent_config(tmp_path, "desktop"))
+    assert production is not None
+    assert production.agent_id == "desktop"
+
+
+def test_machine_identity_must_be_one_safe_symbolic_name(tmp_path) -> None:
+    """Relaxing the literal must not admit an arbitrary configured value."""
+
+    from butters.actions.agent import AgentHub
+
+    for rejected in (
+        "Desktop",
+        "desktop staging",
+        "../desktop",
+        "desktop/staging",
+        "",
+        "d" * 65,
+    ):
+        assert AgentHub._load_credentials(_agent_config(tmp_path, rejected)) is None
+
+
+def test_hello_must_match_the_configured_identity(tmp_path) -> None:
+    """A staging-identity hub must still reject a production-identity hello."""
+
+    import hashlib
+
+    from butters.actions.agent import AgentHub
+    from butters.assistant_config import AgentIngressSettings
+    from butters_agent import protocol
+
+    token = "c" * 64
+    key = tmp_path / "command.key"
+    key.write_text("a" * 64)
+    key.chmod(0o400)
+    config = tmp_path / "desktop-agent.toml"
+    config.write_text(
+        "schema_version = 1\n"
+        "protocol_version = 1\n"
+        'agent_id = "desktop-staging"\n'
+        f'token_sha256 = "{hashlib.sha256(token.encode()).hexdigest()}"\n'
+        f'command_key_file = "{key}"\n'
+    )
+    config.chmod(0o600)
+
+    hub = AgentHub(AgentIngressSettings(enabled=True, config_path=config))
+    assert hub.configured is True
+
+    def hello(agent_id: str):
+        return {
+            "type": "hello",
+            "protocol": 1,
+            "schema": 1,
+            "agent_id": agent_id,
+            "version": "1.0.0",
+            "token": token,
+            "actions": sorted(protocol.SCHEMAS),
+        }
+
+    hub._authenticate_hello(hello("desktop-staging"), protocol.SCHEMAS)
+    with pytest.raises(Exception, match="unauthorized"):
+        hub._authenticate_hello(hello("desktop"), protocol.SCHEMAS)
