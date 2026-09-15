@@ -6,6 +6,7 @@ import json
 import math
 import socket
 import ssl
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -33,6 +34,12 @@ class TrueNasRpc:
         "Butters NAS Agent approved shutdown",
         {"delay": None},
     )
+    # A heartbeat and an explicit status action may arrive together. TrueNAS
+    # middleware is local, but its WebSocket handshake can still serialize or
+    # rate-limit nearby sessions. Reuse only a very recent successful snapshot
+    # so callers share one bounded observation instead of opening overlapping
+    # authenticated sessions.
+    _STATUS_CACHE_SECONDS = 5.0
 
     def __init__(
         self,
@@ -42,12 +49,16 @@ class TrueNasRpc:
         *,
         connector: Callable[..., Any] = connect,
         pin_verifier: Callable[[object, str], None] = verify_spki,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.config = config
         self._read_api_key = read_api_key
         self._shutdown_api_key = shutdown_api_key
         self._connector = connector
         self._pin_verifier = pin_verifier
+        self._monotonic = monotonic
+        self._status_lock = threading.Lock()
+        self._cached_status: tuple[float, dict[str, object]] | None = None
 
     def _context(self) -> ssl.SSLContext:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -126,6 +137,18 @@ class TrueNasRpc:
         return websocket
 
     def status(self) -> dict[str, object]:
+        with self._status_lock:
+            now = self._monotonic()
+            if (
+                self._cached_status is not None
+                and now - self._cached_status[0] <= self._STATUS_CACHE_SECONDS
+            ):
+                return dict(self._cached_status[1])
+            result = self._fresh_status()
+            self._cached_status = (self._monotonic(), result)
+            return dict(result)
+
+    def _fresh_status(self) -> dict[str, object]:
         try:
             with self._session(self._read_api_key) as websocket:
                 state = self._call(websocket, 2, "system.state", [])

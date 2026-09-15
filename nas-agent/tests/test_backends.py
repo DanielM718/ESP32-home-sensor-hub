@@ -100,6 +100,46 @@ def test_status_uses_only_fixed_methods_and_projects_safe_fields():
     assert socket.sent[0]["params"][0]["login_options"] == {"user_info": False}
 
 
+def test_status_reuses_only_a_recent_successful_snapshot():
+    socket = RpcSocket()
+    clock = [10.0]
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=lambda *a, **k: socket,
+        pin_verifier=lambda *_args: None,
+        monotonic=lambda: clock[0],
+    )
+    rpc._context = lambda: object()
+
+    first = rpc.status()
+    clock[0] = 14.9
+    second = rpc.status()
+    assert second == first
+    assert second is not first
+    assert len(socket.sent) == 4
+
+    clock[0] = 15.1
+    assert rpc.status() == first
+    assert len(socket.sent) == 8
+
+
+def test_failed_status_is_not_cached():
+    sockets = [RpcSocket(error_method="system.state"), RpcSocket()]
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=lambda *a, **k: sockets.pop(0),
+        pin_verifier=lambda *_args: None,
+    )
+    rpc._context = lambda: object()
+
+    with pytest.raises(ProtocolError, match="truenas_refused"):
+        rpc.status()
+    assert rpc.status()["system_state"] == "online"
+    assert sockets == []
+
+
 def test_truenas_spki_mismatch_fails_before_api_key_is_sent():
     socket = RpcSocket()
     def reject(*_args):

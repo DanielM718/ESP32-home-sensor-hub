@@ -20,8 +20,10 @@ and rollback action.
   the three reviewed status methods. Do not create the FULL_ADMIN shutdown key.
 - Record the TrueNAS middleware certificate SPKI in non-secret agent
   configuration. Put secret files in a dedicated dataset/ACL. Verify files are
-  regular, owner-readable
-  only (`0600` for secrets), and visible only to UID/GID 568.
+  regular, owned by UID/GID 568, mode `0400`, and below a root-only (`0700`)
+  secrets directory. TrueNAS 25.10 Custom Apps materialize Compose `secrets`
+  as root-owned bind mounts and ignore long-form `uid`, `gid`, and `mode`, so
+  the reviewed definition uses explicit read-only file mounts instead.
 
 ## Read-only acceptance
 

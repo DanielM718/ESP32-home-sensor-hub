@@ -24,17 +24,12 @@ services:
       - /run/butters-nas-agent:size=1m,mode=0700,uid=568,gid=568
     volumes:
       - /mnt/REPLACE/butters-nas-agent/config:/config:ro
-    secrets:
-      - source: butters_agent_credentials
-        target: butters_agent_credentials
-        uid: "568"
-        gid: "568"
-        mode: 0400
-      - source: truenas_read_api_key
-        target: truenas_read_api_key
-        uid: "568"
-        gid: "568"
-        mode: 0400
+      # TrueNAS Custom Apps materialize Compose file secrets as root-owned bind
+      # mounts and ignore long-syntax uid/gid/mode. Use explicit read-only
+      # mounts from a root-only dataset instead. The two host files MUST be
+      # owned by 568:568 and mode 0400 before installation.
+      - /mnt/REPLACE/butters-nas-agent/secrets/butters-agent-credentials.json:/run/secrets/butters_agent_credentials:ro
+      - /mnt/REPLACE/butters-nas-agent/secrets/truenas-read-api-key:/run/secrets/truenas_read_api_key:ro
     healthcheck:
       test: ["CMD", "butters-nas-agent", "--healthcheck", "/run/butters-nas-agent/last-heartbeat"]
       interval: 30s
@@ -51,9 +46,3 @@ services:
         limits:
           cpus: "0.50"
           memory: 256M
-
-secrets:
-  butters_agent_credentials:
-    file: /mnt/REPLACE/butters-nas-agent/secrets/butters-agent-credentials.json
-  truenas_read_api_key:
-    file: /mnt/REPLACE/butters-nas-agent/secrets/truenas-read-api-key

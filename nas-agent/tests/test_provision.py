@@ -1,5 +1,6 @@
 import json
 import stat
+from pathlib import Path
 
 import pytest
 from butters_nas_agent.config import load_agent_credentials
@@ -36,3 +37,13 @@ def test_provision_is_create_only(tmp_path):
     with pytest.raises(FileExistsError):
         provision(destination)
     assert json.loads((destination / "agent-credentials.json").read_text()) == original
+
+
+def test_truenas_custom_app_mounts_secrets_explicitly_read_only():
+    compose = (Path(__file__).parents[1] / "truenas-custom-app.compose.yaml").read_text(
+        encoding="utf-8"
+    )
+    assert ":/run/secrets/butters_agent_credentials:ro" in compose
+    assert ":/run/secrets/truenas_read_api_key:ro" in compose
+    assert "    secrets:" not in compose
+    assert "\nsecrets:" not in compose
