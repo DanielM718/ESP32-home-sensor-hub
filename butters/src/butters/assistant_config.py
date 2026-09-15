@@ -174,6 +174,40 @@ class AgentIngressSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class NasAgentIngressSettings:
+    """Independent application gate and credential namespace for NAS ingress."""
+
+    enabled: bool = False
+    config_path: Path = Path("/etc/butters/nas-agent.toml")
+    protocol_version: int = 1
+    hello_timeout_seconds: float = 5.0
+    socket_idle_seconds: float = 60.0
+    heartbeat_aging_seconds: float = 30.0
+    heartbeat_stale_seconds: float = 45.0
+    request_timeout_seconds: int = 30
+    max_pending_requests: int = 1
+
+    def validated(self) -> NasAgentIngressSettings:
+        if not self.config_path.is_absolute():
+            raise ConfigError("nas_agent_ingress.config_path must be absolute")
+        if self.protocol_version != 1:
+            raise ConfigError("nas_agent_ingress.protocol_version must be 1")
+        if not 1 <= self.hello_timeout_seconds <= 15:
+            raise ConfigError("nas_agent_ingress.hello_timeout_seconds must be 1 to 15")
+        if not 15 <= self.socket_idle_seconds <= 120:
+            raise ConfigError("nas_agent_ingress.socket_idle_seconds must be 15 to 120")
+        if not 15 <= self.heartbeat_aging_seconds < self.heartbeat_stale_seconds:
+            raise ConfigError("nas_agent_ingress heartbeat aging must precede stale timeout")
+        if not self.heartbeat_stale_seconds < self.socket_idle_seconds:
+            raise ConfigError("nas_agent_ingress stale timeout must precede socket idle timeout")
+        if not 1 <= self.request_timeout_seconds <= 30:
+            raise ConfigError("nas_agent_ingress.request_timeout_seconds must be 1 to 30")
+        if self.max_pending_requests != 1:
+            raise ConfigError("nas_agent_ingress.max_pending_requests must be 1")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class KnownDeviceSettings:
     enabled: bool = False
     configured: bool = False
@@ -704,6 +738,7 @@ class AssistantSettings:
     authentication: AuthenticationSettings = AuthenticationSettings()
     broker: BrokerSettings = BrokerSettings()
     agent_ingress: AgentIngressSettings = AgentIngressSettings()
+    nas_agent_ingress: NasAgentIngressSettings = NasAgentIngressSettings()
     actions: ActionSettings = ActionSettings()
     planner: PlannerSettings = PlannerSettings()
     nas_endpoints: NasEndpointSettings = NasEndpointSettings()
@@ -907,6 +942,21 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         heartbeat_aging_seconds=float(agent_table.get("heartbeat_aging_seconds", 30.0)),
         heartbeat_stale_seconds=float(agent_table.get("heartbeat_stale_seconds", 45.0)),
         request_timeout_seconds=int(agent_table.get("request_timeout_seconds", 30)),
+    ).validated()
+
+    nas_agent_table = _table(data, "nas_agent_ingress")
+    nas_agent_ingress = NasAgentIngressSettings(
+        enabled=bool(nas_agent_table.get("enabled", False)),
+        config_path=Path(
+            str(nas_agent_table.get("config_path", "/etc/butters/nas-agent.toml"))
+        ).expanduser(),
+        protocol_version=int(nas_agent_table.get("protocol_version", 1)),
+        hello_timeout_seconds=float(nas_agent_table.get("hello_timeout_seconds", 5.0)),
+        socket_idle_seconds=float(nas_agent_table.get("socket_idle_seconds", 60.0)),
+        heartbeat_aging_seconds=float(nas_agent_table.get("heartbeat_aging_seconds", 30.0)),
+        heartbeat_stale_seconds=float(nas_agent_table.get("heartbeat_stale_seconds", 45.0)),
+        request_timeout_seconds=int(nas_agent_table.get("request_timeout_seconds", 30)),
+        max_pending_requests=int(nas_agent_table.get("max_pending_requests", 1)),
     ).validated()
 
     actions_table = _table(data, "actions")
@@ -1125,6 +1175,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         authentication=authentication,
         broker=broker,
         agent_ingress=agent_ingress,
+        nas_agent_ingress=nas_agent_ingress,
         actions=actions,
         planner=planner,
         nas_endpoints=nas_endpoints,

@@ -9,13 +9,13 @@ This surface is deliberately small. An authorized holder of the
 * be redirected to one of two operator-configured Jellyfin URLs once Jellyfin
   is actually ready.
 
-What this surface cannot reach is as important as what it can. There is no
-shutdown, no Desktop control, no administrator tool, no skill or action name
-taken from a request, no JSON executor, no broker control, no redirect target
-that is not one of the two configured URLs, and no host, IP, MAC, port, or
-interface anywhere in its request model. The role never implies administrator:
-administrator authorization is decided by AuthPolicy from the tailnet identity
-alone and consults nothing this module writes.
+The independent ``nas_power`` role may additionally prepare exactly one fixed,
+zero-argument NAS Agent shutdown plan and complete a FRESH passkey ceremony
+bound to its digest. It grants neither Jellyfin access nor administrator status.
+There is no Desktop control, administrator tool, caller-selected skill, JSON
+executor, broker control, or caller-selected target/host/method in this module.
+Administrator authorization remains solely an AuthPolicy decision based on the
+tailnet identity and never consults portal roles.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass
 
 from butters.assistant_config import NasEndpointSettings, PortalSettings
-from butters.auth.store import JELLYFIN_ACCESS, AuthStateError
+from butters.auth.store import JELLYFIN_ACCESS, NAS_POWER, AuthStateError
 from butters.skills.model import AuthenticationContext, AuthenticationLevel
 from butters.web.locality import LocalityClassifier, jellyfin_destination
 from butters.web.sessions import BrowserSession
@@ -176,6 +176,10 @@ class PortalService:
         if isinstance(last, dict) and last.get("operation") == "wake_nas":
             elapsed = max(0.0, time.time() - float(last["at"]))
         ready = aggregate == "READY"
+        roles = self.runtime.auth_state.portal_session_roles(
+            session.session_id, session.peer_key
+        )
+        capability = status.get("capability")
         return {
             "observations": status.get("observations", {}),
             "aggregate": aggregate,
@@ -200,6 +204,15 @@ class PortalService:
             "can_wake": _can_wake(
                 aggregate, elapsed, self.settings.max_poll_seconds
             ),
+            # This is authorization/capability truth, not a control. The portal
+            # UI intentionally has no shutdown button in this dormant slice.
+            "can_shutdown": (
+                NAS_POWER in roles
+                and isinstance(capability, dict)
+                and capability.get("shutdown_configured") is True
+            ),
+            "power_state": status.get("power_state", "unknown"),
+            "lifecycle": status.get("lifecycle", "UNKNOWN"),
         }
 
     def wake(self, session: BrowserSession) -> dict[str, object]:
@@ -253,6 +266,102 @@ class PortalService:
             "jobs": list(jobs),
             "last_operation": _portal_last_operation(record),
         }
+
+    # ----- dormant NAS power flow -------------------------------------------
+
+    def prepare_shutdown(
+        self, session: BrowserSession, *, confirmed: bool
+    ) -> dict[str, object]:
+        """Freeze the only portal power plan; this never executes it."""
+
+        self.require_role(session, NAS_POWER)
+        if confirmed is not True:
+            raise PortalError(
+                "confirmation_required", "NAS shutdown requires explicit confirmation"
+            )
+        status = self.runtime.nas_admin_status()
+        capability = status.get("capability")
+        if not isinstance(capability, dict) or capability.get("shutdown_configured") is not True:
+            raise PortalError(
+                "capability_unavailable", "NAS Agent shutdown is disabled or unconfigured"
+            )
+        plan = self.runtime.actions.freeze(
+            skill="nas.system.shutdown",
+            arguments={},
+            summary="Shut down the configured NAS",
+            session_id=session.session_id,
+            identity=session.peer_key,
+            request_id="portal-power-" + _request_suffix(),
+            source="nas_power_portal",
+            pending_confirmation=True,
+        )
+        return {
+            "status": "shutdown_auth_required",
+            "authentication_required": AuthenticationLevel.FRESH.value,
+            "pending_action": plan.safe_dict(),
+        }
+
+    def begin_shutdown_authentication(
+        self, session: BrowserSession, *, pending_action_id: str
+    ) -> dict[str, object]:
+        self.require_role(session, NAS_POWER)
+        plan = self._shutdown_plan(session, pending_action_id)
+        return self.runtime.passkeys.begin_authentication(
+            session_id=session.session_id,
+            identity=session.peer_key,
+            purpose="pending_action",
+            action_digest=plan.digest,
+            pending_action_id=plan.plan_id,
+            subject="nas",
+            required_level=AuthenticationLevel.FRESH,
+        )
+
+    def finish_shutdown_authentication(
+        self,
+        session: BrowserSession,
+        *,
+        ceremony_id: str,
+        credential: dict[str, object],
+    ) -> dict[str, object]:
+        self.require_role(session, NAS_POWER)
+        outcome = self.runtime.passkeys.finish_authentication(
+            ceremony_id=ceremony_id,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            credential=credential,
+        )
+        if outcome.pending_action_id is None or outcome.context is None:
+            raise PortalError("fresh_authentication_required", "fresh authentication is required")
+        self._shutdown_plan(session, outcome.pending_action_id)
+        jobs = self.runtime.actions.execute(
+            outcome.pending_action_id,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            authentication=outcome.context,
+        )
+        self.runtime._record_operation(
+            "nas", "nas.system.shutdown", "shutdown_queued", "portal:nas_power"
+        )
+        return {"verified": True, "status": "shutdown_queued", "jobs": list(jobs)}
+
+    def _shutdown_plan(self, session: BrowserSession, plan_id: str):
+        try:
+            plan = self.runtime.action_state.require(
+                plan_id,
+                session_id=session.session_id,
+                identity=session.peer_key,
+                allowed_states=frozenset({"pending_confirmation", "pending_auth"}),
+            )
+        except Exception as exc:
+            raise PortalError("pending_action_denied", "pending action is unavailable") from exc
+        if (
+            len(plan.steps) != 1
+            or plan.steps[0].skill != "nas.system.shutdown"
+            or plan.steps[0].arguments != {}
+            or plan.authentication is not AuthenticationLevel.FRESH
+        ):
+            raise PortalError("pending_action_denied", "pending action is unavailable")
+        return plan
 
     # ----- redirect -----------------------------------------------------------
 

@@ -23,7 +23,7 @@ import tomllib
 
 from butters.actions.file_security import require_private_regular_file
 
-AGENT_PATH = "/agent/v1/session"
+AGENT_PATHS = frozenset({"/agent/v1/session", "/nas-agent/v1/session"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +121,10 @@ def validate_handshake(raw: bytes) -> bytes:
     except UnicodeDecodeError as exc:
         raise ValueError("malformed_handshake") from exc
     lines = text.split("\r\n")
-    if not lines or lines[0] != f"GET {AGENT_PATH} HTTP/1.1":
+    if not lines or not lines[0].startswith("GET ") or not lines[0].endswith(" HTTP/1.1"):
+        raise ValueError("unknown_path")
+    path = lines[0][4:-9]
+    if path not in AGENT_PATHS:
         raise ValueError("unknown_path")
     allowed = {
         "host",
@@ -166,7 +169,7 @@ def validate_handshake(raw: bytes) -> bytes:
         "sec-websocket-version",
     )
     return (
-        f"GET {AGENT_PATH} HTTP/1.1\r\n"
+        f"GET {path} HTTP/1.1\r\n"
         + "\r\n".join(f"{name}: {headers[name]}" for name in ordered)
         + "\r\n\r\n"
     ).encode("ascii")

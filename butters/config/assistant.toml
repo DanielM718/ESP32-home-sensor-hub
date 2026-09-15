@@ -87,6 +87,19 @@ heartbeat_aging_seconds = 30
 heartbeat_stale_seconds = 45
 request_timeout_seconds = 30
 
+# Separate NAS machine ingress. This repository and production deployment ship
+# it disabled; staging requires independent nas-primary credentials.
+[nas_agent_ingress]
+enabled = false
+config_path = "/etc/butters/nas-agent.toml"
+protocol_version = 1
+hello_timeout_seconds = 5
+socket_idle_seconds = 60
+heartbeat_aging_seconds = 30
+heartbeat_stale_seconds = 45
+request_timeout_seconds = 30
+max_pending_requests = 1
+
 [actions]
 audit_capacity = 1000
 job_capacity = 256
@@ -104,8 +117,8 @@ safety_entity = ""
 safety_max_age_seconds = 120.0
 
 # Powering the NAS off is gated separately from waking it, so enabling wake can
-# never imply shutdown. The broker keeps its own `nas.shutdown` gate as well,
-# and both this and that gate ship false.
+# never imply shutdown. This server gate and the NAS Agent's local gate both
+# ship false; a later staging approval must enable them independently.
 [actions.nas_shutdown]
 enabled = false
 configured = false

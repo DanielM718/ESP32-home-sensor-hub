@@ -10,18 +10,20 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import hashlib
 import subprocess
 from dataclasses import replace
 from pathlib import Path
 
 import httpx
 from butters.assistant_config import (
+    NasAgentIngressSettings,
     NasEndpointSettings,
     PortalSettings,
     load_assistant_settings,
 )
 from butters.auth.manager import AuthenticationVerification
-from butters.auth.store import JELLYFIN_ACCESS
+from butters.auth.store import JELLYFIN_ACCESS, NAS_POWER
 from butters.integrations.nas_status import (
     JellyfinState,
     NasAggregate,
@@ -122,14 +124,58 @@ class FakeNas:
         )
 
 
-def _application(tmp_path, *, portal_settings: PortalSettings | None = None):
+def _nas_agent_credentials(tmp_path: Path) -> Path:
+    key = tmp_path / "nas-agent-command.key"
+    key.write_text((b"z" * 32).hex(), encoding="utf-8")
+    key.chmod(0o640)
+    token = "n" * 64
+    config = tmp_path / "nas-agent.toml"
+    config.write_text(
+        "\n".join(
+            (
+                "schema_version = 1",
+                "protocol_version = 1",
+                'agent_id = "nas-primary"',
+                f'token_sha256 = "{hashlib.sha256(token.encode()).hexdigest()}"',
+                f'command_key_file = "{key}"',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    config.chmod(0o640)
+    return config
+
+
+def _application(
+    tmp_path,
+    *,
+    portal_settings: PortalSettings | None = None,
+    nas_agent_shutdown: bool = False,
+):
     base = load_assistant_settings()
     device = replace(base.actions.nas, enabled=True, configured=True)
     settings = replace(
         base,
         diagnostics=replace(base.diagnostics, enabled=False),
         broker=replace(base.broker, enabled=True),
-        actions=replace(base.actions, nas=device).validated(),
+        actions=replace(
+            base.actions,
+            nas=device,
+            nas_shutdown=replace(
+                device,
+                enabled=nas_agent_shutdown,
+                configured=nas_agent_shutdown,
+            ),
+        ).validated(),
+        nas_agent_ingress=NasAgentIngressSettings(
+            enabled=nas_agent_shutdown,
+            config_path=(
+                _nas_agent_credentials(tmp_path)
+                if nas_agent_shutdown
+                else base.nas_agent_ingress.config_path
+            ),
+        ).validated(),
         nas_endpoints=ENDPOINTS,
         portal=(portal_settings or PortalSettings(enabled=True)).validated(),
         web=replace(
@@ -151,11 +197,16 @@ def _application(tmp_path, *, portal_settings: PortalSettings | None = None):
     return create_app(settings, vocabulary, service, stt_engine_factory=Engine), service, nas
 
 
-def _enroll(service, identity=PARTNER, credential_id=b"partner-credential"):
+def _enroll(
+    service,
+    identity=PARTNER,
+    credential_id=b"partner-credential",
+    roles=frozenset({JELLYFIN_ACCESS}),
+):
     """Grant the role and register a credential, as enrollment would."""
 
     service.auth_state.grant_portal_roles(
-        f"identity:{identity}", "Partner", frozenset({JELLYFIN_ACCESS}), maximum=16
+        f"identity:{identity}", "Partner", roles, maximum=16
     )
     service.auth_state.add_credential(
         credential_id=credential_id,
@@ -618,6 +669,109 @@ async def _redirect_only_when_ready_and_never_from_request_input(tmp_path) -> No
         del service
 
 
+async def _nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path) -> None:
+    app, service, _nas = _application(tmp_path, nas_agent_shutdown=True)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    try:
+        # The intended initial partner role can use Jellyfin but cannot even
+        # prepare a shutdown plan.
+        _enroll(service)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as jellyfin_http:
+            mutation = await _mutation(jellyfin_http, PARTNER)
+            await _sign_in(jellyfin_http, mutation)
+            denied = await jellyfin_http.post(
+                "/api/portal/shutdown/plan",
+                headers=mutation,
+                json={"confirm": True},
+            )
+            assert denied.status_code == 401
+            assert denied.json()["error"] == "portal_authentication_required"
+
+        power_identity = "power@example.com"
+        _enroll(
+            service,
+            identity=power_identity,
+            credential_id=b"power-credential",
+            roles=frozenset({NAS_POWER}),
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as power_http:
+            mutation = await _mutation(power_http, power_identity)
+            verified = await _sign_in(
+                power_http, mutation, credential_id=b"power-credential"
+            )
+            assert verified.json()["value"]["roles"] == [NAS_POWER]
+
+            # NAS power does not imply Jellyfin access or administrator status.
+            assert (await power_http.get("/api/portal/nas", headers=mutation)).status_code == 401
+            assert (await power_http.get("/api/admin/overview", headers=mutation)).status_code in {
+                401,
+                403,
+            }
+
+            for payload in (
+                {},
+                {"confirm": False},
+                {"confirm": True, "method": "system.reboot"},
+                {"confirm": True, "delay": 0},
+            ):
+                rejected = await power_http.post(
+                    "/api/portal/shutdown/plan", headers=mutation, json=payload
+                )
+                assert rejected.status_code in {400, 403}
+
+            prepared = await power_http.post(
+                "/api/portal/shutdown/plan",
+                headers=mutation,
+                json={"confirm": True},
+            )
+            assert prepared.status_code == 200, prepared.text
+            pending = prepared.json()["pending_action"]
+            assert prepared.json()["authentication_required"] == "fresh"
+            assert pending["authentication"] == "fresh"
+            assert pending["steps"] == [
+                {"skill": "nas.system.shutdown", "arguments": {}}
+            ]
+
+            options = await power_http.post(
+                "/api/portal/shutdown/authenticate/options",
+                headers=mutation,
+                json={"pending_action_id": pending["pending_action_id"]},
+            )
+            assert options.status_code == 200
+            ceremony = options.json()["value"]["ceremony_id"]
+            finished = await power_http.post(
+                "/api/portal/shutdown/authenticate/verify",
+                headers=mutation,
+                json={
+                    "ceremony_id": ceremony,
+                    "credential": _credential(b"power-credential"),
+                },
+            )
+            assert finished.status_code == 200, finished.text
+            assert finished.json()["value"]["status"] == "shutdown_queued"
+
+            # Mutation defenses apply to this new path too.
+            no_csrf = await power_http.post(
+                "/api/portal/shutdown/plan",
+                headers={"tailscale-user-login": power_identity},
+                json={"confirm": True},
+            )
+            assert no_csrf.status_code == 403
+            wrong_origin = await power_http.post(
+                "/api/portal/shutdown/plan",
+                headers={**mutation, "origin": "https://attacker.invalid"},
+                json={"confirm": True},
+            )
+            assert wrong_origin.status_code == 403
+    finally:
+        await app.state.shutdown_workers()
+        del service
+
+
 def test_unauthenticated_access_is_denied(tmp_path) -> None:
     asyncio.run(_unauthenticated_access_is_denied(tmp_path))
 
@@ -652,6 +806,10 @@ def test_polling_progresses_and_bounds_itself(tmp_path) -> None:
 
 def test_redirect_only_when_ready_and_never_from_request_input(tmp_path) -> None:
     asyncio.run(_redirect_only_when_ready_and_never_from_request_input(tmp_path))
+
+
+def test_nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path) -> None:
+    asyncio.run(_nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path))
 
 
 # ------------------------- locality classification ---------------------------
@@ -784,11 +942,14 @@ def test_portal_client_never_names_a_host_action_or_redirect() -> None:
 
 def test_portal_service_exposes_no_generic_execution() -> None:
     source = (Path(__file__).parents[1] / "src/butters/web/portal.py").read_text()
-    # It freezes exactly one plan, and that plan names the fixed wake action.
-    assert source.count("self.runtime.actions.freeze(") == 1
+    # The only frozen plans are the fixed wake and fixed NAS-Agent shutdown.
+    assert source.count("self.runtime.actions.freeze(") == 2
     assert 'skill="wake_nas"' in source
-    assert source.count("self.runtime.actions.execute(") == 1
+    assert 'skill="nas.system.shutdown"' in source
+    assert source.count("self.runtime.actions.execute(") == 2
     assert "shutdown_nas" not in source
+    assert "skill=payload" not in source
+    assert "skill=request" not in source
     # No desktop identifier of any kind is reachable from this module.
     for identifier in (
         "shutdown_desktop",

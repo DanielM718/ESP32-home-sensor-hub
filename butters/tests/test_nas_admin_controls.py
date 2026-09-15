@@ -12,7 +12,9 @@ from __future__ import annotations
 import asyncio
 import base64
 import getpass
+import hashlib
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 from butters.actions.broker import (
@@ -20,7 +22,7 @@ from butters.actions.broker import (
     FixedBrokerConfig,
     FixedBrokerOperations,
 )
-from butters.assistant_config import load_assistant_settings
+from butters.assistant_config import NasAgentIngressSettings, load_assistant_settings
 from butters.auth.manager import AuthenticationVerification
 from butters.integrations.model import IntegrationError
 from butters.stt.normalization import DomainVocabulary
@@ -75,6 +77,29 @@ class FakeNas:
         return {"accepted": True, "outcome": "shutdown_requested"}
 
 
+def _nas_agent_credentials(tmp_path: Path) -> Path:
+    key = tmp_path / "nas-agent-command.key"
+    key.write_text((b"z" * 32).hex(), encoding="utf-8")
+    key.chmod(0o640)
+    token = "n" * 64
+    config = tmp_path / "nas-agent.toml"
+    config.write_text(
+        "\n".join(
+            (
+                "schema_version = 1",
+                "protocol_version = 1",
+                'agent_id = "nas-primary"',
+                f'token_sha256 = "{hashlib.sha256(token.encode()).hexdigest()}"',
+                f'command_key_file = "{key}"',
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    config.chmod(0o640)
+    return config
+
+
 def _application(tmp_path, *, shutdown_available: bool = True):
     base = load_assistant_settings()
     device = replace(base.actions.nas, enabled=True, configured=True)
@@ -89,6 +114,14 @@ def _application(tmp_path, *, shutdown_available: bool = True):
                 device,
                 enabled=shutdown_available,
                 configured=shutdown_available,
+            ),
+        ).validated(),
+        nas_agent_ingress=NasAgentIngressSettings(
+            enabled=shutdown_available,
+            config_path=(
+                _nas_agent_credentials(tmp_path)
+                if shutdown_available
+                else base.nas_agent_ingress.config_path
             ),
         ).validated(),
         web=replace(
@@ -327,8 +360,12 @@ async def _shutdown_requires_confirmation_fresh_auth_and_empty_body(tmp_path) ->
             job = await _await_job(
                 http, headers, verified.json()["jobs"][0]["job_id"]
             )
-            assert job["state"] == "completed"
-            assert nas.shutdowns == 1
+            # The exact plan passed every browser/coordinator gate, then failed
+            # closed because this unit test has no authenticated NAS Agent.
+            assert job["state"] == "failed"
+            assert job["failure_code"] == "agent_unavailable"
+            # The deprecated broker adapter was never touched.
+            assert nas.shutdowns == 0
     finally:
         await app.state.shutdown_workers()
         del service
