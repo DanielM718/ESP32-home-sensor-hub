@@ -1,0 +1,44 @@
+name: NAS Agent image
+
+on:
+  push:
+    branches:
+      - feature/nas-agent
+    paths:
+      - .github/workflows/nas-agent-image.yml
+      - nas-agent/**
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-amd64:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check out the exact source revision
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Authenticate to GHCR
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io --username "${{ github.actor }}" --password-stdin
+
+      - name: Build immutable AMD64 image
+        env:
+          IMAGE: ghcr.io/danielm718/butters-nas-agent
+          REVISION: ${{ github.sha }}
+        run: |
+          created="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          docker build \
+            --pull \
+            --platform linux/amd64 \
+            --label "org.opencontainers.image.created=${created}" \
+            --label "org.opencontainers.image.revision=${REVISION}" \
+            --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" \
+            --tag "${IMAGE}:${REVISION}" \
+            nas-agent
+          docker push "${IMAGE}:${REVISION}"
+          digest="$(docker inspect --format '{{index .RepoDigests 0}}' "${IMAGE}:${REVISION}")"
+          echo "### NAS Agent image" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Source commit: \`${REVISION}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Build timestamp: \`${created}\`" >> "${GITHUB_STEP_SUMMARY}"
+          echo "- Image: \`${digest}\`" >> "${GITHUB_STEP_SUMMARY}"
