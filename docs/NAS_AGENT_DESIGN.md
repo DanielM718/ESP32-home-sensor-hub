@@ -43,7 +43,8 @@ The NAS implementation is deliberately separate from the proven Desktop Agent:
    and file-mounted credentials. It has no inbound port, shell interface,
    Docker socket, or host filesystem access.
 7. The TrueNAS JSON-RPC boundary exposes only source-owned method constants.
-   Read and dormant shutdown credentials are independent.
+   Its locally observed certificate SPKI is verified before an API key is
+   transmitted. Read and dormant shutdown credentials are independent.
 8. Jellyfin is a fixed agent-owned health URL. Its response body is discarded;
    only reachability, readiness, optional bounded version, and HTTP status are
    returned.
@@ -135,7 +136,10 @@ exact 25.10 patch release and re-check its matching API documentation.
   `/api/current`; REST is deprecated from 25.04 and is scheduled for removal in
   26. [JSON-RPC guide](https://api.truenas.com/v25.10/jsonrpc.html)
 - For 25.10, the agent authenticates with `auth.login_ex` and the
-  `API_KEY_PLAIN` mechanism over verified WSS. The older
+  `API_KEY_PLAIN` mechanism over SPKI-pinned WSS. This accommodates the
+  appliance default self-signed certificate, which can be valid only for
+  `localhost`, without using host networking or sending a credential before
+  server identity is verified. The older
   `auth.login_with_api_key` exists but is deprecated; SCRAM becomes mandatory
   only in 26+. [login_ex](https://api.truenas.com/v25.10/api_methods_auth.login_ex.html)
 - The exact shutdown operation is the job method `system.shutdown`, with

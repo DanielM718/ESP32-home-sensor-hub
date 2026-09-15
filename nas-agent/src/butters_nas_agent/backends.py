@@ -17,6 +17,7 @@ from websockets.sync.client import connect
 
 from .config import AgentConfig
 from .protocol import MAX_FRAME, ProtocolError, canonical
+from .tls import verify_spki
 
 
 def _bounded_text(value: object, limit: int) -> str | None:
@@ -40,14 +41,20 @@ class TrueNasRpc:
         shutdown_api_key: str | None = None,
         *,
         connector: Callable[..., Any] = connect,
+        pin_verifier: Callable[[object, str], None] = verify_spki,
     ) -> None:
         self.config = config
         self._read_api_key = read_api_key
         self._shutdown_api_key = shutdown_api_key
         self._connector = connector
+        self._pin_verifier = pin_verifier
 
     def _context(self) -> ssl.SSLContext:
-        return ssl.create_default_context(cafile=str(self.config.truenas_ca_file))
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.check_hostname = False
+        context.verify_mode = ssl.CERT_NONE
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
+        return context
 
     def _call(
         self, websocket: Any, request_id: int, method: str, params: list[object]
@@ -94,6 +101,10 @@ class TrueNasRpc:
             proxy=None,
         )
         try:
+            # The appliance default certificate is commonly self-signed and
+            # valid only for localhost. Pin the reviewed local middleware key
+            # before the API key crosses the socket.
+            self._pin_verifier(websocket.socket, self.config.truenas_spki_sha256)
             login = self._call(
                 websocket,
                 1,

@@ -23,7 +23,7 @@ class AgentConfig:
     spki_sha256: str
     truenas_url: str
     truenas_username: str
-    truenas_ca_file: Path
+    truenas_spki_sha256: str
     jellyfin_url: str
     jellyfin_health_path: str
     timeout_seconds: float
@@ -78,7 +78,7 @@ def load_config(path: Path) -> AgentConfig:
         != {
             "url",
             "username",
-            "ca_file",
+            "spki_sha256",
             "timeout_seconds",
             "shutdown_enabled",
         }
@@ -93,7 +93,7 @@ def load_config(path: Path) -> AgentConfig:
         health_file=Path(str(agent["health_file"])),
         truenas_url=str(truenas["url"]),
         truenas_username=str(truenas["username"]),
-        truenas_ca_file=Path(str(truenas["ca_file"])),
+        truenas_spki_sha256=str(truenas["spki_sha256"]),
         timeout_seconds=float(truenas["timeout_seconds"]),
         shutdown_enabled=truenas["shutdown_enabled"] is True,
         jellyfin_url=str(jellyfin["url"]),
@@ -121,7 +121,7 @@ def load_config(path: Path) -> AgentConfig:
             (nas_url.username, nas_url.password, nas_url.query, nas_url.fragment)
         )
         and USERNAME.fullmatch(config.truenas_username)
-        and config.truenas_ca_file.is_absolute()
+        and HEX_64.fullmatch(config.truenas_spki_sha256)
         and jf_url.scheme in {"http", "https"}
         and bool(jf_url.hostname)
         and not any((jf_url.username, jf_url.password, jf_url.query, jf_url.fragment))

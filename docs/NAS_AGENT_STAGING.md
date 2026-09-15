@@ -18,8 +18,9 @@ and rollback action.
   plus HMAC key in the NAS-side secret file. Never reuse Desktop credentials.
 - Create only the dedicated TrueNAS read-only service identity/key needed for
   the three reviewed status methods. Do not create the FULL_ADMIN shutdown key.
-- Put non-secret agent configuration, the TrueNAS CA certificate, and secret
-  files in a dedicated dataset/ACL. Verify files are regular, owner-readable
+- Record the TrueNAS middleware certificate SPKI in non-secret agent
+  configuration. Put secret files in a dedicated dataset/ACL. Verify files are
+  regular, owner-readable
   only (`0600` for secrets), and visible only to UID/GID 568.
 
 ## Read-only acceptance

@@ -15,7 +15,7 @@ def _config(**changes):
         "spki_sha256": "a" * 64,
         "truenas_url": "wss://truenas.local/api/current",
         "truenas_username": "status_agent",
-        "truenas_ca_file": Path("/ca.pem"),
+        "truenas_spki_sha256": "b" * 64,
         "jellyfin_url": "http://192.168.1.240:8096",
         "jellyfin_health_path": "/health",
         "timeout_seconds": 5.0,
@@ -32,6 +32,11 @@ class RpcSocket:
         self.sent = []
         self.shutdown_result = shutdown_result
         self.error_method = error_method
+        self.socket = self
+
+    def getpeercert(self, *, binary_form):
+        assert binary_form is True
+        return b"certificate"
 
     def __enter__(self):
         return self
@@ -65,7 +70,13 @@ class RpcSocket:
 
 
 def _rpc(config, socket, shutdown_key=None):
-    rpc = TrueNasRpc(config, "read-key", shutdown_key, connector=lambda *a, **k: socket)
+    rpc = TrueNasRpc(
+        config,
+        "read-key",
+        shutdown_key,
+        connector=lambda *a, **k: socket,
+        pin_verifier=lambda *_args: None,
+    )
     rpc._context = lambda: object()
     return rpc
 
@@ -87,6 +98,22 @@ def test_status_uses_only_fixed_methods_and_projects_safe_fields():
         "system.info",
     ]
     assert socket.sent[0]["params"][0]["login_options"] == {"user_info": False}
+
+
+def test_truenas_spki_mismatch_fails_before_api_key_is_sent():
+    socket = RpcSocket()
+    def reject(*_args):
+        raise ProtocolError("server_identity_mismatch")
+
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=lambda *a, **k: socket,
+        pin_verifier=reject,
+    )
+    with pytest.raises(ProtocolError, match="server_identity_mismatch"):
+        rpc.status()
+    assert socket.sent == []
 
 
 def test_shutdown_gate_and_missing_separate_key_fail_before_network():

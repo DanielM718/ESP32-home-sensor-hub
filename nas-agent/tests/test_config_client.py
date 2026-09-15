@@ -3,9 +3,10 @@ import json
 from pathlib import Path
 
 import pytest
-from butters_nas_agent.client import healthcheck, verify_pin
+from butters_nas_agent.client import healthcheck
 from butters_nas_agent.config import load_agent_credentials, load_api_key, load_config
 from butters_nas_agent.protocol import ProtocolError
+from butters_nas_agent.tls import verify_spki
 
 
 def _write(path: Path, value: str, mode=0o600):
@@ -31,7 +32,7 @@ health_file = "/run/agent-health"
 [truenas]
 url = "wss://truenas.local/api/current"
 username = "status_agent"
-ca_file = "/run/secrets/ca.pem"
+spki_sha256 = "{"b" * 64}"
 timeout_seconds = 5
 shutdown_enabled = {values["shutdown"]}
 [jellyfin]
@@ -105,10 +106,10 @@ def test_spki_pin_mismatch_fails_before_machine_auth(monkeypatch):
             return b"certificate"
 
     monkeypatch.setattr(
-        "butters_nas_agent.client.x509.load_der_x509_certificate",
+        "butters_nas_agent.tls.x509.load_der_x509_certificate",
         lambda _value: Certificate(),
     )
     expected = hashlib.sha256(public).hexdigest()
-    verify_pin(TlsObject(), expected)
+    verify_spki(TlsObject(), expected)
     with pytest.raises(ProtocolError, match="server_identity_mismatch"):
-        verify_pin(TlsObject(), "0" * 64)
+        verify_spki(TlsObject(), "0" * 64)

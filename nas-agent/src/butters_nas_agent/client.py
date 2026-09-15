@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import logging
 import os
@@ -12,8 +11,6 @@ import ssl
 import threading
 import time
 
-from cryptography import x509
-from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 from websockets.asyncio.client import connect
 
 from . import AGENT_VERSION
@@ -32,20 +29,9 @@ from .protocol import (
     validate_request_id,
     verify,
 )
+from .tls import verify_spki
 
 LOG = logging.getLogger("butters_nas_agent")
-
-
-def verify_pin(ssl_object, expected: str) -> None:
-    certificate = x509.load_der_x509_certificate(
-        ssl_object.getpeercert(binary_form=True)
-    )
-    public_key = certificate.public_key().public_bytes(
-        Encoding.DER, PublicFormat.SubjectPublicKeyInfo
-    )
-    actual = hashlib.sha256(public_key).hexdigest()
-    if not __import__("hmac").compare_digest(actual, expected):
-        raise ProtocolError("server_identity_mismatch")
 
 
 class Client:
@@ -101,7 +87,7 @@ class Client:
             compression=None,
             user_agent_header=None,
         ) as websocket:
-            verify_pin(
+            verify_spki(
                 websocket.transport.get_extra_info("ssl_object"),
                 self.config.spki_sha256,
             )

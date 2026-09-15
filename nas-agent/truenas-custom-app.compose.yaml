@@ -35,11 +35,6 @@ services:
         uid: "568"
         gid: "568"
         mode: 0400
-      - source: truenas_ca
-        target: truenas_ca.pem
-        uid: "568"
-        gid: "568"
-        mode: 0444
     healthcheck:
       test: ["CMD", "butters-nas-agent", "--healthcheck", "/run/butters-nas-agent/last-heartbeat"]
       interval: 30s
@@ -62,5 +57,3 @@ secrets:
     file: /mnt/REPLACE/butters-nas-agent/secrets/butters-agent-credentials.json
   truenas_read_api_key:
     file: /mnt/REPLACE/butters-nas-agent/secrets/truenas-read-api-key
-  truenas_ca:
-    file: /mnt/REPLACE/butters-nas-agent/secrets/truenas-ca.pem
