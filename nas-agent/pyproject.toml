@@ -12,6 +12,7 @@ dependencies = ["websockets==15.0.1", "cryptography==50.0.0"]
 
 [project.scripts]
 butters-nas-agent = "butters_nas_agent.__main__:main"
+butters-nas-agent-provision = "butters_nas_agent.provision:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
