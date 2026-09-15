@@ -31,6 +31,34 @@ def powershell(script):
     return json.loads(text) if text else None
 
 
+def resolve_application_state(process_ids, visible_windows, window_classes=()):
+    """Decide whether an allow-listed application is open, and visibly so.
+
+    ``visible_windows`` is ``(pid, window_class)`` for every visible top-level
+    window. ``window_classes`` is the app's fixed registry allowlist.
+
+    Without an allowlist the image's presence is what "running" means, which is
+    the long-standing behaviour for ordinary applications. With one, presence of
+    the image proves nothing: File Explorer's image is ``explorer.exe``, which is
+    the Windows shell itself and is resident for the whole session, so reporting
+    it as running would be permanently true and therefore dishonest. Only a
+    visible window of an allow-listed class proves the application is open.
+
+    The allowlist can only ever narrow the answer. It names no process, path,
+    argument, or command, and nothing in it is caller-supplied.
+    """
+
+    classes = {name.casefold() for name in window_classes}
+    matched = [
+        pid
+        for pid, window_class in visible_windows
+        if pid in process_ids
+        and (not classes or str(window_class).casefold() in classes)
+    ]
+    running = bool(matched) if classes else bool(process_ids)
+    return running, bool(matched)
+
+
 class Blob(ctypes.Structure):
     _fields_ = [("size", w.DWORD), ("data", ctypes.POINTER(ctypes.c_byte))]
 
@@ -59,6 +87,8 @@ class Platform:
         self.user = ctypes.WinDLL("user32", use_last_error=True)
         self.user.GetWindowThreadProcessId.argtypes = [w.HWND, ctypes.POINTER(w.DWORD)]
         self.user.IsWindowVisible.argtypes = [w.HWND]
+        self.user.GetClassNameW.argtypes = [w.HWND, w.LPWSTR, ctypes.c_int]
+        self.user.GetClassNameW.restype = ctypes.c_int
         self.user.EnumWindows.argtypes = [ctypes.c_void_p, w.LPARAM]
         self.session_id = w.DWORD()
         if not self.kernel.ProcessIdToSessionId(
@@ -169,17 +199,25 @@ ConvertTo-Json -InputObject $result -Compress
             process_id = w.DWORD()
             self.user.GetWindowThreadProcessId(window, ctypes.byref(process_id))
             if process_id.value in process_ids and self.user.IsWindowVisible(window):
-                windows.append(process_id.value)
+                windows.append((process_id.value, self._window_class(window)))
             return True
 
         self.user.EnumWindows(visit, 0)
+        running, visible = resolve_application_state(
+            process_ids, windows, entry.get("window_classes", ())
+        )
         return {
             "installed": Path(entry["path"]).is_file(),
-            "running": bool(matching),
+            "running": running,
             "pids": sorted(process_ids),
             "session_id": self.session_id.value,
-            "visible_window": bool(windows),
+            "visible_window": visible,
         }
+
+    def _window_class(self, window):
+        buffer = ctypes.create_unicode_buffer(256)
+        length = self.user.GetClassNameW(window, buffer, len(buffer))
+        return buffer.value if length else ""
 
     def launch(self, entry):
         if not self.session()["gui_launch"]:
