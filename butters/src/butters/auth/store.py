@@ -51,6 +51,32 @@ class CredentialRecord:
         }
 
 
+# The one non-administrator capability this deployment grants. It is named
+# explicitly rather than derived so that no future role can widen into
+# administrator by accident: `administrator` is decided by AuthPolicy from the
+# tailnet identity alone and is never stored, granted, or implied here.
+JELLYFIN_ACCESS = "jellyfin_access"
+PORTAL_ROLES = frozenset({JELLYFIN_ACCESS})
+
+
+@dataclass(frozen=True, slots=True)
+class PortalIdentityRecord:
+    identity: str
+    label: str
+    roles: frozenset[str]
+    created_at: float
+    revoked: bool
+
+    def safe_dict(self) -> dict[str, object]:
+        return {
+            "identity": self.identity,
+            "label": self.label,
+            "roles": sorted(self.roles),
+            "created_at": self.created_at,
+            "revoked": self.revoked,
+        }
+
+
 @dataclass(frozen=True, slots=True)
 class CeremonyRecord:
     ceremony_id: str
@@ -126,6 +152,29 @@ class AuthStateStore:
                     created_at REAL NOT NULL,
                     expires_at REAL NOT NULL,
                     used INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS portal_identities (
+                    identity TEXT PRIMARY KEY,
+                    label TEXT NOT NULL,
+                    roles_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    revoked INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS portal_invites (
+                    invite_id TEXT PRIMARY KEY,
+                    token_hash BLOB NOT NULL UNIQUE,
+                    identity TEXT NOT NULL,
+                    label TEXT NOT NULL,
+                    roles_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    used INTEGER NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS portal_sessions (
+                    session_id TEXT PRIMARY KEY,
+                    identity TEXT NOT NULL,
+                    roles_json TEXT NOT NULL,
+                    expires_at REAL NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS fresh_grants (
                     grant_id TEXT PRIMARY KEY,
@@ -501,6 +550,218 @@ class AuthStateStore:
             )
         return row["subject"]
 
+
+    # ----- portal role assignment -------------------------------------------
+    #
+    # Roles live beside credentials but never interact with administrator
+    # authorization: `AuthPolicy.admin_identity` reads the tailnet identity and
+    # the configured administrator list, and consults nothing in this database.
+    # A portal role therefore cannot escalate, and an administrator only gains a
+    # portal role by being granted one explicitly.
+
+    def portal_identity(self, identity: str) -> PortalIdentityRecord | None:
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM portal_identities WHERE identity=?", (identity,)
+            ).fetchone()
+        return None if row is None else _portal_identity(row)
+
+    def portal_identities(self) -> tuple[PortalIdentityRecord, ...]:
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM portal_identities ORDER BY created_at, identity LIMIT ?",
+                (self.settings.max_credentials,),
+            ).fetchall()
+        return tuple(_portal_identity(row) for row in rows)
+
+    def portal_roles(self, identity: str) -> frozenset[str]:
+        record = self.portal_identity(identity)
+        if record is None or record.revoked:
+            return frozenset()
+        return record.roles
+
+    def grant_portal_roles(
+        self, identity: str, label: str, roles: frozenset[str], *, maximum: int
+    ) -> PortalIdentityRecord:
+        unknown = roles - PORTAL_ROLES
+        if unknown:
+            raise AuthStateError("role_denied", "role is not recognised")
+        if not roles:
+            raise AuthStateError("role_denied", "at least one role is required")
+        identity = _identity(identity)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT COUNT(*) AS count FROM portal_identities WHERE identity<>?",
+                (identity,),
+            ).fetchone()
+            if int(existing["count"]) >= maximum:
+                raise AuthStateError("identity_limit", "portal identity capacity reached")
+            connection.execute(
+                """INSERT INTO portal_identities(identity,label,roles_json,created_at,revoked)
+                VALUES (?,?,?,?,0) ON CONFLICT(identity) DO UPDATE SET
+                label=excluded.label, roles_json=excluded.roles_json, revoked=0""",
+                (
+                    identity,
+                    _label(label),
+                    json.dumps(sorted(roles), separators=(",", ":")),
+                    self.clock(),
+                ),
+            )
+        record = self.portal_identity(identity)
+        assert record is not None
+        return record
+
+    def revoke_portal_identity(self, identity: str) -> None:
+        """Revoke the role and every live portal session it authorized.
+
+        Credentials are left alone: an administrator who also holds a passkey
+        keeps it, and a partner's credential is revoked separately through the
+        normal credential path. What ends here is the authorization.
+        """
+
+        with self._lock, self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE portal_identities SET revoked=1 WHERE identity=? AND revoked=0",
+                (identity,),
+            )
+            connection.execute(
+                "DELETE FROM portal_sessions WHERE identity=?", (identity,)
+            )
+            connection.execute(
+                "DELETE FROM portal_invites WHERE identity=? AND used=0", (identity,)
+            )
+        if cursor.rowcount != 1:
+            raise AuthStateError("identity_denied", "portal identity is unavailable")
+
+    # ----- enrollment invites ----------------------------------------------
+
+    def create_portal_invite(
+        self, identity: str, label: str, roles: frozenset[str], ttl_seconds: float
+    ) -> tuple[str, float]:
+        """Mint one single-use, expiring enrollment authorization.
+
+        Passkey registration on the portal is never open to an unauthenticated
+        visitor. An administrator creates this invite for one named identity,
+        and only the holder of the token, arriving as that identity, may
+        register a credential.
+        """
+
+        unknown = roles - PORTAL_ROLES
+        if unknown:
+            raise AuthStateError("role_denied", "role is not recognised")
+        token = secrets.token_urlsafe(32)
+        now = self.clock()
+        expires = now + ttl_seconds
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM portal_invites WHERE identity=? AND used=0", (identity,)
+            )
+            connection.execute(
+                """INSERT INTO portal_invites
+                (invite_id,token_hash,identity,label,roles_json,created_at,expires_at)
+                VALUES (?,?,?,?,?,?,?)""",
+                (
+                    secrets.token_urlsafe(18),
+                    _token_hash(token),
+                    _identity(identity),
+                    _label(label),
+                    json.dumps(sorted(roles), separators=(",", ":")),
+                    now,
+                    expires,
+                ),
+            )
+        return token, expires
+
+    def consume_portal_invite(self, token: str, identity: str) -> frozenset[str]:
+        digest = _token_hash(token)
+        with self._lock, self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM portal_invites WHERE token_hash=?", (digest,)
+            ).fetchone()
+            if row is None or bool(row["used"]) or row["identity"] != identity:
+                raise AuthStateError("invite_denied", "enrollment authorization is invalid")
+            if float(row["expires_at"]) <= self.clock():
+                connection.execute(
+                    "UPDATE portal_invites SET used=1 WHERE invite_id=?",
+                    (row["invite_id"],),
+                )
+                raise AuthStateError("invite_expired", "enrollment authorization expired")
+            connection.execute(
+                "UPDATE portal_invites SET used=1 WHERE invite_id=?", (row["invite_id"],)
+            )
+        return frozenset(json.loads(row["roles_json"]))
+
+    def portal_invites(self) -> tuple[dict[str, object], ...]:
+        now = self.clock()
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM portal_invites WHERE used=0 AND expires_at>? "
+                "ORDER BY created_at LIMIT ?",
+                (now, self.settings.max_credentials),
+            ).fetchall()
+        return tuple(
+            {
+                "identity": row["identity"],
+                "label": row["label"],
+                "roles": sorted(json.loads(row["roles_json"])),
+                "expires_at": float(row["expires_at"]),
+            }
+            for row in rows
+        )
+
+    # ----- portal sessions --------------------------------------------------
+
+    def open_portal_session(
+        self, session_id: str, identity: str, ttl_seconds: float
+    ) -> frozenset[str]:
+        roles = self.portal_roles(identity)
+        if not roles:
+            raise AuthStateError("role_denied", "identity holds no portal role")
+        expires = self.clock() + ttl_seconds
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                """INSERT INTO portal_sessions(session_id,identity,roles_json,expires_at)
+                VALUES (?,?,?,?) ON CONFLICT(session_id) DO UPDATE SET
+                identity=excluded.identity, roles_json=excluded.roles_json,
+                expires_at=excluded.expires_at""",
+                (
+                    session_id,
+                    identity,
+                    json.dumps(sorted(roles), separators=(",", ":")),
+                    expires,
+                ),
+            )
+        return roles
+
+    def portal_session_roles(self, session_id: str, identity: str) -> frozenset[str]:
+        """Roles for a live portal session, re-checked against current grants.
+
+        The session row records what was granted at sign-in; the identity's
+        current grant decides what still applies. Revocation therefore takes
+        effect on the next request rather than at session expiry.
+        """
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM portal_sessions WHERE session_id=?", (session_id,)
+            ).fetchone()
+        if (
+            row is None
+            or row["identity"] != identity
+            or float(row["expires_at"]) <= self.clock()
+        ):
+            self.close_portal_session(session_id)
+            return frozenset()
+        return frozenset(json.loads(row["roles_json"])) & self.portal_roles(identity)
+
+    def close_portal_session(self, session_id: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM portal_sessions WHERE session_id=?", (session_id,)
+            )
+
     def cleanup(self) -> None:
         now = self.clock()
         with self._lock, self._connect() as connection:
@@ -512,6 +773,12 @@ class AuthStateStore:
             )
             connection.execute(
                 "DELETE FROM fresh_grants WHERE used=1 OR expires_at<=?", (now,)
+            )
+            connection.execute(
+                "DELETE FROM portal_sessions WHERE expires_at<=?", (now,)
+            )
+            connection.execute(
+                "DELETE FROM portal_invites WHERE used=1 OR expires_at<=?", (now,)
             )
 
     def local_recovery_revoke_all(self) -> None:
@@ -528,6 +795,9 @@ class AuthStateStore:
             connection.execute("DELETE FROM auth_ceremonies")
             connection.execute("DELETE FROM fresh_grants")
             connection.execute("DELETE FROM bootstrap_authorizations")
+            connection.execute("DELETE FROM portal_sessions")
+            connection.execute("DELETE FROM portal_invites")
+            connection.execute("DELETE FROM portal_identities")
 
 
 def _credential(row: sqlite3.Row) -> CredentialRecord:
@@ -545,6 +815,23 @@ def _credential(row: sqlite3.Row) -> CredentialRecord:
         row["device_type"],
         None if row["backed_up"] is None else bool(row["backed_up"]),
     )
+
+
+def _portal_identity(row: sqlite3.Row) -> PortalIdentityRecord:
+    return PortalIdentityRecord(
+        row["identity"],
+        row["label"],
+        frozenset(json.loads(row["roles_json"])),
+        float(row["created_at"]),
+        bool(row["revoked"]),
+    )
+
+
+def _identity(value: str) -> str:
+    clean = value.strip()
+    if not clean or len(clean) > 160 or not clean.isprintable():
+        raise AuthStateError("invalid_identity", "portal identity is invalid")
+    return clean
 
 
 def _token_hash(token: str) -> bytes:

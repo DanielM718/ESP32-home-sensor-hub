@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import threading
 import time
@@ -10,6 +11,9 @@ from pathlib import PureWindowsPath
 import tomllib
 
 from .protocol import NAME, ProtocolError, parameters
+
+# A Win32 window class name: letters, digits, dot, underscore, hyphen only.
+WINDOW_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
 
 
 class Engine:
@@ -32,9 +36,19 @@ class Engine:
                 try:
                     if (
                         type(entry) is not dict
-                        or set(entry) - {"path", "images", "require_visible"}
+                        or set(entry)
+                        - {"path", "images", "require_visible", "window_classes"}
                         or not {"path", "images"}.issubset(entry)
                         or type(entry.get("require_visible", False)) is not bool
+                        # Optional fixed window-class allowlist. It narrows what
+                        # "running" means for an app whose image is a resident
+                        # shell component, and can express nothing executable.
+                        or not isinstance(entry.get("window_classes", []), list)
+                        or any(
+                            not isinstance(item, str)
+                            or not WINDOW_CLASS.fullmatch(item)
+                            for item in entry.get("window_classes", [])
+                        )
                         or not isinstance(entry["path"], str)
                         or not PureWindowsPath(entry["path"]).is_absolute()
                         or PureWindowsPath(entry["path"]).suffix.lower() != ".exe"

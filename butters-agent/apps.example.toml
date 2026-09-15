@@ -6,3 +6,15 @@ schema_version = 1
 # path = 'C:\Program Files\Git\git-bash.exe'
 # images = ['C:\Program Files\Git\usr\bin\mintty.exe']
 # require_visible = true
+
+# File Explorer is the Windows shell, so its image (explorer.exe) is resident for
+# the whole session and process presence proves nothing. window_classes narrows
+# "running" to an actual open folder window: CabinetWClass is the normal File
+# Explorer window and ExploreWClass the legacy explorer-bar variant. The shell's
+# own Progman/WorkerW/Shell_TrayWnd surfaces are deliberately absent, so a
+# desktop with no folder window open reports not_running truthfully.
+[apps.file_explorer]
+path = 'C:\Windows\explorer.exe'
+images = ['C:\Windows\explorer.exe']
+require_visible = true
+window_classes = ['CabinetWClass', 'ExploreWClass']

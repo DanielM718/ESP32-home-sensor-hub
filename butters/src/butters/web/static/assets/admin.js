@@ -69,7 +69,7 @@ async function refresh(panel) {
     if(panel==="models") renderObject(document.querySelector("#model-status"),(await api("/api/admin/models")).value);
     if(panel==="voice") await refreshVoice();
     if(panel==="skills") await refreshSkills();
-    if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
+    if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]); await Promise.all([refreshDesktop(),refreshNas(),refreshPortalIdentities()]);}
     if(panel==="usage") renderObject(document.querySelector("#usage-view"),(await api("/api/admin/usage")).value);
     if(panel==="system") renderObject(document.querySelector("#system-view"),(await api("/api/admin/system")).value);
     if(panel==="logs") document.querySelector("#logs-view").textContent=pretty((await api("/api/admin/logs")).value);
@@ -89,7 +89,7 @@ function authOptions(value){const options={...value,challenge:decodeBase64url(va
 function registrationOptions(value){const options={...value,challenge:decodeBase64url(value.challenge),user:{...value.user,id:decodeBase64url(value.user.id)}};if(Array.isArray(value.excludeCredentials))options.excludeCredentials=value.excludeCredentials.map(item=>({...item,id:decodeBase64url(item.id)}));return options;}
 function assertionJson(credential){return{id:credential.id,rawId:encodeBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment||null,clientExtensionResults:credential.getClientExtensionResults(),response:{authenticatorData:encodeBase64url(credential.response.authenticatorData),clientDataJSON:encodeBase64url(credential.response.clientDataJSON),signature:encodeBase64url(credential.response.signature),userHandle:credential.response.userHandle?encodeBase64url(credential.response.userHandle):null}};}
 function registrationJson(credential){const transports=typeof credential.response.getTransports==="function"?credential.response.getTransports():[];return{id:credential.id,rawId:encodeBase64url(credential.rawId),type:credential.type,authenticatorAttachment:credential.authenticatorAttachment||null,clientExtensionResults:credential.getClientExtensionResults(),response:{attestationObject:encodeBase64url(credential.response.attestationObject),clientDataJSON:encodeBase64url(credential.response.clientDataJSON),transports}};}
-async function authenticatePurpose(purpose="elevation",subject=null){if(!window.PublicKeyCredential||!navigator.credentials)throw new Error("Passkeys are unavailable in this browser");const body={purpose};if(subject)body.subject=subject;const begin=(await api("/api/auth/authenticate/options",{method:"POST",body:JSON.stringify(body)})).value;const credential=await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});if(!credential)throw new Error("Authentication cancelled");return(await api("/api/auth/authenticate/verify",{method:"POST",body:JSON.stringify({ceremony_id:begin.ceremony_id,credential:assertionJson(credential)})})).value;}
+async function authenticatePurpose(purpose="elevation",subject=null,pendingActionId=null){if(!window.PublicKeyCredential||!navigator.credentials)throw new Error("Passkeys are unavailable in this browser");const body={purpose};if(subject)body.subject=subject;if(pendingActionId)body.pending_action_id=pendingActionId;const begin=(await api("/api/auth/authenticate/options",{method:"POST",body:JSON.stringify(body)})).value;const credential=await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});if(!credential)throw new Error("Authentication cancelled");return(await api("/api/auth/authenticate/verify",{method:"POST",body:JSON.stringify({ceremony_id:begin.ceremony_id,credential:assertionJson(credential)})})).value;}
 function authStatusText(status){return status.elevated?`Elevated for ${status.remaining_seconds}s (server authoritative, non-sliding)`:`Locked · ${status.passkey_count} active passkey(s)`;}
 async function refreshPasskeys(){const status=(await api("/api/auth/status")).value;document.querySelector("#auth-admin-status").textContent=authStatusText(status);const credentials=(await api("/api/auth/passkeys")).value.credentials;const container=document.querySelector("#passkey-list");container.replaceChildren();for(const credential of credentials){const row=document.createElement("article");row.className="data-row";const content=document.createElement("div");const title=document.createElement("h3");title.textContent=credential.label;const detail=document.createElement("p");detail.textContent=`Created ${new Date(credential.created_at*1000).toLocaleString()} · last used ${credential.last_used_at?new Date(credential.last_used_at*1000).toLocaleString():"never"}${credential.revoked?" · revoked":""}`;content.append(title,detail);row.append(content);if(!credential.revoked){const revoke=document.createElement("button");revoke.className="secondary-button";revoke.textContent="Revoke";revoke.addEventListener("click",()=>revokePasskey(credential.record_id));row.append(revoke);}container.append(row);}}
 async function revokePasskey(recordId){if(!confirm("Revoke this passkey after a fresh assertion?"))return;try{const outcome=await authenticatePurpose("revoke_passkey",recordId);await api("/api/auth/passkeys/revoke",{method:"POST",body:JSON.stringify({record_id:recordId,fresh_grant:outcome.fresh_grant})});await refreshPasskeys();}catch(error){alert(error.message);}}
@@ -98,6 +98,11 @@ function renderCapabilities(values){rows(document.querySelector("#capability-lis
 document.querySelector("#admin-authenticate").addEventListener("click",async()=>{try{await authenticatePurpose();await refreshPasskeys();}catch(error){alert(error.message);}});
 document.querySelector("#admin-lock").addEventListener("click",async()=>{try{await api("/api/auth/lock",{method:"POST"});await refreshPasskeys();}catch(error){alert(error.message);}});
 document.querySelector("#add-passkey").addEventListener("click",addPasskey);
+
+/* Poll one frozen action job to a terminal state. The job ID comes from the
+ * server's own response to the POST that created it; nothing here can name an
+ * arbitrary job. */
+async function waitForAdminAction(jobId){for(let attempt=0;attempt<60;attempt+=1){const job=(await api(`/api/actions/jobs/${encodeURIComponent(jobId)}`)).value;if(job.state==="completed")return job;if(["failed","cancelled","expired"].includes(job.state))throw new Error(job.failure_reason||"the action did not complete");await new Promise(resolve=>window.setTimeout(resolve,500));}throw new Error("the action is still running; check Actions / Broker for its final status");}
 
 async function refreshTraces(){renderTraces((await api("/api/admin/traces?limit=50")).value.traces);}
 function createTraceCard(traceId){const card=document.createElement("details");card.className="trace-card";card.dataset.traceId=traceId;const summary=document.createElement("summary");const label=document.createElement("span");label.className="trace-summary-label";summary.append(label);summary.addEventListener("click",event=>{event.preventDefault();selectTrace(traceId);});const events=document.createElement("div");events.className="trace-events";card.append(summary,events);traceCards.set(traceId,card);return card;}
@@ -134,3 +139,262 @@ document.querySelector("#codex-approve").addEventListener("click",()=>decideJob(
 document.querySelector("#codex-reject").addEventListener("click",()=>decideJob("reject"));
 
 initialize();
+
+/* ===================== Tools: Desktop and NAS =====================
+ *
+ * Two rules hold throughout this section.
+ *
+ * 1. CURRENT OBSERVED STATE and LAST OPERATION are rendered from separate
+ *    server fields into separate places, and one never overwrites the other.
+ *    A wake requested a minute ago cannot relabel a connected agent as
+ *    offline, because the agent line is only ever written from `observed`.
+ * 2. Every effectful control posts to one fixed endpoint that names one
+ *    registered action server-side. No action name, host, or command is ever
+ *    sent from this file.
+ */
+
+const AXIS_TONE = {yes:"good", present:"good", connected:"good", reachable:"good", ready:"good", no:"bad", absent:"bad", unreachable:"bad", unavailable:"bad", not_configured:"bad", unknown:"muted", not_observed:"muted", starting:"warn", heartbeat_aging:"warn", heartbeat_stale:"warn"};
+const AXIS_TEXT = {yes:"Yes", no:"No", unknown:"Unknown", present:"Active", absent:"Not active", not_observed:"Not observed", reachable:"Reachable", unreachable:"Unreachable", ready:"Ready", starting:"Starting", unavailable:"Unavailable", connected:"Connected", not_configured:"Not configured", heartbeat_aging:"Heartbeat aging", heartbeat_stale:"Heartbeat stale", disconnected:"Disconnected"};
+
+function axis(container, entries) {
+  container.replaceChildren();
+  for (const [label, raw, note] of entries) {
+    const cell=document.createElement("article"); cell.className=`axis-cell axis-${AXIS_TONE[raw]||"muted"}`;
+    const name=document.createElement("small"); name.textContent=label;
+    const value=document.createElement("strong"); value.textContent=AXIS_TEXT[raw]||String(raw);
+    cell.append(name,value);
+    if(note){const detail=document.createElement("span"); detail.className="axis-note"; detail.textContent=note; cell.append(detail);}
+    container.append(cell);
+  }
+}
+
+function ago(seconds){ if(seconds===null||seconds===undefined)return "unknown"; const value=Math.round(seconds); if(value<60)return `${value} second${value===1?"":"s"} ago`; const minutes=Math.round(value/60); if(minutes<60)return `${minutes} minute${minutes===1?"":"s"} ago`; const hours=Math.round(minutes/60); return `${hours} hour${hours===1?"":"s"} ago`; }
+
+function renderLastOperation(node, record, empty) {
+  // Purely historical. Never feeds any observed-state line.
+  if(!record){ node.textContent=empty; node.classList.remove("stale-operation"); return; }
+  node.textContent=`${record.operation} · ${record.outcome}${record.detail?` (${record.detail})`:""} · ${ago(record.age_seconds)}`;
+  node.classList.toggle("stale-operation", (record.age_seconds||0) > 300);
+}
+
+/* ---------- Desktop ---------- */
+
+async function refreshDesktop() {
+  const summary=document.querySelector("#desktop-summary");
+  try {
+    const state=(await api("/api/admin/tools/desktop")).value;
+    const observed=state.observed;
+    summary.textContent=state.summary;
+    axis(document.querySelector("#desktop-status"), [
+      ["Power / network", observed.power_network],
+      ["SSH", observed.ssh],
+      ["Parsec", observed.parsec],
+      ["Desktop Agent", observed.agent],
+      ["Windows session", observed.windows_session],
+      ["Agent heartbeat", observed.agent_heartbeat_age_seconds===null?"unknown":"yes", observed.agent_heartbeat_age_seconds===null?undefined:`${Math.round(observed.agent_heartbeat_age_seconds)}s ago`],
+    ]);
+    // Written only from `observed`, so a stale workflow cannot contradict it.
+    document.querySelector("#desktop-agent-status").textContent=
+      observed.agent_connected
+        ? `Agent connected · Windows session ${AXIS_TEXT[observed.windows_session]||observed.windows_session} · heartbeat ${observed.agent_heartbeat_age_seconds===null?"unknown":`${Math.round(observed.agent_heartbeat_age_seconds)}s ago`}`
+        : `Agent ${AXIS_TEXT[observed.agent]||observed.agent}${state.agent_detail.reason?` · ${state.agent_detail.reason}`:""}`;
+    renderLastOperation(document.querySelector("#desktop-last-operation"), state.last_operation, "No desktop operation has been requested from this console.");
+    renderDesktopApps(state.apps);
+    document.querySelector("#desktop-vms").textContent=`${state.vm.headline}. ${state.vm.detail}`;
+    document.querySelector("#desktop-shutdown").disabled=!state.configured.shutdown;
+    document.querySelector("#desktop-streaming").disabled=!state.configured.streaming;
+    document.querySelector("#desktop-wake").disabled=!state.configured.wake;
+  } catch(error) { summary.textContent=`Desktop status unavailable: ${error.message||"unknown error"}`; }
+}
+
+function renderDesktopApps(apps) {
+  const grid=document.querySelector("#desktop-apps"); grid.replaceChildren();
+  if(!apps.observed){
+    const note=document.createElement("p"); note.className="tool-note";
+    note.textContent=apps.reason==="agent_not_connected"
+      ? "Application controls appear when the Desktop Agent is connected."
+      : `Application catalog unavailable: ${apps.reason}.`;
+    grid.append(note); return;
+  }
+  if(!apps.apps.length){
+    const note=document.createElement("p"); note.className="tool-note";
+    note.textContent="The Desktop Agent reported an empty allowlist."; grid.append(note); return;
+  }
+  for(const app of apps.apps){
+    const button=document.createElement("button"); button.className="secondary-button app-button";
+    button.type="button"; button.dataset.app=app.app;
+    button.textContent=app.display_name||app.app;
+    if(app.installed===false){button.disabled=true; button.title="Not installed on the desktop";}
+    button.addEventListener("click",()=>launchDesktopApp(app.app,button.textContent));
+    grid.append(button);
+  }
+}
+
+async function launchDesktopApp(app, label) {
+  await runDesktopAction(`Launch ${label}`, () => api("/api/admin/tools/desktop/launch-app",{method:"POST",body:JSON.stringify({app})}));
+}
+
+async function runDesktopAction(label, request) {
+  const summary=document.querySelector("#desktop-result-summary");
+  const detail=document.querySelector("#desktop-result");
+  summary.textContent=`${label}: submitting…`;
+  try {
+    let result=(await request()).value;
+    if(result.status==="authentication_required"){
+      summary.textContent=`${label}: passkey authentication required…`;
+      result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
+    }
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("the action was not queued");
+    const job=await waitForAdminAction(result.jobs[0].job_id);
+    summary.textContent=`${label}: completed.`;
+    detail.textContent=pretty(job);
+  } catch(error) {
+    summary.textContent=`${label} failed: ${error.message||"unknown error"}`;
+    detail.textContent=String(error.message||error);
+  }
+  await refreshDesktop();
+}
+
+/* ---------- NAS ---------- */
+
+async function refreshNas() {
+  const summary=document.querySelector("#nas-summary");
+  try {
+    const state=(await api("/api/admin/tools/nas?refresh=1")).value;
+    const observations=state.observations;
+    summary.textContent=`${state.aggregate}`;
+    axis(document.querySelector("#nas-status"), [
+      ["LAN reachability", observations.lan],
+      ["NAS OS / API", observations.nas_api],
+      ["Tailscale", observations.tailscale],
+      ["Jellyfin", observations.jellyfin],
+    ]);
+    renderLastOperation(document.querySelector("#nas-last-operation"), state.last_operation, "No NAS operation has been requested from this console.");
+    document.querySelector("#nas-wake").disabled=!state.capability.wake_configured;
+    document.querySelector("#nas-shutdown").disabled=!state.capability.shutdown_configured;
+    if(!state.capability.shutdown_configured){
+      document.querySelector("#nas-shutdown-status").textContent="NAS shutdown is not enabled in configuration or at the broker gate.";
+    }
+  } catch(error) { summary.textContent=`NAS status unavailable: ${error.message||"unknown error"}`; }
+}
+
+async function wakeNas() {
+  const button=document.querySelector("#nas-wake"); const status=document.querySelector("#nas-action-status");
+  button.disabled=true; status.textContent="Submitting the fixed NAS wake action…";
+  try {
+    let result=(await api("/api/admin/tools/wake-nas",{method:"POST",body:JSON.stringify({})})).value;
+    if(result.status==="authentication_required"){
+      status.textContent="Passkey authentication required…";
+      result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
+    }
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("NAS wake was not queued");
+    await waitForAdminAction(result.jobs[0].job_id);
+    // Deliberate wording: one packet left this host. Boot is decided by polling.
+    status.textContent="Wake packet sent. Polling current state to see whether the NAS boots…";
+  } catch(error) { status.textContent=`Wake NAS failed: ${error.message||"unknown error"}`; }
+  finally { button.disabled=false; await refreshNas(); }
+}
+
+function confirmPanel(node, message, onConfirm) {
+  node.replaceChildren();
+  const text=document.createElement("p"); text.textContent=message;
+  const row=document.createElement("div"); row.className="button-row";
+  const yes=document.createElement("button"); yes.className="danger-button"; yes.type="button"; yes.textContent="Confirm";
+  const no=document.createElement("button"); no.className="secondary-button"; no.type="button"; no.textContent="Cancel";
+  no.addEventListener("click",()=>{node.hidden=true;});
+  yes.addEventListener("click",()=>{node.hidden=true; onConfirm();});
+  row.append(yes,no); node.append(text,row); node.hidden=false;
+}
+
+async function shutdownNas() {
+  const status=document.querySelector("#nas-shutdown-status");
+  status.textContent="Submitting the fixed NAS shutdown action…";
+  try {
+    let result=(await api("/api/admin/tools/shutdown-nas",{method:"POST",body:JSON.stringify({confirm:true})})).value;
+    if(result.status==="authentication_required"){
+      status.textContent="Fresh passkey authentication bound to this exact action is required…";
+      result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
+    }
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("NAS shutdown was not queued");
+    await waitForAdminAction(result.jobs[0].job_id);
+    status.textContent="Shutdown requested. Polling current state…";
+  } catch(error) { status.textContent=`Shut Down NAS failed: ${error.message||"unknown error"}`; }
+  finally { await refreshNas(); }
+}
+
+/* ---------- Portal enrollment ---------- */
+
+async function refreshPortalIdentities() {
+  try {
+    const data=(await api("/api/admin/portal/identities")).value;
+    const container=document.querySelector("#portal-identity-list"); container.replaceChildren();
+    for(const item of data.identities){
+      const row=document.createElement("article"); row.className="data-row";
+      const content=document.createElement("div");
+      const title=document.createElement("h3"); title.textContent=`${item.label} · ${item.identity}`;
+      const detail=document.createElement("p"); detail.textContent=`${item.roles.join(", ")}${item.revoked?" · revoked":""}`;
+      content.append(title,detail); row.append(content);
+      if(!item.revoked){
+        const revoke=document.createElement("button"); revoke.className="secondary-button"; revoke.textContent="Revoke access";
+        revoke.addEventListener("click",()=>revokePortalIdentity(item.identity));
+        row.append(revoke);
+      }
+      container.append(row);
+    }
+    for(const invite of data.pending_invites){
+      const row=document.createElement("article"); row.className="data-row";
+      const content=document.createElement("div");
+      const title=document.createElement("h3"); title.textContent=`Pending invitation · ${invite.identity}`;
+      const detail=document.createElement("p"); detail.textContent=`${invite.label} · expires ${new Date(invite.expires_at*1000).toLocaleString()}`;
+      content.append(title,detail); row.append(content); container.append(row);
+    }
+  } catch(error) { document.querySelector("#portal-invite-status").textContent=error.message||"unknown error"; }
+}
+
+async function createPortalInvite() {
+  const status=document.querySelector("#portal-invite-status");
+  const identity=document.querySelector("#portal-identity").value.trim();
+  const label=document.querySelector("#portal-label").value.trim();
+  if(!identity||!label){status.textContent="An identity and a label are both required.";return;}
+  try {
+    const result=(await api("/api/admin/portal/invite",{method:"POST",body:JSON.stringify({identity,label})})).value;
+    // Shown once, in the administrator's own browser, and never stored here.
+    status.textContent=`Invitation for ${result.identity}: ${result.invite_token} — give this to them over a channel you trust. It is single-use and expires ${new Date(result.expires_at*1000).toLocaleString()}.`;
+    await refreshPortalIdentities();
+  } catch(error) { status.textContent=`Invitation failed: ${error.message||"unknown error"}`; }
+}
+
+async function revokePortalIdentity(identity) {
+  if(!confirm(`Revoke portal access for ${identity}?`))return;
+  try { await api("/api/admin/portal/revoke",{method:"POST",body:JSON.stringify({identity})}); await refreshPortalIdentities(); }
+  catch(error) { document.querySelector("#portal-invite-status").textContent=error.message||"unknown error"; }
+}
+
+/* ---------- wiring ---------- */
+
+document.querySelector("#desktop-refresh").addEventListener("click",refreshDesktop);
+document.querySelector("#desktop-ssh-test").addEventListener("click",async()=>{
+  const summary=document.querySelector("#desktop-result-summary");
+  summary.textContent="SSH Test: probing…";
+  try {
+    const result=(await api("/api/admin/tools/desktop/ssh-test",{method:"POST",body:JSON.stringify({})})).value;
+    summary.textContent=`SSH Test: port ${AXIS_TEXT[result.ssh]||result.ssh} (TCP connect only — no session, no command).`;
+    document.querySelector("#desktop-result").textContent=pretty(result);
+  } catch(error) { summary.textContent=`SSH Test failed: ${error.message||"unknown error"}`; }
+  await refreshDesktop();
+});
+document.querySelector("#desktop-wake").addEventListener("click",()=>runDesktopAction("Wake Desktop",()=>api("/api/admin/tools/desktop/wake",{method:"POST",body:JSON.stringify({})})));
+document.querySelector("#desktop-streaming").addEventListener("click",()=>runDesktopAction("Prepare for Streaming",()=>api("/api/admin/tools/desktop/streaming",{method:"POST",body:JSON.stringify({})})));
+document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
+  confirmPanel(document.querySelector("#desktop-shutdown-confirm"),
+    "This ends every interactive desktop session, including Parsec, and any running build.",
+    ()=>runDesktopAction("Shut Down Desktop",()=>api("/api/admin/tools/desktop/shutdown",{method:"POST",body:JSON.stringify({})})));
+});
+document.querySelector("#nas-refresh").addEventListener("click",refreshNas);
+document.querySelector("#nas-wake").addEventListener("click",wakeNas);
+document.querySelector("#nas-shutdown").addEventListener("click",()=>{
+  confirmPanel(document.querySelector("#nas-shutdown-confirm"),
+    "This powers the NAS off. Jellyfin and every share it serves stop until it is woken again.",
+    shutdownNas);
+});
+document.querySelector("#portal-invite").addEventListener("click",createPortalInvite);

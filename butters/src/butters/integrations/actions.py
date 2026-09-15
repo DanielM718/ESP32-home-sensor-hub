@@ -16,6 +16,7 @@ from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
+from butters.integrations.nas_status import NasStatusObserver
 
 
 class HostStatusAdapter:
@@ -123,24 +124,80 @@ class FixedActionAdapter:
 
 
 class NasAdapter:
+    """One fixed NAS: observe it, wake it, or power it off.
+
+    The adapter owns no addressing of its own. Wake and shutdown name a broker
+    operation and nothing else; observation is delegated to the configured
+    status observer. There is no call here that accepts a host, address, port,
+    URL, credential, command, or argv from any caller.
+    """
+
     def __init__(
-        self, settings: KnownDeviceSettings, actions: FixedActionAdapter
+        self,
+        settings: KnownDeviceSettings,
+        actions: FixedActionAdapter,
+        *,
+        observer: NasStatusObserver | None = None,
+        shutdown_settings: KnownDeviceSettings | None = None,
     ) -> None:
         self.settings = settings
         self.actions = actions
+        self.observer = observer
+        # Shutdown is gated separately from wake so enabling wake can never
+        # imply the ability to power the NAS off.
+        self.shutdown_settings = shutdown_settings or KnownDeviceSettings()
 
     def status(self) -> dict[str, object]:
-        return {
+        base: dict[str, object] = {
             "device": "nas",
             "configured": self.settings.configured,
             "enabled": self.settings.enabled,
+            "shutdown_configured": self.shutdown_settings.configured,
+            "shutdown_enabled": self.shutdown_settings.enabled,
             "network_reachable": None,
             "status": "unconfigured" if not self.settings.configured else "unknown",
         }
+        if self.observer is None or not self.observer.configured:
+            base["observed"] = False
+            return base
+        observation = self.observer.observe()
+        base["observed"] = True
+        base["status"] = observation.aggregate.value
+        base["network_reachable"] = observation.lan.value == "reachable"
+        base.update(observation.safe_dict())
+        return base
+
+    def observe(
+        self, *, wake_requested_at: float | None = None, refresh: bool = False
+    ) -> dict[str, object]:
+        if self.observer is None or not self.observer.configured:
+            raise IntegrationError(
+                "capability_unavailable", "NAS observation is not configured"
+            )
+        return self.observer.observe(
+            wake_requested_at=wake_requested_at, refresh=refresh
+        ).safe_dict()
 
     def wake(self, cancel_event: threading.Event | None = None) -> dict[str, object]:
         self._require()
-        return self.actions.execute(BrokerOperation.NAS_WAKE, cancel_event=cancel_event)
+        result = self.actions.execute(
+            BrokerOperation.NAS_WAKE, cancel_event=cancel_event
+        )
+        # Truthful wording: a magic packet left the host. Whether the NAS boots
+        # is decided by the status observations, never by this result.
+        return {**result, "outcome": "wake_packet_sent"}
+
+    def shutdown(
+        self, cancel_event: threading.Event | None = None
+    ) -> dict[str, object]:
+        if not self.shutdown_settings.enabled or not self.shutdown_settings.configured:
+            raise IntegrationError(
+                "capability_unavailable", "NAS shutdown is not configured"
+            )
+        result = self.actions.execute(
+            BrokerOperation.NAS_SHUTDOWN, cancel_event=cancel_event
+        )
+        return {**result, "outcome": "shutdown_requested"}
 
     def _require(self) -> None:
         if not self.settings.enabled or not self.settings.configured:

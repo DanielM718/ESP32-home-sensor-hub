@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="theme-color" content="#111512">
+  <meta name="referrer" content="same-origin">
+  <title>Jellyfin Access</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+</head>
+<body class="portal-body">
+  <main class="portal-shell">
+    <header class="portal-head">
+      <div class="identity-mark small"><span>J</span></div>
+      <div><strong>Jellyfin Access</strong><small id="portal-identity-line">Checking your access…</small></div>
+    </header>
+
+    <section id="portal-signin" class="portal-card" hidden>
+      <h1>Sign in</h1>
+      <p>Use the passkey registered to you on this device. This page can wake the media server and take you to Jellyfin. It has no other controls.</p>
+      <div class="button-row"><button id="portal-authenticate" class="primary-button" type="button">Sign in with passkey</button></div>
+      <details class="portal-enroll">
+        <summary>I have an enrollment invitation</summary>
+        <p>An invitation is issued to one named person and can be used once. Registration is not open to anyone without one.</p>
+        <label>Your label<input id="portal-enroll-label" maxlength="80" placeholder="My phone"></label>
+        <label>Invitation<input id="portal-enroll-token" maxlength="200" autocomplete="off"></label>
+        <div class="button-row"><button id="portal-register" class="secondary-button" type="button">Register this device</button></div>
+      </details>
+      <p id="portal-signin-status" class="portal-status" role="status" aria-live="polite"></p>
+    </section>
+
+    <section id="portal-main" class="portal-card" hidden>
+      <div class="portal-state">
+        <h1 id="portal-headline">Checking…</h1>
+        <p id="portal-detail" class="portal-detail"></p>
+      </div>
+
+      <h2>Current</h2>
+      <div id="portal-observations" class="axis-grid" role="group" aria-label="Current observed state"></div>
+
+      <h2>Last operation</h2>
+      <p id="portal-last-operation" class="portal-note">Nothing has been requested yet.</p>
+
+      <div class="button-row">
+        <button id="portal-wake" class="primary-button" type="button">Wake NAS</button>
+        <button id="portal-retry" class="secondary-button" type="button">Retry Status</button>
+        <button id="portal-signout" class="secondary-button" type="button">Sign out</button>
+      </div>
+      <p id="portal-action-status" class="portal-status" role="status" aria-live="polite"></p>
+      <p class="portal-note">Where you land in Jellyfin is chosen by the server from your network location. This page cannot request a different destination.</p>
+    </section>
+  </main>
+  <script src="/assets/portal.js"></script>
+</body>
+</html>

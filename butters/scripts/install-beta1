@@ -161,6 +161,15 @@ command -v rsync >/dev/null || { echo "rsync is required" >&2; exit 2; }
 [[ -f "${butters_dir}/requirements.txt" ]] \
   || { echo "Butters requirements.txt is missing" >&2; exit 2; }
 [[ -d "${butters_dir}/models" ]] || { echo "Butters local models are missing" >&2; exit 2; }
+# butters.actions.agent and butters.skills.desktop_agent import
+# butters_agent.protocol, the wire contract shared with the Windows Desktop
+# Agent. It lives in a sibling checkout directory, so the rsync below does not
+# cover it and it has to be staged explicitly. Production has been serving the
+# live agent out of this in-tree copy; without this step an install would delete
+# it and take the connected Desktop Agent's backend with it.
+agent_package="$(dirname "${butters_dir}")/butters-agent/src/butters_agent"
+[[ -f "${agent_package}/protocol.py" ]] \
+  || { echo "Shared agent protocol is missing at ${agent_package}" >&2; exit 2; }
 
 # A production install must never ship the development authorization bypass.
 if grep -Eq '^[[:space:]]*development_mode[[:space:]]*=[[:space:]]*true' \
@@ -217,6 +226,8 @@ rsync -a --delete \
   --exclude '*.pyc' \
   --exclude .venv \
   "${butters_dir}/" "${staging_dir}/"
+rsync -a --delete --exclude __pycache__ --exclude '*.pyc' \
+  "${agent_package}/" "${staging_dir}/src/butters_agent/"
 # Freeze the snapshot before root executes anything out of it. Running as root,
 # rsync -a preserves the *source* owner, so without this the staged tree would
 # still be owned by the invoking user while the interpreter below runs as root.
