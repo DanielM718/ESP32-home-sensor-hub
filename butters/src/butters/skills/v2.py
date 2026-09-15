@@ -7,7 +7,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from butters.integrations.desktop import DesktopWorkflow
+from butters.integrations.desktop import STATUS_TIMEOUT_SECONDS, DesktopWorkflow
 from butters.integrations.history import DashboardHistoryAdapter, HistorySeries
 from butters.integrations.model import (
     IntegrationError,
@@ -617,7 +617,7 @@ def register_v2_skills(
             impl.authorize_desktop,
             impl.get_desktop_status,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
-            timeout=5,
+            timeout=STATUS_TIMEOUT_SECONDS,
         )
     )
     registry.register(

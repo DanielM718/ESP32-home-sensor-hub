@@ -298,3 +298,80 @@ def test_reachability_attempts_share_one_absolute_deadline() -> None:
     assert result["timed_out"] is True
     assert result["elapsed_ms"] == 500
     assert operations.timeouts == [("ssh", 0.5), ("network", 0.3)]
+
+
+# ---------------------------------------------------------------------------
+# The registered read deadline has to outlast one real status observation.
+# ---------------------------------------------------------------------------
+
+
+def test_registered_status_timeout_exceeds_the_workflow_budget() -> None:
+    """A deadline shorter than one observation hides the state it measured.
+
+    `get_desktop_status` was registered at 5s while a single observation against
+    a powered-off host costs about 7s: the desktop is named by mDNS, and a
+    failing `.local` lookup stalls in getaddrinfo before either probe's own
+    timeout can apply. The skill then failed `timeout`, every field projected as
+    `unknown`, and Admin reported "Desktop state unknown" instead of the
+    powered-off summary the probes had already established.
+    """
+
+    from butters.integrations.desktop import (
+        NAME_RESOLUTION_STALL_SECONDS,
+        NETWORK_ATTEMPT_TIMEOUT_SECONDS,
+        STATUS_TIMEOUT_SECONDS,
+        STATUS_WORST_CASE_SECONDS,
+    )
+    assert STATUS_WORST_CASE_SECONDS == (
+        NAME_RESOLUTION_STALL_SECONDS + NETWORK_ATTEMPT_TIMEOUT_SECONDS
+    )
+    assert STATUS_TIMEOUT_SECONDS > STATUS_WORST_CASE_SECONDS
+    # Bounded, not merely generous: a read skill must still fail closed.
+    assert STATUS_TIMEOUT_SECONDS <= 30
+
+    # Read the value off the real assistant registry rather than rebuilding it.
+    from butters.assistant import create_assistant
+    from butters.stt.normalization import DomainVocabulary
+
+    assistant = create_assistant(load_assistant_settings(), DomainVocabulary((), ()))
+    spec = assistant.skills.get("get_desktop_status")
+    assert spec is not None
+    assert spec.timeout_seconds == STATUS_TIMEOUT_SECONDS
+    assert spec.timeout_seconds > STATUS_WORST_CASE_SECONDS
+
+
+def test_powered_off_desktop_reports_not_reachable_rather_than_unknown() -> None:
+    """An off host is a known observation, not an absence of one."""
+
+    operations = Operations(network=[False], ssh=[False], parsec=[None])
+    state = _workflow(operations).status("desktop")
+    assert state.network_reachable is False
+    assert state.ssh_ready is False
+    assert state.observed is True
+    # Parsec is never probed when SSH is down, so it contributes no latency.
+    assert "parsec_status" not in operations.calls
+
+
+def test_unknown_parsec_stays_distinguishable_from_a_known_off_host() -> None:
+    """`False` and `None` must not collapse into one another."""
+
+    reachable = Operations(network=[True], ssh=[True], parsec=[None])
+    state = _workflow(reachable).status("desktop")
+    assert state.ssh_ready is True
+    assert state.parsec_ready is None
+
+    off = _workflow(Operations(network=[False], ssh=[False], parsec=[None])).status(
+        "desktop"
+    )
+    assert off.ssh_ready is False
+    assert off.parsec_ready is False
+
+
+def test_reachable_desktop_status_is_unchanged() -> None:
+    operations = Operations(network=[True], ssh=[True], parsec=[True])
+    state = _workflow(operations).status("desktop")
+    assert (state.network_reachable, state.ssh_ready, state.parsec_ready) == (
+        True,
+        True,
+        True,
+    )
