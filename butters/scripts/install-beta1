@@ -12,6 +12,7 @@ previous_dir="/opt/butters.previous"
 # Holds the N-2 tree only for the duration of a swap, so the rollback copy is
 # never absent while ${install_dir} is being replaced.
 superseded_dir="/opt/butters.superseded"
+deployment_name="DEPLOYMENT"
 state_dir="/var/lib/butters"
 config_dir="/etc/butters"
 unit_name="butters-web.service"
@@ -254,6 +255,44 @@ verify_runtime_dependencies \
 
 # 2c. Point the venv's console scripts at the path they will actually live at.
 retarget_runtime_venv "${staging_dir}" "${install_dir}"
+
+# 2c. Record the deployment identity INTO the staged tree, while it is still
+#     staging. Ordering is the whole point:
+#
+#     * it is written after the tree is complete, verified and byte-compiled, so
+#       the digest covers what will actually run;
+#     * it is written before the seal, so it receives the same ownership and
+#       modes as every other published file rather than being a root-only
+#       straggler;
+#     * it is written before the swap, so a run that fails anywhere earlier
+#       leaves /opt/butters and its existing record untouched and never claims a
+#       deployment that did not happen;
+#     * because it lives inside the tree, the single rename below publishes code
+#       and identity together -- they cannot disagree, and the replaced tree
+#       keeps its own record as it moves to ${previous_dir}.
+#
+#     The digest excludes bytecode and the record itself, since a file cannot
+#     contain its own hash. tree_digest_method is stored so a reader can
+#     reproduce the value without guessing.
+source_commit="$(git -C "${butters_dir}" rev-parse HEAD 2>/dev/null || echo unknown)"
+source_branch="$(git -C "${butters_dir}" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+staged_digest="$(
+  cd "${staging_dir}" && find . -xdev -type f \
+    ! -name '*.pyc' ! -path '*/__pycache__/*' ! -name "${deployment_name}" -print0 \
+    | sort -z | xargs -0 sha256sum | sha256sum | awk '{print $1}'
+)"
+cat >"${staging_dir}/${deployment_name}" <<JSON
+{
+  "commit": "${source_commit}",
+  "branch": "${source_branch}",
+  "source": "${butters_dir}",
+  "installed_at": "$(date -u +%Y-%m-%dT%H:%M:%S+00:00)",
+  "tree_digest": "${staged_digest}",
+  "installer": "install-beta1",
+  "tree_digest_method": "sha256 of sorted sha256sum over the installed tree, excluding *.pyc, __pycache__ and ${deployment_name}"
+}
+JSON
+echo "Recorded deployment ${source_commit:0:12} digest ${staged_digest:0:16}."
 
 # 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
 #    also covers the bytecode compileall just generated and establishes the final
