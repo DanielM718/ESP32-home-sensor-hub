@@ -17,6 +17,25 @@ from butters.integrations.model import IntegrationError
 
 NETWORK_ATTEMPT_TIMEOUT_SECONDS = 2.0
 SSH_ATTEMPT_TIMEOUT_SECONDS = 1.0
+# Failing name resolution is not covered by either probe's own timeout. The
+# configured desktop is named by mDNS, and resolving a `.local` name for a host
+# that is powered off blocks in getaddrinfo before create_connection's timeout
+# can begin to apply; the ping helper has to resolve the same name and is capped
+# only by its subprocess timeout. Measured against the real host while it was
+# off: getaddrinfo 5.02s then gaierror, create_connection(timeout=1.0) 5.02s
+# then gaierror, and ping -c1 -W1 exceeding its 2.0s cap -- about 7.0s for one
+# status observation.
+NAME_RESOLUTION_STALL_SECONDS = 5.0
+# What DesktopWorkflow.status() can cost when the desktop is actually off: one
+# stalled SSH resolution plus the separately-capped ping. Parsec is only probed
+# when SSH succeeded, so it adds nothing to this path.
+STATUS_WORST_CASE_SECONDS = (
+    NAME_RESOLUTION_STALL_SECONDS + NETWORK_ATTEMPT_TIMEOUT_SECONDS
+)
+# Registered ceiling for the read skill, with headroom over that worst case. It
+# has to exceed it: a skill deadline shorter than one observation makes every
+# field `unknown` and hides the powered-off state the probes actually measured.
+STATUS_TIMEOUT_SECONDS = 10.0
 
 
 @dataclass(frozen=True, slots=True)

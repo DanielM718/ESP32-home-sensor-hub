@@ -14,8 +14,11 @@ is installed.
 from __future__ import annotations
 
 import grp
+import json
 import os
 import pwd
+import re
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -25,6 +28,8 @@ import pytest
 
 
 INSTALLER = Path(__file__).resolve().parents[1] / "scripts" / "install-beta1"
+# The `butters/` subsystem directory the installer is invoked against.
+BUTTERS_DIR = Path(__file__).resolve().parents[1]
 
 # Every regular file the staged tree contains, as (relative path, source mode).
 # The executable entries mirror real staged content: helper scripts at 0700,
@@ -333,9 +338,16 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
     rsync = max(staging_copies)
     freeze = index_of('chown -h -R root:butters "${staging_dir}"')
     compile_step = index_of("-m compileall")
+    record = index_of('cat >"${staging_dir}/${deployment_name}" <<JSON')
     seal = index_of('normalize_application_tree "${staging_dir}"')
     swap = index_of('mv "${staging_dir}" "${install_dir}"')
     first_systemctl = min(i for i, line in enumerate(lines) if "systemctl" in line)
+
+    # The deployment record belongs inside the staged tree: written after the
+    # tree is complete and compiled, before the seal so it gets the published
+    # ownership and modes, and before the swap so a failed run never claims a
+    # deployment. One rename then publishes code and identity together.
+    assert compile_step < record < seal < swap
 
     # The freeze must land between staging and the first time root executes
     # anything out of the staged tree, so the snapshot cannot be swapped under
@@ -349,3 +361,90 @@ def test_installer_ordering_freezes_then_seals_then_swaps() -> None:
     # the rename rather than on the whole line.
     after_seal = [line.strip() for line in lines[seal + 1 :] if "${staging_dir}" in line]
     assert after_seal == ['if ! mv "${staging_dir}" "${install_dir}"; then']
+
+
+def _deployment_record_block() -> str:
+    """Extract the installer's own record-writing code, verbatim."""
+
+    source = INSTALLER.read_text(encoding="utf-8")
+    start = source.index('source_commit="$(git')
+    end = source.index("Recorded deployment", start)
+    end = source.index("\n", end) + 1
+    return source[start:end]
+
+
+def test_installer_deployment_record_is_valid_and_self_excluding(tmp_path) -> None:
+    """Run the shipped block against a temp tree rather than reinstalling.
+
+    This executes the installer's actual code, so the JSON shape, the field set
+    and the digest's exclusions are proven without touching /opt/butters.
+    """
+
+    staging = tmp_path / "staging"
+    (staging / "src").mkdir(parents=True)
+    (staging / "src" / "module.py").write_text("x = 1\n", encoding="utf-8")
+    cache = staging / "src" / "__pycache__"
+    cache.mkdir()
+    (cache / "module.cpython-313.pyc").write_bytes(b"\x00bytecode")
+
+    script = "\n".join(
+        [
+            "set -Eeuo pipefail",
+            f'butters_dir={shlex.quote(str(BUTTERS_DIR))}',
+            f"staging_dir={shlex.quote(str(staging))}",
+            'deployment_name="DEPLOYMENT"',
+            _deployment_record_block(),
+        ]
+    )
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+
+    record = json.loads((staging / "DEPLOYMENT").read_text(encoding="utf-8"))
+    assert set(record) == {
+        "commit",
+        "branch",
+        "source",
+        "installed_at",
+        "tree_digest",
+        "installer",
+        "tree_digest_method",
+    }
+    assert record["installer"] == "install-beta1"
+    assert re.fullmatch(r"[0-9a-f]{40}", record["commit"])
+    assert re.fullmatch(r"[0-9a-f]{64}", record["tree_digest"])
+    assert record["source"].endswith("/butters")
+    assert "DEPLOYMENT" in record["tree_digest_method"]
+
+    # The record cannot contain its own hash, so the digest must ignore it, and
+    # bytecode must not move the digest either.
+    first = record["tree_digest"]
+    (staging / "DEPLOYMENT").unlink()
+    (cache / "module.cpython-313.pyc").write_bytes(b"\x00different bytecode")
+    completed = subprocess.run(
+        ["bash", "-c", script], capture_output=True, text=True, check=False
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads((staging / "DEPLOYMENT").read_text())["tree_digest"] == first
+
+    # A real content change must move it.
+    (staging / "src" / "module.py").write_text("x = 2\n", encoding="utf-8")
+    (staging / "DEPLOYMENT").unlink()
+    subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=True)
+    assert json.loads((staging / "DEPLOYMENT").read_text())["tree_digest"] != first
+
+
+def test_installer_records_identity_only_inside_the_staged_tree() -> None:
+    """Nothing may write the record straight into the live install directory."""
+
+    source = INSTALLER.read_text(encoding="utf-8")
+    writes = [
+        line
+        for line in source.splitlines()
+        if "${deployment_name}" in line and ">" in line
+    ]
+    assert writes, "the installer must write a deployment record"
+    for line in writes:
+        assert "${staging_dir}" in line, line
+        assert "${install_dir}" not in line, line
