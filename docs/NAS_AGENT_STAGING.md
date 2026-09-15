@@ -40,6 +40,11 @@ and rollback action.
 4. **Read status:** invoke `nas.agent.status` and `nas.system.status`; compare
    only the bounded fields with local TrueNAS state. Confirm no key, raw JSON,
    network URL, or middleware body appears in responses or logs.
+   Observe the secret-safe monotonic phase records for WebSocket connect
+   (DNS, when configured, plus TCP/TLS/upgrade), SPKI,
+   authentication, each fixed RPC method, backend return, signed result send,
+   ACK, and result receipt. A cache miss should reuse the established
+   authenticated read-only socket; a transport timeout must invalidate it.
 5. **Jellyfin:** test healthy, stopped/unreachable, and non-200 health responses.
    Confirm the agent stays healthy while Jellyfin is down and only the fixed
    configured endpoint is contacted.

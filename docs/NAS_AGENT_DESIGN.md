@@ -157,6 +157,17 @@ exact 25.10 patch release and re-check its matching API documentation.
   still materially narrower than the separate dormant `FULL_ADMIN` shutdown
   user/key. [system.state](https://api.truenas.com/v25.10/api_methods_system.state.html),
   [system.info](https://api.truenas.com/v25.10/api_methods_system.info.html)
+- Read-only status calls share one serialized, authenticated middleware
+  WebSocket. Heartbeat collection and explicit status actions therefore cannot
+  compete for a reader or correlate the same JSON-RPC response. Request IDs
+  increase for the life of that socket. Any timeout, malformed frame, or
+  server-side closure invalidates the socket; the next attempt performs a new
+  TLS/SPKI check and authentication. A stale established socket may be retried
+  once, but only within the original end-to-end backend deadline.
+- The TrueNAS backend timeout is one operation budget covering lock wait,
+  connect, TLS/SPKI, authentication, and all three fixed status methods. It is
+  not restarted for each phase, so the 10-second agent-local bound remains
+  below the 30-second signed request/hub deadline.
 - TrueNAS 25.10 supports Custom App installation from YAML/Compose. A normal
   bridged container can reach the NAS's fixed LAN/MagicDNS WSS endpoint; host
   networking and a middleware socket mount are unnecessary and would enlarge

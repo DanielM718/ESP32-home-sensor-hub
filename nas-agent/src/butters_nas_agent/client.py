@@ -134,18 +134,35 @@ class Client:
         async def heartbeat() -> None:
             sequence = 0
             while True:
+                started = time.monotonic()
                 state = await asyncio.to_thread(self.engine.heartbeat_state)
+                collected = time.monotonic()
                 await send(
                     "heartbeat", seq=sequence, state=state, version=AGENT_VERSION
                 )
+                sent = time.monotonic()
                 self.engine.heartbeat_sent(sequence)
                 self.config.health_file.parent.mkdir(parents=True, exist_ok=True)
                 self.config.health_file.touch(mode=0o600, exist_ok=True)
+                LOG.info(
+                    json.dumps(
+                        {
+                            "event": "heartbeat_sent",
+                            "sequence": sequence,
+                            "backend_ms": round((collected - started) * 1000, 3),
+                            "send_ms": round((sent - collected) * 1000, 3),
+                            "total_ms": round((sent - started) * 1000, 3),
+                        },
+                        sort_keys=True,
+                    )
+                )
                 sequence += 1
                 await asyncio.sleep(self.config.heartbeat_seconds)
 
         async def execute(frame: dict[str, object], cancel: threading.Event) -> None:
             request_id = str(frame["request_id"])
+            action = str(frame["action"])
+            started = time.monotonic()
 
             async def expire() -> None:
                 issued_at = float(frame["issued_at"])
@@ -158,24 +175,33 @@ class Client:
                 result = self.cache.get(frame)
                 duplicate = result is not None
                 if result is None:
+                    backend_started = time.monotonic()
                     result = await asyncio.to_thread(
                         self.engine.invoke,
                         frame["action"],
                         frame["parameters"],
                         cancel,
                     )
+                    backend_ms = (time.monotonic() - backend_started) * 1000
                     self.cache.put(frame, result)
+                else:
+                    backend_ms = 0.0
+                send_started = time.monotonic()
                 await send(
                     "result", request_id=request_id, result=result, duplicate=duplicate
                 )
+                sent = time.monotonic()
                 LOG.info(
                     json.dumps(
                         {
                             "event": "result",
                             "request_id": request_id,
-                            "action": frame["action"],
+                            "action": action,
                             "success": result["success"],
                             "duplicate": duplicate,
+                            "backend_ms": round(backend_ms, 3),
+                            "send_ms": round((sent - send_started) * 1000, 3),
+                            "total_ms": round((sent - started) * 1000, 3),
                         }
                     )
                 )
@@ -210,6 +236,16 @@ class Client:
                         continue
                     request(frame, target=self.config.agent_id)
                     request_id = str(frame["request_id"])
+                    LOG.info(
+                        json.dumps(
+                            {
+                                "event": "request_received",
+                                "request_id": request_id,
+                                "action": frame["action"],
+                            },
+                            sort_keys=True,
+                        )
+                    )
                     self.cache.get(frame)
                     existing = active.get(request_id)
                     if existing:

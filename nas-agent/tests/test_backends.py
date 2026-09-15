@@ -1,4 +1,6 @@
 import json
+import logging
+import threading
 from pathlib import Path
 from typing import ClassVar
 
@@ -33,6 +35,8 @@ class RpcSocket:
         self.shutdown_result = shutdown_result
         self.error_method = error_method
         self.socket = self
+        self.transport_error_method = None
+        self.close_calls = 0
 
     def getpeercert(self, *, binary_form):
         assert binary_form is True
@@ -45,7 +49,7 @@ class RpcSocket:
         return None
 
     def close(self):
-        pass
+        self.close_calls += 1
 
     def send(self, raw):
         self.sent.append(json.loads(raw))
@@ -53,6 +57,8 @@ class RpcSocket:
     def recv(self, timeout):
         call = self.sent[-1]
         method = call["method"]
+        if method == self.transport_error_method:
+            raise TimeoutError
         if method == self.error_method:
             return json.dumps(
                 {"jsonrpc": "2.0", "id": call["id"], "error": {"code": -1}}
@@ -121,7 +127,169 @@ def test_status_reuses_only_a_recent_successful_snapshot():
 
     clock[0] = 15.1
     assert rpc.status() == first
-    assert len(socket.sent) == 8
+    assert len(socket.sent) == 7
+    assert [item["id"] for item in socket.sent] == list(range(1, 8))
+
+
+def test_status_reuses_one_authenticated_session_after_cache_expiry():
+    socket = RpcSocket()
+    clock = [10.0]
+    connections = 0
+
+    def connector(*_args, **_kwargs):
+        nonlocal connections
+        connections += 1
+        return socket
+
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=connector,
+        pin_verifier=lambda *_args: None,
+        monotonic=lambda: clock[0],
+    )
+    rpc._context = lambda: object()
+    rpc.status()
+    clock[0] += 6
+    rpc.status()
+    assert connections == 1
+    assert [item["method"] for item in socket.sent] == [
+        "auth.login_ex",
+        "system.state",
+        "system.version_short",
+        "system.info",
+        "system.state",
+        "system.version_short",
+        "system.info",
+    ]
+
+
+def test_stale_persistent_session_is_invalidated_and_reauthenticated_once():
+    first = RpcSocket()
+    second = RpcSocket()
+    sockets = [first, second]
+    clock = [10.0]
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=lambda *_args, **_kwargs: sockets.pop(0),
+        pin_verifier=lambda *_args: None,
+        monotonic=lambda: clock[0],
+    )
+    rpc._context = lambda: object()
+    rpc.status()
+    clock[0] += 6
+    first.transport_error_method = "system.state"
+    result = rpc.status()
+    assert result["system_state"] == "online"
+    assert first.close_calls == 1
+    assert [item["method"] for item in second.sent] == [
+        "auth.login_ex",
+        "system.state",
+        "system.version_short",
+        "system.info",
+    ]
+    assert sockets == []
+
+
+def test_timed_out_new_session_is_not_reused_by_the_next_request():
+    first = RpcSocket()
+    first.transport_error_method = "system.state"
+    second = RpcSocket()
+    sockets = [first, second]
+    rpc = TrueNasRpc(
+        _config(),
+        "read-key",
+        connector=lambda *_args, **_kwargs: sockets.pop(0),
+        pin_verifier=lambda *_args: None,
+    )
+    rpc._context = lambda: object()
+    with pytest.raises(ProtocolError, match="truenas_unavailable"):
+        rpc.status()
+    assert first.close_calls == 1
+    assert rpc.status()["system_state"] == "online"
+    assert [item["method"] for item in second.sent] == [
+        "auth.login_ex",
+        "system.state",
+        "system.version_short",
+        "system.info",
+    ]
+    assert sockets == []
+
+
+def test_heartbeat_and_explicit_status_overlap_share_one_backend_call():
+    entered = threading.Event()
+    release = threading.Event()
+
+    class BlockingSocket(RpcSocket):
+        blocked = False
+
+        def recv(self, timeout):
+            if self.sent[-1]["method"] == "system.state" and not self.blocked:
+                self.blocked = True
+                entered.set()
+                assert release.wait(timeout=1)
+            return super().recv(timeout)
+
+    socket = BlockingSocket()
+    rpc = _rpc(_config(), socket)
+    results = []
+    first = threading.Thread(target=lambda: results.append(rpc.status()))
+    second = threading.Thread(target=lambda: results.append(rpc.status()))
+    first.start()
+    assert entered.wait(timeout=1)
+    second.start()
+    release.set()
+    first.join(timeout=1)
+    second.join(timeout=1)
+    assert len(results) == 2
+    assert results[0] == results[1]
+    assert len(socket.sent) == 4
+
+
+def test_timing_logs_are_bounded_and_never_contain_key_material(caplog):
+    socket = RpcSocket()
+    with caplog.at_level(logging.INFO, logger="butters_nas_agent"):
+        _rpc(_config(), socket).status()
+    messages = "\n".join(record.message for record in caplog.records)
+    assert "truenas_connect" in messages
+    assert "truenas_spki" in messages
+    assert "truenas_authentication" in messages
+    assert "truenas_rpc" in messages
+    assert "read-key" not in messages
+
+
+def test_one_end_to_end_deadline_bounds_connect_authentication_and_methods():
+    clock = [0.0]
+    socket = RpcSocket()
+    receive_budgets = []
+    original_recv = socket.recv
+
+    def timed_recv(timeout):
+        receive_budgets.append(timeout)
+        clock[0] += 2.0
+        return original_recv(timeout)
+
+    socket.recv = timed_recv
+    connect_budgets = []
+
+    def connector(*_args, **kwargs):
+        connect_budgets.append(kwargs["open_timeout"])
+        clock[0] += 2.0
+        return socket
+
+    rpc = TrueNasRpc(
+        _config(timeout_seconds=10),
+        "read-key",
+        connector=connector,
+        pin_verifier=lambda *_args: None,
+        monotonic=lambda: clock[0],
+    )
+    rpc._context = lambda: object()
+    assert rpc.status()["system_state"] == "online"
+    assert connect_budgets == [10.0]
+    assert receive_budgets == [8.0, 6.0, 4.0, 2.0]
+    assert clock[0] == 10.0
 
 
 def test_failed_status_is_not_cached():

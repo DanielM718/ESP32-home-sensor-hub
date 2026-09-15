@@ -2,16 +2,20 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
+import logging
 import math
 import socket
 import ssl
 import threading
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 from websockets.sync.client import connect
@@ -19,6 +23,8 @@ from websockets.sync.client import connect
 from .config import AgentConfig
 from .protocol import MAX_FRAME, ProtocolError, canonical
 from .tls import verify_spki
+
+LOG = logging.getLogger("butters_nas_agent")
 
 
 def _bounded_text(value: object, limit: int) -> str | None:
@@ -34,11 +40,9 @@ class TrueNasRpc:
         "Butters NAS Agent approved shutdown",
         {"delay": None},
     )
-    # A heartbeat and an explicit status action may arrive together. TrueNAS
-    # middleware is local, but its WebSocket handshake can still serialize or
-    # rate-limit nearby sessions. Reuse only a very recent successful snapshot
-    # so callers share one bounded observation instead of opening overlapping
-    # authenticated sessions.
+    # A heartbeat and an explicit status action may arrive together. Reuse only
+    # a very recent successful snapshot; older observations share the one
+    # serialized persistent read session below.
     _STATUS_CACHE_SECONDS = 5.0
 
     def __init__(
@@ -59,6 +63,22 @@ class TrueNasRpc:
         self._monotonic = monotonic
         self._status_lock = threading.Lock()
         self._cached_status: tuple[float, dict[str, object]] | None = None
+        self._read_websocket: Any | None = None
+        self._read_request_id = 1
+
+    def _trace(self, event: str, started: float, **fields: object) -> None:
+        LOG.info(
+            json.dumps(
+                {
+                    "event": event,
+                    "elapsed_ms": round(
+                        max(0.0, self._monotonic() - started) * 1000, 3
+                    ),
+                    **fields,
+                },
+                sort_keys=True,
+            )
+        )
 
     def _context(self) -> ssl.SSLContext:
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
@@ -67,8 +87,20 @@ class TrueNasRpc:
         context.minimum_version = ssl.TLSVersion.TLSv1_2
         return context
 
+    def _remaining(self, deadline: float) -> float:
+        remaining = deadline - self._monotonic()
+        if remaining <= 0:
+            raise TimeoutError
+        return remaining
+
     def _call(
-        self, websocket: Any, request_id: int, method: str, params: list[object]
+        self,
+        websocket: Any,
+        request_id: int,
+        method: str,
+        params: list[object],
+        *,
+        deadline: float,
     ) -> object:
         if method not in {
             "auth.login_ex",
@@ -76,12 +108,29 @@ class TrueNasRpc:
             self._SHUTDOWN_METHOD,
         }:
             raise ProtocolError("invalid_action")
-        websocket.send(
-            canonical(
-                {"jsonrpc": "2.0", "id": request_id, "method": method, "params": params}
-            ).decode("ascii")
-        )
-        raw = websocket.recv(timeout=self.config.timeout_seconds)
+        started = self._monotonic()
+        outcome = "transport_error"
+        try:
+            websocket.send(
+                canonical(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": request_id,
+                        "method": method,
+                        "params": params,
+                    }
+                ).decode("ascii")
+            )
+            raw = websocket.recv(timeout=self._remaining(deadline))
+            outcome = "response"
+        finally:
+            self._trace(
+                "truenas_rpc",
+                started,
+                method=method,
+                request_id=request_id,
+                outcome=outcome,
+            )
         if not isinstance(raw, str) or len(raw.encode("utf-8")) > MAX_FRAME:
             raise ProtocolError("truenas_unavailable")
         try:
@@ -100,22 +149,50 @@ class TrueNasRpc:
             raise ProtocolError("truenas_refused")
         return response["result"]
 
-    def _session(self, api_key: str) -> Any:
-        websocket = self._connector(
-            self.config.truenas_url,
-            ssl=self._context(),
-            open_timeout=self.config.timeout_seconds,
-            close_timeout=1,
-            max_size=MAX_FRAME,
-            max_queue=4,
-            compression=None,
-            proxy=None,
+    def _session(self, api_key: str, *, deadline: float) -> Any:
+        hostname = urlsplit(self.config.truenas_url).hostname
+        try:
+            address_kind = (
+                "ip_literal"
+                if hostname and ipaddress.ip_address(hostname)
+                else "hostname"
+            )
+        except ValueError:
+            address_kind = "hostname"
+        connect_started = self._monotonic()
+        try:
+            websocket = self._connector(
+                self.config.truenas_url,
+                ssl=self._context(),
+                open_timeout=self._remaining(deadline),
+                close_timeout=1,
+                max_size=MAX_FRAME,
+                max_queue=4,
+                compression=None,
+                proxy=None,
+            )
+        except Exception:
+            self._trace(
+                "truenas_connect",
+                connect_started,
+                outcome="failed",
+                address_kind=address_kind,
+            )
+            raise
+        self._trace(
+            "truenas_connect",
+            connect_started,
+            outcome="connected",
+            address_kind=address_kind,
         )
         try:
             # The appliance default certificate is commonly self-signed and
             # valid only for localhost. Pin the reviewed local middleware key
             # before the API key crosses the socket.
+            pin_started = self._monotonic()
             self._pin_verifier(websocket.socket, self.config.truenas_spki_sha256)
+            self._trace("truenas_spki", pin_started, outcome="verified")
+            auth_started = self._monotonic()
             login = self._call(
                 websocket,
                 1,
@@ -128,35 +205,100 @@ class TrueNasRpc:
                         "login_options": {"user_info": False},
                     }
                 ],
+                deadline=deadline,
             )
             if type(login) is not dict or login.get("response_type") != "SUCCESS":
                 raise ProtocolError("truenas_authentication_failed")
+            self._trace(
+                "truenas_authentication", auth_started, outcome="authenticated"
+            )
         except Exception:
             websocket.close()
             raise
         return websocket
 
+    def _invalidate_read_session(self, reason: str) -> None:
+        websocket = self._read_websocket
+        self._read_websocket = None
+        self._read_request_id = 1
+        if websocket is not None:
+            with suppress(Exception):
+                websocket.close()
+        LOG.info(json.dumps({"event": "truenas_session_invalidated", "reason": reason}))
+
+    def _next_read_request_id(self) -> int:
+        self._read_request_id += 1
+        return self._read_request_id
+
     def status(self) -> dict[str, object]:
+        waiting = self._monotonic()
+        deadline = waiting + self.config.timeout_seconds
         with self._status_lock:
+            lock_wait_ms = round(
+                max(0.0, self._monotonic() - waiting) * 1000, 3
+            )
             now = self._monotonic()
             if (
                 self._cached_status is not None
                 and now - self._cached_status[0] <= self._STATUS_CACHE_SECONDS
             ):
+                self._trace(
+                    "truenas_status",
+                    waiting,
+                    outcome="cache_hit",
+                    lock_wait_ms=lock_wait_ms,
+                )
                 return dict(self._cached_status[1])
-            result = self._fresh_status()
+            result = self._fresh_status(deadline=deadline)
             self._cached_status = (self._monotonic(), result)
+            self._trace(
+                "truenas_status",
+                waiting,
+                outcome="fresh",
+                lock_wait_ms=lock_wait_ms,
+            )
             return dict(result)
 
-    def _fresh_status(self) -> dict[str, object]:
+    def _fresh_status(self, *, deadline: float) -> dict[str, object]:
+        reused_session = self._read_websocket is not None
         try:
-            with self._session(self._read_api_key) as websocket:
-                state = self._call(websocket, 2, "system.state", [])
-                version = self._call(websocket, 3, "system.version_short", [])
-                info = self._call(websocket, 4, "system.info", [])
-        except ProtocolError:
+            if self._read_websocket is None:
+                self._read_websocket = self._session(
+                    self._read_api_key, deadline=deadline
+                )
+                self._read_request_id = 1
+            websocket = self._read_websocket
+            state = self._call(
+                websocket,
+                self._next_read_request_id(),
+                "system.state",
+                [],
+                deadline=deadline,
+            )
+            version = self._call(
+                websocket,
+                self._next_read_request_id(),
+                "system.version_short",
+                [],
+                deadline=deadline,
+            )
+            info = self._call(
+                websocket,
+                self._next_read_request_id(),
+                "system.info",
+                [],
+                deadline=deadline,
+            )
+        except ProtocolError as exc:
+            self._invalidate_read_session(str(exc))
             raise
         except Exception:  # noqa: BLE001 - transport details can contain secrets/URLs.
+            self._invalidate_read_session("transport_error")
+            if reused_session:
+                # A server-closed or otherwise ambiguous persistent session is
+                # never reused. Retry once on a newly pinned/authenticated
+                # stream; a fresh-connect failure remains a bounded failure.
+                return self._fresh_status(deadline=deadline)
             raise ProtocolError("truenas_unavailable") from None
         if state not in {"BOOTING", "READY", "SHUTTING_DOWN"} or type(info) is not dict:
             raise ProtocolError("truenas_malformed_response")
@@ -180,13 +322,15 @@ class TrueNasRpc:
             raise ProtocolError("operation_disabled")
         if self._shutdown_api_key is None:
             raise ProtocolError("shutdown_credential_unavailable")
+        deadline = self._monotonic() + self.config.timeout_seconds
         try:
-            with self._session(self._shutdown_api_key) as websocket:
+            with self._session(self._shutdown_api_key, deadline=deadline) as websocket:
                 result = self._call(
                     websocket,
                     2,
                     self._SHUTDOWN_METHOD,
                     list(self._SHUTDOWN_PARAMS),
+                    deadline=deadline,
                 )
         except ProtocolError:
             raise

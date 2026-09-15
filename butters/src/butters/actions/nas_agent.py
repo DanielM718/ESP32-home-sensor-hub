@@ -6,6 +6,8 @@ import asyncio
 import concurrent.futures
 import hashlib
 import hmac
+import json
+import logging
 import math
 import secrets
 import threading
@@ -23,6 +25,8 @@ from butters.actions import nas_protocol as protocol
 from butters.actions.file_security import require_private_regular_file
 from butters.assistant_config import NasAgentIngressSettings
 
+LOG = logging.getLogger("butters.actions.nas_agent")
+
 
 @dataclass(frozen=True, slots=True)
 class _Credentials:
@@ -38,6 +42,9 @@ class _Pending:
     action: str
     acknowledged: asyncio.Event
     result: asyncio.Future[dict[str, object]]
+    started_at: float
+    sent_at: float | None = None
+    acknowledged_at: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -265,7 +272,13 @@ class NasAgentHub:
         idempotency_key: str,
     ) -> dict[str, object]:
         loop = asyncio.get_running_loop()
-        pending = _Pending(connection_id, action, asyncio.Event(), loop.create_future())
+        pending = _Pending(
+            connection_id,
+            action,
+            asyncio.Event(),
+            loop.create_future(),
+            self._monotonic(),
+        )
         if (
             len(self._pending) >= self.settings.max_pending_requests
             or request_id in self._pending
@@ -293,6 +306,20 @@ class NasAgentHub:
                 protocol.canonical(
                     protocol.sign(frame, self._credentials.command_key)
                 ).decode("ascii")
+            )
+            pending.sent_at = self._monotonic()
+            LOG.info(
+                json.dumps(
+                    {
+                        "event": "nas_agent_request_sent",
+                        "request_id": request_id,
+                        "action": action,
+                        "send_ms": round(
+                            max(0.0, pending.sent_at - pending.started_at) * 1000, 3
+                        ),
+                    },
+                    sort_keys=True,
+                )
             )
             sent = True
             started = loop.time()
@@ -493,7 +520,23 @@ class NasAgentHub:
         if kind == "ack":
             if set(frame) != base or pending.acknowledged.is_set():
                 raise protocol.ProtocolError("replayed_message")
+            pending.acknowledged_at = self._monotonic()
             pending.acknowledged.set()
+            LOG.info(
+                json.dumps(
+                    {
+                        "event": "nas_agent_ack_received",
+                        "request_id": request_id,
+                        "action": pending.action,
+                        "elapsed_ms": round(
+                            max(0.0, pending.acknowledged_at - pending.started_at)
+                            * 1000,
+                            3,
+                        ),
+                    },
+                    sort_keys=True,
+                )
+            )
             return
         if kind == "result":
             value = frame.get("result")
@@ -506,6 +549,32 @@ class NasAgentHub:
             ):
                 raise protocol.ProtocolError("malformed_result")
             pending.result.set_result(dict(value))
+            received_at = self._monotonic()
+            LOG.info(
+                json.dumps(
+                    {
+                        "event": "nas_agent_result_received",
+                        "request_id": request_id,
+                        "action": pending.action,
+                        "ack_ms": (
+                            None
+                            if pending.acknowledged_at is None
+                            else round(
+                                max(
+                                    0.0,
+                                    pending.acknowledged_at - pending.started_at,
+                                )
+                                * 1000,
+                                3,
+                            )
+                        ),
+                        "total_ms": round(
+                            max(0.0, received_at - pending.started_at) * 1000, 3
+                        ),
+                    },
+                    sort_keys=True,
+                )
+            )
             return
         if kind == "error":
             error = frame.get("error")
