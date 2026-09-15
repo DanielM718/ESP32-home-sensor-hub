@@ -1,0 +1,66 @@
+# Dormant TrueNAS SCALE 25.10 "Install via YAML" definition.
+# Before staging, publish the reviewed Dockerfile and replace the placeholder
+# with its immutable digest. Do not add the shutdown secret or CLI argument
+# until a separately approved destructive hardware test.
+services:
+  nas-agent:
+    image: ghcr.io/danielm718/butters-nas-agent@sha256:REPLACE_WITH_REVIEWED_DIGEST
+    user: "568:568"
+    command:
+      - --config
+      - /config/agent.toml
+      - --agent-credentials
+      - /run/secrets/butters_agent_credentials
+      - --truenas-read-key
+      - /run/secrets/truenas_read_api_key
+    restart: unless-stopped
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+      - /run/butters-nas-agent:size=1m,mode=0700,uid=568,gid=568
+    volumes:
+      - /mnt/REPLACE/butters-nas-agent/config:/config:ro
+    secrets:
+      - source: butters_agent_credentials
+        target: butters_agent_credentials
+        uid: "568"
+        gid: "568"
+        mode: 0400
+      - source: truenas_read_api_key
+        target: truenas_read_api_key
+        uid: "568"
+        gid: "568"
+        mode: 0400
+      - source: truenas_ca
+        target: truenas_ca.pem
+        uid: "568"
+        gid: "568"
+        mode: 0444
+    healthcheck:
+      test: ["CMD", "butters-nas-agent", "--healthcheck", "/run/butters-nas-agent/last-heartbeat"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "3"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.50"
+          memory: 256M
+
+secrets:
+  butters_agent_credentials:
+    file: /mnt/REPLACE/butters-nas-agent/secrets/butters-agent-credentials.json
+  truenas_read_api_key:
+    file: /mnt/REPLACE/butters-nas-agent/secrets/truenas-read-api-key
+  truenas_ca:
+    file: /mnt/REPLACE/butters-nas-agent/secrets/truenas-ca.pem

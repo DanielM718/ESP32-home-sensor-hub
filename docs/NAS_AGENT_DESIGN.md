@@ -212,4 +212,3 @@ shutdown secret and CLI option are absent.
   paths. No installer or `/opt/butters/DEPLOYMENT` change is part of this branch.
 - Production frontend controls remain dormant; the server-side lifecycle and
   fixed RBAC/auth flow are ready for a later explicitly approved UI slice.
-
