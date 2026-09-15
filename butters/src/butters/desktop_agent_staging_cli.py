@@ -12,6 +12,7 @@ from pathlib import Path
 
 from butters_agent.protocol import NAME
 
+from butters.assistant_config import AgentIngressSettings
 from butters.desktop_agent_staging import (
     STAGING_VALIDATION_SOCKET,
     load_staging_settings,
@@ -75,6 +76,29 @@ def _request(method: str, path: str, timeout: float) -> dict[str, object]:
         connection.close()
 
 
+def _request_timeout_seconds(config: Path) -> float:
+    """Resolve only the client-side socket bound.
+
+    Operator separation deliberately denies the `butters-staging-ops` group read
+    access to service-owned staging configuration, so an authorized operator
+    running this CLI cannot open that file -- which previously made every
+    validation command fail with PermissionError before it reached the socket.
+
+    The value read here is nothing but a local timeout. The daemon loads and
+    validates its own configuration at startup, and verifies the socket's type,
+    owner, group, and mode before serving it, so falling back to the reviewed
+    default grants the operator no access and relaxes no boundary. Any error
+    other than permission still propagates.
+    """
+
+    try:
+        settings = load_staging_settings(config)
+    except PermissionError:
+        return AgentIngressSettings().request_timeout_seconds
+    validate_staging_settings(config, settings)
+    return settings.agent_ingress.request_timeout_seconds
+
+
 def main() -> int:
     options = parser().parse_args()
     config = Path(
@@ -82,14 +106,12 @@ def main() -> int:
             "BUTTERS_STAGING_CONFIG", "/etc/butters-staging/assistant.toml"
         )
     )
-    settings = load_staging_settings(config)
-    validate_staging_settings(config, settings)
     method, path = _selected_route(options)
     try:
         payload = _request(
             method,
             path,
-            settings.agent_ingress.request_timeout_seconds + 12,
+            _request_timeout_seconds(config) + 12,
         )
     except (OSError, TypeError, ValueError, json.JSONDecodeError):
         print(json.dumps({"ok": False, "error": "staging_unavailable"}))

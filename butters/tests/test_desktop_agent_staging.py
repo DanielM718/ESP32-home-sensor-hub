@@ -870,3 +870,54 @@ def test_staging_code_has_no_fault_injection_or_generic_agent_invocation():
     assert "fault_injection" not in source
     assert "hub._request" not in source
     assert "launch_app(" not in source
+
+
+def test_operator_cli_does_not_require_service_owned_configuration(
+    tmp_path, monkeypatch
+) -> None:
+    """An authorized operator cannot read the daemon's config, by design.
+
+    `butters-staging-ops` grants the four fixed validation operations and
+    deliberately not staging-secret access, so the CLI must not depend on
+    opening a `butters-staging:root` 0600 file. It previously did, which made
+    every operator command fail with PermissionError before reaching the socket.
+    """
+
+    from butters.assistant_config import AgentIngressSettings
+    from butters.desktop_agent_staging_cli import _request_timeout_seconds
+
+    unreadable = tmp_path / "assistant.toml"
+    unreadable.write_text("[staging]\n")
+
+    def deny(*_args, **_kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(
+        "butters.desktop_agent_staging_cli.load_staging_settings", deny
+    )
+    assert (
+        _request_timeout_seconds(unreadable)
+        == AgentIngressSettings().request_timeout_seconds
+    )
+
+
+def test_operator_cli_still_validates_configuration_it_can_read(
+    tmp_path, monkeypatch
+) -> None:
+    """Root keeps the full read-and-validate path; only permission falls back."""
+
+    from butters.desktop_agent_staging_cli import _request_timeout_seconds
+
+    calls: list[str] = []
+
+    def loaded(_path):
+        calls.append("load")
+        raise ValueError("staging_loopback_required")
+
+    monkeypatch.setattr(
+        "butters.desktop_agent_staging_cli.load_staging_settings", loaded
+    )
+    # A genuine configuration fault must still surface, not be swallowed.
+    with pytest.raises(ValueError, match="staging_loopback_required"):
+        _request_timeout_seconds(tmp_path / "assistant.toml")
+    assert calls == ["load"]
