@@ -68,11 +68,12 @@ connect_timeout_seconds = 2.0
 request_timeout_seconds = 30.0
 max_message_bytes = 8192
 
-# Observer-only Desktop Agent ingress. This application gate must be enabled in
-# addition to installing/enabling the separate private TLS ingress service.
-# Machine credentials live in the root-managed file, never in this config.
+# Desktop Agent ingress. This application gate is enabled alongside the private
+# TLS ingress service; machine credentials live in the root-managed file named
+# by config_path and never in this config. The hardware validation for this path
+# was performed in the isolated staging environment before production migration.
 [agent_ingress]
-enabled = false
+enabled = true
 config_path = "/etc/butters/desktop-agent.toml"
 protocol_version = 1
 hello_timeout_seconds = 5
