@@ -1,0 +1,6 @@
+# Root-owned (0600) Butters-side NAS Agent identity. Values are examples only.
+schema_version = 1
+agent_id = "nas-primary"
+token_sha256 = "REPLACE_WITH_SHA256_OF_DISTINCT_32_BYTE_NAS_MACHINE_TOKEN"
+command_key_file = "/etc/butters/credentials/nas-agent-command-key"
+protocol_version = 1

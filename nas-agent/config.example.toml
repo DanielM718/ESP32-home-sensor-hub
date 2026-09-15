@@ -1,0 +1,21 @@
+schema_version = 1
+
+[agent]
+url = "wss://sensor-pi.tail9644cc.ts.net:8443/nas-agent/v1/session"
+agent_id = "nas-primary"
+spki_sha256 = "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS_BEFORE_STAGING"
+heartbeat_seconds = 15
+health_file = "/run/butters-nas-agent/last-heartbeat"
+
+[truenas]
+# Must name the certificate-valid local WSS endpoint on the exact appliance.
+url = "wss://truenas-scale.tail9644cc.ts.net/api/current"
+username = "butters_nas_status"
+ca_file = "/run/secrets/truenas_ca.pem"
+timeout_seconds = 5
+# Dormant by construction. Enabling also requires a separate FULL_ADMIN key file.
+shutdown_enabled = false
+
+[jellyfin]
+url = "http://192.168.1.240:8096"
+health_path = "/health"
