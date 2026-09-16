@@ -1,8 +1,10 @@
 import hashlib
 import json
+import logging
 from pathlib import Path
 
 import pytest
+from butters_nas_agent.__main__ import SafeJsonFormatter
 from butters_nas_agent.client import healthcheck
 from butters_nas_agent.config import load_agent_credentials, load_api_key, load_config
 from butters_nas_agent.protocol import ProtocolError
@@ -113,3 +115,36 @@ def test_spki_pin_mismatch_fails_before_machine_auth(monkeypatch):
     verify_spki(TlsObject(), expected)
     with pytest.raises(ProtocolError, match="server_identity_mismatch"):
         verify_spki(TlsObject(), "0" * 64)
+
+
+def test_safe_formatter_preserves_timing_fields_but_drops_unapproved_values():
+    record = logging.LogRecord(
+        "butters_nas_agent",
+        logging.INFO,
+        __file__,
+        1,
+        json.dumps(
+            {
+                "event": "truenas_connect",
+                "outcome": "connected",
+                "address_kind": "ip_literal",
+                "elapsed_ms": 12.345,
+                "backend_ms": 15.0,
+                "method": "system.info",
+                "api_key": "must-not-appear",
+                "url": "must-not-appear",
+            }
+        ),
+        (),
+        None,
+    )
+    value = json.loads(SafeJsonFormatter().format(record))
+    assert value["event"] == "truenas_connect"
+    assert value["outcome"] == "connected"
+    assert value["address_kind"] == "ip_literal"
+    assert value["elapsed_ms"] == 12.345
+    assert value["backend_ms"] == 15.0
+    assert value["method"] == "system.info"
+    assert "api_key" not in value
+    assert "url" not in value
+    assert "must-not-appear" not in json.dumps(value)

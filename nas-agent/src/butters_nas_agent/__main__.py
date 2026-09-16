@@ -28,6 +28,16 @@ class SafeJsonFormatter(logging.Formatter):
                 "success",
                 "duplicate",
                 "count",
+                "sequence",
+                "method",
+                "outcome",
+                "address_kind",
+                "elapsed_ms",
+                "lock_wait_ms",
+                "backend_ms",
+                "send_ms",
+                "ack_ms",
+                "total_ms",
             }
             fields = {key: value for key, value in fields.items() if key in allowed}
         except (TypeError, ValueError, AttributeError):

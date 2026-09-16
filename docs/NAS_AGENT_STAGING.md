@@ -24,6 +24,10 @@ and rollback action.
   secrets directory. TrueNAS 25.10 Custom Apps materialize Compose `secrets`
   as root-owned bind mounts and ignore long-form `uid`, `gid`, and `mode`, so
   the reviewed definition uses explicit read-only file mounts instead.
+- Inspect the live Custom App network IPAM and set the NAS-local WSS URL to
+  that app network's actual host gateway. TrueNAS allocates Compose bridge
+  subnets dynamically; never infer the gateway from another app or an earlier
+  deployment. Recheck it after any operation that recreates the app network.
 
 ## Read-only acceptance
 
