@@ -2,11 +2,11 @@
 
 /* Jellyfin access portal.
  *
- * This client can do four things: sign in, read status, POST one wake, and
- * follow the destination the server chooses. It never names a host, an address,
- * an action, or a redirect target. The only URL it will ever navigate to is the
- * one the server returns from /api/portal/destination, and the server returns
- * that only when Jellyfin's own readiness probe currently passes.
+ * This client can sign in, read status, POST one wake, follow the destination
+ * the server chooses, and—only when independently authorized—complete the
+ * fixed NAS shutdown ceremony. It never names a host, address, action, method,
+ * mode, delay, or redirect target. The only URL it will ever navigate to is the
+ * server-returned Jellyfin destination.
  */
 
 let csrf = "";
@@ -120,8 +120,10 @@ async function refreshState(){
       ? `Wake packet sent ${ago(state.last_operation.age_seconds)}`
       : "Nothing has been requested yet.";
     const wake=document.querySelector("#portal-wake");
+    const shutdown=document.querySelector("#portal-shutdown");
     // Wake Again only when it is actually appropriate, and never automatically.
     wake.hidden=!state.can_wake;
+    shutdown.hidden=!state.can_shutdown;
     if(state.jellyfin_ready){await enterJellyfin();return;}
     if(state.poll_expired){
       stopPolling();
@@ -177,9 +179,31 @@ async function wake(){
   finally{button.disabled=false;}
 }
 
+async function shutdownNas(){
+  const button=document.querySelector("#portal-shutdown");
+  const status=document.querySelector("#portal-action-status");
+  if(!window.confirm("Shut down the NAS? Jellyfin will become unavailable."))return;
+  button.disabled=true;
+  try{
+    if(!window.PublicKeyCredential||!navigator.credentials)throw new Error("Passkeys are unavailable in this browser");
+    const plan=await api("/api/portal/shutdown/plan",{method:"POST",body:JSON.stringify({confirm:true})});
+    const pending=plan.pending_action;
+    status.textContent="Confirm this exact shutdown with your passkey…";
+    const begin=(await api("/api/portal/shutdown/authenticate/options",{method:"POST",body:JSON.stringify({pending_action_id:pending.pending_action_id})})).value;
+    const credential=await navigator.credentials.get({publicKey:authOptions(begin.publicKey)});
+    if(!credential)throw new Error("Shutdown confirmation cancelled");
+    await api("/api/portal/shutdown/authenticate/verify",{method:"POST",body:JSON.stringify({ceremony_id:begin.ceremony_id,credential:assertionJson(credential)})});
+    status.textContent="Shutdown request queued. Waiting for observed state…";
+    startPolling();
+    await refreshState();
+  }catch(error){status.textContent=error.message||"Shutdown request failed";}
+  finally{button.disabled=false;}
+}
+
 document.querySelector("#portal-authenticate").addEventListener("click",signIn);
 document.querySelector("#portal-register").addEventListener("click",register);
 document.querySelector("#portal-wake").addEventListener("click",wake);
+document.querySelector("#portal-shutdown").addEventListener("click",shutdownNas);
 document.querySelector("#portal-retry").addEventListener("click",refreshState);
 document.querySelector("#portal-signout").addEventListener("click",async()=>{
   stopPolling();

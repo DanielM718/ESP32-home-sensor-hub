@@ -991,6 +991,74 @@ def create_app(
         ) as exc:
             return _exception_response(exc)
 
+    async def portal_shutdown_plan(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"confirm"}:
+                raise ValueError("shutdown accepts only an explicit confirmation")
+            return JSONResponse(
+                await run_blocking(
+                    portal.prepare_shutdown,
+                    session,
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            PortalError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def portal_shutdown_auth_options(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"pending_action_id"}:
+                raise ValueError("pending_action_id is required")
+            return JSONResponse(
+                {
+                    "value": await run_blocking(
+                        portal.begin_shutdown_authentication,
+                        session,
+                        pending_action_id=_string_field(payload, "pending_action_id"),
+                    )
+                }
+            )
+        except (SecurityError, SessionError, PortalError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def portal_shutdown_auth_verify(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"ceremony_id", "credential"}:
+                raise ValueError("ceremony_id and credential are required")
+            ceremony_id, credential = _ceremony_body(payload)
+            return JSONResponse(
+                {
+                    "value": await run_blocking(
+                        portal.finish_shutdown_authentication,
+                        session,
+                        ceremony_id=ceremony_id,
+                        credential=credential,
+                    )
+                }
+            )
+        except (
+            SecurityError,
+            SessionError,
+            PortalError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+        except WebAuthnError as exc:
+            return _exception_response(exc)
+
     async def portal_destination(request: Request) -> Response:
         """Report the server-chosen Jellyfin URL, or nothing at all.
 
@@ -1978,6 +2046,17 @@ def create_app(
         Route("/api/portal/nas", portal_nas_status),
         # Wake is POST-only by construction: there is no GET route for it.
         Route("/api/portal/wake", portal_wake, methods=["POST"]),
+        Route("/api/portal/shutdown/plan", portal_shutdown_plan, methods=["POST"]),
+        Route(
+            "/api/portal/shutdown/authenticate/options",
+            portal_shutdown_auth_options,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/portal/shutdown/authenticate/verify",
+            portal_shutdown_auth_verify,
+            methods=["POST"],
+        ),
         Route("/api/portal/destination", portal_destination),
         Route("/api/admin/usage", usage),
         Route("/api/admin/security", security_status),
@@ -2005,6 +2084,10 @@ def create_app(
     if configured.agent_ingress.enabled:
         routes.insert(
             -3, WebSocketRoute("/agent/v1/session", runtime.desktop_agent.socket)
+        )
+    if configured.nas_agent_ingress.enabled:
+        routes.insert(
+            -3, WebSocketRoute("/nas-agent/v1/session", runtime.nas_agent.socket)
         )
 
     async def shutdown_workers() -> None:

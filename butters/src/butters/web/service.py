@@ -15,6 +15,7 @@ from pathlib import Path
 
 from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
+from butters.actions.nas_agent import NasAgentHub
 from butters.actions.store import ActionStateStore
 from butters.assistant import (
     AssistantResponse,
@@ -50,6 +51,7 @@ from butters.skills.model import (
     ActionClass,
     AuthenticationLevel,
 )
+from butters.skills.nas_agent import register_nas_agent_skills
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
 from butters.web.sessions import BrowserSession, SessionError, SessionManager
 from butters.web.speech import (
@@ -198,6 +200,15 @@ class BetaAssistantService:
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
         self.desktop_agent = AgentHub(settings.agent_ingress)
         register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
+        self.nas_agent = NasAgentHub(settings.nas_agent_ingress)
+        register_nas_agent_skills(
+            self.assistant.skills,
+            self.nas_agent,
+            shutdown_enabled=(
+                settings.actions.nas_shutdown.enabled
+                and settings.actions.nas_shutdown.configured
+            ),
+        )
         self.actions = ActionCoordinator(self.assistant.skills, self.action_state)
         self.planner_provider = planner_provider or DisabledPlannerProvider()
         self.planner_validator = PlannerValidator(
@@ -1391,15 +1402,19 @@ class BetaAssistantService:
             "wake_configured": self.settings.actions.nas.configured
             and self.settings.actions.nas.enabled,
             "shutdown_configured": self.settings.actions.nas_shutdown.configured
-            and self.settings.actions.nas_shutdown.enabled,
+            and self.settings.actions.nas_shutdown.enabled
+            and self.nas_agent.configured
+            and self.settings.nas_agent_ingress.enabled,
             "observation_configured": self.settings.nas_endpoints.configured,
+            "agent_configured": self.nas_agent.configured,
         }
+        agent = self.nas_agent.status()
         last = self.last_operation("nas")
         wake_at = None
         if last is not None and last.get("operation") == "wake_nas":
             wake_at = float(last["at"])
         if adapter is None or not self.settings.nas_endpoints.configured:
-            return {
+            status = {
                 "capability": capability,
                 "observations": {
                     "lan": "not_observed",
@@ -1411,8 +1426,73 @@ class BetaAssistantService:
                 "observed_at": time.time(),
                 "last_operation": last,
             }
+            return {
+                **status,
+                "nas_agent": agent,
+                "power_state": self._nas_power_state(status, agent),
+                "lifecycle": self._nas_lifecycle(status, agent, last),
+            }
         observation = adapter.observe(wake_requested_at=wake_at, refresh=refresh)
-        return {"capability": capability, **observation, "last_operation": last}
+        status = {"capability": capability, **observation, "last_operation": last}
+        return {
+            **status,
+            "nas_agent": agent,
+            "power_state": self._nas_power_state(status, agent),
+            "lifecycle": self._nas_lifecycle(status, agent, last),
+        }
+
+    @staticmethod
+    def _nas_power_state(
+        status: dict[str, object], agent: dict[str, object]
+    ) -> str:
+        observations = status.get("observations")
+        # OFF is a corroborated observation, not an interpretation of the
+        # socket. It also terminates a previously accepted shutdown lifecycle.
+        if (
+            agent.get("state") == "disconnected"
+            and isinstance(observations, dict)
+            and observations.get("lan") == "unreachable"
+            and observations.get("nas_api") == "unreachable"
+        ):
+            return "off"
+        system = agent.get("system")
+        if agent.get("shutdown_accepted_at") is not None or (
+            isinstance(system, dict) and system.get("system_state") == "shutting_down"
+        ):
+            return "shutting_down"
+        if agent.get("state") in {"connected", "heartbeat_aging"} and (
+            isinstance(system, dict) and system.get("reachable") is True
+        ):
+            return "online"
+        return "unknown"
+
+    @staticmethod
+    def _nas_lifecycle(
+        status: dict[str, object],
+        agent: dict[str, object],
+        last: dict[str, object] | None,
+    ) -> str:
+        power = BetaAssistantService._nas_power_state(status, agent)
+        if power == "off":
+            return "OFF"
+        if power == "shutting_down":
+            return "SHUTTING_DOWN"
+        if agent.get("state") in {"connected", "heartbeat_aging"}:
+            jellyfin = agent.get("jellyfin")
+            observations = status.get("observations")
+            if isinstance(jellyfin, dict) and jellyfin.get("ready") is True:
+                return "READY"
+            if isinstance(observations, dict) and observations.get("tailscale") == "reachable":
+                return "TAILSCALE_REACHABLE"
+            return "AGENT_CONNECTED"
+        observations = status.get("observations")
+        if isinstance(observations, dict) and (
+            observations.get("lan") == "reachable" or observations.get("nas_api") == "reachable"
+        ):
+            return "NAS_REACHABLE"
+        if isinstance(last, dict) and last.get("operation") == "wake_nas":
+            return "WAKE_SENT"
+        return "UNKNOWN"
 
     def start_admin_nas_wake(self, session: BrowserSession) -> dict[str, object]:
         """Start the fixed NAS wake. Success means one packet left this host."""
@@ -1428,12 +1508,11 @@ class BetaAssistantService:
     def start_admin_nas_shutdown(
         self, session: BrowserSession, *, confirmed: bool
     ) -> dict[str, object]:
-        """Start the fixed NAS shutdown.
+        """Start the fixed, default-disabled NAS Agent shutdown.
 
-        Three separate gates stand in front of the broker: the action is
-        registered FRESH so a live elevation is never enough, this method
-        requires an explicit confirmation flag from the administrator surface,
-        and the broker keeps its own `nas.shutdown` gate, shipped false.
+        The registered action requires FRESH authentication, this method
+        requires explicit confirmation, and the independent NAS Agent action
+        gate ships false. No TrueNAS method or parameter comes from the caller.
         """
 
         self._require_action_admin(session)
@@ -1444,7 +1523,7 @@ class BetaAssistantService:
             )
         return self._start_admin_action(
             session,
-            skill="shutdown_nas",
+            skill="nas.system.shutdown",
             arguments={},
             summary="Shut down the configured NAS",
             subject="nas",

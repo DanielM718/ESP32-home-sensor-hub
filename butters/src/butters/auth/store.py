@@ -56,7 +56,8 @@ class CredentialRecord:
 # administrator by accident: `administrator` is decided by AuthPolicy from the
 # tailnet identity alone and is never stored, granted, or implied here.
 JELLYFIN_ACCESS = "jellyfin_access"
-PORTAL_ROLES = frozenset({JELLYFIN_ACCESS})
+NAS_POWER = "nas_power"
+PORTAL_ROLES = frozenset({JELLYFIN_ACCESS, NAS_POWER})
 
 
 @dataclass(frozen=True, slots=True)

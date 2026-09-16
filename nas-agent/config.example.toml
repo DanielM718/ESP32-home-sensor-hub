@@ -1,0 +1,22 @@
+schema_version = 1
+
+[agent]
+url = "wss://sensor-pi.tail9644cc.ts.net:8443/nas-agent/v1/session"
+agent_id = "nas-primary"
+spki_sha256 = "REPLACE_WITH_64_LOWERCASE_HEX_CHARACTERS_BEFORE_STAGING"
+heartbeat_seconds = 15
+health_file = "/run/butters-nas-agent/last-heartbeat"
+
+[truenas]
+# The fixed local endpoint and the reviewed middleware certificate SPKI are
+# operator-owned. The API key is not sent until the SPKI comparison succeeds.
+url = "wss://192.168.1.240/api/current"
+username = "butters_nas_status"
+spki_sha256 = "REPLACE_WITH_TRUENAS_64_LOWERCASE_HEX_CHARACTERS"
+timeout_seconds = 5
+# Dormant by construction. Enabling also requires a separate FULL_ADMIN key file.
+shutdown_enabled = false
+
+[jellyfin]
+url = "http://192.168.1.240:8096"
+health_path = "/health"

@@ -631,6 +631,9 @@ def test_machine_proxy_rejects_browser_and_non_agent_handshakes() -> None:
         "Sec-WebSocket-Version: 13\r\n\r\n"
     ).encode("ascii")
     assert validate_handshake(raw).startswith(b"GET /agent/v1/session ")
+    assert validate_handshake(
+        raw.replace(b"/agent/v1/session", b"/nas-agent/v1/session")
+    ).startswith(b"GET /nas-agent/v1/session ")
     for extra in (
         b"Origin: https://browser.invalid\r\n",
         b"Cookie: butters_session=admin\r\n",
