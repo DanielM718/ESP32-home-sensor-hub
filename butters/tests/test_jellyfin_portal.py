@@ -12,8 +12,10 @@ import asyncio
 import base64
 import hashlib
 import subprocess
+import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 from butters.assistant_config import (
@@ -124,6 +126,175 @@ class FakeNas:
         )
 
 
+class _MockShutdownBackend:
+    """A fixed, local-only backend for end-to-end control-plane acceptance."""
+
+    def __init__(self) -> None:
+        self.shutdowns = 0
+
+    def status(self) -> dict[str, object]:
+        return {
+            "reachable": True,
+            "hostname": "mock-truenas",
+            "version": "25.10.7",
+            "uptime_seconds": 1234.0,
+            "system_state": "online",
+        }
+
+    def shutdown(self) -> dict[str, object]:
+        self.shutdowns += 1
+        return {
+            "accepted": True,
+            "state": "scheduled",
+            "method": "system.shutdown",
+        }
+
+
+class _MockLocalBackend:
+    def status(self) -> dict[str, object]:
+        return {"hostname": "mock-agent", "uptime_seconds": 42.0}
+
+
+class _MockJellyfinBackend:
+    def status(self) -> dict[str, object]:
+        return {
+            "reachable": True,
+            "ready": True,
+            "version": "10.10.7",
+            "http_status": 200,
+        }
+
+
+_CLOSED = object()
+
+
+class _HubSocket:
+    """The ASGI half of a bounded in-memory WebSocket pair."""
+
+    def __init__(self, from_agent: asyncio.Queue, to_agent: asyncio.Queue) -> None:
+        self.headers: dict[str, str] = {}
+        self._from_agent = from_agent
+        self._to_agent = to_agent
+        self._closed = False
+
+    async def accept(self) -> None:
+        return None
+
+    async def receive_text(self) -> str:
+        value = await self._from_agent.get()
+        if value is _CLOSED:
+            raise ConnectionError("mock agent disconnected")
+        assert isinstance(value, str)
+        return value
+
+    async def send_text(self, value: str) -> None:
+        if self._closed:
+            raise ConnectionError("mock hub socket closed")
+        await self._to_agent.put(value)
+
+    async def close(self, code: int = 1000) -> None:
+        del code
+        if not self._closed:
+            self._closed = True
+            await self._to_agent.put(_CLOSED)
+
+
+class _AgentSocket:
+    """The standalone-client half of a bounded in-memory WebSocket pair."""
+
+    def __init__(self, to_hub: asyncio.Queue, from_hub: asyncio.Queue) -> None:
+        self._to_hub = to_hub
+        self._from_hub = from_hub
+        self._closed = False
+
+    async def send(self, value: str) -> None:
+        if self._closed:
+            raise ConnectionError("mock agent socket closed")
+        await self._to_hub.put(value)
+
+    async def recv(self) -> str:
+        value = await self._from_hub.get()
+        if value is _CLOSED:
+            raise ConnectionError("mock hub disconnected")
+        assert isinstance(value, str)
+        return value
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        value = await self._from_hub.get()
+        if value is _CLOSED:
+            raise StopAsyncIteration
+        assert isinstance(value, str)
+        return value
+
+    async def close(self) -> None:
+        if not self._closed:
+            self._closed = True
+            await self._to_hub.put(_CLOSED)
+
+
+async def _mock_agent_connection(service, tmp_path: Path, system_backend):
+    """Attach the real standalone client/engine to the real hub, without a network."""
+
+    source = Path(__file__).resolve().parents[2] / "nas-agent" / "src"
+    if str(source) not in sys.path:
+        sys.path.insert(0, str(source))
+    from butters_nas_agent import AGENT_VERSION
+    from butters_nas_agent.client import Client
+    from butters_nas_agent.engine import Engine as NasEngine
+    from butters_nas_agent.protocol import (
+        ACTION_SCHEMA_VERSION,
+        PROTOCOL_VERSION,
+        SCHEMAS,
+        canonical,
+        decode,
+        verify,
+    )
+
+    agent_to_hub: asyncio.Queue = asyncio.Queue(maxsize=32)
+    hub_to_agent: asyncio.Queue = asyncio.Queue(maxsize=32)
+    hub_socket = _HubSocket(agent_to_hub, hub_to_agent)
+    agent_socket = _AgentSocket(agent_to_hub, hub_to_agent)
+    engine = NasEngine(_MockLocalBackend(), system_backend, _MockJellyfinBackend())
+    config = SimpleNamespace(
+        agent_id="nas-primary",
+        heartbeat_seconds=0.05,
+        health_file=tmp_path / "mock-agent.health",
+    )
+    credentials = {"token": "n" * 64, "command_key": (b"z" * 32).hex()}
+    client = Client(config, credentials, engine)
+
+    async def agent_session() -> None:
+        await agent_socket.send(
+            canonical(
+                {
+                    "type": "hello",
+                    "protocol": PROTOCOL_VERSION,
+                    "schema": ACTION_SCHEMA_VERSION,
+                    "agent_id": "nas-primary",
+                    "version": AGENT_VERSION,
+                    "token": credentials["token"],
+                    "actions": sorted(SCHEMAS),
+                }
+            ).decode("ascii")
+        )
+        welcome = decode(await agent_socket.recv())
+        connection_id = welcome["connection_id"]
+        assert isinstance(connection_id, str)
+        verify(welcome, bytes.fromhex(credentials["command_key"]), connection_id)
+        assert welcome["protocol"] == PROTOCOL_VERSION
+        client.connection_count += 1
+        engine.connected(client.connection_count)
+        await client._connected(agent_socket, connection_id)
+
+    hub_task = asyncio.create_task(service.nas_agent.socket(hub_socket))
+    agent_task = asyncio.create_task(agent_session())
+    assert await _settles(lambda: service.nas_agent.status()["state"] == "connected")
+    return agent_socket, hub_task, agent_task
+
+
 def _nas_agent_credentials(tmp_path: Path) -> Path:
     key = tmp_path / "nas-agent-command.key"
     key.write_text((b"z" * 32).hex(), encoding="utf-8")
@@ -175,6 +346,7 @@ def _application(
                 if nas_agent_shutdown
                 else base.nas_agent_ingress.config_path
             ),
+            request_timeout_seconds=2 if nas_agent_shutdown else 30,
         ).validated(),
         nas_endpoints=ENDPOINTS,
         portal=(portal_settings or PortalSettings(enabled=True)).validated(),
@@ -194,7 +366,11 @@ def _application(
     nas = FakeNas()
     service.assistant.skills.get("wake_nas").implementation.__self__.nas = nas
     service.assistant.nas_adapter = nas
-    return create_app(settings, vocabulary, service, stt_engine_factory=Engine), service, nas
+    return (
+        create_app(settings, vocabulary, service, stt_engine_factory=Engine),
+        service,
+        nas,
+    )
 
 
 def _enroll(
@@ -590,6 +766,7 @@ async def _polling_progresses_and_bounds_itself(tmp_path) -> None:
             assert offline["detail"] == "Jellyfin Unavailable"
             assert offline["jellyfin_ready"] is False
             assert offline["can_wake"] is True
+            assert offline["can_shutdown"] is False
 
             await http.post("/api/portal/wake", headers=mutation, json={})
             waiting = (await http.get("/api/portal/nas", headers=mutation)).json()
@@ -767,7 +944,123 @@ async def _nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path) ->
                 json={"confirm": True},
             )
             assert wrong_origin.status_code == 403
+
+        # A separately assigned user holding both portal roles receives only
+        # the fixed gated UI capability; neither role implies the other.
+        combined_identity = "combined@example.com"
+        _enroll(
+            service,
+            identity=combined_identity,
+            credential_id=b"combined-credential",
+            roles=frozenset({JELLYFIN_ACCESS, NAS_POWER}),
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as combined_http:
+            mutation = await _mutation(combined_http, combined_identity)
+            await _sign_in(
+                combined_http, mutation, credential_id=b"combined-credential"
+            )
+            state = await combined_http.get("/api/portal/nas", headers=mutation)
+            assert state.status_code == 200
+            assert state.json()["can_shutdown"] is True
     finally:
+        await app.state.shutdown_workers()
+        del service
+
+
+async def _mock_shutdown_crosses_the_complete_signed_control_plane(tmp_path) -> None:
+    """Accept shutdown only through the frozen plan and a mock local backend."""
+
+    app, service, nas = _application(tmp_path, nas_agent_shutdown=True)
+    backend = _MockShutdownBackend()
+    first_connection = None
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    power_identity = "power@example.com"
+    identity_key = f"identity:{power_identity}"
+    try:
+        first_connection = await _mock_agent_connection(service, tmp_path, backend)
+        nas.become_ready()
+        _enroll(
+            service,
+            identity=power_identity,
+            credential_id=b"power-credential",
+            roles=frozenset({NAS_POWER}),
+        )
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as power_http:
+            mutation = await _mutation(power_http, power_identity)
+            signed_in = await _sign_in(
+                power_http, mutation, credential_id=b"power-credential"
+            )
+            assert signed_in.status_code == 200
+            assert signed_in.json()["value"]["roles"] == [NAS_POWER]
+            assert signed_in.json()["value"]["administrator"] is False
+
+            prepared = await power_http.post(
+                "/api/portal/shutdown/plan",
+                headers=mutation,
+                json={"confirm": True},
+            )
+            assert prepared.status_code == 200, prepared.text
+            pending = prepared.json()["pending_action"]
+            assert pending["authentication"] == "fresh"
+            assert pending["steps"] == [
+                {"skill": "nas.system.shutdown", "arguments": {}}
+            ]
+
+            options = await power_http.post(
+                "/api/portal/shutdown/authenticate/options",
+                headers=mutation,
+                json={"pending_action_id": pending["pending_action_id"]},
+            )
+            assert options.status_code == 200
+            finished = await power_http.post(
+                "/api/portal/shutdown/authenticate/verify",
+                headers=mutation,
+                json={
+                    "ceremony_id": options.json()["value"]["ceremony_id"],
+                    "credential": _credential(b"power-credential"),
+                },
+            )
+            assert finished.status_code == 200, finished.text
+            value = finished.json()["value"]
+            assert value["status"] == "shutdown_queued"
+            assert len(value["jobs"]) == 1
+            job_id = value["jobs"][0]["job_id"]
+            action_state = service.action_state
+            assert await _settles(
+                lambda: (
+                    next(
+                        job
+                        for job in action_state.jobs(identity=identity_key)
+                        if job["job_id"] == job_id
+                    )["state"]
+                    == "completed"
+                )
+            )
+            assert backend.shutdowns == 1
+
+        accepted = service.nas_agent.status()
+        assert not first_connection[2].done()
+        assert accepted["shutdown_accepted_at"] is not None
+        assert accepted["system"]["system_state"] == "shutting_down"
+        assert service.nas_admin_status()["lifecycle"] == "SHUTTING_DOWN"
+        # Extra parameters are rejected before any frame can reach the agent.
+        rejected = service.nas_agent._request(
+            "nas.system.shutdown", {"method": "system.reboot"}
+        )
+        assert rejected["error"] == "invalid_parameter"
+        assert backend.shutdowns == 1
+    finally:
+        for connection in (first_connection,):
+            if connection is None:
+                continue
+            await connection[0].close()
+            for task in connection[1:]:
+                task.cancel()
+            await asyncio.gather(*connection[1:], return_exceptions=True)
         await app.state.shutdown_workers()
         del service
 
@@ -810,6 +1103,22 @@ def test_redirect_only_when_ready_and_never_from_request_input(tmp_path) -> None
 
 def test_nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path) -> None:
     asyncio.run(_nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path))
+
+
+def test_mock_shutdown_crosses_the_complete_signed_control_plane(tmp_path) -> None:
+    # CPython 3.13's Runner waits on the default executor's join helper even
+    # after all to_thread calls have returned in this test environment. Close
+    # the loop first, then join that same executor directly and deterministically.
+    loop = asyncio.new_event_loop()
+    try:
+        loop.run_until_complete(
+            _mock_shutdown_crosses_the_complete_signed_control_plane(tmp_path)
+        )
+    finally:
+        executor = loop._default_executor
+        loop.close()
+        if executor is not None:
+            executor.shutdown(wait=True)
 
 
 # ------------------------- locality classification ---------------------------
@@ -930,14 +1239,29 @@ def test_portal_client_never_names_a_host_action_or_redirect() -> None:
         "?host=",
         "local=true",
         "/api/admin/",
-        "shutdown",
         "skill",
         "broker",
+        "system.shutdown",
+        "system.reboot",
+        "delay:",
     ):
         assert forbidden not in source, forbidden
     # The one navigation it performs uses the server-supplied destination only.
     assert "window.location.assign(destination.destination)" in source
     assert source.count("window.location.assign") == 1
+    # The destructive UI has no selector or option: confirmation freezes the
+    # server-owned empty plan, then the browser completes FRESH WebAuthn.
+    assert source.count('api("/api/portal/shutdown/plan"') == 1
+    assert source.count('api("/api/portal/shutdown/authenticate/options"') == 1
+    assert source.count('api("/api/portal/shutdown/authenticate/verify"') == 1
+    assert "JSON.stringify({confirm:true})" in source
+    assert "window.confirm(" in source
+    document = (
+        Path(__file__).parents[1] / "src/butters/web/static/portal.html"
+    ).read_text()
+    assert 'id="portal-shutdown"' in document
+    assert "Shut Down NAS…" in document
+    assert 'type="button" hidden' in document
 
 
 def test_portal_service_exposes_no_generic_execution() -> None:

@@ -81,7 +81,11 @@ Do not proceed without explicit owner approval of both the destructive test and
 the documented `FULL_ADMIN` residual risk. At that later time:
 
 1. Create a dedicated, expiring/revocable TrueNAS user-linked API key whose
-   account has `FULL_ADMIN`; store it only in the NAS secret dataset.
+   account has `FULL_ADMIN`; store it only in the NAS secret dataset. This is a
+   separate identity, key, and secret file from the read-only status account.
+   The key itself has broader authority than the zero-argument agent protocol,
+   which is an explicitly accepted residual risk rather than a narrow TrueNAS
+   grant.
 2. Add the shutdown secret mount and `--truenas-shutdown-key` argument to a
    reviewed staging-only Compose copy. Flip both independent gates only for the
    window.
@@ -92,6 +96,11 @@ the documented `FULL_ADMIN` residual risk. At that later time:
    OFF from the disconnect.
 5. Use the existing fixed Butters WOL action to recover. Validate the entire
    observed boot lifecycle through Jellyfin ready.
+
+The shutdown credential must never be sent to Butters or a browser, mounted or
+loaded while shutdown is disabled, or reused for status. It remains
+independently revocable/rotatable and the agent must continue to expose only
+the fixed `nas.system.shutdown` operation—never a generic TrueNAS RPC proxy.
 
 ## Rollback and cleanup
 

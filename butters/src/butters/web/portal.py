@@ -204,8 +204,8 @@ class PortalService:
             "can_wake": _can_wake(
                 aggregate, elapsed, self.settings.max_poll_seconds
             ),
-            # This is authorization/capability truth, not a control. The portal
-            # UI intentionally has no shutdown button in this dormant slice.
+            # The UI renders its fixed shutdown ceremony only when both this
+            # independent role and the two server-side capability gates agree.
             "can_shutdown": (
                 NAS_POWER in roles
                 and isinstance(capability, dict)

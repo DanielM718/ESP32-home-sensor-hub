@@ -185,6 +185,18 @@ and rotated after staging. The shutdown key is neither provisioned nor mounted
 until a separately approved destructive test, and the process refuses to load
 it while `shutdown_enabled=false`.
 
+The eventual destructive stage has an unavoidable privilege asymmetry:
+TrueNAS 25.10 requires `FULL_ADMIN` for `system.shutdown`, so the API credential
+itself has broader TrueNAS authority than the NAS Agent protocol exposes. That
+risk is contained, not eliminated. The future credential must be a distinct
+key for a distinct shutdown identity, stored in its own NAS-local secret file,
+never sent to Butters or a browser, never loaded or mounted while either
+shutdown gate is false, and independently revocable/rotatable. Even when that
+credential is present, the agent exposes it only through the fixed,
+zero-argument `nas.system.shutdown`; no middleware method, URL, delay, reboot
+mode, shell, or argv crosses the agent protocol. No such credential exists in
+the read-only baseline.
+
 ## Shutdown gates and disconnect semantics
 
 `nas.system.shutdown` is registered as destructive, explicit-intent,
