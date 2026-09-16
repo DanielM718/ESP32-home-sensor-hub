@@ -1,13 +1,17 @@
+import asyncio
 import hashlib
 import json
 import logging
+import time
+import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from butters_nas_agent.__main__ import SafeJsonFormatter
-from butters_nas_agent.client import healthcheck
+from butters_nas_agent.client import Client, healthcheck
 from butters_nas_agent.config import load_agent_credentials, load_api_key, load_config
-from butters_nas_agent.protocol import ProtocolError
+from butters_nas_agent.protocol import ProtocolError, decode, envelope, sign
 from butters_nas_agent.tls import verify_spki
 
 
@@ -148,3 +152,121 @@ def test_safe_formatter_preserves_timing_fields_but_drops_unapproved_values():
     assert "api_key" not in value
     assert "url" not in value
     assert "must-not-appear" not in json.dumps(value)
+
+
+def test_immediate_exact_retry_replays_cached_result_while_active(
+    monkeypatch, tmp_path
+):
+    """A retry in the result-send cleanup window must not time out."""
+
+    key = b"z" * 32
+    connection_id = "c" * 64
+    request_id = str(uuid.uuid4())
+    idempotency_key = str(uuid.uuid4())
+    closed = object()
+
+    class BackendEngine:
+        def __init__(self):
+            self.invocations = 0
+
+        def heartbeat_state(self):
+            return {
+                "system": {"reachable": False, "error": "truenas_unavailable"},
+                "jellyfin": {"reachable": False, "error": "backend_unavailable"},
+            }
+
+        def heartbeat_sent(self, _sequence):
+            return None
+
+        def invoke(self, action, parameters, _cancel):
+            self.invocations += 1
+            assert action == "nas.system.shutdown"
+            assert parameters == {}
+            now = time.time()
+            return {
+                "action": action,
+                "target": "nas-primary",
+                "started_at": now,
+                "success": True,
+                "accepted": True,
+                "state": "scheduled",
+                "method": "system.shutdown",
+                "completed_at": now,
+                "duration_seconds": 0.0,
+            }
+
+    class Socket:
+        def __init__(self):
+            self.incoming = asyncio.Queue()
+            self.sent = []
+            self.first_result_started = asyncio.Event()
+            self.release_first_result = asyncio.Event()
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            value = await self.incoming.get()
+            if value is closed:
+                raise StopAsyncIteration
+            return value
+
+        async def send(self, raw):
+            frame = decode(raw)
+            self.sent.append(frame)
+            if frame.get("type") == "result" and frame.get("duplicate") is False:
+                self.first_result_started.set()
+                await self.release_first_result.wait()
+
+    async def inline_to_thread(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", inline_to_thread)
+    engine = BackendEngine()
+    client = Client(
+        SimpleNamespace(
+            agent_id="nas-primary",
+            heartbeat_seconds=3600,
+            health_file=tmp_path / "health",
+        ),
+        {"command_key": key.hex()},
+        engine,
+    )
+    socket = Socket()
+
+    def request_frame():
+        return sign(
+            envelope(
+                "request",
+                connection_id,
+                request_id=request_id,
+                action="nas.system.shutdown",
+                target="nas-primary",
+                parameters={},
+                idempotency_key=idempotency_key,
+                timeout_seconds=30,
+            ),
+            key,
+        )
+
+    async def scenario():
+        task = asyncio.create_task(client._connected(socket, connection_id))
+        await socket.incoming.put(json.dumps(request_frame()))
+        await asyncio.wait_for(socket.first_result_started.wait(), 1)
+        await socket.incoming.put(json.dumps(request_frame()))
+        deadline = asyncio.get_running_loop().time() + 1
+        while not any(
+            frame.get("type") == "result" and frame.get("duplicate") is True
+            for frame in socket.sent
+        ):
+            assert asyncio.get_running_loop().time() < deadline
+            await asyncio.sleep(0)
+        socket.release_first_result.set()
+        await socket.incoming.put(closed)
+        await asyncio.wait_for(task, 1)
+
+    asyncio.run(scenario())
+    results = [frame for frame in socket.sent if frame.get("type") == "result"]
+    assert engine.invocations == 1
+    assert len(results) == 2
+    assert {frame["duplicate"] for frame in results} == {False, True}

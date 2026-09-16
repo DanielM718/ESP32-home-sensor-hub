@@ -246,12 +246,36 @@ class Client:
                             sort_keys=True,
                         )
                     )
-                    self.cache.get(frame)
+                    cached = self.cache.get(frame)
                     existing = active.get(request_id)
                     if existing:
-                        if canonical(existing[0]) != canonical(frame):
+                        stable = {
+                            name: value
+                            for name, value in frame.items()
+                            if name not in {"issued_at", "sig"}
+                        }
+                        existing_stable = {
+                            name: value
+                            for name, value in existing[0].items()
+                            if name not in {"issued_at", "sig"}
+                        }
+                        if canonical(existing_stable) != canonical(stable):
                             raise ProtocolError("duplicate_request")
                         await send("ack", request_id=request_id)
+                        # The first execution may have cached and transmitted
+                        # its terminal result but not yet removed its active
+                        # marker. An immediate exact retry then belongs to a
+                        # new hub pending request, so ACK plus the cached result
+                        # must both be replayed. If no result is cached yet, the
+                        # still-running execution will provide the terminal
+                        # frame for the original pending request.
+                        if cached is not None:
+                            await send(
+                                "result",
+                                request_id=request_id,
+                                result=cached,
+                                duplicate=True,
+                            )
                         continue
                     if active:
                         raise ProtocolError("busy")
