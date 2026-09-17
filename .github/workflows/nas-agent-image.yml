@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - feature/nas-agent
+      - feature/nas-shutdown-rollout
     paths:
       - .github/workflows/nas-agent-image.yml
       - nas-agent/**
