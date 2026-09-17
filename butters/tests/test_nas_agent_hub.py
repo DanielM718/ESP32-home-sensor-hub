@@ -539,8 +539,21 @@ def test_accepted_shutdown_result_is_fixed_and_records_transition(
         assert observed["method"] == "system.shutdown"
         assert hub.status()["system"]["system_state"] == "shutting_down"
         assert hub.status()["shutdown_accepted_at"] is not None
+        # A final online heartbeat can race the accepted result before the
+        # appliance disappears. It must not roll the lifecycle backward.
+        await socket.incoming.put(_heartbeat(connection_id, sequence=1))
+        await asyncio.sleep(0.01)
+        assert hub.status()["system"]["system_state"] == "shutting_down"
         await socket.incoming.put(None)
         await task
+
+        # Recovery is a new authenticated connection, which clears the old
+        # shutdown marker and accepts the new connection's online truth.
+        recovered_socket, recovered_task, _ = await _connected(hub)
+        assert hub.status()["shutdown_accepted_at"] is None
+        assert hub.status()["system"]["system_state"] == "online"
+        await recovered_socket.incoming.put(None)
+        await recovered_task
 
     asyncio.run(scenario())
 

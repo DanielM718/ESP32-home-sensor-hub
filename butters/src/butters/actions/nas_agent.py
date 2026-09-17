@@ -487,6 +487,12 @@ class NasAgentHub:
         with self._state_lock:
             if self._socket is not websocket:
                 raise protocol.ProtocolError("superseded_connection")
+            # A heartbeat may race the accepted shutdown result while TrueNAS
+            # is still online for its final few seconds. Preserve the accepted
+            # lifecycle on this connection; a fresh authenticated connection
+            # clears the marker and permits an online state after recovery.
+            if self._shutdown_accepted_at is not None:
+                system = {**system, "system_state": "shutting_down"}
             self._system = system
             self._jellyfin = jellyfin
             self.last_authenticated_activity = self._monotonic()
