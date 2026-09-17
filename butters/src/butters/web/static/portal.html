@@ -38,11 +38,18 @@
       <h2>Current</h2>
       <div id="portal-observations" class="axis-grid" role="group" aria-label="Current observed state"></div>
 
+      <section id="portal-bandwidth" hidden>
+        <h2>Remote bandwidth</h2>
+        <div id="portal-bandwidth-metrics" class="axis-grid" role="group" aria-label="Remote bandwidth state"></div>
+        <div id="portal-remote-streams" class="portal-streams"></div>
+      </section>
+
       <h2>Last operation</h2>
       <p id="portal-last-operation" class="portal-note">Nothing has been requested yet.</p>
 
       <div class="button-row">
         <button id="portal-wake" class="primary-button" type="button">Wake NAS</button>
+        <button id="portal-open" class="primary-button" type="button" hidden>Open Jellyfin</button>
         <button id="portal-retry" class="secondary-button" type="button">Retry Status</button>
         <button id="portal-shutdown" class="secondary-button" type="button" hidden>Shut Down NAS…</button>
         <button id="portal-signout" class="secondary-button" type="button">Sign out</button>
