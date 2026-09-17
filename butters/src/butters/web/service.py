@@ -1406,7 +1406,15 @@ class BetaAssistantService:
         }
         agent = self.nas_agent.status()
         bandwidth: dict[str, object] | None = None
+        network_telemetry: dict[str, object] | None = None
+        jellyfin_sessions: dict[str, object] | None = None
         if refresh and agent.get("state") == "connected":
+            network_telemetry = self._nas_read_diagnostic(
+                self.nas_agent.network_status()
+            )
+            jellyfin_sessions = self._nas_read_diagnostic(
+                self.nas_agent.jellyfin_sessions()
+            )
             observed_bandwidth = self.nas_agent.bandwidth_status()
             if observed_bandwidth.get("success") is True:
                 bandwidth = {
@@ -1441,6 +1449,8 @@ class BetaAssistantService:
             return {
                 **status,
                 "nas_agent": agent,
+                "network_telemetry": network_telemetry,
+                "jellyfin_sessions": jellyfin_sessions,
                 "bandwidth": bandwidth,
                 "power_state": self._nas_power_state(status, agent),
                 "lifecycle": self._nas_lifecycle(status, agent, last),
@@ -1450,9 +1460,29 @@ class BetaAssistantService:
         return {
             **status,
             "nas_agent": agent,
+            "network_telemetry": network_telemetry,
+            "jellyfin_sessions": jellyfin_sessions,
             "bandwidth": bandwidth,
             "power_state": self._nas_power_state(status, agent),
             "lifecycle": self._nas_lifecycle(status, agent, last),
+        }
+
+    @staticmethod
+    def _nas_read_diagnostic(value: object) -> dict[str, object] | None:
+        """Strip transport metadata from an already schema-projected result."""
+
+        if not isinstance(value, dict):
+            return None
+        return {
+            key: item
+            for key, item in value.items()
+            if key
+            not in {
+                "action",
+                "request_id",
+                "idempotency_key",
+                "transport",
+            }
         }
 
     @staticmethod

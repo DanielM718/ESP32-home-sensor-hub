@@ -374,6 +374,60 @@ def _application(
     )
 
 
+def test_admin_refresh_exposes_only_projected_read_diagnostics(tmp_path) -> None:
+    _app, service, _nas = _application(tmp_path)
+    calls: list[str] = []
+
+    def result(action: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(action)
+        return {
+            "action": action,
+            "success": True,
+            "request_id": "internal-request-id",
+            "transport": "nas_agent_wss",
+            **payload,
+        }
+
+    service.nas_agent = SimpleNamespace(
+        configured=True,
+        status=lambda: {"state": "connected"},
+        network_status=lambda: result(
+            "nas.network.status",
+            {
+                "remote_tx_mbps": 1.25,
+                "measurement_quality": "partial",
+            },
+        ),
+        jellyfin_sessions=lambda: result(
+            "nas.jellyfin.sessions",
+            {"available": False, "reason": "jellyfin_authentication_failed"},
+        ),
+        bandwidth_status=lambda: result(
+            "nas.bandwidth.status",
+            {"policy_mode": "dry_run", "measurement_quality": "unavailable"},
+        ),
+    )
+
+    status = service.nas_admin_status(refresh=True)
+    assert calls == [
+        "nas.network.status",
+        "nas.jellyfin.sessions",
+        "nas.bandwidth.status",
+    ]
+    assert status["network_telemetry"] == {
+        "success": True,
+        "remote_tx_mbps": 1.25,
+        "measurement_quality": "partial",
+    }
+    assert status["jellyfin_sessions"] == {
+        "success": True,
+        "available": False,
+        "reason": "jellyfin_authentication_failed",
+    }
+    assert "request_id" not in status["network_telemetry"]
+    assert "transport" not in status["jellyfin_sessions"]
+
+
 def _enroll(
     service,
     identity=PARTNER,
