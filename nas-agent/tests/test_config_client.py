@@ -25,9 +25,15 @@ def _toml(**changes):
     values = {
         "agent_id": "nas-primary",
         "shutdown": "false",
+        "shutdown_username": "",
         "path": "/nas-agent/v1/session",
     }
     values.update(changes)
+    shutdown_username = (
+        f'shutdown_username = "{values["shutdown_username"]}"\n'
+        if values["shutdown_username"]
+        else ""
+    )
     return f'''schema_version = 1
 [agent]
 url = "wss://butters:8443{values["path"]}"
@@ -38,7 +44,7 @@ health_file = "/run/agent-health"
 [truenas]
 url = "wss://truenas.local/api/current"
 username = "status_agent"
-spki_sha256 = "{"b" * 64}"
+{shutdown_username}spki_sha256 = "{"b" * 64}"
 timeout_seconds = 5
 shutdown_enabled = {values["shutdown"]}
 [jellyfin]
@@ -56,6 +62,26 @@ def test_config_requires_exact_identity_paths_and_default_disabled(tmp_path):
         _toml(agent_id="desktop"),
         _toml(path="/agent/v1/session"),
         _toml().replace("/api/current", "/api/v2.0/system/info"),
+    ):
+        _write(path, changed)
+        with pytest.raises(ValueError, match="invalid_configuration"):
+            load_config(path)
+
+
+def test_enabled_shutdown_requires_a_distinct_fixed_identity(tmp_path):
+    path = _write(
+        tmp_path / "agent.toml",
+        _toml(shutdown="true", shutdown_username="power_agent"),
+    )
+    config = load_config(path)
+    assert config.shutdown_enabled is True
+    assert config.truenas_username == "status_agent"
+    assert config.truenas_shutdown_username == "power_agent"
+
+    for changed in (
+        _toml(shutdown="true"),
+        _toml(shutdown="true", shutdown_username="status_agent"),
+        _toml(shutdown_username="power_agent"),
     ):
         _write(path, changed)
         with pytest.raises(ValueError, match="invalid_configuration"):

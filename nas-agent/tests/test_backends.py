@@ -17,6 +17,7 @@ def _config(**changes):
         "spki_sha256": "a" * 64,
         "truenas_url": "wss://truenas.local/api/current",
         "truenas_username": "status_agent",
+        "truenas_shutdown_username": None,
         "truenas_spki_sha256": "b" * 64,
         "jellyfin_url": "http://192.168.1.240:8096",
         "jellyfin_health_path": "/health",
@@ -104,6 +105,7 @@ def test_status_uses_only_fixed_methods_and_projects_safe_fields():
         "system.info",
     ]
     assert socket.sent[0]["params"][0]["login_options"] == {"user_info": False}
+    assert socket.sent[0]["params"][0]["username"] == "status_agent"
 
 
 def test_status_reuses_only_a_recent_successful_snapshot():
@@ -329,13 +331,27 @@ def test_shutdown_gate_and_missing_separate_key_fail_before_network():
     with pytest.raises(ProtocolError, match="operation_disabled"):
         _rpc(_config(), socket).shutdown()
     with pytest.raises(ProtocolError, match="shutdown_credential_unavailable"):
-        _rpc(_config(shutdown_enabled=True), socket).shutdown()
+        _rpc(
+            _config(
+                shutdown_enabled=True,
+                truenas_shutdown_username="power_agent",
+            ),
+            socket,
+        ).shutdown()
     assert socket.sent == []
 
 
 def test_shutdown_uses_exact_reviewed_method_and_arguments():
     socket = RpcSocket(shutdown_result=None)
-    result = _rpc(_config(shutdown_enabled=True), socket, "full-admin-key").shutdown()
+    result = _rpc(
+        _config(
+            shutdown_enabled=True,
+            truenas_shutdown_username="power_agent",
+        ),
+        socket,
+        "full-admin-key",
+    ).shutdown()
+    assert socket.sent[0]["params"][0]["username"] == "power_agent"
     call = socket.sent[-1]
     assert call["method"] == "system.shutdown"
     assert call["params"] == ["Butters NAS Agent approved shutdown", {"delay": None}]
@@ -344,6 +360,32 @@ def test_shutdown_uses_exact_reviewed_method_and_arguments():
         "state": "scheduled",
         "method": "system.shutdown",
     }
+
+
+@pytest.mark.parametrize("acknowledgement", [True, 1, {}, {"job_id": 7}])
+def test_shutdown_accepts_and_discards_non_null_success_acknowledgement(
+    acknowledgement,
+):
+    socket = RpcSocket(shutdown_result=acknowledgement)
+    result = _rpc(
+        _config(
+            shutdown_enabled=True,
+            truenas_shutdown_username="power_agent",
+        ),
+        socket,
+        "full-admin-key",
+    ).shutdown()
+
+    assert result == {
+        "accepted": True,
+        "state": "scheduled",
+        "method": "system.shutdown",
+    }
+    assert socket.sent[-1]["method"] == "system.shutdown"
+    assert socket.sent[-1]["params"] == [
+        "Butters NAS Agent approved shutdown",
+        {"delay": None},
+    ]
 
 
 def test_backend_refusal_is_enumerated_without_server_blob():
@@ -357,7 +399,10 @@ def test_shutdown_backend_timeout_is_enumerated():
         raise TimeoutError
 
     rpc = TrueNasRpc(
-        _config(shutdown_enabled=True),
+        _config(
+            shutdown_enabled=True,
+            truenas_shutdown_username="power_agent",
+        ),
         "read-key",
         "full-admin-key",
         connector=unavailable,

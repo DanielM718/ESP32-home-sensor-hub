@@ -23,6 +23,7 @@ class AgentConfig:
     spki_sha256: str
     truenas_url: str
     truenas_username: str
+    truenas_shutdown_username: str | None
     truenas_spki_sha256: str
     jellyfin_url: str
     jellyfin_health_path: str
@@ -65,6 +66,19 @@ def load_config(path: Path) -> AgentConfig:
         and isinstance(truenas, dict)
         and isinstance(jellyfin, dict)
     )
+    truenas_fields = {
+        "url",
+        "username",
+        "spki_sha256",
+        "timeout_seconds",
+        "shutdown_enabled",
+    }
+    shutdown_enabled = truenas.get("shutdown_enabled") is True
+    expected_truenas_fields = (
+        truenas_fields | {"shutdown_username"}
+        if shutdown_enabled
+        else truenas_fields
+    )
     if (
         set(agent)
         != {
@@ -74,14 +88,7 @@ def load_config(path: Path) -> AgentConfig:
             "heartbeat_seconds",
             "health_file",
         }
-        or set(truenas)
-        != {
-            "url",
-            "username",
-            "spki_sha256",
-            "timeout_seconds",
-            "shutdown_enabled",
-        }
+        or set(truenas) != expected_truenas_fields
         or set(jellyfin) != {"url", "health_path"}
     ):
         raise ValueError("invalid_configuration")
@@ -93,9 +100,12 @@ def load_config(path: Path) -> AgentConfig:
         health_file=Path(str(agent["health_file"])),
         truenas_url=str(truenas["url"]),
         truenas_username=str(truenas["username"]),
+        truenas_shutdown_username=(
+            str(truenas["shutdown_username"]) if shutdown_enabled else None
+        ),
         truenas_spki_sha256=str(truenas["spki_sha256"]),
         timeout_seconds=float(truenas["timeout_seconds"]),
-        shutdown_enabled=truenas["shutdown_enabled"] is True,
+        shutdown_enabled=shutdown_enabled,
         jellyfin_url=str(jellyfin["url"]),
         jellyfin_health_path=str(jellyfin["health_path"]),
     )
@@ -121,6 +131,14 @@ def load_config(path: Path) -> AgentConfig:
             (nas_url.username, nas_url.password, nas_url.query, nas_url.fragment)
         )
         and USERNAME.fullmatch(config.truenas_username)
+        and (
+            not config.shutdown_enabled
+            or (
+                config.truenas_shutdown_username is not None
+                and USERNAME.fullmatch(config.truenas_shutdown_username)
+                and config.truenas_shutdown_username != config.truenas_username
+            )
+        )
         and HEX_64.fullmatch(config.truenas_spki_sha256)
         and jf_url.scheme in {"http", "https"}
         and bool(jf_url.hostname)

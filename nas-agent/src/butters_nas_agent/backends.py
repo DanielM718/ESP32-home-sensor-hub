@@ -149,7 +149,7 @@ class TrueNasRpc:
             raise ProtocolError("truenas_refused")
         return response["result"]
 
-    def _session(self, api_key: str, *, deadline: float) -> Any:
+    def _session(self, api_key: str, username: str, *, deadline: float) -> Any:
         hostname = urlsplit(self.config.truenas_url).hostname
         try:
             address_kind = (
@@ -200,7 +200,7 @@ class TrueNasRpc:
                 [
                     {
                         "mechanism": "API_KEY_PLAIN",
-                        "username": self.config.truenas_username,
+                        "username": username,
                         "api_key": api_key,
                         "login_options": {"user_info": False},
                     }
@@ -264,7 +264,9 @@ class TrueNasRpc:
         try:
             if self._read_websocket is None:
                 self._read_websocket = self._session(
-                    self._read_api_key, deadline=deadline
+                    self._read_api_key,
+                    self.config.truenas_username,
+                    deadline=deadline,
                 )
                 self._read_request_id = 1
             websocket = self._read_websocket
@@ -324,8 +326,18 @@ class TrueNasRpc:
             raise ProtocolError("shutdown_credential_unavailable")
         deadline = self._monotonic() + self.config.timeout_seconds
         try:
-            with self._session(self._shutdown_api_key, deadline=deadline) as websocket:
-                result = self._call(
+            assert self.config.truenas_shutdown_username is not None
+            with self._session(
+                self._shutdown_api_key,
+                self.config.truenas_shutdown_username,
+                deadline=deadline,
+            ) as websocket:
+                # A JSON-RPC success envelope is the acceptance boundary. Some
+                # TrueNAS 25.10 builds return null as documented while the
+                # production appliance returned a non-null acknowledgement.
+                # The value is deliberately discarded: it cannot influence or
+                # broaden this fixed zero-argument operation.
+                self._call(
                     websocket,
                     2,
                     self._SHUTDOWN_METHOD,
@@ -338,8 +350,6 @@ class TrueNasRpc:
             raise ProtocolError("timeout") from None
         except Exception:  # noqa: BLE001 - transport details can expose the endpoint.
             raise ProtocolError("truenas_unavailable") from None
-        if result is not None:
-            raise ProtocolError("truenas_malformed_response")
         return {"accepted": True, "state": "scheduled", "method": "system.shutdown"}
 
 

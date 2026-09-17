@@ -143,8 +143,11 @@ exact 25.10 patch release and re-check its matching API documentation.
   `auth.login_with_api_key` exists but is deprecated; SCRAM becomes mandatory
   only in 26+. [login_ex](https://api.truenas.com/v25.10/api_methods_auth.login_ex.html)
 - The exact shutdown operation is the job method `system.shutdown`, with
-  parameters `[reason, {"delay": null}]`; its immediate result is `null`.
-  The agent therefore reports only that TrueNAS accepted/scheduled the job.
+  parameters `[reason, {"delay": null}]`; the 25.10 documentation describes
+  its immediate result as `null`. Hardware acceptance on 25.10.7 returned a
+  non-null success acknowledgement before powering off. The agent therefore
+  treats any well-formed JSON-RPC success envelope as accepted, discards its
+  result value, and reports only that TrueNAS accepted/scheduled the job.
   [system.shutdown](https://api.truenas.com/v25.10/api_methods_system.shutdown.html),
   [jobs](https://api.truenas.com/v25.10/jobs.html)
 - `system.shutdown` requires `FULL_ADMIN`. TrueNAS documents that role as
@@ -184,6 +187,12 @@ Keys should be expiring where operationally feasible, independently revocable,
 and rotated after staging. The shutdown key is neither provisioned nor mounted
 until a separately approved destructive test, and the process refuses to load
 it while `shutdown_enabled=false`.
+
+The local configuration names the two identities separately. Read sessions
+authenticate only as `butters_nas_status`; an enabled shutdown backend requires
+the distinct fixed `butters_nas_power` username and refuses configuration that
+reuses the read identity. Separate key files without separate login identities
+are not sufficient isolation.
 
 The eventual destructive stage has an unavoidable privilege asymmetry:
 TrueNAS 25.10 requires `FULL_ADMIN` for `system.shutdown`, so the API credential
