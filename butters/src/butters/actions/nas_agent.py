@@ -54,7 +54,7 @@ class _TimedOut:
 
 
 class NasAgentHub:
-    """One exact identity, one exact schema set, and four typed operations."""
+    """One exact identity, one exact schema set, and seven typed operations."""
 
     _ACK_TIMEOUT_SECONDS = 3.0
     _LATE_RESULT_TTL_SECONDS = 30.0
@@ -70,6 +70,10 @@ class NasAgentHub:
             "invalid_action",
             "invalid_parameter",
             "invalid_request_id",
+            "jellyfin_authentication_failed",
+            "jellyfin_credential_unavailable",
+            "jellyfin_malformed_response",
+            "jellyfin_unavailable",
             "operation_disabled",
             "shutdown_credential_unavailable",
             "shutdown_result_indeterminate",
@@ -187,6 +191,15 @@ class NasAgentHub:
 
     def jellyfin_status(self) -> dict[str, object]:
         return self._request_public("nas.jellyfin.status")
+
+    def network_status(self) -> dict[str, object]:
+        return self._request_public("nas.network.status")
+
+    def jellyfin_sessions(self) -> dict[str, object]:
+        return self._request_public("nas.jellyfin.sessions")
+
+    def bandwidth_status(self) -> dict[str, object]:
+        return self._request_public("nas.bandwidth.status")
 
     def shutdown(
         self,
@@ -777,7 +790,7 @@ class NasAgentHub:
             fields = {
                 "agent_version": cls._text(value.get("agent_version"), 32),
                 "protocol_version": cls._integer(value.get("protocol_version"), 1, 1),
-                "schema_version": cls._integer(value.get("schema_version"), 1, 1),
+                "schema_version": cls._integer(value.get("schema_version"), 2, 2),
                 "hostname": cls._nullable_text(value.get("hostname"), 255),
                 "uptime_seconds": cls._number(value.get("uptime_seconds")),
                 "connection_count": cls._integer(
@@ -794,6 +807,12 @@ class NasAgentHub:
             fields = cls._project_heartbeat_system(payload)
         elif action == "nas.jellyfin.status":
             fields = cls._project_heartbeat_jellyfin(payload)
+        elif action == "nas.network.status":
+            fields = cls._project_network(payload)
+        elif action == "nas.jellyfin.sessions":
+            fields = cls._project_sessions(payload)
+        elif action == "nas.bandwidth.status":
+            fields = cls._project_bandwidth(payload)
         else:
             fields = (
                 {"accepted": True, "state": "scheduled", "method": "system.shutdown"}
@@ -866,6 +885,222 @@ class NasAgentHub:
         return None if any(item is cls._INVALID for item in fields.values()) else fields
 
     @classmethod
+    def _project_network(cls, value: object) -> dict[str, object] | None:
+        expected = {
+            "sample_timestamp",
+            "nas_total_tx_mbps",
+            "nas_total_rx_mbps",
+            "remote_tx_mbps",
+            "remote_rx_mbps",
+            "remote_path_counters",
+            "physical_source",
+            "remote_source",
+            "measurement_quality",
+            "physical_reason",
+            "remote_reason",
+            "sample_window_seconds",
+            "smoothing",
+        }
+        if type(value) is not dict or set(value) != expected:
+            return None
+        paths = value.get("remote_path_counters")
+        if type(paths) is not dict or set(paths) - {
+            "direct_ipv4",
+            "direct_ipv6",
+            "derp",
+            "peer_relay_ipv4",
+            "peer_relay_ipv6",
+            "unknown",
+        }:
+            return None
+        projected_paths: dict[str, dict[str, object]] = {}
+        for name, counters in paths.items():
+            if type(counters) is not dict or set(counters) != {"tx_bytes", "rx_bytes"}:
+                return None
+            tx = cls._number(counters.get("tx_bytes"))
+            rx = cls._number(counters.get("rx_bytes"))
+            if cls._INVALID in {tx, rx}:
+                return None
+            projected_paths[name] = {"tx_bytes": tx, "rx_bytes": rx}
+        fields = {
+            "sample_timestamp": cls._number(value.get("sample_timestamp")),
+            "nas_total_tx_mbps": cls._nullable_number(value.get("nas_total_tx_mbps")),
+            "nas_total_rx_mbps": cls._nullable_number(value.get("nas_total_rx_mbps")),
+            "remote_tx_mbps": cls._nullable_number(value.get("remote_tx_mbps")),
+            "remote_rx_mbps": cls._nullable_number(value.get("remote_rx_mbps")),
+            "remote_path_counters": projected_paths,
+            "physical_source": value.get("physical_source")
+            if value.get("physical_source") == "truenas_reporting_interface_rate"
+            else cls._INVALID,
+            "remote_source": value.get("remote_source")
+            if value.get("remote_source") == "tailscale_client_metrics_counters"
+            else cls._INVALID,
+            "measurement_quality": value.get("measurement_quality")
+            if value.get("measurement_quality") in {"good", "partial", "unavailable"}
+            else cls._INVALID,
+            "physical_reason": cls._nullable_text(value.get("physical_reason"), 64),
+            "remote_reason": cls._nullable_text(value.get("remote_reason"), 64),
+            "sample_window_seconds": cls._nullable_number(
+                value.get("sample_window_seconds")
+            ),
+            "smoothing": cls._text(value.get("smoothing"), 64),
+        }
+        return None if any(item is cls._INVALID for item in fields.values()) else fields
+
+    @classmethod
+    def _project_sessions(cls, value: object) -> dict[str, object] | None:
+        if type(value) is not dict or set(value) != {"available", "reason", "sessions"}:
+            return None
+        available = value.get("available")
+        reason = cls._nullable_text(value.get("reason"), 64)
+        sessions = value.get("sessions")
+        if (
+            type(available) is not bool
+            or reason is cls._INVALID
+            or type(sessions) is not list
+            or len(sessions) > 32
+        ):
+            return None
+        projected = []
+        expected = {
+            "session_id",
+            "user",
+            "playing",
+            "paused",
+            "classification",
+            "play_method",
+            "observed_mbps",
+            "bitrate_source",
+            "position_ticks",
+            "client",
+            "device",
+            "item",
+        }
+        for item in sessions:
+            if type(item) is not dict or set(item) != expected:
+                return None
+            fields = {
+                "session_id": cls._text(item.get("session_id"), 64),
+                "user": cls._nullable_text(item.get("user"), 80),
+                "playing": item.get("playing")
+                if type(item.get("playing")) is bool
+                else cls._INVALID,
+                "paused": item.get("paused")
+                if type(item.get("paused")) is bool
+                else cls._INVALID,
+                "classification": item.get("classification")
+                if item.get("classification") in {"local", "remote", "unknown"}
+                else cls._INVALID,
+                "play_method": item.get("play_method")
+                if item.get("play_method")
+                in {"direct_play", "direct_stream", "transcode", "unknown"}
+                else cls._INVALID,
+                "observed_mbps": cls._nullable_number(item.get("observed_mbps")),
+                "bitrate_source": item.get("bitrate_source")
+                if item.get("bitrate_source")
+                in {"transcode_reported", "source_reported", "unavailable"}
+                else cls._INVALID,
+                "position_ticks": cls._nullable_integer(item.get("position_ticks")),
+                "client": cls._nullable_text(item.get("client"), 64),
+                "device": cls._nullable_text(item.get("device"), 80),
+                "item": cls._nullable_text(item.get("item"), 260),
+            }
+            if any(field is cls._INVALID for field in fields.values()):
+                return None
+            projected.append(fields)
+        return {"available": available, "reason": reason, "sessions": projected}
+
+    @classmethod
+    def _project_bandwidth(cls, value: object) -> dict[str, object] | None:
+        expected = {
+            "effective_capacity_mbps",
+            "safe_streaming_budget_mbps",
+            "reserve_mbps",
+            "remote_jellyfin_stream_count",
+            "unknown_stream_count",
+            "remote_jellyfin_observed_mbps",
+            "other_remote_observed_mbps",
+            "reconciliation_delta_mbps",
+            "total_remote_observed_mbps",
+            "available_headroom_mbps",
+            "calculated_per_stream_target_mbps",
+            "candidate_per_stream_target_mbps",
+            "policy_mode",
+            "measurement_quality",
+            "reason",
+            "would_enforce",
+            "sessions_above_target",
+            "direct_play_above_target",
+            "sessions",
+        }
+        if type(value) is not dict or set(value) != expected:
+            return None
+        session_projection = cls._project_sessions(
+            {"available": True, "reason": None, "sessions": value.get("sessions")}
+        )
+        above = cls._bounded_text_list(value.get("sessions_above_target"), 32, 64)
+        direct = cls._bounded_text_list(value.get("direct_play_above_target"), 32, 64)
+        fields = {
+            "effective_capacity_mbps": cls._number(
+                value.get("effective_capacity_mbps")
+            ),
+            "safe_streaming_budget_mbps": cls._number(
+                value.get("safe_streaming_budget_mbps")
+            ),
+            "reserve_mbps": cls._number(value.get("reserve_mbps")),
+            "remote_jellyfin_stream_count": cls._integer(
+                value.get("remote_jellyfin_stream_count"), 0, 32
+            ),
+            "unknown_stream_count": cls._integer(
+                value.get("unknown_stream_count"), 0, 32
+            ),
+            "remote_jellyfin_observed_mbps": cls._nullable_number(
+                value.get("remote_jellyfin_observed_mbps")
+            ),
+            "other_remote_observed_mbps": cls._nullable_number(
+                value.get("other_remote_observed_mbps")
+            ),
+            "reconciliation_delta_mbps": cls._nullable_signed_number(
+                value.get("reconciliation_delta_mbps")
+            ),
+            "total_remote_observed_mbps": cls._nullable_number(
+                value.get("total_remote_observed_mbps")
+            ),
+            "available_headroom_mbps": cls._nullable_number(
+                value.get("available_headroom_mbps")
+            ),
+            "calculated_per_stream_target_mbps": cls._nullable_number(
+                value.get("calculated_per_stream_target_mbps")
+            ),
+            "candidate_per_stream_target_mbps": cls._nullable_number(
+                value.get("candidate_per_stream_target_mbps")
+            ),
+            "policy_mode": value.get("policy_mode")
+            if value.get("policy_mode") in {"off", "observe", "dry_run"}
+            else cls._INVALID,
+            "measurement_quality": value.get("measurement_quality")
+            if value.get("measurement_quality") in {"good", "partial", "unavailable"}
+            else cls._INVALID,
+            "reason": cls._text(value.get("reason"), 96),
+            "would_enforce": value.get("would_enforce")
+            if type(value.get("would_enforce")) is bool
+            else cls._INVALID,
+            "sessions_above_target": above,
+            "direct_play_above_target": direct,
+            "sessions": None
+            if session_projection is None
+            else session_projection["sessions"],
+        }
+        return (
+            None
+            if any(
+                item is cls._INVALID or item is None and name == "sessions"
+                for name, item in fields.items()
+            )
+            else fields
+        )
+
+    @classmethod
     def _safe_error(cls, value: object) -> bool:
         return isinstance(value, str) and value in cls._PUBLIC_ERRORS
 
@@ -898,6 +1133,14 @@ class NasAgentHub:
         return value if value is None else cls._number(value)
 
     @classmethod
+    def _nullable_signed_number(cls, value: object) -> object:
+        return (
+            value
+            if value is None or type(value) in (int, float) and math.isfinite(value)
+            else cls._INVALID
+        )
+
+    @classmethod
     def _integer(cls, value: object, low: int, high: int) -> object:
         return value if type(value) is int and low <= value <= high else cls._INVALID
 
@@ -908,6 +1151,14 @@ class NasAgentHub:
             if value is None or type(value) is int and value >= 0
             else cls._INVALID
         )
+
+    @classmethod
+    def _bounded_text_list(cls, value: object, count: int, limit: int) -> object:
+        if type(value) is not list or len(value) > count:
+            return cls._INVALID
+        if not all(isinstance(item, str) and 0 < len(item) <= limit for item in value):
+            return cls._INVALID
+        return list(value)
 
     @staticmethod
     def _failure(action: str, code: str) -> dict[str, object]:
