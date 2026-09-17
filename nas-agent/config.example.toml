@@ -22,3 +22,32 @@ shutdown_enabled = false
 [jellyfin]
 url = "http://192.168.1.240:8096"
 health_path = "/health"
+# Requires a separately reviewed NAS-local Jellyfin API token supplied with
+# --jellyfin-api-key. The agent uses it only for one fixed GET, but Jellyfin
+# does not make the token itself a narrowly scoped monitoring credential.
+# Keep false until that credential is explicitly staged.
+session_monitoring_enabled = false
+local_networks = ["192.168.1.0/24"]
+remote_networks = ["100.64.0.0/10", "fd7a:115c:a1e0::/48"]
+
+[network]
+enabled = false
+# Operator-owned; callers can never select an interface.
+physical_interface = "REPLACE_WITH_REVIEWED_PHYSICAL_INTERFACE"
+# The only accepted metrics URL is Tailscale's documented local-only endpoint.
+tailscale_metrics_url = "http://100.100.100.100/metrics"
+sample_interval_seconds = 5
+smoothing_alpha = 0.35
+maximum_sample_interval_seconds = 30
+
+[bandwidth]
+effective_capacity_mbps = 30
+safe_streaming_budget_mbps = 24
+reserve_mbps = 6
+minimum_stream_mbps = 3
+maximum_stream_mbps = 24
+stream_stability_seconds = 15
+minimum_change_mbps = 1
+policy_cooldown_seconds = 30
+# This build rejects "enforce" at startup.
+policy_mode = "dry_run"

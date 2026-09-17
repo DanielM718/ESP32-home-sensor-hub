@@ -21,6 +21,24 @@ def _config(**changes):
         "truenas_spki_sha256": "b" * 64,
         "jellyfin_url": "http://192.168.1.240:8096",
         "jellyfin_health_path": "/health",
+        "jellyfin_session_monitoring_enabled": False,
+        "local_networks": ("192.168.1.0/24",),
+        "remote_networks": ("100.64.0.0/10", "fd7a:115c:a1e0::/48"),
+        "network_monitoring_enabled": False,
+        "physical_interface": "eno1",
+        "tailscale_metrics_url": "http://100.100.100.100/metrics",
+        "sample_interval_seconds": 5.0,
+        "smoothing_alpha": 0.35,
+        "maximum_sample_interval_seconds": 30.0,
+        "effective_capacity_mbps": 30.0,
+        "safe_streaming_budget_mbps": 24.0,
+        "reserve_mbps": 6.0,
+        "minimum_stream_mbps": 3.0,
+        "maximum_stream_mbps": 24.0,
+        "stream_stability_seconds": 15.0,
+        "minimum_change_mbps": 1.0,
+        "policy_cooldown_seconds": 30.0,
+        "policy_mode": "observe",
         "timeout_seconds": 5.0,
         "heartbeat_seconds": 15.0,
         "shutdown_enabled": False,
@@ -312,6 +330,7 @@ def test_failed_status_is_not_cached():
 
 def test_truenas_spki_mismatch_fails_before_api_key_is_sent():
     socket = RpcSocket()
+
     def reject(*_args):
         raise ProtocolError("server_identity_mismatch")
 
@@ -435,7 +454,7 @@ def test_jellyfin_uses_fixed_url_and_never_returns_body():
         seen["timeout"] = timeout
         return Response()
 
-    result = JellyfinBackend(_config(), open_request).status()
+    result = JellyfinBackend(_config(), opener=open_request).status()
     assert seen == {"url": "http://192.168.1.240:8096/health", "timeout": 5.0}
     assert result == {
         "reachable": True,
@@ -450,9 +469,39 @@ def test_jellyfin_unavailable_is_not_system_unavailable():
     def unavailable(*args, **kwargs):
         raise OSError("offline")
 
-    assert JellyfinBackend(_config(), unavailable).status() == {
+    assert JellyfinBackend(_config(), opener=unavailable).status() == {
         "reachable": False,
         "ready": False,
         "version": None,
         "http_status": None,
     }
+
+
+def test_truenas_interface_rate_uses_one_operator_owned_reporting_graph():
+    rpc = TrueNasRpc(_config(network_monitoring_enabled=True), "read-key")
+    seen = {}
+
+    def read_call(method, params, *, deadline):
+        seen.update(method=method, params=params, deadline=deadline)
+        return [
+            {
+                "name": "interface",
+                "identifier": "eno1",
+                "data": [
+                    [100, 1_000, 2_000],
+                    [102, 2_000, 3_000],
+                ],
+                "aggregations": None,
+                "start": 100,
+                "end": 102,
+                "legend": ["time", "received", "sent"],
+            }
+        ]
+
+    rpc._read_call = read_call
+    result = rpc.interface_rate()
+    assert seen["method"] == "reporting.netdata_get_data"
+    assert seen["params"][0] == [{"name": "interface", "identifier": "eno1"}]
+    assert result["tx_mbps"] == 3.0
+    assert result["rx_mbps"] == 2.0
+    assert result["sample_window_seconds"] == 2
