@@ -185,6 +185,12 @@ and rotated after staging. The shutdown key is neither provisioned nor mounted
 until a separately approved destructive test, and the process refuses to load
 it while `shutdown_enabled=false`.
 
+The local configuration names the two identities separately. Read sessions
+authenticate only as `butters_nas_status`; an enabled shutdown backend requires
+the distinct fixed `butters_nas_power` username and refuses configuration that
+reuses the read identity. Separate key files without separate login identities
+are not sufficient isolation.
+
 The eventual destructive stage has an unavoidable privilege asymmetry:
 TrueNAS 25.10 requires `FULL_ADMIN` for `system.shutdown`, so the API credential
 itself has broader TrueNAS authority than the NAS Agent protocol exposes. That

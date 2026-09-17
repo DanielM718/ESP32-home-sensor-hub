@@ -14,7 +14,9 @@ url = "wss://192.168.1.240/api/current"
 username = "butters_nas_status"
 spki_sha256 = "REPLACE_WITH_TRUENAS_64_LOWERCASE_HEX_CHARACTERS"
 timeout_seconds = 5
-# Dormant by construction. Enabling also requires a separate FULL_ADMIN key file.
+# Dormant by construction. When enabling, add a distinct fixed
+# `shutdown_username = "butters_nas_power"` and mount its separate FULL_ADMIN
+# key file. The read key is never authenticated as the shutdown identity.
 shutdown_enabled = false
 
 [jellyfin]
