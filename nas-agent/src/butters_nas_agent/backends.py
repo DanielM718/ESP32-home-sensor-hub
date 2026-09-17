@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -286,12 +286,9 @@ class TrueNasRpc:
             return dict(result)
 
     def _fresh_status(self, *, deadline: float) -> dict[str, object]:
-        try:
-            state = self._read_call("system.state", [], deadline=deadline)
-            version = self._read_call("system.version_short", [], deadline=deadline)
-            info = self._read_call("system.info", [], deadline=deadline)
-        except ProtocolError:
-            raise
+        state = self._read_call("system.state", [], deadline=deadline)
+        version = self._read_call("system.version_short", [], deadline=deadline)
+        info = self._read_call("system.info", [], deadline=deadline)
         if state not in {"BOOTING", "READY", "SHUTTING_DOWN"} or type(info) is not dict:
             raise ProtocolError("truenas_malformed_response")
         uptime = info.get("uptime_seconds")
@@ -608,7 +605,7 @@ class JellyfinBackend:
 class TailscaleMetricsBackend:
     """Read only the documented Tailscale throughput counters."""
 
-    _NAMES = {
+    _NAMES: ClassVar[dict[str, str]] = {
         "tailscaled_outbound_bytes_total": "tx",
         "tailscaled_inbound_bytes_total": "rx",
     }

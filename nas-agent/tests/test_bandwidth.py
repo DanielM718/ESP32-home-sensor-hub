@@ -1,8 +1,8 @@
 import json
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
-
 from butters_nas_agent.backends import JellyfinBackend, TailscaleMetricsBackend
 from butters_nas_agent.bandwidth import (
     CounterRateSampler,
@@ -20,17 +20,17 @@ class Clock:
 
 
 def policy_config(**changes):
-    value = dict(
-        effective_capacity_mbps=30.0,
-        safe_streaming_budget_mbps=24.0,
-        reserve_mbps=6.0,
-        minimum_stream_mbps=3.0,
-        maximum_stream_mbps=24.0,
-        stream_stability_seconds=0.0,
-        minimum_change_mbps=1.0,
-        policy_cooldown_seconds=0.0,
-        policy_mode="dry_run",
-    )
+    value = {
+        "effective_capacity_mbps": 30.0,
+        "safe_streaming_budget_mbps": 24.0,
+        "reserve_mbps": 6.0,
+        "minimum_stream_mbps": 3.0,
+        "maximum_stream_mbps": 24.0,
+        "stream_stability_seconds": 0.0,
+        "minimum_change_mbps": 1.0,
+        "policy_cooldown_seconds": 0.0,
+        "policy_mode": "dry_run",
+    }
     value.update(changes)
     return SimpleNamespace(**value)
 
@@ -152,7 +152,7 @@ def test_network_status_does_not_perturb_the_scheduled_counter_window():
 
 class Response:
     status = 200
-    headers = {}
+    headers: ClassVar[dict[str, str]] = {}
 
     def __init__(self, body):
         self.body = body
