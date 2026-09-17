@@ -362,6 +362,32 @@ def test_shutdown_uses_exact_reviewed_method_and_arguments():
     }
 
 
+@pytest.mark.parametrize("acknowledgement", [True, 1, {}, {"job_id": 7}])
+def test_shutdown_accepts_and_discards_non_null_success_acknowledgement(
+    acknowledgement,
+):
+    socket = RpcSocket(shutdown_result=acknowledgement)
+    result = _rpc(
+        _config(
+            shutdown_enabled=True,
+            truenas_shutdown_username="power_agent",
+        ),
+        socket,
+        "full-admin-key",
+    ).shutdown()
+
+    assert result == {
+        "accepted": True,
+        "state": "scheduled",
+        "method": "system.shutdown",
+    }
+    assert socket.sent[-1]["method"] == "system.shutdown"
+    assert socket.sent[-1]["params"] == [
+        "Butters NAS Agent approved shutdown",
+        {"delay": None},
+    ]
+
+
 def test_backend_refusal_is_enumerated_without_server_blob():
     socket = RpcSocket(error_method="system.state")
     with pytest.raises(ProtocolError, match="truenas_refused"):

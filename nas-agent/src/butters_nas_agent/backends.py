@@ -332,7 +332,12 @@ class TrueNasRpc:
                 self.config.truenas_shutdown_username,
                 deadline=deadline,
             ) as websocket:
-                result = self._call(
+                # A JSON-RPC success envelope is the acceptance boundary. Some
+                # TrueNAS 25.10 builds return null as documented while the
+                # production appliance returned a non-null acknowledgement.
+                # The value is deliberately discarded: it cannot influence or
+                # broaden this fixed zero-argument operation.
+                self._call(
                     websocket,
                     2,
                     self._SHUTDOWN_METHOD,
@@ -345,8 +350,6 @@ class TrueNasRpc:
             raise ProtocolError("timeout") from None
         except Exception:  # noqa: BLE001 - transport details can expose the endpoint.
             raise ProtocolError("truenas_unavailable") from None
-        if result is not None:
-            raise ProtocolError("truenas_malformed_response")
         return {"accepted": True, "state": "scheduled", "method": "system.shutdown"}
 
 
