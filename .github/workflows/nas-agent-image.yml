@@ -5,6 +5,7 @@ on:
     branches:
       - feature/nas-agent
       - feature/nas-shutdown-rollout
+      - feature/jellyfin-bandwidth-governor
     paths:
       - .github/workflows/nas-agent-image.yml
       - nas-agent/**
