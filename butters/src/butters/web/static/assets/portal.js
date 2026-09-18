@@ -56,9 +56,9 @@ function renderBandwidth(value){
     ["Streaming usage",mbps(value.remote_jellyfin_observed_mbps)],
     ["Other remote traffic",mbps(value.other_remote_observed_mbps)],
     ["Available headroom",mbps(value.available_headroom_mbps)],
-    ["Remote streams",String(value.remote_jellyfin_stream_count)],
-    ["Unknown streams",String(value.unknown_stream_count)],
-    ["Dry-run target",value.calculated_per_stream_target_mbps===null?"Stabilizing":`${mbps(value.calculated_per_stream_target_mbps)} / stream`],
+    ["Remote streams",value.remote_jellyfin_stream_count===null?"unavailable":String(value.remote_jellyfin_stream_count)],
+    ["Unknown streams",value.unknown_stream_count===null?"unavailable":String(value.unknown_stream_count)],
+    ["Dry-run target",value.calculated_per_stream_target_mbps===null?(value.measurement_quality==="unavailable"?"unavailable":"Stabilizing"):`${mbps(value.calculated_per_stream_target_mbps)} / stream`],
     ["Measurement quality",String(value.measurement_quality||"unavailable")],
     ["Policy mode",String(value.policy_mode||"off")],
   ]);

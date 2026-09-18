@@ -428,6 +428,13 @@ class TrueNasRpc:
 
 @dataclass(slots=True)
 class JellyfinBackend:
+    # Jellyfin 10.11 session DTOs include deeply nested media metadata. The
+    # first production sample was 1,191,365 bytes for two sessions, so the
+    # original 256 KiB limit rejected a valid response. Four MiB remains a
+    # strict memory bound while covering the intended small-home concurrent
+    # stream population with measured headroom.
+    _MAX_SESSIONS_RESPONSE_BYTES: ClassVar[int] = 4 * 1024 * 1024
+
     config: AgentConfig
     api_key: str | None = None
     opener: Callable[..., Any] = urlopen
@@ -488,7 +495,7 @@ class JellyfinBackend:
             with self.opener(request, timeout=self.config.timeout_seconds) as response:
                 if int(getattr(response, "status", 200)) != 200:
                     raise ProtocolError("jellyfin_unavailable")
-                raw = response.read(256 * 1024 + 1)
+                raw = response.read(self._MAX_SESSIONS_RESPONSE_BYTES + 1)
         except HTTPError as exc:
             raise ProtocolError(
                 "jellyfin_authentication_failed"
@@ -497,7 +504,7 @@ class JellyfinBackend:
             ) from None
         except (URLError, TimeoutError, OSError, ValueError):
             raise ProtocolError("jellyfin_unavailable") from None
-        if len(raw) > 256 * 1024:
+        if len(raw) > self._MAX_SESSIONS_RESPONSE_BYTES:
             raise ProtocolError("jellyfin_malformed_response")
         try:
             value = json.loads(raw)

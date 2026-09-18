@@ -9,6 +9,7 @@ from butters_nas_agent.bandwidth import (
     DryRunGovernor,
     NetworkTelemetry,
 )
+from butters_nas_agent.protocol import ProtocolError
 
 
 class Clock:
@@ -250,6 +251,26 @@ def test_sessions_filters_disconnected_and_nonplaying_and_bounds_secret_fields()
     assert "secret" not in json.dumps(result)
 
 
+def test_sessions_accepts_measured_large_jellyfin_dto_but_keeps_a_fixed_bound():
+    measured = raw_session("100.64.0.2")
+    measured["IgnoredNestedMetadata"] = "x" * 1_200_000
+    body = json.dumps([measured]).encode()
+    assert len(body) > 1_191_365
+
+    result = JellyfinBackend(
+        jellyfin_config(), "secret", opener=lambda *_a, **_k: Response(body)
+    ).sessions()
+    assert len(result["sessions"]) == 1
+    assert "IgnoredNestedMetadata" not in json.dumps(result)
+
+    oversized = b"[" + b" " * JellyfinBackend._MAX_SESSIONS_RESPONSE_BYTES + b"]"
+    backend = JellyfinBackend(
+        jellyfin_config(), "secret", opener=lambda *_a, **_k: Response(oversized)
+    )
+    with pytest.raises(ProtocolError, match="jellyfin_malformed_response"):
+        backend.sessions()
+
+
 def test_tailscale_metrics_sums_paths_without_accepting_other_metrics():
     body = b"""# HELP ignored value
 tailscaled_outbound_bytes_total{path=\"direct_ipv4\"} 100
@@ -338,6 +359,56 @@ def test_absent_bit_rate_or_remote_counter_stays_unknown_not_zero():
     assert state["total_remote_observed_mbps"] is None
     assert state["other_remote_observed_mbps"] is None
     assert state["available_headroom_mbps"] is None
+
+
+def test_unavailable_session_source_never_fabricates_zero_usage():
+    governor = DryRunGovernor(policy_config())
+    state = governor.status(network(7), sessions(available=False))
+    assert state["remote_jellyfin_stream_count"] is None
+    assert state["unknown_stream_count"] is None
+    assert state["remote_jellyfin_observed_mbps"] is None
+    assert state["other_remote_observed_mbps"] is None
+    assert state["reconciliation_delta_mbps"] is None
+    assert state["total_remote_observed_mbps"] == 7
+    assert state["available_headroom_mbps"] == 23
+    assert state["calculated_per_stream_target_mbps"] is None
+    assert state["measurement_quality"] == "unavailable"
+    assert state["reason"] == "jellyfin_session_telemetry_unavailable"
+    assert state["would_enforce"] is False
+
+
+def test_unavailable_session_source_does_not_reset_hysteresis():
+    clock = Clock()
+    governor = DryRunGovernor(
+        policy_config(stream_stability_seconds=10), monotonic=clock
+    )
+    assert (
+        governor.status(network(1), sessions(session("a")))[
+            "calculated_per_stream_target_mbps"
+        ]
+        is None
+    )
+    clock.value = 10
+    assert (
+        governor.status(network(1), sessions(session("a")))[
+            "calculated_per_stream_target_mbps"
+        ]
+        == 24
+    )
+    clock.value = 11
+    assert (
+        governor.status(network(1), sessions(available=False))[
+            "calculated_per_stream_target_mbps"
+        ]
+        is None
+    )
+    clock.value = 12
+    assert (
+        governor.status(network(1), sessions(session("a")))[
+            "calculated_per_stream_target_mbps"
+        ]
+        == 24
+    )
 
 
 def test_hysteresis_stability_threshold_and_cooldown():

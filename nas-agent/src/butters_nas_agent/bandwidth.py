@@ -252,6 +252,38 @@ class DryRunGovernor:
     def status(
         self, network: dict[str, object], session_state: dict[str, object]
     ) -> dict[str, object]:
+        session_available = session_state.get("available") is True
+        total_remote = _number(network.get("remote_tx_mbps"))
+        available_headroom = (
+            None
+            if total_remote is None
+            else round(max(0.0, self.config.effective_capacity_mbps - total_remote), 3)
+        )
+        if not session_available:
+            # A session-source outage is not evidence that there are zero streams.
+            # Do not advance hysteresis either: the stream count is unknown, not a
+            # real transition to zero.
+            return {
+                "effective_capacity_mbps": self.config.effective_capacity_mbps,
+                "safe_streaming_budget_mbps": self.config.safe_streaming_budget_mbps,
+                "reserve_mbps": self.config.reserve_mbps,
+                "remote_jellyfin_stream_count": None,
+                "unknown_stream_count": None,
+                "remote_jellyfin_observed_mbps": None,
+                "other_remote_observed_mbps": None,
+                "reconciliation_delta_mbps": None,
+                "total_remote_observed_mbps": total_remote,
+                "available_headroom_mbps": available_headroom,
+                "calculated_per_stream_target_mbps": None,
+                "candidate_per_stream_target_mbps": None,
+                "policy_mode": self.config.policy_mode,
+                "measurement_quality": "unavailable",
+                "reason": "jellyfin_session_telemetry_unavailable",
+                "would_enforce": False,
+                "sessions_above_target": [],
+                "direct_play_above_target": [],
+                "sessions": [],
+            }
         sessions = session_state.get("sessions")
         if not isinstance(sessions, list):
             sessions = []
@@ -273,7 +305,6 @@ class DryRunGovernor:
         remote_jellyfin = (
             round(sum(known_rates), 3) if len(known_rates) == len(remote) else None
         )
-        total_remote = _number(network.get("remote_tx_mbps"))
         other_remote = (
             None
             if total_remote is None or remote_jellyfin is None
@@ -283,11 +314,6 @@ class DryRunGovernor:
             None
             if total_remote is None or remote_jellyfin is None
             else round(total_remote - remote_jellyfin, 3)
-        )
-        available_headroom = (
-            None
-            if total_remote is None
-            else round(max(0.0, self.config.effective_capacity_mbps - total_remote), 3)
         )
         dynamic_budget = self.config.safe_streaming_budget_mbps
         if other_remote is not None:
@@ -342,9 +368,7 @@ class DryRunGovernor:
         else:
             reason = "within_dry_run_target"
         quality = str(network.get("measurement_quality", "unavailable"))
-        if session_state.get("available") is not True:
-            quality = "unavailable"
-        elif (
+        if (
             unknown
             or remote_jellyfin is None
             or other_remote is None

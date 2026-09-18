@@ -1048,11 +1048,15 @@ class NasAgentHub:
                 value.get("safe_streaming_budget_mbps")
             ),
             "reserve_mbps": cls._number(value.get("reserve_mbps")),
-            "remote_jellyfin_stream_count": cls._integer(
-                value.get("remote_jellyfin_stream_count"), 0, 32
+            "remote_jellyfin_stream_count": (
+                None
+                if value.get("remote_jellyfin_stream_count") is None
+                else cls._integer(value.get("remote_jellyfin_stream_count"), 0, 32)
             ),
-            "unknown_stream_count": cls._integer(
-                value.get("unknown_stream_count"), 0, 32
+            "unknown_stream_count": (
+                None
+                if value.get("unknown_stream_count") is None
+                else cls._integer(value.get("unknown_stream_count"), 0, 32)
             ),
             "remote_jellyfin_observed_mbps": cls._nullable_number(
                 value.get("remote_jellyfin_observed_mbps")

@@ -114,3 +114,41 @@ def test_bandwidth_projection_allows_only_non_enforcing_modes():
         )
         is None
     )
+
+
+def test_bandwidth_projection_preserves_unknown_session_counts():
+    payload = {
+        "effective_capacity_mbps": 30.0,
+        "safe_streaming_budget_mbps": 24.0,
+        "reserve_mbps": 6.0,
+        "remote_jellyfin_stream_count": None,
+        "unknown_stream_count": None,
+        "remote_jellyfin_observed_mbps": None,
+        "other_remote_observed_mbps": None,
+        "reconciliation_delta_mbps": None,
+        "total_remote_observed_mbps": 1.0,
+        "available_headroom_mbps": 29.0,
+        "calculated_per_stream_target_mbps": None,
+        "candidate_per_stream_target_mbps": None,
+        "policy_mode": "dry_run",
+        "measurement_quality": "unavailable",
+        "reason": "jellyfin_session_telemetry_unavailable",
+        "would_enforce": False,
+        "sessions_above_target": [],
+        "direct_play_above_target": [],
+        "sessions": [],
+    }
+    projected = NasAgentHub._project_result(
+        "nas.bandwidth.status", result("nas.bandwidth.status", payload)
+    )
+    assert projected is not None
+    assert projected["remote_jellyfin_stream_count"] is None
+    assert projected["unknown_stream_count"] is None
+
+    invalid = {**payload, "remote_jellyfin_stream_count": 33}
+    assert (
+        NasAgentHub._project_result(
+            "nas.bandwidth.status", result("nas.bandwidth.status", invalid)
+        )
+        is None
+    )
