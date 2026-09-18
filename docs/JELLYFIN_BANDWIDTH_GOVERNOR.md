@@ -1,9 +1,10 @@
 # Jellyfin bandwidth governor
 
 Status: implementation complete for measurement, classification, and dry-run
-calculation; production hardware validation is not complete. This phase contains
-no Jellyfin mutation path and rejects `policy_mode = "enforce"` at configuration
-load and again when constructing the governor.
+calculation; the first production read-only hardware validation is in progress.
+This phase contains no Jellyfin mutation path and rejects
+`policy_mode = "enforce"` at configuration load and again when constructing the
+governor.
 
 The implementation extends the production NAS Agent rather than introducing a
 second NAS daemon. It preserves the existing outbound authenticated WSS link,
@@ -66,10 +67,39 @@ live measurements are accepted.
   and outbound byte counters with `direct_ipv4`, `direct_ipv6`, `derp`, and
   peer-relay path labels. A client exposes its own metrics at
   `http://100.100.100.100/metrics`. [Tailscale client metrics](https://tailscale.com/docs/reference/tailscale-client-metrics)
-- The NAS Tailscale version and the local metrics endpoint's visibility from the
-  existing bridged NAS Agent container remain to be verified on hardware. The
-  Butters host runs Tailscale 1.102.2, but that is not evidence of the NAS
-  client's version.
+- The live NAS Tailscale Custom App is `v1.102.3` (chart `1.4.14`). Its local
+  metrics endpoint is reachable from the existing bridged, unprivileged NAS
+  Agent container without host networking or added mounts.
+
+## First hardware findings
+
+The production physical interface is `enp6s0`, the sole link-up physical NIC
+carrying `192.168.1.240`. Its TrueNAS interface graph exists, uses the upstream
+`Kilobits/s` unit, and produces plausible physical-only bursts. Tailscale's
+monotonic counters were visible for `direct_ipv4`, `direct_ipv6`, `derp`, and
+both peer-relay paths; the peer-relay counters remained zero during validation.
+
+The NAS-local Jellyfin credential successfully reads two-session responses from
+Jellyfin 10.11.11. The first real response was 1,191,365 bytes, proving that the
+original 256 KiB input bound was too small for Jellyfin's nested session DTOs.
+The fixed 4 MiB bound accepts the measured response while raw inspection and
+projected output remain capped at 64 and 32 records respectively.
+
+Real LAN and Tailnet sessions matched the configured LAN and Tailscale CIDRs
+from Jellyfin's server-recorded `RemoteEndPoint`; raw addresses were not exposed
+to the portal. A LAN transcode produced 41.576--50.356 Mbps physical bursts with
+0--0.001 Mbps Tailscale TX and remained outside the remote pool. A remote
+transcode reported 7.122 Mbps and was charged as one remote stream with a stable
+24 Mbps dry-run target.
+
+The remote run also established an important limitation: Jellyfin's reported
+bitrate is nominal, while clients fetch media in large bursts and then play from
+buffer. Five-second Tailscale TX ranged from effectively zero to 14.632 Mbps
+while Jellyfin continued reporting 7.122 Mbps and playback position advanced.
+Therefore instantaneous `T - J` is a useful signed reconciliation diagnostic,
+but is not a truthful measurement of non-Jellyfin traffic while a remote or
+unknown Jellyfin session exists. Enforcement remains blocked on a separately
+reviewed longer-window/attribution design.
 
 ## Measurement sources
 
@@ -109,16 +139,16 @@ This source is preferable to physical-interface inference because it counts
 bytes actually carried by the Tailscale client and distinguishes direct/relay
 paths. The endpoint is not currently reachable remotely on NAS port 5252; that
 mode would require enabling the web client and changing tailnet ACLs, neither
-of which was authorized. Hardware staging must prove the local endpoint is
-reachable from the hardened NAS Agent container. If it is not, the result stays
-unavailable; the deployment must not add privileged host access as a shortcut.
+of which was authorized. Live staging proved the local endpoint reachable from
+the hardened NAS Agent container. No host networking, Docker socket, host
+`/proc` or `/sys` mount, or additional capability was added.
 
 ### Jellyfin sessions
 
 The source is the fixed authenticated endpoint
 `GET /Sessions?activeWithinSeconds=90`. The token is a NAS-local read secret,
 never placed in Butters, a browser response, the action protocol, or logs. The
-response is capped at 256 KiB, at most 64 raw records are inspected, and at most
+response is capped at 4 MiB, at most 64 raw records are inspected, and at most
 32 projected sessions are returned.
 
 Only sessions with a `NowPlayingItem`, a valid bounded session ID, and a
@@ -186,7 +216,8 @@ Jellyfin response.
 ### `nas.bandwidth.status`
 
 Returns configured capacity/pool/reserve; known remote and unknown counts;
-reported remote Jellyfin Mbps; total and other Tailscale Mbps; reconciliation
+reported remote Jellyfin Mbps; total and attributable-other Tailscale Mbps;
+reconciliation
 delta; physical headroom; candidate and hysteresis-held per-stream targets;
 mode/quality/reason; informational `would_enforce`; above-target stable IDs for
 server-side diagnosis; Direct Play above-target IDs; and the bounded sessions.
@@ -239,17 +270,20 @@ S = configured safe Jellyfin pool
 R = configured reserve
 J = sum of reported bitrates for known remote active/unpaused sessions
 T = smoothed Tailscale outbound rate
-O = max(0, T - J), only when both T and J are known
+O = T, only when no remote/unknown Jellyfin session is present
 D = T - J, signed reconciliation delta
 H = max(0, C - T), only when T is known
 ```
 
-`O` is an estimate, not an independently measured service counter. A negative
-`D` means Jellyfin's summed reported rate exceeds current smoothed wire rate;
-this is plausible during buffering but degrades quality when the discrepancy is
-at least the configured 1 Mbps change threshold. If any known remote session
-lacks bitrate, `J`, `O`, and `D` remain unavailable rather than silently
-under-counting.
+When no remote or unknown Jellyfin session exists, all measured Tailscale TX is
+truthfully non-Jellyfin (`O = T`). While any such session exists, `O` is
+unavailable: short-window subtraction cannot distinguish non-Jellyfin traffic
+from Jellyfin segment bursts. `D` remains a signed diagnostic comparison when
+all known active remote sessions have reported bitrate and there is no unknown
+session. A negative `D` means the reported nominal rate exceeds the current
+smoothed wire rate, which is expected while a client plays from buffer. Any
+active or paused remote/unknown session makes derived quality partial even when
+the underlying network source remains good.
 
 Initial configurable values are:
 
@@ -268,7 +302,8 @@ Paused sessions and trusted local sessions do not receive a full allocation.
 Unknown is conservative: it counts against allocation but is not added to the
 known-remote reported-bitrate sum.
 
-When other traffic is known:
+When other traffic is independently attributable because no remote/unknown
+Jellyfin session exists:
 
 ```text
 dynamic_pool = min(S, max(0, C - R - O))
@@ -276,8 +311,10 @@ fair_share = dynamic_pool / chargeable_count
 candidate = min(maximum, max(minimum, fair_share))
 ```
 
-When `O` is unknown, the static safe pool `S` is used and quality is partial or
-unavailable. The result says why. If `fair_share` is below the floor, the floor
+During active remote playback, `O` is unknown, the static safe pool `S` is used,
+and quality is partial. The result says why. This dry-run phase deliberately
+does not shrink the pool using a value hardware proved would misattribute media
+bursts as other traffic. If `fair_share` is below the floor, the floor
 is reported with `configured_floor_exceeds_available_fair_share`; it is not
 presented as a feasible guarantee. A single stream is still capped by the
 configured maximum.
@@ -298,7 +335,8 @@ targets; `observe` calculates targets without setting `would_enforce`; and
 - A new stream count must remain stable for 15 seconds.
 - A target movement below 1 Mbps is held.
 - Accepted target changes have a 30-second cooldown.
-- Stream start and end both pass through the same stability/cooldown state.
+- Stream starts and nonzero count changes pass through stability/cooldown;
+  zero chargeable streams clear the displayed target immediately.
 - All durations and thresholds are configurable within bounded ranges.
 
 The governor reports both the current mathematical candidate and the held
@@ -343,8 +381,10 @@ command. Until that behavior is validated per supported client, dry run reports
 both sessions and flags A without changing either.
 
 When a stream ends, the remaining stream's larger candidate waits for stability
-and cooldown. When non-Jellyfin Tailscale traffic rises, `dynamic_pool` shrinks;
-the same safeguards apply. Unknown sessions never receive a local exemption.
+and cooldown. A future enforcement design must obtain trustworthy
+longer-window or source-attributed non-Jellyfin traffic before allowing it to
+shrink the pool during playback. Unknown sessions never receive a local
+exemption.
 
 ## Failure modes
 
@@ -357,9 +397,11 @@ the same safeguards apply. Unknown sessions never receive a local exemption.
 - Session endpoint missing/obscured: classification unknown and chargeable;
   quality partial.
 - Reported bitrate absent: Jellyfin aggregate and reconciliation stay null.
+- Any remote/unknown Jellyfin session is present: other-remote attribution is
+  null and quality is partial; the signed delta remains diagnostic where valid.
 - Reported Jellyfin exceeds current remote wire rate: signed delta is negative,
-  other traffic clamps to zero, and quality degrades rather than inventing a
-  negative service rate.
+  which is expected during buffered playback and never becomes a negative
+  service rate.
 - More sessions than the floor can support: the result is explicitly
   infeasible; dry run does not pretend the configured floor can fit.
 - Agent/hub schema mismatch: the authenticated connection fails closed because
@@ -367,10 +409,11 @@ the same safeguards apply. Unknown sessions never receive a local exemption.
 
 ## Portal and future time-series metrics
 
-The portal displays remote usage/capacity, safe pool, known Jellyfin usage,
-other remote estimate, physical headroom, remote/unknown counts, held dry-run
-target, quality, mode, and compact remote stream cards. `null` renders as
-Unavailable, never `0 Mbps`. Local sessions do not enter the browser response.
+The portal displays remote usage/capacity, safe pool, explicitly labeled
+Jellyfin reported rate, attributable other remote traffic, physical headroom,
+remote/unknown counts, held dry-run target, quality, mode, and compact remote
+stream cards. `null` renders as Unavailable, never `0 Mbps`. Local sessions do
+not enter the browser response.
 
 Once a reviewed exporter path exists, use fixed measurement/field names for:
 

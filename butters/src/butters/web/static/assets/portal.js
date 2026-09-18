@@ -53,12 +53,12 @@ function renderBandwidth(value){
   axis(document.querySelector("#portal-bandwidth-metrics"),[
     ["Remote bandwidth",value.total_remote_observed_mbps===null?"unavailable":`${mbps(value.total_remote_observed_mbps)} / ${mbps(value.effective_capacity_mbps)}`],
     ["Safe streaming pool",mbps(value.safe_streaming_budget_mbps)],
-    ["Streaming usage",mbps(value.remote_jellyfin_observed_mbps)],
+    ["Jellyfin reported rate",mbps(value.remote_jellyfin_observed_mbps)],
     ["Other remote traffic",mbps(value.other_remote_observed_mbps)],
     ["Available headroom",mbps(value.available_headroom_mbps)],
     ["Remote streams",value.remote_jellyfin_stream_count===null?"unavailable":String(value.remote_jellyfin_stream_count)],
     ["Unknown streams",value.unknown_stream_count===null?"unavailable":String(value.unknown_stream_count)],
-    ["Dry-run target",value.calculated_per_stream_target_mbps===null?(value.measurement_quality==="unavailable"?"unavailable":"Stabilizing"):`${mbps(value.calculated_per_stream_target_mbps)} / stream`],
+    ["Dry-run target",value.calculated_per_stream_target_mbps===null?(value.measurement_quality==="unavailable"?"unavailable":value.reason==="no_active_remote_or_unknown_streams"?"No active streams":"Stabilizing"):`${mbps(value.calculated_per_stream_target_mbps)} / stream`],
     ["Measurement quality",String(value.measurement_quality||"unavailable")],
     ["Policy mode",String(value.policy_mode||"off")],
   ]);
@@ -67,7 +67,7 @@ function renderBandwidth(value){
   for(const stream of value.sessions||[]){
     if(stream.classification!=="remote")continue;
     const card=document.createElement("div");card.className="portal-stream";
-    for(const text of [stream.user||"Viewer",stream.item||"Active item",String(stream.play_method||"unknown").replaceAll("_"," "),mbps(stream.observed_mbps)]){
+    for(const text of [stream.user||"Viewer",stream.item||"Active item",stream.paused?"Paused":"Playing",String(stream.play_method||"unknown").replaceAll("_"," "),mbps(stream.observed_mbps)]){
       const line=document.createElement("span");line.textContent=text;card.append(line);
     }
     list.append(card);

@@ -1355,7 +1355,12 @@ def test_portal_bandwidth_ui_preserves_unavailable_and_remote_only() -> None:
     assert 'stream.classification!=="remote"' in script
     assert 'remote_jellyfin_stream_count===null?"unavailable"' in script
     assert 'unknown_stream_count===null?"unavailable"' in script
-    assert 'measurement_quality==="unavailable"?"unavailable":"Stabilizing"' in script
+    assert (
+        'value.reason==="no_active_remote_or_unknown_streams"?"No active streams"'
+        in script
+    )
+    assert '["Jellyfin reported rate",' in script
+    assert 'stream.paused?"Paused":"Playing"' in script
     assert "if(state.jellyfin_ready){await enterJellyfin()" not in script
     assert "RemoteEndPoint" not in script
     assert "api_key" not in script

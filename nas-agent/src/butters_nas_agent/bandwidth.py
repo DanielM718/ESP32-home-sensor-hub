@@ -295,6 +295,13 @@ class DryRunGovernor:
             and value.get("paused") is False
             and value.get("classification") in {"remote", "unknown"}
         ]
+        tracked_remote_or_unknown = [
+            value
+            for value in sessions
+            if isinstance(value, dict)
+            and value.get("playing") is True
+            and value.get("classification") in {"remote", "unknown"}
+        ]
         remote = [s for s in chargeable if s.get("classification") == "remote"]
         unknown = [s for s in chargeable if s.get("classification") == "unknown"]
         known_rates = [
@@ -307,12 +314,12 @@ class DryRunGovernor:
         )
         other_remote = (
             None
-            if total_remote is None or remote_jellyfin is None
-            else round(max(0.0, total_remote - remote_jellyfin), 3)
+            if total_remote is None or tracked_remote_or_unknown
+            else round(total_remote, 3)
         )
         reconciliation_delta = (
             None
-            if total_remote is None or remote_jellyfin is None
+            if total_remote is None or remote_jellyfin is None or unknown
             else round(total_remote - remote_jellyfin, 3)
         )
         dynamic_budget = self.config.safe_streaming_budget_mbps
@@ -357,19 +364,20 @@ class DryRunGovernor:
             reason = "no_active_remote_or_unknown_streams"
         elif infeasible:
             reason = "configured_floor_exceeds_available_fair_share"
-        elif other_remote is None:
-            reason = "remote_accounting_incomplete_using_static_safe_pool"
-        elif held_reason:
-            reason = held_reason
         elif direct_play_above:
             reason = "direct_play_above_target_requires_future_renegotiation"
         elif above:
             reason = "one_or_more_sessions_above_dry_run_target"
+        elif held_reason:
+            reason = held_reason
+        elif other_remote is None:
+            reason = "remote_accounting_incomplete_using_static_safe_pool"
         else:
             reason = "within_dry_run_target"
         quality = str(network.get("measurement_quality", "unavailable"))
         if (
-            unknown
+            tracked_remote_or_unknown
+            or unknown
             or remote_jellyfin is None
             or other_remote is None
             or reconciliation_delta is not None
@@ -403,6 +411,12 @@ class DryRunGovernor:
     ) -> tuple[float | None, str | None]:
         now = self.monotonic()
         with self._lock:
+            if count == 0 or candidate is None:
+                self._observed_count = count
+                self._count_since = now
+                self._accepted_target = None
+                self._changed_at = now
+                return None, None
             if count != self._observed_count:
                 self._observed_count = count
                 self._count_since = now
@@ -411,10 +425,6 @@ class DryRunGovernor:
                         self._accepted_target,
                         "stream_count_change_waiting_for_stability",
                     )
-            if count == 0 or candidate is None:
-                self._accepted_target = None
-                self._changed_at = now
-                return None, None
             if self._accepted_target is None:
                 if (
                     self._count_since is not None

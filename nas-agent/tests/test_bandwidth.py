@@ -311,28 +311,44 @@ def test_policy_reserve_other_traffic_floor_and_ceiling():
     three = governor.status(
         network(29), sessions(*(session(str(i), rate=10) for i in range(3)))
     )
-    # Reported Jellyfin exceeds total network here, so other traffic is clamped,
-    # and the static 24 Mbps pool remains authoritative.
-    assert three["other_remote_observed_mbps"] == 0
+    # The signed reconciliation delta remains diagnostic, but bursty stream
+    # delivery makes point-in-time "other" attribution unknowable.
+    assert three["other_remote_observed_mbps"] is None
     assert three["reconciliation_delta_mbps"] == -1
     assert three["measurement_quality"] == "partial"
     constrained = governor.status(network(28), sessions(session("x", rate=2)))
     assert constrained["calculated_per_stream_target_mbps"] >= 4
 
 
-def test_non_jellyfin_traffic_shrinks_budget_and_direct_play_is_flagged():
+def test_active_stream_bursts_do_not_fabricate_other_remote_traffic():
     governor = DryRunGovernor(policy_config())
     state = governor.status(
         network(27),
         sessions(
-            session("direct", rate=12, method="direct_play"),
+            session("direct", rate=14, method="direct_play"),
             session("transcode", rate=4),
         ),
     )
-    assert state["other_remote_observed_mbps"] == 11
-    assert state["calculated_per_stream_target_mbps"] == 6.5
+    assert state["other_remote_observed_mbps"] is None
+    assert state["reconciliation_delta_mbps"] == 9
+    assert state["calculated_per_stream_target_mbps"] == 12
+    assert state["measurement_quality"] == "partial"
     assert state["direct_play_above_target"] == ["direct"]
     assert state["would_enforce"] is True
+
+
+def test_remote_traffic_is_other_only_when_no_remote_or_unknown_session_exists():
+    governor = DryRunGovernor(policy_config())
+    idle = governor.status(
+        network(3), sessions(session("local", classification="local"))
+    )
+    assert idle["other_remote_observed_mbps"] == 3
+
+    paused = governor.status(network(3), sessions(session("paused", paused=True)))
+    assert paused["other_remote_observed_mbps"] is None
+    assert paused["remote_jellyfin_stream_count"] == 0
+    assert paused["calculated_per_stream_target_mbps"] is None
+    assert paused["measurement_quality"] == "partial"
 
 
 def test_paused_local_and_unknown_session_handling():
@@ -347,7 +363,7 @@ def test_paused_local_and_unknown_session_handling():
     )
     assert state["remote_jellyfin_stream_count"] == 0
     assert state["unknown_stream_count"] == 1
-    assert state["calculated_per_stream_target_mbps"] == 21
+    assert state["calculated_per_stream_target_mbps"] == 24
 
 
 def test_absent_bit_rate_or_remote_counter_stays_unknown_not_zero():
@@ -447,6 +463,18 @@ def test_hysteresis_stability_threshold_and_cooldown():
         ]
         == 12
     )
+
+
+def test_zero_chargeable_streams_clear_a_held_target_immediately():
+    governor = DryRunGovernor(policy_config())
+    active = governor.status(network(1), sessions(session("a")))
+    assert active["calculated_per_stream_target_mbps"] == 24
+
+    paused = governor.status(network(1), sessions(session("a", paused=True)))
+    assert paused["remote_jellyfin_stream_count"] == 0
+    assert paused["calculated_per_stream_target_mbps"] is None
+    assert paused["candidate_per_stream_target_mbps"] is None
+    assert paused["reason"] == "no_active_remote_or_unknown_streams"
 
 
 def test_enforce_mode_is_impossible():
