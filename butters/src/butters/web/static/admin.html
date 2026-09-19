@@ -15,6 +15,7 @@
       <button data-panel="trace">Live Trace</button>
       <button data-panel="sessions">Conversations</button>
       <button data-panel="routing">Routing</button>
+      <button data-panel="integrations">Integrations</button>
       <button data-panel="models">Models / STT</button>
       <button data-panel="voice">TTS / Voice</button>
       <button data-panel="skills">Skills</button>
@@ -59,14 +60,86 @@
 
     <section id="panel-models" class="admin-panel"><div id="model-status" class="data-list"></div><div class="control-card"><label>Cloud STT WAV diagnostic<input id="stt-file" type="file" accept="audio/wav,.wav"></label><button id="stt-test" class="secondary-button" type="button">Transcribe bounded WAV</button><pre id="stt-result" class="code-output">No cloud STT test run. Local browser STT is exercised from normal tap-to-record.</pre></div></section>
 
+    <section id="panel-integrations" class="admin-panel">
+      <div class="control-card tool-card" id="openai-card">
+        <div class="tool-head"><h2>OpenAI</h2><span id="openai-summary" class="tool-headline" role="status">Checking credential state…</span></div>
+        <h3>Credential</h3>
+        <p class="tool-note">Butters shows the state of the credential, never its value. A stored key is not returned by any endpoint, is not written to logs, audit records, or job payloads, and never reaches this page.</p>
+        <div id="openai-credential" class="axis-grid" role="group" aria-label="OpenAI credential state">Select Integrations to load credential state.</div>
+        <div class="button-row">
+          <button id="openai-test" class="secondary-button" type="button">Test credential</button>
+          <button id="openai-set" class="primary-button" type="button">Set / Replace API key…</button>
+          <button id="openai-remove" class="danger-button" type="button">Remove from Butters…</button>
+        </div>
+
+        <form id="openai-key-form" class="confirm-panel" hidden autocomplete="off">
+          <label>New OpenAI API key<input id="openai-key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="512" placeholder="Pasted once, never stored in this browser"></label>
+          <p class="tool-note">The candidate is validated against OpenAI before it replaces anything. If validation fails the existing credential stays active and the candidate is discarded. Use a project key scoped to Butters rather than a general-purpose key.</p>
+          <div class="button-row"><button id="openai-key-submit" class="primary-button" type="submit">Validate and store</button><button id="openai-key-cancel" class="secondary-button" type="button">Cancel</button></div>
+        </form>
+
+        <div id="openai-remove-confirm" class="confirm-panel" role="group" aria-label="Confirm credential removal" hidden></div>
+        <p id="openai-status" class="tool-action-status" role="status" aria-live="polite">No credential operation has been requested.</p>
+        <p class="tool-note">Removing the credential here deletes only Butters&rsquo; local copy. It cannot revoke anything in your OpenAI account; revoke the key in the OpenAI Platform if it is no longer needed.</p>
+      </div>
+
+      <div class="control-card ai-card" id="chat-card">
+        <div class="tool-head"><h2>Butters Chat model</h2><span id="chat-effective" class="tool-headline" role="status">Loading effective configuration…</span></div>
+        <p class="tool-note">Every control here is offered by the selected model. A setting the model does not support is not shown, is refused if submitted, and is never placed in a request to the provider. A control left blank is omitted rather than sent as a default.</p>
+        <div class="form-row">
+          <label>Provider<select id="chat-provider"></select></label>
+          <label>Model<select id="chat-model"></select></label>
+        </div>
+        <div class="form-row">
+          <label id="chat-effort-field">Reasoning effort<select id="chat-effort"></select></label>
+          <label id="chat-verbosity-field">Response verbosity<select id="chat-verbosity"></select></label>
+          <label id="chat-output-field">Maximum output tokens<input id="chat-output" type="number" min="64" step="1"></label>
+          <label id="chat-temperature-field">Temperature<input id="chat-temperature" type="number" min="0" max="2" step="0.05" placeholder="unset"></label>
+        </div>
+        <details id="chat-advanced" class="advanced-block">
+          <summary>Advanced</summary>
+          <div class="form-row">
+            <label id="chat-top-p-field">top_p<input id="chat-top-p" type="number" min="0.01" max="1" step="0.01" placeholder="unset"></label>
+            <label id="chat-truncation-field">Truncation<select id="chat-truncation"></select></label>
+            <label id="chat-tool-calls-field">Maximum tool calls<input id="chat-tool-calls" type="number" min="0" max="32" step="1" placeholder="unset"></label>
+          </div>
+          <div class="toggle-row">
+            <label id="chat-parallel-field"><input id="chat-parallel" type="checkbox"> Parallel tool calls</label>
+            <label id="chat-store-field"><input id="chat-store" type="checkbox"> Store responses at OpenAI</label>
+            <label id="chat-cache-field"><input id="chat-cache" type="checkbox"> Send a prompt-cache hint</label>
+          </div>
+        </details>
+        <div class="button-row"><button id="chat-save" class="primary-button" type="button">Save and apply</button></div>
+        <p id="chat-status" class="tool-action-status" role="status" aria-live="polite">Loaded from the running service.</p>
+      </div>
+    </section>
+
     <section id="panel-voice" class="admin-panel">
-      <form id="voice-form" class="control-card">
-        <div class="form-row"><label>Provider<select id="voice-provider"><option value="local">Local Piper</option><option value="openai">OpenAI</option></select></label><label>Model<input id="voice-model" value="local-piper" maxlength="128"></label><label>Voice<input id="voice-name" value="kathleen" maxlength="128"></label><label>Speed<input id="voice-speed" type="number" min="0.25" max="4" step="0.05" value="1"></label></div>
-        <label>Style / instructions<textarea id="voice-instructions" maxlength="1000" placeholder="Supported by configured cloud voices"></textarea></label>
-        <label>Preview phrase<input id="voice-phrase" maxlength="500" value="Hello. This is Butters, checking the home sensor stack."></label>
-        <div class="button-row"><button class="primary-button" type="submit">Generate preview</button><button id="save-preset" class="secondary-button" type="button">Save as default preset</button></div>
+      <div class="control-card ai-card" id="tts-card">
+        <div class="tool-head"><h2>Text to speech</h2><span id="tts-effective" class="tool-headline" role="status">Loading effective configuration…</span></div>
+        <p class="tool-note">This is the configuration Butters Chat speaks with. Preview uses the same synthesis path as a spoken chat answer, so what you hear here is what a chat response will sound like.</p>
+        <div class="form-row">
+          <label>Provider<select id="tts-provider"></select></label>
+          <label>Model<select id="tts-model"></select></label>
+          <label>Voice<select id="tts-voice"></select></label>
+        </div>
+        <p id="tts-model-note" class="tool-note"></p>
+        <label id="tts-speed-field" class="range-field">Speed <output id="tts-speed-value">1.00×</output><input id="tts-speed" type="range" min="0.5" max="2" step="0.05" value="1"></label>
+        <label id="tts-instructions-field">Speaking style / instructions<textarea id="tts-instructions" maxlength="1000" placeholder="Warm, concise, calm home assistant."></textarea></label>
+        <p id="tts-instructions-note" class="tool-note">Shown only for models that consume a speaking style.</p>
+        <details id="tts-advanced" class="advanced-block">
+          <summary>Advanced</summary>
+          <div class="form-row"><label>Audio format<select id="tts-format"></select></label></div>
+        </details>
+        <div class="button-row">
+          <button id="tts-save" class="primary-button" type="button">Save and apply</button>
+          <button id="tts-preview" class="secondary-button" type="button">Preview voice</button>
+        </div>
+        <p id="tts-status" class="tool-action-status" role="status" aria-live="polite">Loaded from the running service.</p>
         <audio id="voice-audio" controls></audio>
-      </form>
+      </div>
+      <h2>Saved named presets</h2>
+      <p class="tool-note">Historical named presets. Butters Chat speaks with the effective configuration above, not with these.</p>
       <div id="voice-presets" class="data-list"></div>
     </section>
 

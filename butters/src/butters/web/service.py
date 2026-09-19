@@ -17,6 +17,9 @@ from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.nas_agent import NasAgentHub
 from butters.actions.store import ActionStateStore
+from butters.ai.capabilities import build_registry
+from butters.ai.credentials import CREDENTIAL_CLASS
+from butters.ai.runtime import AIRuntimeController, ProviderBundle
 from butters.assistant import (
     AssistantResponse,
     DeterministicAssistant,
@@ -63,6 +66,7 @@ from butters.web.speech import (
     TranscriptionResult,
     VoicePreset,
     VoicePresetStore,
+    preset_from_speech_settings,
     validate_preset,
 )
 from butters.web.trace import ExecutionTrace, TraceBuffer, TraceStage
@@ -246,6 +250,21 @@ class BetaAssistantService:
         self.local_tts = local_tts or LocalTTSProvider(self._local_tts_engine)
         self.cloud_stt = OpenAISTTProvider(settings)
         self.cloud_tts = OpenAITTSProvider(settings)
+        # Administrator-owned AI/TTS configuration. The controller holds the
+        # credential, the capability registry, and the effective runtime; the
+        # request paths below read the effective values rather than a constant,
+        # so what Admin displays is what synthesis and reasoning actually use.
+        self._injected_reasoner = general_reasoner is not None
+        self.ai_registry = build_registry(settings)
+        self.ai = AIRuntimeController(
+            settings,
+            self.state_dir,
+            registry=self.ai_registry,
+            chat_factory=self._build_chat_reasoner,
+            speech_factory=self._build_cloud_tts,
+            transcription_factory=self._build_cloud_stt,
+            install=self._install_ai_providers,
+        )
         # A single daemon owns paid-provider accounting. Serializing the
         # permit/call/record sequence prevents concurrent requests from all
         # passing a stale daily or monthly budget check.
@@ -585,8 +604,11 @@ class BetaAssistantService:
             "max",
         }:
             raise ValueError("reasoning effort is not allow-listed")
+        # Read once per turn: an Admin change that lands mid-turn applies to
+        # the next turn, never to half of this one.
+        effective_chat = self.ai.effective.chat
         output_limit = (
-            self.settings.cloud.max_output_tokens
+            (effective_chat.max_output_tokens or self.settings.cloud.max_output_tokens)
             if max_output_tokens is None
             else max_output_tokens
         )
@@ -822,8 +844,8 @@ class BetaAssistantService:
                     session,
                     text,
                     current_trace,
-                    model=self.settings.cloud.terra_model,
-                    effort="high",
+                    model=effective_chat.model,
+                    effort=effective_chat.reasoning_effort or "high",
                     max_output_tokens=output_limit,
                     route=route,
                     reason_code="open_ended_reasoning_required",
@@ -867,7 +889,7 @@ class BetaAssistantService:
                 True,
             )
         elif override in {RouteOverride.CLOUD_AUTO, RouteOverride.FORCE_CLOUD_MODEL}:
-            model = forced_model or self.settings.cloud.terra_model
+            model = forced_model or effective_chat.model
             response = self._general_cloud(
                 session,
                 text,
@@ -942,8 +964,8 @@ class BetaAssistantService:
                 session,
                 text,
                 current_trace,
-                model=self.settings.cloud.terra_model,
-                effort="high",
+                model=effective_chat.model,
+                effort=effective_chat.reasoning_effort or "high",
                 max_output_tokens=output_limit,
                 route=route,
                 reason_code="open_ended_reasoning_required",
@@ -1703,6 +1725,160 @@ class BetaAssistantService:
             job_id=None,
         )
 
+    # =================== Administrator: AI and speech =====================
+    #
+    # Four rules hold for everything below.
+    #
+    # 1. The capability registry decides what is valid. These methods never
+    #    re-derive a model list, a voice list, or a parameter range.
+    # 2. SAVED, CREDENTIAL, and EFFECTIVE are reported separately. A stored
+    #    row is never presented as a live configuration change.
+    # 3. The credential value never leaves `AIRuntimeController`. Nothing here
+    #    accepts it as an argument it then forwards, logs, or audits: it is
+    #    read from the request body, handed to the controller, and dropped.
+    # 4. Mutating the credential needs an administrator identity, an explicit
+    #    confirmation, and a FRESH passkey assertion bound to this exact
+    #    operation.
+
+    def ai_catalog(self, session: BrowserSession) -> dict[str, object]:
+        self._require_action_admin(session)
+        return self.ai_registry.as_dict()
+
+    def ai_settings(self, session: BrowserSession) -> dict[str, object]:
+        self._require_action_admin(session)
+        return self.ai.state()
+
+    def apply_chat_settings(
+        self, session: BrowserSession, payload: dict[str, object]
+    ) -> dict[str, object]:
+        self._require_action_admin(session)
+        state = self.ai.apply_chat(payload)
+        self._audit_ai("ai.chat.configure", session, state["saved"]["chat"])
+        return state
+
+    def apply_speech_settings(
+        self, session: BrowserSession, payload: dict[str, object]
+    ) -> dict[str, object]:
+        self._require_action_admin(session)
+        state = self.ai.apply_speech(payload)
+        self._audit_ai("ai.tts.configure", session, state["saved"]["speech"])
+        return state
+
+    def openai_credential_state(self, session: BrowserSession) -> dict[str, object]:
+        self._require_action_admin(session)
+        return self.ai.credential_state()
+
+    def test_openai_credential(self, session: BrowserSession) -> dict[str, object]:
+        """Bounded authentication check against the already-stored credential."""
+
+        self._require_action_admin(session)
+        result = self.ai.test_credential(model=self.ai.effective.chat.model)
+        self._audit_ai(
+            "ai.credential.test",
+            session,
+            {
+                "credential_class": CREDENTIAL_CLASS,
+                "authenticated": result["validation"]["authenticated"],
+                "code": result["validation"]["code"],
+            },
+        )
+        return result
+
+    def set_openai_credential(
+        self,
+        session: BrowserSession,
+        *,
+        candidate: object,
+        fresh_grant: str,
+        confirmed: bool,
+    ) -> dict[str, object]:
+        """Validate first, replace only on success, never overwrite blindly."""
+
+        self._require_fresh_credential_grant(session, fresh_grant, subject="set")
+        if confirmed is not True:
+            raise ActionCoordinatorError(
+                "confirmation_required",
+                "replacing the OpenAI credential requires explicit confirmation",
+            )
+        result = self.ai.set_credential(candidate)
+        self._audit_ai(
+            "ai.credential.set",
+            session,
+            {
+                "credential_class": CREDENTIAL_CLASS,
+                "replaced": result["replaced"],
+                "fingerprint": result["credential"].get("fingerprint"),
+                "validation_code": result["validation"]["code"],
+            },
+            authentication=AuthenticationLevel.FRESH,
+            method="fresh_webauthn",
+        )
+        return result
+
+    def remove_openai_credential(
+        self, session: BrowserSession, *, fresh_grant: str, confirmed: bool
+    ) -> dict[str, object]:
+        """Remove Butters' own copy. Nothing is revoked at OpenAI."""
+
+        self._require_fresh_credential_grant(session, fresh_grant, subject="remove")
+        if confirmed is not True:
+            raise ActionCoordinatorError(
+                "confirmation_required",
+                "removing the OpenAI credential requires explicit confirmation",
+            )
+        result = self.ai.remove_credential()
+        self._audit_ai(
+            "ai.credential.remove",
+            session,
+            {"credential_class": CREDENTIAL_CLASS, "removed": result["removed"]},
+            authentication=AuthenticationLevel.FRESH,
+            method="fresh_webauthn",
+        )
+        return result
+
+    def _require_fresh_credential_grant(
+        self, session: BrowserSession, fresh_grant: object, *, subject: str
+    ) -> None:
+        self._require_action_admin(session)
+        if not isinstance(fresh_grant, str) or not fresh_grant:
+            raise ActionCoordinatorError(
+                "fresh_required", "fresh passkey authentication is required"
+            )
+        bound = self.auth_state.consume_fresh_grant(
+            fresh_grant,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            purpose="openai_credential",
+        )
+        if bound != subject:
+            raise ActionCoordinatorError(
+                "fresh_binding_denied",
+                "fresh authorization targets another credential operation",
+            )
+
+    def _audit_ai(
+        self,
+        skill: str,
+        session: BrowserSession,
+        arguments: dict[str, object],
+        *,
+        authentication: AuthenticationLevel = AuthenticationLevel.ELEVATED,
+        method: str = "administrator",
+    ) -> None:
+        # `arguments` is written verbatim into the durable audit trail, so it
+        # carries identifiers and outcomes only. No caller may place credential
+        # material here.
+        self.action_state.audit(
+            identity=session.peer_key,
+            session_id=session.session_id,
+            skill=skill,
+            authentication=authentication,
+            method=method,
+            arguments=arguments,
+            outcome="completed",
+            job_id=None,
+        )
+
     def action_job(self, session: BrowserSession, job_id: str) -> dict[str, object]:
         return self.action_state.job(
             job_id, session_id=session.session_id, identity=session.peer_key
@@ -1755,7 +1931,10 @@ class BetaAssistantService:
             raise SpeechProviderError(
                 "trace_denied", "response trace has no assistant message"
             )
-        selected = preset or self.voice_presets.default(self.settings)
+        # The single source of truth for how Butters Chat sounds. There is no
+        # second default and no per-request override: whatever Admin shows as
+        # the effective voice is what this request carries.
+        selected = preset or preset_from_speech_settings(self.ai.effective.speech)
         started = time.perf_counter()
         result = self.synthesize_preview(
             message,
@@ -1788,7 +1967,7 @@ class BetaAssistantService:
     ) -> SpeechResult:
         # Previews and saved presets share one validation boundary, so an
         # out-of-range or non-finite speed is rejected before any engine loads.
-        validate_preset(preset, settings=self.settings)
+        validate_preset(preset, registry=self.ai_registry)
         if preset.provider == "local":
             return self.local_tts.synthesize(text, preset)
         if preset.provider != "openai":
@@ -2367,6 +2546,9 @@ class BetaAssistantService:
                     previous_response_id=previous,
                     tool_output=tool_output,
                     timeout_seconds=remaining_wall,
+                    # Only the controls the administrator set for exactly this
+                    # model; everything unset stays out of the request body.
+                    parameters=self._chat_parameters(model),
                 )
             except CloudReasonerError as exc:
                 configuration = ReasoningConfiguration(
@@ -2886,6 +3068,46 @@ class BetaAssistantService:
             self.settings.cloud,
             ledger=self.ledger,
         )
+
+    def _chat_parameters(self, model: str):
+        """Advanced parameters, but only when they belong to this model.
+
+        An administrator override during a diagnostic or an escalation can run
+        a different model than the configured one. Sending that model the
+        parameters saved for another would be exactly the capability mismatch
+        this work removes, so they are withheld instead.
+        """
+
+        effective = self.ai.effective.chat
+        return effective if effective.model == model else None
+
+    # ------------------- effective AI/TTS provider wiring -------------------
+    #
+    # Every rebuild goes through these three factories, so a credential change
+    # cannot leave one provider holding the old key while another holds the
+    # new one. `_install_ai_providers` is the only place the live attributes
+    # are replaced, and it replaces all of them or none.
+
+    def _build_chat_reasoner(self, api_key: str | None):
+        if self._injected_reasoner:
+            return self.general_reasoner
+        return OpenAIGeneralReasoner(self.settings.cloud, api_key=api_key or "")
+
+    def _build_cloud_tts(self, api_key: str | None):
+        return OpenAITTSProvider(
+            self.settings, api_key=api_key or "", registry=self.ai_registry
+        )
+
+    def _build_cloud_stt(self, api_key: str | None):
+        return OpenAISTTProvider(self.settings, api_key=api_key or "")
+
+    def _install_ai_providers(self, bundle: ProviderBundle) -> None:
+        if not self._injected_reasoner and bundle.chat is not None:
+            self.general_reasoner = bundle.chat
+        if bundle.speech is not None:
+            self.cloud_tts = bundle.speech
+        if bundle.transcription is not None:
+            self.cloud_stt = bundle.transcription
 
     def _local_tts_engine(self, speed: float):
         from butters.tts.sherpa_engine import SherpaOnnxPiperTTS

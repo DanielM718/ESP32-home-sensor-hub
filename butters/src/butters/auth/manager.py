@@ -223,7 +223,18 @@ class PyWebAuthnBackend:
 
 class PasskeyManager:
     PURPOSES = frozenset(
-        {"elevation", "pending_action", "register_passkey", "revoke_passkey"}
+        {
+            "elevation",
+            "pending_action",
+            "register_passkey",
+            "revoke_passkey",
+            # Mutating the stored OpenAI credential is a sensitive
+            # administrator action, so it carries its own fresh-grant purpose
+            # rather than reusing elevation. The grant is additionally bound to
+            # the subject "set" or "remove", so an assertion collected for one
+            # cannot authorize the other.
+            "openai_credential",
+        }
     )
     # The portal's own sign-in purpose. It is deliberately not in PURPOSES: the
     # administrator endpoints validate against PURPOSES, so a portal ceremony

@@ -25,6 +25,8 @@ from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from butters.actions.coordinator import ActionCoordinatorError
 from butters.actions.store import ActionStateError
+from butters.ai.capabilities import CapabilityError
+from butters.ai.credentials import CredentialError
 from butters.assistant_config import AssistantSettings, load_assistant_settings
 from butters.auth.manager import WebAuthnError
 from butters.auth.store import AuthStateError
@@ -1472,6 +1474,160 @@ def create_app(
         ) as exc:
             return _exception_response(exc)
 
+    # ------------------- Admin: Integrations (OpenAI) / AI -------------------
+    #
+    # The candidate API key arrives in exactly one place: the JSON body of an
+    # authenticated, same-origin, CSRF-checked HTTPS POST. It is never a path
+    # parameter, never a query parameter, and never returned. The response
+    # carries state - configured, validated, effective - and nothing else.
+
+    async def ai_catalog(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.ai_catalog(session))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def ai_settings(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.ai_settings(session))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def ai_chat_settings(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not admin_rate.check(identity):
+                return _error("rate_limited", "administrator rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            return JSONResponse(
+                await run_blocking(runtime.apply_chat_settings, session, payload)
+            )
+        except (
+            SecurityError,
+            SessionError,
+            CapabilityError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def ai_tts_settings(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not admin_rate.check(identity):
+                return _error("rate_limited", "administrator rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            return JSONResponse(
+                await run_blocking(runtime.apply_speech_settings, session, payload)
+            )
+        except (
+            SecurityError,
+            SessionError,
+            CapabilityError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def openai_credential(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.openai_credential_state(session))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def openai_credential_test(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("credential:" + identity):
+                return _error(
+                    "rate_limited", "credential test rate limit exceeded", 429
+                )
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            return JSONResponse(
+                await run_blocking(runtime.test_openai_credential, session)
+            )
+        except (
+            SecurityError,
+            SessionError,
+            CredentialError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def openai_credential_set(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("credential:" + identity):
+                return _error(
+                    "rate_limited", "credential change rate limit exceeded", 429
+                )
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"api_key", "fresh_grant", "confirm"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.set_openai_credential,
+                    session,
+                    candidate=payload.get("api_key"),
+                    fresh_grant=payload.get("fresh_grant"),
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            CredentialError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def openai_credential_remove(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("credential:" + identity):
+                return _error(
+                    "rate_limited", "credential change rate limit exceeded", 429
+                )
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"fresh_grant", "confirm"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.remove_openai_credential,
+                    session,
+                    fresh_grant=payload.get("fresh_grant"),
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            CredentialError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     async def system_info(request: Request) -> Response:
         try:
             _admin(request, auth)
@@ -2064,6 +2220,26 @@ def create_app(
         Route("/api/admin/voice/presets", voice_presets),
         Route("/api/admin/voice/presets", save_voice_preset, methods=["POST"]),
         Route("/api/admin/voice/preview", preview_voice, methods=["POST"]),
+        Route("/api/admin/ai/catalog", ai_catalog),
+        Route("/api/admin/ai/settings", ai_settings),
+        Route("/api/admin/ai/chat", ai_chat_settings, methods=["POST"]),
+        Route("/api/admin/ai/tts", ai_tts_settings, methods=["POST"]),
+        Route("/api/admin/integrations/openai", openai_credential),
+        Route(
+            "/api/admin/integrations/openai/test",
+            openai_credential_test,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/integrations/openai/key",
+            openai_credential_set,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/integrations/openai/key",
+            openai_credential_remove,
+            methods=["DELETE"],
+        ),
         Route("/api/admin/system", system_info),
         Route("/api/admin/logs", logs),
         Route("/api/admin/codex/jobs", codex_jobs),
@@ -2432,6 +2608,14 @@ def _exception_response(
         return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SpeechProviderError):
         return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)
+    if isinstance(exc, CapabilityError):
+        # A rejected provider/model/parameter combination is a client error and
+        # keeps its specific code, so the browser can point at the right field.
+        return _error(exc.code, str(exc), 400)
+    if isinstance(exc, CredentialError):
+        return _error(
+            exc.code, str(exc), 409 if exc.code == "credential_missing" else 400
+        )
     if isinstance(exc, SkillAuthoringError):
         status = (
             404

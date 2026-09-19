@@ -16,6 +16,8 @@ import wave
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from butters.ai.capabilities import CapabilityError, CapabilityRegistry, build_registry
+from butters.ai.model import SpeechSettings
 from butters.assistant_config import AssistantSettings
 from butters.tts.model import SynthesizedSpeech, TTSError, TextToSpeechEngine
 
@@ -198,10 +200,14 @@ class OpenAITTSProvider:
         *,
         api_key: str | None = None,
         opener: callable = urllib.request.urlopen,
+        registry: CapabilityRegistry | None = None,
     ) -> None:
         self.settings = settings
         self._api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
         self._opener = opener
+        # The registry, not a template or a conditional here, decides which
+        # voices exist and whether this model consumes speaking instructions.
+        self.registry = registry or build_registry(settings)
 
     @property
     def available(self) -> bool:
@@ -219,19 +225,30 @@ class OpenAITTSProvider:
         price = self.settings.providers.cloud_tts_price_per_million_characters_usd
         if price is None:
             raise SpeechProviderError("pricing_unknown", "paid TTS pricing is not configured")
-        if preset.model != self.settings.providers.cloud_tts_model:
-            raise SpeechProviderError("model_denied", "TTS model is not configured")
+        try:
+            capability = self.registry.speech_model("openai", preset.model)
+        except CapabilityError as exc:
+            raise SpeechProviderError(exc.code, str(exc)) from exc
+        if preset.voice not in capability.voice_ids():
+            raise SpeechProviderError(
+                "invalid_voice", f"{preset.voice} is not a voice of {capability.id}"
+            )
         value = " ".join(text.split())
         if not value or len(value) > 2000:
             raise SpeechProviderError("invalid_text", "TTS text must be 1 to 2000 characters")
-        body = {
+        body: dict[str, object] = {
             "model": preset.model,
             "input": value,
             "voice": preset.voice,
-            "instructions": preset.instructions[:1000],
             "response_format": "wav",
-            "speed": preset.speed,
         }
+        # A parameter the selected model does not support is never placed in
+        # the request. A stale style left over from another model is dropped
+        # here rather than sent and silently ignored upstream.
+        if capability.supports_instructions and preset.instructions:
+            body["instructions"] = preset.instructions[:1000]
+        if capability.supports_speed:
+            body["speed"] = preset.speed
         request = urllib.request.Request(
             f"{self.settings.cloud.base_url}/v1/audio/speech",
             data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
@@ -353,10 +370,31 @@ LOCAL_SPEED_RANGE = (0.5, 2.0)
 CLOUD_SPEED_RANGE = (0.25, 4.0)
 
 
+def preset_from_speech_settings(
+    speech: SpeechSettings, *, name: str = "effective"
+) -> VoicePreset:
+    """The one translation from stored Admin settings to a synthesis request.
+
+    Butters Chat and Preview both go through this, so a preview cannot honour
+    a setting that the spoken chat response would ignore.
+    """
+
+    return VoicePreset(
+        name,
+        speech.provider,
+        speech.model,
+        speech.voice,
+        1.0 if speech.speed is None else speech.speed,
+        speech.instructions or "",
+        True,
+    )
+
+
 def validate_preset(
     preset: VoicePreset,
     *,
     settings: AssistantSettings | None = None,
+    registry: CapabilityRegistry | None = None,
 ) -> None:
     """Single validation boundary for saved presets and one-off previews."""
 
@@ -383,9 +421,32 @@ def validate_preset(
         )
     if preset.provider == "local" and preset.model != LOCAL_TTS_MODEL:
         raise SpeechProviderError("invalid_preset", "local TTS uses the reviewed local model")
-    if settings is not None and preset.provider == "openai":
-        if preset.model != settings.providers.cloud_tts_model:
-            raise SpeechProviderError("model_denied", "TTS model is not configured")
+    # The capability registry is authoritative for model, voice, and which
+    # controls the model accepts. `settings` is accepted only so the existing
+    # callers that already hold configuration can derive the same registry.
+    catalog = registry
+    if catalog is None and settings is not None:
+        catalog = build_registry(settings)
+    if catalog is None:
+        return
+    try:
+        capability = catalog.speech_model(preset.provider, preset.model)
+    except CapabilityError as exc:
+        raise SpeechProviderError(exc.code, str(exc)) from exc
+    if preset.voice not in capability.voice_ids():
+        raise SpeechProviderError(
+            "invalid_voice", f"{preset.voice} is not a voice of {capability.id}"
+        )
+    low, high = capability.speed_range
+    if not low <= speed <= high:
+        raise SpeechProviderError(
+            "invalid_preset", f"{capability.id} accepts a speed of {low} to {high}"
+        )
+    if preset.instructions and not capability.supports_instructions:
+        raise SpeechProviderError(
+            "unsupported_parameter",
+            f"{capability.id} does not accept speaking instructions",
+        )
 
 
 def _validate_preset(preset: VoicePreset) -> None:

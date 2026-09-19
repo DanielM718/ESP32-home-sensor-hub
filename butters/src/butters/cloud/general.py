@@ -12,6 +12,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from butters.ai.model import ChatSettings
 from butters.assistant_config import CloudSettings
 from butters.cloud.model import CloudReasonerError, CloudTokenUsage, ToolRequest
 from butters.cloud.openai_responses import _usage
@@ -55,6 +56,7 @@ class GeneralCloudReasoner(ABC):
         previous_response_id: str | None = None,
         tool_output: dict[str, object] | None = None,
         timeout_seconds: float | None = None,
+        parameters: ChatSettings | None = None,
     ) -> GeneralCloudTurn: ...
 
 
@@ -90,6 +92,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
         previous_response_id: str | None = None,
         tool_output: dict[str, object] | None = None,
         timeout_seconds: float | None = None,
+        parameters: ChatSettings | None = None,
     ) -> GeneralCloudTurn:
         if not self._api_key:
             raise CloudReasonerError(
@@ -116,6 +119,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
             max_output_tokens=max_output_tokens,
             previous_response_id=previous_response_id,
             tool_output=tool_output,
+            parameters=parameters,
         )
         encoded_body = json.dumps(
             body, separators=(",", ":"), ensure_ascii=True
@@ -202,6 +206,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
         max_output_tokens: int,
         previous_response_id: str | None,
         tool_output: dict[str, object] | None,
+        parameters: ChatSettings | None = None,
     ) -> dict[str, object]:
         body: dict[str, object] = {
             "model": model,
@@ -224,6 +229,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
                 and isinstance(item.get("content"), str)
             ]
             body["input"] = [*bounded_context, {"role": "user", "content": text[:8000]}]
+        _apply_chat_parameters(body, parameters)
         return body
 
     @staticmethod
@@ -304,3 +310,38 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
             usage=_usage(payload.get("usage")),
             stopping_reason="tool_call" if tool_requests else "complete",
         )
+
+
+# One stable key lets OpenAI route repeated Butters prefixes to the same cache
+# shard. It is a routing hint, never an identifier of the person or the turn.
+PROMPT_CACHE_KEY = "butters-chat"
+
+
+def _apply_chat_parameters(
+    body: dict[str, object], parameters: ChatSettings | None
+) -> None:
+    """Add only the controls the administrator actually set.
+
+    An unset control is omitted rather than sent as an invented default, and a
+    control the selected model does not support never reaches here: the
+    capability registry refuses it when the setting is saved.
+    """
+
+    if parameters is None:
+        return
+    if parameters.verbosity is not None:
+        body["text"] = {"verbosity": parameters.verbosity}
+    if parameters.temperature is not None:
+        body["temperature"] = parameters.temperature
+    if parameters.top_p is not None:
+        body["top_p"] = parameters.top_p
+    if parameters.truncation is not None:
+        body["truncation"] = parameters.truncation
+    if parameters.parallel_tool_calls is not None:
+        body["parallel_tool_calls"] = parameters.parallel_tool_calls
+    if parameters.max_tool_calls is not None:
+        body["max_tool_calls"] = parameters.max_tool_calls
+    if parameters.store_responses is not None:
+        body["store"] = parameters.store_responses
+    if parameters.prompt_cache_enabled:
+        body["prompt_cache_key"] = PROMPT_CACHE_KEY
