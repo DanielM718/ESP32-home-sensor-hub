@@ -166,3 +166,43 @@ Systemd hardening is unchanged: `ProtectSystem=strict`,
 `CapabilityBoundingSet`, and `/var/lib/butters` as the only writable path.
 `/etc/butters` is readable but not writable by the service, which is what makes
 the overlay a boundary the service cannot move.
+
+## Pricing ownership
+
+Model rates are **class 1**: reviewed repository configuration in
+`butters/src/butters/pricing.py`, alongside `PRICING_SOURCE` and
+`PRICING_DATE`, which are updated in the same change as the rates. They are
+server-authoritative — no Admin form field can express a price, and a test
+asserts that `ChatSettings` and `SpeechSettings` carry no price, rate, or cost
+field.
+
+Each model declares the dimension OpenAI actually bills:
+
+| Model | Billing dimension |
+| --- | --- |
+| `gpt-5.6-luna` / `terra` / `sol` | input, cached input, output tokens (`TokenPricing`) |
+| `tts-1`, `tts-1-hd` | input characters (`CharacterPricing`) |
+| `gpt-4o-mini-tts` | text input tokens + audio output tokens (`SpeechTokenPricing`) |
+
+A model with no entry is denied before any HTTP call, in both the chat and
+speech paths.
+
+### What a recorded cost claims
+
+`provider_usage.cost_basis` says how much a figure should be trusted:
+`provider_reported`, `input_measured`, `estimated_upper_bound`, `unavailable`,
+or `unrecorded` for rows written before the column existed. Every field is
+named `estimated_cost_usd`; the ledger is an estimate until reconciled against
+OpenAI billing, and nothing in it claims to be a settled charge.
+
+Recorded rows keep their request-time figure. They are a snapshot for audit,
+not a recomputation, so a later rate change never rewrites history.
+
+`POST /v1/audio/speech` returns audio bytes and no usage object, so for
+`gpt-4o-mini-tts` neither billable dimension is observable. Its cost is
+therefore an openly labelled ceiling (`estimated_upper_bound`,
+`reconciliation_required: true`), never a measurement, and audio tokens are
+never inferred from the encoded audio's size or duration — OpenAI defines no
+such conversion. Budget admission uses that same ceiling, so a request whose
+worst case exceeds the budget is refused rather than admitted on the grounds
+that its true cost is unknowable.

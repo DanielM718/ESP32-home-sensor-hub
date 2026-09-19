@@ -2016,8 +2016,14 @@ class BetaAssistantService:
             return self.local_tts.synthesize(text, preset)
         if preset.provider != "openai":
             raise SpeechProviderError("provider_denied", "TTS provider is not allowed")
-        price = self.settings.providers.cloud_tts_price_per_million_characters_usd
-        estimate = float("inf") if price is None else len(text) * price / 1_000_000
+        # Preflight on the model's own billing dimension. For a character-priced
+        # model this equals the final charge. For gpt-4o-mini-tts, whose audio
+        # output tokens the speech endpoint never reports, it is a deliberate
+        # ceiling: a request is admitted only if even the worst case fits the
+        # budget, so an unknowable final cost can never be an excuse to admit
+        # a request. An unpriced model yields infinity and is refused.
+        preflight = self.ledger.speech_cost(preset.model, characters=len(text))
+        estimate = preflight.amount_usd
         with self._paid_operation_gate:
             if not self.ledger.permits(estimate):
                 raise SpeechProviderError(
@@ -2036,6 +2042,7 @@ class BetaAssistantService:
                     request_id=request_id,
                     session_id=session_id,
                     error_code=exc.code,
+                    cost_basis=str(preflight.basis),
                 )
                 raise
             if result.estimated_cost_usd is None:
@@ -2051,6 +2058,11 @@ class BetaAssistantService:
                 success=True,
                 request_id=request_id,
                 session_id=session_id,
+                # Recorded with the basis the provider result carries, so an
+                # upper bound is never filed as a measured charge.
+                cost_basis=str(
+                    result.cost.basis if result.cost is not None else preflight.basis
+                ),
             )
         return result
 

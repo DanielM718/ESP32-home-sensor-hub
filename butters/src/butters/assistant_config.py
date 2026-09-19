@@ -14,6 +14,18 @@ import tomllib
 
 from butters.config import ConfigError, subsystem_root
 from butters.config_overlay import load_overlay, local_config_path, merge_overlay
+from butters.pricing import (
+    CHAT_PRICING,
+    PRICING_DATE,
+    PRICING_SOURCE,
+    SPEECH_PRICING,
+    SpeechPricing,
+    TokenPricing,
+)
+
+# Historical alias. Chat models are token-priced; speech models declare
+# their own billing dimension in butters.pricing.
+ModelPricing = TokenPricing
 
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
 
@@ -593,13 +605,6 @@ class DiagnosticSettings:
 
 
 @dataclass(frozen=True, slots=True)
-class ModelPricing:
-    input_per_million_usd: float
-    cached_input_per_million_usd: float
-    output_per_million_usd: float
-
-
-@dataclass(frozen=True, slots=True)
 class CloudSettings:
     enabled: bool = False
     allow_paid_calls: bool = False
@@ -622,8 +627,8 @@ class CloudSettings:
     daily_budget_usd: float = 2.0
     monthly_budget_usd: float = 20.0
     max_usage_records: int = 50000
-    pricing_source: str = "https://developers.openai.com/api/docs/models/compare"
-    pricing_date: str = "2026-08-11"
+    pricing_source: str = PRICING_SOURCE
+    pricing_date: str = PRICING_DATE
 
     def validated(self) -> CloudSettings:
         parsed = urlparse(self.base_url)
@@ -670,14 +675,26 @@ class CloudSettings:
         return self
 
     @property
-    def pricing(self) -> dict[str, ModelPricing]:
-        # Verified from the official model comparison on pricing_date. Keeping
-        # this separate from routing makes updates reviewable and testable.
+    def pricing(self) -> dict[str, TokenPricing]:
+        """Reviewed chat pricing, keyed by the configured model IDs.
+
+        The rates live in `butters.pricing` beside the speech rates and the
+        date they were verified, so a price change is one reviewable edit
+        rather than three scattered ones. A model missing from this mapping is
+        denied before any HTTP call.
+        """
+
         return {
-            self.luna_model: ModelPricing(1.00, 0.10, 6.00),
-            self.terra_model: ModelPricing(2.50, 0.25, 15.00),
-            self.sol_model: ModelPricing(5.00, 0.50, 30.00),
+            name: CHAT_PRICING[name]
+            for name in (self.luna_model, self.terra_model, self.sol_model)
+            if name in CHAT_PRICING
         }
+
+    @property
+    def speech_pricing(self) -> dict[str, SpeechPricing]:
+        """Reviewed speech pricing. Server-authoritative and not Admin-editable."""
+
+        return dict(SPEECH_PRICING)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1105,10 +1122,10 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         pricing_source=str(
             cloud_table.get(
                 "pricing_source",
-                "https://developers.openai.com/api/docs/models/compare",
+                PRICING_SOURCE,
             )
         ),
-        pricing_date=str(cloud_table.get("pricing_date", "2026-08-11")),
+        pricing_date=str(cloud_table.get("pricing_date", PRICING_DATE)),
     ).validated()
 
     remediation_table = _table(data, "remediation")

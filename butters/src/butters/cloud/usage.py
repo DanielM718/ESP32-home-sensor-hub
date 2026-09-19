@@ -13,6 +13,7 @@ from pathlib import Path
 
 from butters.assistant_config import CloudSettings
 from butters.cloud.model import CloudTokenUsage, ReasoningConfiguration
+from butters.pricing import CostBasis, SpeechCost, speech_cost
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +40,10 @@ class CloudUsageRecord:
     route_category: str = "cloud"
     request_id: str | None = None
     session_id: str | None = None
+    # How much the cost figure above should be trusted. Defaulting to
+    # UNRECORDED keeps rows written before this column honest rather than
+    # retroactively claiming a basis they were never given.
+    cost_basis: str = str(CostBasis.UNRECORDED)
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +81,7 @@ CREATE TABLE IF NOT EXISTS provider_usage (
     tool_calls INTEGER NOT NULL,
     wall_seconds REAL NOT NULL,
     estimated_cost_usd REAL NOT NULL,
+    cost_basis TEXT NOT NULL DEFAULT 'unrecorded',
     success INTEGER NOT NULL,
     escalation_occurred INTEGER NOT NULL,
     error_code TEXT,
@@ -130,6 +136,19 @@ class UsageLedger:
             self.database_path.parent.mkdir(parents=True, exist_ok=True)
             with self._connect() as connection:
                 connection.executescript(_SCHEMA)
+                # Additive migration: a database written before cost_basis
+                # existed keeps every row, and those rows stay honestly
+                # labelled 'unrecorded' rather than being given a basis after
+                # the fact.
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(provider_usage)")
+                }
+                if "cost_basis" not in columns:
+                    connection.execute(
+                        "ALTER TABLE provider_usage ADD COLUMN cost_basis TEXT "
+                        "NOT NULL DEFAULT 'unrecorded'"
+                    )
                 count = int(connection.execute("SELECT COUNT(*) FROM spend_totals").fetchone()[0])
                 if count == 0:
                     connection.execute(
@@ -148,7 +167,7 @@ class UsageLedger:
         "output_tokens, reasoning_tokens, tool_rounds, wall_seconds, "
         "estimated_cost_usd, success, escalation_occurred, error_code, "
         "provider, operation_category, tool_calls, route_category, "
-        "request_id, session_id"
+        "request_id, session_id, cost_basis"
     )
     _REQUEST_COLUMNS = (
         "timestamp, request_id, session_id, source, route_category, "
@@ -172,16 +191,30 @@ class UsageLedger:
         return [_provider_row(row) for row in rows]
 
     def estimated_cost(self, model: str, usage: CloudTokenUsage) -> float:
+        """Cost a token-priced chat model. Unknown model stays fail-closed."""
+
         price = self.settings.pricing.get(model)
         if price is None:
             return float("inf")
-        uncached = max(0, usage.input_tokens - usage.cached_tokens - usage.cache_write_tokens)
-        return (
-            uncached * price.input_per_million_usd
-            + usage.cached_tokens * price.cached_input_per_million_usd
-            + usage.cache_write_tokens * price.input_per_million_usd * 1.25
-            + usage.output_tokens * price.output_per_million_usd
-        ) / 1_000_000
+        # The model owns its own arithmetic, including the cache-write
+        # multiplier, so a pricing shape change never needs an edit here.
+        return price.cost(
+            input_tokens=usage.input_tokens,
+            cached_tokens=usage.cached_tokens,
+            cache_write_tokens=usage.cache_write_tokens,
+            output_tokens=usage.output_tokens,
+        )
+
+    def speech_cost(self, model: str, *, characters: int) -> SpeechCost:
+        """Cost a speech request and state how trustworthy the figure is.
+
+        Character-priced models are measured exactly from the submitted text.
+        `gpt-4o-mini-tts` is billed on text input and audio output tokens that
+        `/v1/audio/speech` does not report, so its figure is an explicit
+        conservative ceiling awaiting reconciliation, never a measurement.
+        """
+
+        return speech_cost(model, characters=characters)
 
     def conservative_request_estimate(
         self, model: str, evidence_bytes: int, max_output_tokens: int
@@ -310,8 +343,14 @@ class UsageLedger:
         input_tokens: int = 0,
         output_tokens: int = 0,
         error_code: str | None = None,
+        cost_basis: str = str(CostBasis.ESTIMATED_UPPER_BOUND),
     ) -> CloudUsageRecord:
-        """Record a pre-priced STT/TTS operation without storing its content."""
+        """Record a pre-priced STT/TTS operation without storing its content.
+
+        The caller supplies the basis because only it knows whether the figure
+        was measured from the submitted input or is a ceiling standing in for
+        usage the provider never reported.
+        """
         if not math.isfinite(estimated_cost_usd) or estimated_cost_usd < 0:
             raise ValueError("pricing_unknown")
         record = CloudUsageRecord(
@@ -337,6 +376,7 @@ class UsageLedger:
             operation_category[:64],
             request_id[:128] if request_id else None,
             session_id[:128] if session_id else None,
+            str(cost_basis)[:32],
         )
         self._append_provider_record(record)
         return record
@@ -431,8 +471,8 @@ class UsageLedger:
                             input_tokens, cached_tokens, cache_write_tokens, output_tokens,
                             reasoning_tokens, tool_rounds, tool_calls, wall_seconds,
                             estimated_cost_usd, success, escalation_occurred, error_code,
-                            request_id, session_id
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            request_id, session_id, cost_basis
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             record.timestamp,
                             record.provider,
@@ -456,6 +496,7 @@ class UsageLedger:
                             record.error_code,
                             record.request_id,
                             record.session_id,
+                            record.cost_basis,
                         ),
                     )
                     connection.execute(
@@ -546,7 +587,7 @@ class UsageLedger:
                 return values
 
             def distribution(table: str, column: str) -> dict[str, int]:
-                clause = f" WHERE session_id=?" if session_id is not None else ""
+                clause = " WHERE session_id=?" if session_id is not None else ""
                 rows = connection.execute(
                     f"SELECT {column}, COUNT(*) FROM {table}{clause} "
                     f"GROUP BY {column} ORDER BY {column}",
@@ -596,6 +637,10 @@ class UsageLedger:
                 "deterministic_or_model_avoided": int(avoided_total),
                 "model_distribution": distribution("provider_usage", "model"),
                 "provider_distribution": distribution("provider_usage", "provider"),
+                # How the recorded spend was arrived at. An operator can see at
+                # a glance how much of a total is measured and how much is a
+                # ceiling awaiting reconciliation against OpenAI billing.
+                "cost_basis_distribution": distribution("provider_usage", "cost_basis"),
                 "latency_by_route": route_latency,
                 "latency_by_operation": latency("provider_usage", "operation_category"),
                 "recent_errors": [
@@ -646,9 +691,11 @@ class UsageLedger:
                 routes[item.route_category] = routes.get(item.route_category, 0) + 1
         models: dict[str, int] = {}
         providers: dict[str, int] = {}
+        bases: dict[str, int] = {}
         for item in records:
             models[item.model] = models.get(item.model, 0) + 1
             providers[item.provider] = providers.get(item.provider, 0) + 1
+            bases[item.cost_basis] = bases.get(item.cost_basis, 0) + 1
 
         def combined(low: str, high: str) -> dict[str, object]:
             provider_items = [item for item in records if low <= item.timestamp < high]
@@ -688,6 +735,7 @@ class UsageLedger:
             "deterministic_or_model_avoided": sum(item.model_avoided for item in requests),
             "model_distribution": models,
             "provider_distribution": providers,
+            "cost_basis_distribution": bases,
             "latency_by_route": latency,
             "latency_by_operation": provider_latency,
             "recent_errors": [

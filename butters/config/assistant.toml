@@ -273,8 +273,10 @@ max_estimated_cost_per_request_usd = 0.50
 daily_budget_usd = 2.0
 monthly_budget_usd = 20.0
 max_usage_records = 50000
-pricing_source = "https://developers.openai.com/api/docs/models/compare"
-pricing_date = "2026-08-11"
+# Provenance for the reviewed rates in butters/pricing.py. Both are updated
+# in the same change as the rates themselves.
+pricing_source = "https://developers.openai.com/api/docs/pricing"
+pricing_date = "2026-09-19"
 
 # Codex engineering jobs are rendered locally by default. Programmatic Codex
 # execution and every production deployment operation remain disabled.

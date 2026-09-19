@@ -19,7 +19,8 @@ from pathlib import Path
 from butters.ai.capabilities import CapabilityError, CapabilityRegistry, build_registry
 from butters.ai.model import SpeechSettings
 from butters.assistant_config import AssistantSettings
-from butters.tts.model import SynthesizedSpeech, TTSError, TextToSpeechEngine
+from butters.pricing import SpeechCost, speech_cost, speech_pricing
+from butters.tts.model import SynthesizedSpeech, TextToSpeechEngine, TTSError
 
 
 class SpeechProviderError(RuntimeError):
@@ -37,6 +38,8 @@ class SpeechResult:
     generation_seconds: float
     audio_seconds: float
     estimated_cost_usd: float | None = None
+    # How the cost above was obtained. None for the local engine, which is free.
+    cost: SpeechCost | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,20 +214,20 @@ class OpenAITTSProvider:
 
     @property
     def available(self) -> bool:
-        return bool(
-            self._api_key
-            and self.settings.providers.allow_paid_tts
-            and self.settings.providers.cloud_tts_price_per_million_characters_usd
-        )
+        # Pricing is now per model and server-authoritative, so availability
+        # no longer depends on an operator having set one free-floating
+        # character rate that was wrong for gpt-4o-mini-tts anyway.
+        return bool(self._api_key and self.settings.providers.allow_paid_tts)
 
     def synthesize(self, text: str, preset: VoicePreset) -> SpeechResult:
         if not self._api_key:
             raise SpeechProviderError("missing_api_key", "OpenAI credential is not configured")
         if not self.settings.providers.allow_paid_tts:
             raise SpeechProviderError("paid_tts_disabled", "paid TTS is disabled")
-        price = self.settings.providers.cloud_tts_price_per_million_characters_usd
-        if price is None:
-            raise SpeechProviderError("pricing_unknown", "paid TTS pricing is not configured")
+        if speech_pricing(preset.model) is None:
+            raise SpeechProviderError(
+                "pricing_unknown", f"{preset.model} has no reviewed speech pricing"
+            )
         try:
             capability = self.registry.speech_model("openai", preset.model)
         except CapabilityError as exc:
@@ -271,6 +274,12 @@ class OpenAITTSProvider:
         if not audio or len(audio) > 8 * 1024 * 1024:
             raise SpeechProviderError("response_too_large", "TTS audio exceeded the byte limit")
         duration = _wav_duration(audio)
+        # Costed from the submitted text, which is the only billable quantity
+        # this endpoint lets Butters observe. Audio output tokens are never
+        # inferred from the returned audio's size: OpenAI defines no such
+        # conversion, and a guess dressed as a measurement is worse than an
+        # openly labelled ceiling.
+        cost = speech_cost(preset.model, characters=len(value))
         return SpeechResult(
             audio,
             "openai",
@@ -278,7 +287,8 @@ class OpenAITTSProvider:
             preset.voice,
             elapsed,
             duration,
-            len(value) * price / 1_000_000,
+            cost.amount_usd,
+            cost,
         )
 
 
