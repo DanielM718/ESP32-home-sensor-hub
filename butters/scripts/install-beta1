@@ -15,13 +15,20 @@ superseded_dir="/opt/butters.superseded"
 deployment_name="DEPLOYMENT"
 state_dir="/var/lib/butters"
 config_dir="/etc/butters"
+# Persistent production-local approvals. This file is deliberately NOT part
+# of the replaced application tree: /opt/butters is deployment state, and a
+# gate an administrator approved or revoked must outlive a release.
+local_config="/etc/butters/assistant.local.toml"
 unit_name="butters-web.service"
 listener_unit_name="butters-live.service"
 enable_service=0
 start_service=0
+# Deliberate override for a release that is *meant* to move a gate. It has to
+# be stated on the command line; there is no way to change one by accident.
+allow_gate_changes=0
 
 usage() {
-  echo "Usage: sudo ./butters/scripts/install-beta1 [--enable] [--start]"
+  echo "Usage: sudo ./butters/scripts/install-beta1 [--enable] [--start] [--allow-gate-changes]"
 }
 
 cleanup() {
@@ -144,6 +151,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --enable) enable_service=1 ;;
     --start) enable_service=1; start_service=1 ;;
+    --allow-gate-changes) allow_gate_changes=1 ;;
     -h|--help) usage; exit 0 ;;
     *) echo "Unknown option: $1" >&2; exit 2 ;;
   esac
@@ -294,6 +302,59 @@ cat >"${staging_dir}/${deployment_name}" <<JSON
 JSON
 echo "Recorded deployment ${source_commit:0:12} digest ${staged_digest:0:16}."
 
+# 2d. Configuration ownership. /opt/butters/config/assistant.toml is shipped
+#     application configuration and is replaced with the tree. Production-local
+#     approvals are not: they live in ${local_config}, which nothing here
+#     deletes or rewrites once it exists.
+#
+#     Two steps, in this order:
+#
+#     * migrate, once, on a machine that predates the overlay: any approval the
+#       running configuration already holds is lifted into ${local_config}.
+#       This reads the deployed configuration only. It never infers an approval
+#       from a service being reachable -- an agent that happens to be connected
+#       is evidence about the network, not about what an administrator allowed.
+#     * verify, every time: compute the approvals in force now and the ones the
+#       staged tree would produce, and refuse the deployment if any differ. This
+#       runs BEFORE the swap, because the swap is two renames and cannot be
+#       meaningfully undone afterwards.
+#
+#     Deploying baf2203 silently reverted nas_agent_ingress.enabled and both
+#     actions.nas_shutdown gates and disconnected the NAS Agent. That deployment
+#     would now stop here.
+staged_python="${staging_dir}/.venv/bin/python"
+if [[ -f "${install_dir}/config/assistant.toml" ]]; then
+  PYTHONPATH="${staging_dir}/src" "${staged_python}" -m butters.deployment_gates migrate \
+      --deployed "${install_dir}/config/assistant.toml" \
+      --shipped "${staging_dir}/config/assistant.toml" \
+      --overlay "${local_config}" \
+    || { echo "Could not record production-local approvals; nothing was replaced." >&2; exit 3; }
+  if [[ -f "${local_config}" ]]; then
+    chown root:butters "${local_config}"
+    chmod 0640 "${local_config}"
+  fi
+  overlay_argument=()
+  [[ -f "${local_config}" ]] && overlay_argument=(--overlay "${local_config}")
+  if ! PYTHONPATH="${staging_dir}/src" "${staged_python}" -m butters.deployment_gates verify \
+      --before "${install_dir}/config/assistant.toml" \
+      --after "${staging_dir}/config/assistant.toml" \
+      "${overlay_argument[@]}"; then
+    if [[ "${allow_gate_changes}" != "1" ]]; then
+      echo "Nothing was replaced." >&2
+      exit 4
+    fi
+    echo "Proceeding anyway: --allow-gate-changes was given." >&2
+  fi
+else
+  echo "No deployed tree: this is a fresh install and starts from shipped defaults."
+fi
+
+# 2e. The overlay only takes effect because the unit names it. A unit that lost
+#     that line would silently fall back to shipped defaults -- and several
+#     gates ship enabled -- so refuse to publish one.
+grep -q '^Environment=BUTTERS_LOCAL_CONFIG=' "${butters_dir}/systemd/${unit_name}" \
+  || { echo "${unit_name} does not set BUTTERS_LOCAL_CONFIG; nothing was replaced." >&2; exit 3; }
+
 # 3. Seal the staged tree. The ownership pass above froze the snapshot; this one
 #    also covers the bytecode compileall just generated and establishes the final
 #    modes. It is the last write to the tree, so the swap below publishes an
@@ -381,6 +442,7 @@ echo "Rollback tree: ${previous_dir} (mv it back over ${install_dir}, then resta
 echo "Secrets: ${config_dir}/butters.env (root:butters 0640)."
 echo "Deployment values: ${config_dir}/butters.conf (set BUTTERS_ALLOWED_ORIGINS)."
 echo "State: ${state_dir} (butters:butters 0700)."
+echo "Production-local approvals: ${local_config} (root:butters 0640, never replaced)."
 echo "Runtime venv: ${install_dir}/.venv built from ${install_dir}/requirements.txt."
 echo
 echo "Physical wake-word listener: ${listener_unit_name} installed but NOT enabled."

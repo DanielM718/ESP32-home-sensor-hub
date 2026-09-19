@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 import tomllib
 
 from butters.config import ConfigError, subsystem_root
+from butters.config_overlay import load_overlay, local_config_path, merge_overlay
 
 _HEADER_NAME = re.compile(r"[A-Za-z][A-Za-z0-9-]{0,63}")
 
@@ -754,6 +755,15 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         raise ConfigError(f"assistant configuration not found: {config_path}") from exc
     except (OSError, tomllib.TOMLDecodeError) as exc:
         raise ConfigError(f"cannot load assistant configuration: {exc}") from exc
+
+    # Production-local approvals are merged over the shipped defaults before
+    # anything is parsed, so every validator below sees one effective
+    # configuration rather than two layers it has to reconcile. The overlay is
+    # active only when the unit names it, which keeps a developer checkout and
+    # the test suite free of a machine's approvals.
+    overlay_path = local_config_path()
+    if overlay_path is not None:
+        data = merge_overlay(data, load_overlay(overlay_path))
 
     integration_table = _table(data, "integration")
     integration = IntegrationSettings(

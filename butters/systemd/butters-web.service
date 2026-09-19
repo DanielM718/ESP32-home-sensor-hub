@@ -14,6 +14,11 @@ WorkingDirectory=/opt/butters
 EnvironmentFile=-/etc/butters/butters.conf
 EnvironmentFile=-/etc/butters/butters.env
 Environment=BUTTERS_CONFIG=/opt/butters/config/assistant.toml
+# Persistent production-local approvals. /opt/butters is replaced on every
+# deployment, so a gate an administrator approved or revoked here must live
+# outside it. Naming the file in the unit keeps the path version-controlled
+# rather than hand-set, and the installer refuses to publish a unit missing it.
+Environment=BUTTERS_LOCAL_CONFIG=/etc/butters/assistant.local.toml
 Environment=PYTHONPATH=/opt/butters/src:/opt/butters-agent/src
 Environment=PYTHONUNBUFFERED=1
 Environment=PYTHONDONTWRITEBYTECODE=1
