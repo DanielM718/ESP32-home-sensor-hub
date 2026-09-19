@@ -313,6 +313,7 @@ def create_app(
                     "session": "ready",
                     "csrf_token": existing.csrf_token,
                     "interaction_generation": existing.interaction_generation,
+                    "voice_disclosure": runtime.voice_disclosure(),
                     "messages": [
                         {
                             "role": item.role,

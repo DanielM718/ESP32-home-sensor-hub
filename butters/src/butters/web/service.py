@@ -1784,6 +1784,27 @@ class BetaAssistantService:
     #    confirmation, and a FRESH passkey assertion bound to this exact
     #    operation.
 
+    # OpenAI's text-to-speech guidance requires telling people the voice is
+    # synthetic. The text is derived from the provider actually in effect
+    # rather than hardcoded in the page, so switching back to the on-device
+    # engine cannot leave the UI claiming OpenAI, and enabling OpenAI cannot
+    # leave it silent. It is shown once in the interface, not spoken before
+    # every answer.
+    _VOICE_DISCLOSURE = {
+        "openai": "Voice responses are AI-generated using OpenAI TTS.",
+        "local": "Voice responses are AI-generated using an on-device model.",
+    }
+
+    def voice_disclosure(self) -> dict[str, object]:
+        provider = self.ai.effective.speech.provider
+        return {
+            "ai_generated": True,
+            "provider": provider,
+            "text": self._VOICE_DISCLOSURE.get(
+                provider, "Voice responses are AI-generated, not a human voice."
+            ),
+        }
+
     def ai_catalog(self, session: BrowserSession) -> dict[str, object]:
         self._require_action_admin(session)
         return self.ai_registry.as_dict()
@@ -2433,13 +2454,12 @@ class BetaAssistantService:
                 session_ttl_seconds=engine.session_ttl_seconds,
                 max_evidence_bytes=engine.max_evidence_bytes,
             )
-        with self._paid_operation_gate:
-            with self.ledger.request_context(
-                request_id=trace.request_id,
-                session_id=trace.session_id,
-                route_category="diagnostic_cloud",
-            ):
-                answer = selected_engine.diagnose(request)
+        with self._paid_operation_gate, self.ledger.request_context(
+            request_id=trace.request_id,
+            session_id=trace.session_id,
+            route_category="diagnostic_cloud",
+        ):
+            answer = selected_engine.diagnose(request)
         trace.emit(
             TraceStage.TOOL,
             "diagnostic_complete",

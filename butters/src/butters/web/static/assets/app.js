@@ -182,6 +182,20 @@ function addMessage(role, text) {
   conversation.scrollTop = conversation.scrollHeight;
 }
 
+/* The voice is synthetic and the interface says so. The wording comes from
+ * the server, which knows which speech provider is actually in effect, so the
+ * page cannot claim OpenAI after a switch back to the on-device engine or go
+ * quiet after a switch to it. Shown once here rather than spoken before every
+ * answer, which would be disclosure by nuisance.
+ */
+function applyVoiceDisclosure(disclosure) {
+  const node = document.querySelector("#voice-disclosure");
+  if (!node) return;
+  const text = disclosure && typeof disclosure.text === "string" ? disclosure.text : "";
+  // Keep the safe default already in the markup if the server said nothing.
+  if (text) node.textContent = text;
+}
+
 async function readJson(response) {
   try {
     const data = await response.json();
@@ -212,6 +226,7 @@ async function initialize() {
       throw new Error("Invalid server response");
     }
     csrf = data.csrf_token;
+    applyVoiceDisclosure(data.voice_disclosure);
     const serverGeneration = Number(data.interaction_generation);
     if (Number.isSafeInteger(serverGeneration) && serverGeneration >= 0) {
       currentTurn = Math.max(currentTurn, serverGeneration);
