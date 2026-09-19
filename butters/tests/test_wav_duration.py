@@ -25,6 +25,7 @@ BLOCK_ALIGN = CHANNELS * SAMPLE_WIDTH
 PCM_BYTES = 57_600
 EXPECTED_SECONDS = 1.2
 PLACEHOLDER = 0xFFFFFFFF
+STREAMING_SENTINEL_VALUE = 0xFFFFFFFF
 
 
 def _chunk(identifier: bytes, body: bytes, *, declared: int | None = None) -> bytes:
@@ -96,7 +97,9 @@ def test_the_streaming_placeholder_regression() -> None:
     assert measurement.duration_seconds == pytest.approx(57_600 / 2 / 24_000)
 
 
-def test_a_placeholder_never_produces_a_gigantic_duration() -> None:
+def test_the_sentinel_never_produces_a_gigantic_duration() -> None:
+    """Whatever the RIFF container claims, the data sentinel governs."""
+
     for riff_size in (PLACEHOLDER, 0x7FFFFFFF, 0):
         payload = _wav(streaming=True, riff_size=riff_size)
         assert wav_duration_seconds(payload) == pytest.approx(EXPECTED_SECONDS)
@@ -150,16 +153,129 @@ def test_odd_sized_chunks_are_padded_to_an_even_boundary() -> None:
     assert wav_duration_seconds(payload) == pytest.approx(EXPECTED_SECONDS)
 
 
-def test_a_declared_length_longer_than_the_payload_is_not_trusted() -> None:
-    """A truncated transfer must report what arrived, not what was promised."""
+# ================== RIFF chunkSize semantics, evidence-based ===============
+#
+# chunkSize is defined as the count of valid bytes in the chunk. Only one
+# value is treated as a streaming sentinel, because only one was ever
+# observed: the captured OpenAI response used 0xFFFFFFFF. Everything else
+# follows the specification, so a malformed file stays malformed instead of
+# being reinterpreted as a stream.
+
+
+def test_only_the_observed_sentinel_is_recognized() -> None:
+    from butters.audio.wav import STREAMING_SENTINEL
+
+    assert STREAMING_SENTINEL == 0xFFFFFFFF
+
+
+def test_a_truncated_finite_length_is_an_error_not_an_implicit_stream() -> None:
+    """Case C: declares 57,600 PCM bytes, only 40,000 arrive.
+
+    The wrong answer here is 40,000 / 2 / 24,000 = 0.8333 s, which would
+    present an incomplete download as valid audio.
+    """
+
+    arrived = 40_000
+    pcm = b"\x01\x00" * (arrived // 2)
+    data = _chunk(b"data", pcm, declared=PCM_BYTES)
+    payload = b"RIFF" + struct.pack("<I", 0) + b"WAVE" + _fmt() + data
+
+    with pytest.raises(WavFormatError) as denied:
+        measure_wav(payload)
+    assert "only 40000 arrived" in str(denied.value)
+    with pytest.raises(SpeechProviderError) as refused:
+        _wav_duration(payload)
+    assert refused.value.code == "malformed_audio"
+
+
+def test_a_finite_data_chunk_counts_only_its_declared_bytes() -> None:
+    """Case D: a trailing chunk after data is not audio."""
 
     pcm = b"\x01\x00" * (PCM_BYTES // 2)
-    data = _chunk(b"data", pcm, declared=PCM_BYTES * 10)
-    payload = b"RIFF" + struct.pack("<I", 0) + b"WAVE" + _fmt() + data
+    trailing = _chunk(b"LIST", b"INFOISFT" + b"Butters\x00")
+    payload = (
+        b"RIFF"
+        + struct.pack("<I", 0)
+        + b"WAVE"
+        + _fmt()
+        + _chunk(b"data", pcm)
+        + trailing
+    )
     measurement = measure_wav(payload)
 
-    assert measurement.streaming is True
+    assert measurement.streaming is False
+    assert measurement.declared_data_bytes == PCM_BYTES
+    # Exactly the declared PCM, not PCM + the trailing chunk.
     assert measurement.data_bytes == PCM_BYTES
+    assert measurement.duration_seconds == pytest.approx(EXPECTED_SECONDS)
+
+
+def test_a_zero_length_data_chunk_is_empty_not_a_sentinel() -> None:
+    """Case B: zero is a legitimate empty chunk under RIFF."""
+
+    trailing = b"\x02\x00" * 1000  # bytes after data that must NOT be read
+    payload = (
+        b"RIFF"
+        + struct.pack("<I", 0)
+        + b"WAVE"
+        + _fmt()
+        + _chunk(b"data", b"")
+        + trailing
+    )
+    measurement = measure_wav(payload)
+
+    assert measurement.streaming is False
+    assert measurement.declared_data_bytes == 0
+    assert measurement.data_bytes == 0
+    assert measurement.duration_seconds == 0.0
+    # And the STT path, where duration gates admission, still fails closed:
+    # its existing `duration <= 0` check rejects empty audio.
+
+
+def test_0x7fffffff_is_an_ordinary_length_not_a_sentinel() -> None:
+    """Case E: no captured evidence, so it gets no special treatment.
+
+    2147483647 was only ever `wave.getnframes()` - 0xFFFFFFFF divided by a
+    2-byte block alignment - never a declared chunk size.
+    """
+
+    pcm = b"\x01\x00" * (PCM_BYTES // 2)
+    data = _chunk(b"data", pcm, declared=0x7FFFFFFF)
+    payload = b"RIFF" + struct.pack("<I", 0) + b"WAVE" + _fmt() + data
+
+    with pytest.raises(WavFormatError) as denied:
+        measure_wav(payload)
+    assert "only 57600 arrived" in str(denied.value)
+
+
+def test_a_partial_trailing_frame_is_not_silently_floored() -> None:
+    """Case F: an odd byte count is incomplete audio, not 1.1999 s."""
+
+    pcm = b"\x01\x00" * (PCM_BYTES // 2) + b"\x7f"
+    payload = (
+        b"RIFF"
+        + struct.pack("<I", STREAMING_SENTINEL_VALUE)
+        + b"WAVE"
+        + _fmt()
+        + b"data"
+        + struct.pack("<I", STREAMING_SENTINEL_VALUE)
+        + pcm
+    )
+    with pytest.raises(WavFormatError) as denied:
+        measure_wav(payload)
+    assert "whole number" in str(denied.value)
+
+
+def test_an_oversized_riff_container_size_does_not_imply_streaming() -> None:
+    """The RIFF size field never decides how much audio arrived."""
+
+    pcm = b"\x01\x00" * (PCM_BYTES // 2)
+    payload = (
+        b"RIFF" + struct.pack("<I", 0xFFFFFF00) + b"WAVE" + _fmt() + _chunk(b"data", pcm)
+    )
+    measurement = measure_wav(payload)
+
+    assert measurement.streaming is False
     assert measurement.duration_seconds == pytest.approx(EXPECTED_SECONDS)
 
 

@@ -6,11 +6,14 @@ emits when the total length is not known up front. Python's `wave` module
 takes those fields at face value, so `getnframes()` returned 2147483647 and a
 1.2 second clip was reported as 89478.485 seconds.
 
-The bytes actually received are the trustworthy quantity. This module walks
+The bytes actually received are the trustworthy quantity *for that one
+recognized sentinel*. Everywhere else RIFF's own semantics hold: chunkSize is
+the count of valid bytes in the chunk. So a declared length is consumed
+exactly, a declared length longer than the payload is a truncated transfer
+rather than an implicit stream, and a zero-length data chunk is an empty
+chunk rather than an invitation to read whatever follows. This module walks
 the chunk structure properly - no fixed 44-byte header, no assumption that
-`data` is the first or only chunk, and padding handled - then measures the
-audio from the PCM bytes that are really present, using a declared length only
-when it is plausible.
+`data` is the first or only chunk, and padding handled.
 
 Nothing here is used for billing. Speech is priced from submitted characters
 or from provider-reported tokens; duration is reported metadata.
@@ -21,10 +24,17 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-# A writer that does not know the final length emits one of these. 0xFFFFFFFF
-# is what OpenAI sends; 0 appears in some streaming writers; the signed
-# maximum shows up once a reader has already divided a placeholder down.
-_PLACEHOLDER_SIZES = frozenset({0xFFFFFFFF, 0x7FFFFFFF, 0})
+# The one recognized streaming sentinel, and the only one there is evidence
+# for: the captured OpenAI /v1/audio/speech response declared exactly this in
+# both its RIFF and data chunk size fields.
+#
+# Nothing else is inferred. An earlier revision also treated 0 and 0x7FFFFFFF
+# as sentinels; both were wrong. RIFF defines chunkSize as the count of valid
+# bytes, so 0 is a legitimate empty chunk, and 0x7FFFFFFF was mistaken for a
+# sentinel only because `wave` reported getnframes() == 2147483647 - which is
+# 0xFFFFFFFF divided by a block alignment of 2, not a declared size at all.
+# Widening the set turned truncated files into apparently valid audio.
+STREAMING_SENTINEL = 0xFFFFFFFF
 _PCM = 0x0001
 _EXTENSIBLE = 0xFFFE
 # Real files carry a handful of chunks. This only bounds a malformed or
@@ -102,9 +112,9 @@ def measure_wav(payload: bytes) -> WavMeasurement:
             # cannot change how many audio bytes were received.
             break
 
-        if declared in _PLACEHOLDER_SIZES:
-            # A placeholder on a non-data chunk leaves the chunk sequence
-            # unwalkable, so stop rather than guess at the next offset.
+        if declared == STREAMING_SENTINEL:
+            # A sentinel on a non-data chunk leaves the sequence unwalkable,
+            # so stop rather than guess at the next offset.
             break
         # RIFF pads odd-length chunk bodies to an even boundary.
         offset = body + declared + (declared & 1)
@@ -121,9 +131,30 @@ def measure_wav(payload: bytes) -> WavMeasurement:
         raise WavFormatError("block alignment is not positive")
 
     available = max(0, total - data_offset)
-    streaming = declared_data in _PLACEHOLDER_SIZES or declared_data > available
-    # Trust a declared length only when it fits inside what actually arrived.
-    data_bytes = available if streaming else declared_data
+    streaming = declared_data == STREAMING_SENTINEL
+    if streaming:
+        # The writer did not know the length, so the audio runs to EOF.
+        data_bytes = available
+    elif declared_data > available:
+        # A finite length longer than the payload means the transfer was cut
+        # short. Reinterpreting EOF as an implicit terminator here would
+        # silently convert a truncated file into plausible-looking audio.
+        raise WavFormatError(
+            f"data chunk declares {declared_data} bytes but only {available} arrived"
+        )
+    else:
+        # Consume exactly what the chunk claims. Later chunks and padding are
+        # not audio and must not be counted as frames.
+        data_bytes = declared_data
+
+    if data_bytes % block_align:
+        # A partial trailing frame is not measurable. Flooring it would report
+        # a duration for audio that is incomplete - and this parser is shared
+        # with the STT path, where duration feeds a cost estimate.
+        raise WavFormatError(
+            f"data payload of {data_bytes} bytes is not a whole number of "
+            f"{block_align}-byte frames"
+        )
 
     return WavMeasurement(
         channels=channels,
@@ -132,7 +163,7 @@ def measure_wav(payload: bytes) -> WavMeasurement:
         block_align=block_align,
         data_offset=data_offset,
         data_bytes=data_bytes,
-        declared_data_bytes=None if declared_data in _PLACEHOLDER_SIZES else declared_data,
+        declared_data_bytes=None if streaming else declared_data,
         streaming=streaming,
         audio_format=audio_format,
     )
