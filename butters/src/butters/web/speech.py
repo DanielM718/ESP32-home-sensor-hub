@@ -19,6 +19,7 @@ from pathlib import Path
 from butters.ai.capabilities import CapabilityError, CapabilityRegistry, build_registry
 from butters.ai.model import SpeechSettings
 from butters.assistant_config import AssistantSettings
+from butters.audio.wav import WavFormatError, wav_duration_seconds
 from butters.pricing import SpeechCost, speech_cost, speech_pricing
 from butters.tts.model import SynthesizedSpeech, TextToSpeechEngine, TTSError
 
@@ -36,7 +37,8 @@ class SpeechResult:
     model: str
     voice: str
     generation_seconds: float
-    audio_seconds: float
+    # None when the container is valid but its duration cannot be derived.
+    audio_seconds: float | None
     estimated_cost_usd: float | None = None
     # How the cost above was obtained. None for the local engine, which is free.
     cost: SpeechCost | None = None
@@ -473,12 +475,22 @@ def _speech_to_wav(speech: SynthesizedSpeech) -> bytes:
     return output.getvalue()
 
 
-def _wav_duration(audio: bytes) -> float:
+def _wav_duration(audio: bytes) -> float | None:
+    """Duration of the audio actually received, or None when unmeasurable.
+
+    A payload that is not a RIFF/WAVE container at all still fails the
+    request: a 200 carrying something other than audio is a provider problem,
+    not a metadata gap. A well-formed container Butters cannot measure - a
+    compressed encoding, say - yields playable audio and an honest "unknown"
+    rather than a fabricated number.
+    """
+
     try:
-        with wave.open(io.BytesIO(audio), "rb") as source:
-            return source.getnframes() / source.getframerate()
-    except (wave.Error, EOFError, ZeroDivisionError) as exc:
-        raise SpeechProviderError("malformed_audio", "TTS returned malformed WAV audio") from exc
+        return wav_duration_seconds(audio)
+    except WavFormatError as exc:
+        raise SpeechProviderError(
+            "malformed_audio", "TTS returned malformed WAV audio"
+        ) from exc
 
 
 def _multipart(

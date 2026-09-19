@@ -1994,7 +1994,9 @@ class BetaAssistantService:
                 "model": result.model,
                 "voice": result.voice,
                 "generation_latency_ms": round(result.generation_seconds * 1000, 3),
-                "audio_seconds": round(result.audio_seconds, 3),
+                "audio_seconds": None
+                if result.audio_seconds is None
+                else round(result.audio_seconds, 3),
                 "estimated_cost_usd": result.estimated_cost_usd,
                 "request_latency_ms": round((time.perf_counter() - started) * 1000, 3),
             },

@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-import io
 import json
 import logging
 import os
 import threading
 import time
-import wave
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
@@ -28,6 +26,7 @@ from butters.actions.store import ActionStateError
 from butters.ai.capabilities import CapabilityError
 from butters.ai.credentials import CredentialError
 from butters.assistant_config import AssistantSettings, load_assistant_settings
+from butters.audio.wav import WavFormatError, measure_wav
 from butters.auth.manager import WebAuthnError
 from butters.auth.store import AuthStateError
 from butters.config import default_vocabulary_path, load_stt_settings
@@ -228,7 +227,7 @@ def create_app(
             await _await_future(future, timeout=5.0)
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001 - teardown never propagates
+        except Exception:
             LOGGER.warning("voice stream teardown failed", exc_info=True)
 
     async def index(_request: Request) -> Response:
@@ -424,7 +423,9 @@ def create_app(
                 media_type="audio/wav",
                 headers={
                     "X-Butters-TTS-Provider": result.provider,
-                    "X-Butters-Audio-Seconds": str(round(result.audio_seconds, 3)),
+                    "X-Butters-Audio-Seconds": _audio_seconds_header(
+                        result.audio_seconds, 3
+                    ),
                 },
             )
         except (SecurityError, SessionError, SpeechProviderError, ValueError) as exc:
@@ -566,20 +567,23 @@ def create_app(
             if not audio or len(audio) > limit:
                 return _error("audio_limit", "STT audio exceeds the byte limit", 413)
             try:
-                with wave.open(io.BytesIO(audio), "rb") as source:
-                    if (
-                        source.getcomptype() != "NONE"
-                        or source.getsampwidth() != 2
-                        or source.getnchannels() not in {1, 2}
-                        or source.getframerate()
-                        not in configured.browser_audio.allowed_sample_rates
-                    ):
-                        raise SpeechProviderError(
-                            "malformed_audio",
-                            "STT test requires allow-listed 16-bit PCM WAV audio",
-                        )
-                    duration = source.getnframes() / source.getframerate()
-            except (wave.Error, EOFError, ZeroDivisionError) as exc:
+                # Measured from the bytes actually uploaded. A streaming WAV
+                # declares placeholder chunk sizes, and trusting them here
+                # would inflate the duration - which this endpoint charges by.
+                measurement = measure_wav(audio)
+                if (
+                    not measurement.measurable
+                    or measurement.sample_width != 2
+                    or measurement.channels not in {1, 2}
+                    or measurement.sample_rate
+                    not in configured.browser_audio.allowed_sample_rates
+                ):
+                    raise SpeechProviderError(
+                        "malformed_audio",
+                        "STT test requires allow-listed 16-bit PCM WAV audio",
+                    )
+                duration = measurement.duration_seconds
+            except WavFormatError as exc:
                 raise SpeechProviderError(
                     "malformed_audio", "STT test requires a valid PCM WAV"
                 ) from exc
@@ -1459,7 +1463,9 @@ def create_app(
                     "X-Butters-Generation-Seconds": str(
                         round(result.generation_seconds, 4)
                     ),
-                    "X-Butters-Audio-Seconds": str(round(result.audio_seconds, 4)),
+                    "X-Butters-Audio-Seconds": _audio_seconds_header(
+                        result.audio_seconds, 4
+                    ),
                     "X-Butters-Cost-USD": "unknown"
                     if result.estimated_cost_usd is None
                     else str(result.estimated_cost_usd),
@@ -2069,7 +2075,7 @@ def create_app(
                 trace.emit(
                     TraceStage.AUDIO, "disconnected", reason_code="browser_disconnect"
                 )
-        except Exception:  # noqa: BLE001 - safe WebSocket boundary
+        except Exception:
             engine_reusable = False
             LOGGER.exception("voice WebSocket failed")
             if trace is not None:
@@ -2350,7 +2356,7 @@ def _configuration_check(runtime: BetaAssistantService) -> str:
     try:
         entities = runtime.assistant.router.entities.entities
         skills = runtime.assistant.skills.skills
-    except Exception:  # noqa: BLE001 - readiness reports, it never raises
+    except Exception:
         LOGGER.warning("readiness configuration check failed", exc_info=True)
         return "unavailable"
     return "ready" if entities and skills else "unavailable"
@@ -2367,7 +2373,7 @@ def _router_check(runtime: BetaAssistantService) -> str:
 
     try:
         routed = runtime.assistant.preview_route("what is the temperature")
-    except Exception:  # noqa: BLE001 - readiness reports, it never raises
+    except Exception:
         LOGGER.warning("readiness router check failed", exc_info=True)
         return "unavailable"
     return "ready" if routed is not None else "unavailable"
@@ -2404,6 +2410,18 @@ def _ceremony_body(payload: dict[str, object]) -> tuple[str, dict[str, object]]:
     if isinstance(credential, dict):
         return ceremony_id, credential
     raise ValueError("credential is required")
+
+
+def _audio_seconds_header(value: float | None, digits: int) -> str:
+    """Report an unmeasurable duration as "unknown" rather than as a number.
+
+    A streaming WAV carries placeholder chunk sizes; trusting them is what
+    reported a 1.2 second clip as 89478 seconds. When the duration genuinely
+    cannot be derived, saying so is the only honest option - 0 would read as
+    silence that is not there.
+    """
+
+    return "unknown" if value is None else str(round(value, digits))
 
 
 def _admin(request: Request, auth: AuthPolicy) -> str:
