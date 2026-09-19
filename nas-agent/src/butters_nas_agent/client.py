@@ -159,6 +159,24 @@ class Client:
                 sequence += 1
                 await asyncio.sleep(self.config.heartbeat_seconds)
 
+        async def telemetry() -> None:
+            while True:
+                try:
+                    await asyncio.to_thread(self.engine.sample_telemetry)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:  # noqa: BLE001 - source details stay redacted.
+                    LOG.warning(
+                        json.dumps(
+                            {
+                                "event": "telemetry_sample_failed",
+                                "reason": "collection_unavailable",
+                            },
+                            sort_keys=True,
+                        )
+                    )
+                await asyncio.sleep(self.config.sample_interval_seconds)
+
         async def execute(frame: dict[str, object], cancel: threading.Event) -> None:
             request_id = str(frame["request_id"])
             action = str(frame["action"])
@@ -210,6 +228,7 @@ class Client:
                 active.pop(request_id, None)
 
         pulse = asyncio.create_task(heartbeat())
+        telemetry_pulse = asyncio.create_task(telemetry())
         tasks: set[asyncio.Task] = set()
         try:
             async for raw in websocket:
@@ -292,9 +311,10 @@ class Client:
                     await send("error", **fields)
         finally:
             pulse.cancel()
+            telemetry_pulse.cancel()
             for _, cancel in active.values():
                 cancel.set()
-            await asyncio.gather(pulse, *tasks, return_exceptions=True)
+            await asyncio.gather(pulse, telemetry_pulse, *tasks, return_exceptions=True)
 
 
 def healthcheck(path, *, now: float | None = None, maximum_age: float = 90) -> bool:

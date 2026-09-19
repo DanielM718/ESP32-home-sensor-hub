@@ -34,6 +34,9 @@ def test_schema_is_exact_and_shutdown_has_zero_parameters():
         "nas.agent.status",
         "nas.system.status",
         "nas.jellyfin.status",
+        "nas.network.status",
+        "nas.jellyfin.sessions",
+        "nas.bandwidth.status",
         "nas.system.shutdown",
     }
     assert parameters("nas.system.shutdown", {}) == {}

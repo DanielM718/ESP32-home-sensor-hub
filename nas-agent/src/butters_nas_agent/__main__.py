@@ -10,7 +10,13 @@ import sys
 import time
 from pathlib import Path
 
-from .backends import JellyfinBackend, LocalStatusBackend, TrueNasRpc
+from .backends import (
+    JellyfinBackend,
+    LocalStatusBackend,
+    TailscaleMetricsBackend,
+    TrueNasRpc,
+)
+from .bandwidth import BandwidthService, DryRunGovernor, NetworkTelemetry
 from .client import Client, healthcheck
 from .config import load_agent_credentials, load_api_key, load_config
 from .engine import Engine
@@ -51,6 +57,7 @@ def parser() -> argparse.ArgumentParser:
     value.add_argument("--agent-credentials", type=Path)
     value.add_argument("--truenas-read-key", type=Path)
     value.add_argument("--truenas-shutdown-key", type=Path)
+    value.add_argument("--jellyfin-api-key", type=Path)
     value.add_argument("--healthcheck", type=Path)
     return value
 
@@ -76,7 +83,15 @@ def main() -> None:
                 options.truenas_shutdown_key, "truenas_shutdown_key"
             )
         truenas = TrueNasRpc(config, read_key, shutdown_key)
-        engine = Engine(LocalStatusBackend(), truenas, JellyfinBackend(config))
+        jellyfin_key = None
+        if config.jellyfin_session_monitoring_enabled:
+            if options.jellyfin_api_key is None:
+                raise ValueError("jellyfin_credential_unavailable")
+            jellyfin_key = load_api_key(options.jellyfin_api_key, "jellyfin_api_key")
+        jellyfin = JellyfinBackend(config, jellyfin_key)
+        network = NetworkTelemetry(config, truenas, TailscaleMetricsBackend(config))
+        bandwidth = BandwidthService(network, jellyfin, DryRunGovernor(config))
+        engine = Engine(LocalStatusBackend(), truenas, jellyfin, network, bandwidth)
         asyncio.run(Client(config, credentials, engine).run())
     except Exception:  # noqa: BLE001 - startup diagnostics never include secret values.
         logging.getLogger("butters_nas_agent").error(

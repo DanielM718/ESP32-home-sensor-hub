@@ -35,6 +35,7 @@ from butters.integrations.nas_status import (
 from butters.stt.normalization import DomainVocabulary
 from butters.web.app import create_app
 from butters.web.locality import Locality, LocalityClassifier, jellyfin_destination
+from butters.web.portal import _portal_bandwidth
 from butters.web.service import BetaAssistantService
 
 PARTNER = "partner@example.com"
@@ -373,6 +374,60 @@ def _application(
     )
 
 
+def test_admin_refresh_exposes_only_projected_read_diagnostics(tmp_path) -> None:
+    _app, service, _nas = _application(tmp_path)
+    calls: list[str] = []
+
+    def result(action: str, payload: dict[str, object]) -> dict[str, object]:
+        calls.append(action)
+        return {
+            "action": action,
+            "success": True,
+            "request_id": "internal-request-id",
+            "transport": "nas_agent_wss",
+            **payload,
+        }
+
+    service.nas_agent = SimpleNamespace(
+        configured=True,
+        status=lambda: {"state": "connected"},
+        network_status=lambda: result(
+            "nas.network.status",
+            {
+                "remote_tx_mbps": 1.25,
+                "measurement_quality": "partial",
+            },
+        ),
+        jellyfin_sessions=lambda: result(
+            "nas.jellyfin.sessions",
+            {"available": False, "reason": "jellyfin_authentication_failed"},
+        ),
+        bandwidth_status=lambda: result(
+            "nas.bandwidth.status",
+            {"policy_mode": "dry_run", "measurement_quality": "unavailable"},
+        ),
+    )
+
+    status = service.nas_admin_status(refresh=True)
+    assert calls == [
+        "nas.network.status",
+        "nas.jellyfin.sessions",
+        "nas.bandwidth.status",
+    ]
+    assert status["network_telemetry"] == {
+        "success": True,
+        "remote_tx_mbps": 1.25,
+        "measurement_quality": "partial",
+    }
+    assert status["jellyfin_sessions"] == {
+        "success": True,
+        "available": False,
+        "reason": "jellyfin_authentication_failed",
+    }
+    assert "request_id" not in status["network_telemetry"]
+    assert "transport" not in status["jellyfin_sessions"]
+
+
 def _enroll(
     service,
     identity=PARTNER,
@@ -532,9 +587,7 @@ async def _valid_role_is_accepted_and_grants_nothing_more(tmp_path) -> None:
                 assert denied.status_code in {400, 401, 403}, path
 
             # The portal itself has no shutdown route at all.
-            missing = await http.post(
-                "/api/portal/shutdown", headers=mutation, json={}
-            )
+            missing = await http.post("/api/portal/shutdown", headers=mutation, json={})
             assert missing.status_code == 404
             assert nas.wakes == 0
     finally:
@@ -552,7 +605,9 @@ async def _revocation_takes_effect_immediately(tmp_path) -> None:
         ) as http:
             mutation = await _mutation(http, PARTNER)
             await _sign_in(http, mutation)
-            assert (await http.get("/api/portal/nas", headers=mutation)).status_code == 200
+            assert (
+                await http.get("/api/portal/nas", headers=mutation)
+            ).status_code == 200
 
             # Revoking the role ends the live session on the next request,
             # without waiting for the portal session to expire.
@@ -644,9 +699,9 @@ async def _admin_invitation_enrolls_exactly_one_identity(tmp_path) -> None:
             )
             assert finish.status_code == 200
             assert finish.json()["value"]["portal_roles"] == [JELLYFIN_ACCESS]
-            assert service.auth_state.portal_roles(
-                f"identity:{PARTNER}"
-            ) == frozenset({JELLYFIN_ACCESS})
+            assert service.auth_state.portal_roles(f"identity:{PARTNER}") == frozenset(
+                {JELLYFIN_ACCESS}
+            )
 
             # Single use: the same token cannot enroll a second credential.
             replayed = await http.post(
@@ -883,8 +938,12 @@ async def _nas_power_is_independent_and_freezes_only_the_fixed_plan(tmp_path) ->
             assert verified.json()["value"]["roles"] == [NAS_POWER]
 
             # NAS power does not imply Jellyfin access or administrator status.
-            assert (await power_http.get("/api/portal/nas", headers=mutation)).status_code == 401
-            assert (await power_http.get("/api/admin/overview", headers=mutation)).status_code in {
+            assert (
+                await power_http.get("/api/portal/nas", headers=mutation)
+            ).status_code == 401
+            assert (
+                await power_http.get("/api/admin/overview", headers=mutation)
+            ).status_code in {
                 401,
                 403,
             }
@@ -1222,9 +1281,7 @@ def test_remote_endpoint_is_tailnet_and_failures_fail_safe() -> None:
 
 def test_destination_is_always_one_of_two_configured_urls() -> None:
     for locality in Locality:
-        decision = type(
-            "D", (), {"locality": locality, "source": "test"}
-        )()
+        decision = type("D", (), {"locality": locality, "source": "test"})()
         assert jellyfin_destination(decision, ENDPOINTS) in {LAN_URL, TS_URL}
 
 
@@ -1232,7 +1289,9 @@ def test_destination_is_always_one_of_two_configured_urls() -> None:
 
 
 def test_portal_client_never_names_a_host_action_or_redirect() -> None:
-    source = (Path(__file__).parents[1] / "src/butters/web/static/assets/portal.js").read_text()
+    source = (
+        Path(__file__).parents[1] / "src/butters/web/static/assets/portal.js"
+    ).read_text()
     for forbidden in (
         "192.168.",
         "redirect=",
@@ -1283,3 +1342,61 @@ def test_portal_service_exposes_no_generic_execution() -> None:
         "start_admin_",
     ):
         assert identifier not in source, identifier
+
+
+def test_portal_bandwidth_ui_preserves_unavailable_and_remote_only() -> None:
+    root = Path(__file__).parents[1] / "src/butters/web/static"
+    page = (root / "portal.html").read_text(encoding="utf-8")
+    script = (root / "assets/portal.js").read_text(encoding="utf-8")
+    assert 'id="portal-bandwidth"' in page
+    assert 'id="portal-remote-streams"' in page
+    assert 'id="portal-open"' in page
+    assert '"Unavailable"' in script
+    assert 'stream.classification!=="remote"' in script
+    assert 'remote_jellyfin_stream_count===null?"unavailable"' in script
+    assert 'unknown_stream_count===null?"unavailable"' in script
+    assert (
+        'value.reason==="no_active_remote_or_unknown_streams"?"No active streams"'
+        in script
+    )
+    assert '["Jellyfin reported rate",' in script
+    assert 'stream.paused?"Paused":"Playing"' in script
+    assert "if(state.jellyfin_ready){await enterJellyfin()" not in script
+    assert "RemoteEndPoint" not in script
+    assert "api_key" not in script
+
+
+def test_portal_bandwidth_projection_excludes_protocol_and_local_details() -> None:
+    common = {
+        "user": "Viewer",
+        "playing": True,
+        "paused": False,
+        "play_method": "direct_play",
+        "observed_mbps": 8.0,
+        "bitrate_source": "source_reported",
+        "item": "Movie",
+        "session_id": "stable-secret-id",
+        "position_ticks": 42,
+        "client": "Web",
+        "device": "Phone",
+    }
+    projected = _portal_bandwidth(
+        {
+            "effective_capacity_mbps": 30.0,
+            "sessions_above_target": ["stable-secret-id"],
+            "remote_path_counters": {"derp": {"tx_bytes": 1}},
+            "sessions": [
+                {**common, "classification": "remote"},
+                {**common, "classification": "local", "item": "Private local item"},
+                {**common, "classification": "unknown", "item": "Unknown item"},
+            ],
+        }
+    )
+    assert projected is not None
+    assert len(projected["sessions"]) == 1
+    assert projected["sessions"][0]["classification"] == "remote"
+    serialized = str(projected)
+    assert "stable-secret-id" not in serialized
+    assert "Private local item" not in serialized
+    assert "Unknown item" not in serialized
+    assert "remote_path_counters" not in projected

@@ -112,7 +112,7 @@ def _hello(**changes: object) -> str:
     value: dict[str, object] = {
         "type": "hello",
         "protocol": 1,
-        "schema": 1,
+        "schema": 2,
         "agent_id": "nas-primary",
         "version": "0.1.0",
         "token": TOKEN,

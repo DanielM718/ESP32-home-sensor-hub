@@ -10,10 +10,21 @@ from .protocol import ACTION_SCHEMA_VERSION, PROTOCOL_VERSION, ProtocolError, pa
 
 
 class Engine:
-    def __init__(self, local, truenas, jellyfin, *, monotonic=time.monotonic) -> None:
+    def __init__(
+        self,
+        local,
+        truenas,
+        jellyfin,
+        network=None,
+        bandwidth=None,
+        *,
+        monotonic=time.monotonic,
+    ) -> None:
         self.local = local
         self.truenas = truenas
         self.jellyfin = jellyfin
+        self.network = network
+        self.bandwidth = bandwidth
         self._mutation_lock = threading.Lock()
         self._transport_lock = threading.Lock()
         self._monotonic = monotonic
@@ -49,6 +60,10 @@ class Engine:
         system = self._safe_status(self.truenas)
         jellyfin = self._safe_status(self.jellyfin)
         return {"system": system, "jellyfin": jellyfin}
+
+    def sample_telemetry(self) -> None:
+        if self.bandwidth is not None:
+            self.bandwidth.refresh()
 
     @staticmethod
     def _safe_status(backend) -> dict[str, object]:
@@ -87,6 +102,16 @@ class Engine:
                 result.update(success=True, **self._safe_status(self.truenas))
             elif action == "nas.jellyfin.status":
                 result.update(success=True, **self._safe_status(self.jellyfin))
+            elif action == "nas.network.status":
+                if self.network is None:
+                    raise ProtocolError("operation_disabled")
+                result.update(success=True, **self.network.status())
+            elif action == "nas.jellyfin.sessions":
+                result.update(success=True, **self.jellyfin.sessions())
+            elif action == "nas.bandwidth.status":
+                if self.bandwidth is None:
+                    raise ProtocolError("operation_disabled")
+                result.update(success=True, **self.bandwidth.status())
             elif action == "nas.system.shutdown":
                 if not self._mutation_lock.acquire(blocking=False):
                     raise ProtocolError("busy")

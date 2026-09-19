@@ -11,12 +11,15 @@ import uuid
 from collections import OrderedDict
 
 PROTOCOL_VERSION = 1
-ACTION_SCHEMA_VERSION = 1
+ACTION_SCHEMA_VERSION = 2
 MAX_FRAME = 32768
 SCHEMAS = {
     "nas.agent.status": frozenset(),
     "nas.system.status": frozenset(),
     "nas.jellyfin.status": frozenset(),
+    "nas.network.status": frozenset(),
+    "nas.jellyfin.sessions": frozenset(),
+    "nas.bandwidth.status": frozenset(),
     "nas.system.shutdown": frozenset(),
 }
 MUTATIONS = frozenset({"nas.system.shutdown"})

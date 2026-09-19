@@ -45,11 +45,12 @@ The NAS implementation is deliberately separate from the proven Desktop Agent:
 7. The TrueNAS JSON-RPC boundary exposes only source-owned method constants.
    Its locally observed certificate SPKI is verified before an API key is
    transmitted. Read and dormant shutdown credentials are independent.
-8. Jellyfin is a fixed agent-owned health URL. Its response body is discarded;
-   only reachability, readiness, optional bounded version, and HTTP status are
-   returned.
-9. Tailscale remains an independent Butters-side observation. It is not a
-   control channel for TrueNAS middleware.
+8. Jellyfin health and session reads use fixed agent-owned endpoints. Session
+   monitoring is optional and projects only bounded policy fields; the NAS-local
+   token, raw endpoint address, and raw response never cross the agent boundary.
+9. Tailscale remains an observation source, not a control channel. Optional
+   bandwidth telemetry reads only the documented local client counters and
+   accepts no caller-selected endpoint.
 
 ## Identities, credentials, and transport
 
@@ -83,11 +84,17 @@ Every operation has an exact zero-parameter schema:
 | `nas.agent.status` | read-only | agent/protocol/schema version, bounded hostname, process uptime, connection count/uptime, last heartbeat sequence |
 | `nas.system.status` | read-only | local TrueNAS reachability, bounded hostname/version, optional uptime, `unknown\|online\|shutting_down` |
 | `nas.jellyfin.status` | read-only | local reachability, readiness, optional bounded version, optional HTTP status |
+| `nas.network.status` | read-only | physical and Tailscale rates, fixed sources, quality/window, bounded path counters |
+| `nas.jellyfin.sessions` | read-only | bounded playback fields and trusted `local\|remote\|unknown` classification |
+| `nas.bandwidth.status` | read-only | configured budget, derived accounting, dry-run target/reason, bounded sessions |
 | `nas.system.shutdown` | destructive, dormant | exactly `accepted=true`, `state=scheduled`, `method=system.shutdown` |
 
 Unknown actions, missing/extra keys, unknown result fields, non-finite values,
 oversized frames, wrong identities, wrong targets, and arbitrary shutdown input
 are rejected. No raw middleware or Jellyfin body crosses the agent boundary.
+The three bandwidth operations and their action schema version 2 are described
+in `docs/JELLYFIN_BANDWIDTH_GOVERNOR.md`. `enforce` is not a valid mode in this
+lineage.
 
 ## State and power truth
 

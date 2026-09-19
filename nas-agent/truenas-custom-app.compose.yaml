@@ -13,6 +13,11 @@ services:
       - /run/secrets/butters_agent_credentials
       - --truenas-read-key
       - /run/secrets/truenas_read_api_key
+      # Add these two entries only after a NAS-local Jellyfin API token has
+      # been reviewed and session_monitoring_enabled=true. The agent uses only
+      # the fixed Sessions GET; the credential itself may have wider authority.
+      # - --jellyfin-api-key
+      # - /run/secrets/jellyfin_api_key
     restart: unless-stopped
     read_only: true
     cap_drop:
@@ -30,6 +35,7 @@ services:
       # owned by 568:568 and mode 0400 before installation.
       - /mnt/REPLACE/butters-nas-agent/secrets/butters-agent-credentials.json:/run/secrets/butters_agent_credentials:ro
       - /mnt/REPLACE/butters-nas-agent/secrets/truenas-read-api-key:/run/secrets/truenas_read_api_key:ro
+      # - /mnt/REPLACE/butters-nas-agent/secrets/jellyfin-api-key:/run/secrets/jellyfin_api_key:ro
     healthcheck:
       test: ["CMD", "butters-nas-agent", "--healthcheck", "/run/butters-nas-agent/last-heartbeat"]
       interval: 30s

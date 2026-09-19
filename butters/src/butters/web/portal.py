@@ -1,11 +1,12 @@
 """Separate passkey-authenticated NAS / Jellyfin access portal.
 
 This surface is deliberately small. An authorized holder of the
-``jellyfin_access`` role may do exactly four things:
+``jellyfin_access`` role may do exactly five things:
 
 * read NAS / Tailscale / Jellyfin observations,
 * send one Wake-on-LAN packet to the one configured NAS,
 * poll wake progress,
+* view a privacy-reduced remote-bandwidth summary,
 * be redirected to one of two operator-configured Jellyfin URLs once Jellyfin
   is actually ready.
 
@@ -82,9 +83,7 @@ class PortalService:
             raise PortalError("portal_disabled", "the access portal is disabled", 404)
         return {
             "portal": "ready",
-            **self.runtime.passkeys.portal_status(
-                session.session_id, session.peer_key
-            ),
+            **self.runtime.passkeys.portal_status(session.session_id, session.peer_key),
             "identity": session.peer_key,
         }
 
@@ -201,9 +200,7 @@ class PortalService:
             # when nothing has been requested yet, or when the bounded poll
             # window has expired. While a wake is in flight the button is
             # withheld, so the UI cannot be nudged into a packet storm.
-            "can_wake": _can_wake(
-                aggregate, elapsed, self.settings.max_poll_seconds
-            ),
+            "can_wake": _can_wake(aggregate, elapsed, self.settings.max_poll_seconds),
             # The UI renders its fixed shutdown ceremony only when both this
             # independent role and the two server-side capability gates agree.
             "can_shutdown": (
@@ -213,6 +210,7 @@ class PortalService:
             ),
             "power_state": status.get("power_state", "unknown"),
             "lifecycle": status.get("lifecycle", "UNKNOWN"),
+            "bandwidth": _portal_bandwidth(status.get("bandwidth")),
         }
 
     def wake(self, session: BrowserSession) -> dict[str, object]:
@@ -281,9 +279,13 @@ class PortalService:
             )
         status = self.runtime.nas_admin_status()
         capability = status.get("capability")
-        if not isinstance(capability, dict) or capability.get("shutdown_configured") is not True:
+        if (
+            not isinstance(capability, dict)
+            or capability.get("shutdown_configured") is not True
+        ):
             raise PortalError(
-                "capability_unavailable", "NAS Agent shutdown is disabled or unconfigured"
+                "capability_unavailable",
+                "NAS Agent shutdown is disabled or unconfigured",
             )
         plan = self.runtime.actions.freeze(
             skill="nas.system.shutdown",
@@ -331,7 +333,9 @@ class PortalService:
             credential=credential,
         )
         if outcome.pending_action_id is None or outcome.context is None:
-            raise PortalError("fresh_authentication_required", "fresh authentication is required")
+            raise PortalError(
+                "fresh_authentication_required", "fresh authentication is required"
+            )
         self._shutdown_plan(session, outcome.pending_action_id)
         jobs = self.runtime.actions.execute(
             outcome.pending_action_id,
@@ -353,7 +357,9 @@ class PortalService:
                 allowed_states=frozenset({"pending_confirmation", "pending_auth"}),
             )
         except Exception as exc:
-            raise PortalError("pending_action_denied", "pending action is unavailable") from exc
+            raise PortalError(
+                "pending_action_denied", "pending action is unavailable"
+            ) from exc
         if (
             len(plan.steps) != 1
             or plan.steps[0].skill != "nas.system.shutdown"
@@ -425,8 +431,7 @@ class PortalService:
     def identities(self) -> dict[str, object]:
         return {
             "identities": [
-                item.safe_dict()
-                for item in self.runtime.auth_state.portal_identities()
+                item.safe_dict() for item in self.runtime.auth_state.portal_identities()
             ],
             "pending_invites": list(self.runtime.auth_state.portal_invites()),
         }
@@ -471,6 +476,56 @@ def _portal_last_operation(record: object) -> dict[str, object] | None:
         "at": at,
         "age_seconds": max(0.0, time.time() - at),
     }
+
+
+def _portal_bandwidth(value: object) -> dict[str, object] | None:
+    """Remove protocol-only identifiers and local-session metadata.
+
+    The hub already validates the agent payload.  This second projection keeps
+    stable session IDs, network path counters, client/device identifiers, and
+    local or unclassified item labels out of the browser response.
+    """
+
+    if not isinstance(value, dict):
+        return None
+    scalar_fields = (
+        "effective_capacity_mbps",
+        "safe_streaming_budget_mbps",
+        "reserve_mbps",
+        "remote_jellyfin_stream_count",
+        "unknown_stream_count",
+        "remote_jellyfin_observed_mbps",
+        "other_remote_observed_mbps",
+        "reconciliation_delta_mbps",
+        "total_remote_observed_mbps",
+        "available_headroom_mbps",
+        "calculated_per_stream_target_mbps",
+        "policy_mode",
+        "measurement_quality",
+        "reason",
+        "would_enforce",
+    )
+    sessions = []
+    raw_sessions = value.get("sessions")
+    if isinstance(raw_sessions, list):
+        for item in raw_sessions:
+            if (
+                isinstance(item, dict)
+                and item.get("classification") == "remote"
+                and item.get("playing") is True
+            ):
+                sessions.append(
+                    {
+                        "user": item.get("user"),
+                        "paused": item.get("paused"),
+                        "classification": "remote",
+                        "play_method": item.get("play_method"),
+                        "observed_mbps": item.get("observed_mbps"),
+                        "bitrate_source": item.get("bitrate_source"),
+                        "item": item.get("item"),
+                    }
+                )
+    return {**{name: value.get(name) for name in scalar_fields}, "sessions": sessions}
 
 
 def _request_suffix() -> str:

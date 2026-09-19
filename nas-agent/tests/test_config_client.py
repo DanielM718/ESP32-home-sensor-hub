@@ -88,6 +88,44 @@ def test_enabled_shutdown_requires_a_distinct_fixed_identity(tmp_path):
             load_config(path)
 
 
+def test_bandwidth_config_rejects_enforcement_arbitrary_metrics_and_interface(tmp_path):
+    base = _toml()
+    valid = (
+        base
+        + """
+[network]
+enabled = true
+physical_interface = "eno1"
+tailscale_metrics_url = "http://100.100.100.100/metrics"
+sample_interval_seconds = 5
+smoothing_alpha = 0.35
+maximum_sample_interval_seconds = 30
+[bandwidth]
+effective_capacity_mbps = 30
+safe_streaming_budget_mbps = 24
+reserve_mbps = 6
+minimum_stream_mbps = 3
+maximum_stream_mbps = 24
+stream_stability_seconds = 15
+minimum_change_mbps = 1
+policy_cooldown_seconds = 30
+policy_mode = "dry_run"
+"""
+    )
+    path = _write(tmp_path / "agent.toml", valid)
+    assert load_config(path).policy_mode == "dry_run"
+    for changed in (
+        valid.replace('policy_mode = "dry_run"', 'policy_mode = "enforce"'),
+        valid.replace("100.100.100.100", "attacker.example"),
+        valid.replace(
+            'physical_interface = "eno1"', 'physical_interface = "../../proc"'
+        ),
+    ):
+        _write(path, changed)
+        with pytest.raises(ValueError, match="invalid_configuration"):
+            load_config(path)
+
+
 def test_config_rejects_group_or_world_writable_file(tmp_path):
     path = _write(tmp_path / "agent.toml", _toml(), 0o622)
     with pytest.raises(ValueError, match="unsafe_configuration"):

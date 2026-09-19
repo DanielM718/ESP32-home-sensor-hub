@@ -44,6 +44,36 @@ function axis(container, entries){
   }
 }
 
+function mbps(value){return value===null||value===undefined?"Unavailable":`${Number(value).toFixed(1)} Mbps`;}
+
+function renderBandwidth(value){
+  const section=document.querySelector("#portal-bandwidth");
+  if(!value){section.hidden=true;return;}
+  section.hidden=false;
+  axis(document.querySelector("#portal-bandwidth-metrics"),[
+    ["Remote bandwidth",value.total_remote_observed_mbps===null?"unavailable":`${mbps(value.total_remote_observed_mbps)} / ${mbps(value.effective_capacity_mbps)}`],
+    ["Safe streaming pool",mbps(value.safe_streaming_budget_mbps)],
+    ["Jellyfin reported rate",mbps(value.remote_jellyfin_observed_mbps)],
+    ["Other remote traffic",mbps(value.other_remote_observed_mbps)],
+    ["Available headroom",mbps(value.available_headroom_mbps)],
+    ["Remote streams",value.remote_jellyfin_stream_count===null?"unavailable":String(value.remote_jellyfin_stream_count)],
+    ["Unknown streams",value.unknown_stream_count===null?"unavailable":String(value.unknown_stream_count)],
+    ["Dry-run target",value.calculated_per_stream_target_mbps===null?(value.measurement_quality==="unavailable"?"unavailable":value.reason==="no_active_remote_or_unknown_streams"?"No active streams":"Stabilizing"):`${mbps(value.calculated_per_stream_target_mbps)} / stream`],
+    ["Measurement quality",String(value.measurement_quality||"unavailable")],
+    ["Policy mode",String(value.policy_mode||"off")],
+  ]);
+  const list=document.querySelector("#portal-remote-streams");
+  list.replaceChildren();
+  for(const stream of value.sessions||[]){
+    if(stream.classification!=="remote")continue;
+    const card=document.createElement("div");card.className="portal-stream";
+    for(const text of [stream.user||"Viewer",stream.item||"Active item",stream.paused?"Paused":"Playing",String(stream.play_method||"unknown").replaceAll("_"," "),mbps(stream.observed_mbps)]){
+      const line=document.createElement("span");line.textContent=text;card.append(line);
+    }
+    list.append(card);
+  }
+}
+
 function ago(seconds){if(seconds===null||seconds===undefined)return "";const value=Math.round(seconds);if(value<60)return `${value} second${value===1?"":"s"} ago`;const minutes=Math.round(value/60);return `${minutes} minute${minutes===1?"":"s"} ago`;}
 
 function show(section){
@@ -114,17 +144,19 @@ async function refreshState(){
       ["Tailscale",state.observations.tailscale],
       ["Jellyfin",state.observations.jellyfin],
     ]);
+    renderBandwidth(state.bandwidth);
     // Last operation is rendered on its own line and never changes the lines above.
     const last=document.querySelector("#portal-last-operation");
     last.textContent=state.last_operation
       ? `Wake packet sent ${ago(state.last_operation.age_seconds)}`
       : "Nothing has been requested yet.";
     const wake=document.querySelector("#portal-wake");
+    const open=document.querySelector("#portal-open");
     const shutdown=document.querySelector("#portal-shutdown");
     // Wake Again only when it is actually appropriate, and never automatically.
     wake.hidden=!state.can_wake;
+    open.hidden=!state.jellyfin_ready;
     shutdown.hidden=!state.can_shutdown;
-    if(state.jellyfin_ready){await enterJellyfin();return;}
     if(state.poll_expired){
       stopPolling();
       document.querySelector("#portal-action-status").textContent=
@@ -203,6 +235,7 @@ async function shutdownNas(){
 document.querySelector("#portal-authenticate").addEventListener("click",signIn);
 document.querySelector("#portal-register").addEventListener("click",register);
 document.querySelector("#portal-wake").addEventListener("click",wake);
+document.querySelector("#portal-open").addEventListener("click",enterJellyfin);
 document.querySelector("#portal-shutdown").addEventListener("click",shutdownNas);
 document.querySelector("#portal-retry").addEventListener("click",refreshState);
 document.querySelector("#portal-signout").addEventListener("click",async()=>{

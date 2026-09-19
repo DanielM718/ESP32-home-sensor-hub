@@ -435,9 +435,7 @@ class BetaAssistantService:
             }
         try:
             frozen = self.actions.freeze_plan(
-                steps=tuple(
-                    (step.action_id, step.parameters) for step in plan.steps
-                ),
+                steps=tuple((step.action_id, step.parameters) for step in plan.steps),
                 summary=plan.summary,
                 session_id=session.session_id,
                 identity=session.peer_key,
@@ -773,7 +771,9 @@ class BetaAssistantService:
         # several metrics at once, for example - keeps its single efficient
         # call and is never split.
         compound = (
-            plan_compound_request(self.assistant.router, normalized, self.assistant.skills)
+            plan_compound_request(
+                self.assistant.router, normalized, self.assistant.skills
+            )
             if not route.matched and override is RouteOverride.AUTO
             else CompoundPlan("not_compound")
         )
@@ -1151,7 +1151,6 @@ class BetaAssistantService:
             stopping_reason="authentication_required",
         )
 
-
     # ================= Administrator Tools: Desktop and NAS =================
     #
     # These endpoints exist so the administrator surface can drive the reviewed
@@ -1219,10 +1218,7 @@ class BetaAssistantService:
             source=source,
         )
         elevation = self.auth_state.elevation(session.session_id, session.peer_key)
-        if (
-            plan.authentication is not AuthenticationLevel.ELEVATED
-            or elevation is None
-        ):
+        if plan.authentication is not AuthenticationLevel.ELEVATED or elevation is None:
             self.action_state.audit(
                 identity=session.peer_key,
                 session_id=session.session_id,
@@ -1431,6 +1427,30 @@ class BetaAssistantService:
             "agent_configured": self.nas_agent.configured,
         }
         agent = self.nas_agent.status()
+        bandwidth: dict[str, object] | None = None
+        network_telemetry: dict[str, object] | None = None
+        jellyfin_sessions: dict[str, object] | None = None
+        if refresh and agent.get("state") == "connected":
+            network_telemetry = self._nas_read_diagnostic(
+                self.nas_agent.network_status()
+            )
+            jellyfin_sessions = self._nas_read_diagnostic(
+                self.nas_agent.jellyfin_sessions()
+            )
+            observed_bandwidth = self.nas_agent.bandwidth_status()
+            if observed_bandwidth.get("success") is True:
+                bandwidth = {
+                    key: value
+                    for key, value in observed_bandwidth.items()
+                    if key
+                    not in {
+                        "action",
+                        "success",
+                        "request_id",
+                        "idempotency_key",
+                        "transport",
+                    }
+                }
         last = self.last_operation("nas")
         wake_at = None
         if last is not None and last.get("operation") == "wake_nas":
@@ -1451,6 +1471,9 @@ class BetaAssistantService:
             return {
                 **status,
                 "nas_agent": agent,
+                "network_telemetry": network_telemetry,
+                "jellyfin_sessions": jellyfin_sessions,
+                "bandwidth": bandwidth,
                 "power_state": self._nas_power_state(status, agent),
                 "lifecycle": self._nas_lifecycle(status, agent, last),
             }
@@ -1459,14 +1482,33 @@ class BetaAssistantService:
         return {
             **status,
             "nas_agent": agent,
+            "network_telemetry": network_telemetry,
+            "jellyfin_sessions": jellyfin_sessions,
+            "bandwidth": bandwidth,
             "power_state": self._nas_power_state(status, agent),
             "lifecycle": self._nas_lifecycle(status, agent, last),
         }
 
     @staticmethod
-    def _nas_power_state(
-        status: dict[str, object], agent: dict[str, object]
-    ) -> str:
+    def _nas_read_diagnostic(value: object) -> dict[str, object] | None:
+        """Strip transport metadata from an already schema-projected result."""
+
+        if not isinstance(value, dict):
+            return None
+        return {
+            key: item
+            for key, item in value.items()
+            if key
+            not in {
+                "action",
+                "request_id",
+                "idempotency_key",
+                "transport",
+            }
+        }
+
+    @staticmethod
+    def _nas_power_state(status: dict[str, object], agent: dict[str, object]) -> str:
         observations = status.get("observations")
         # OFF is a corroborated observation, not an interpretation of the
         # socket. It also terminates a previously accepted shutdown lifecycle.
@@ -1504,12 +1546,16 @@ class BetaAssistantService:
             observations = status.get("observations")
             if isinstance(jellyfin, dict) and jellyfin.get("ready") is True:
                 return "READY"
-            if isinstance(observations, dict) and observations.get("tailscale") == "reachable":
+            if (
+                isinstance(observations, dict)
+                and observations.get("tailscale") == "reachable"
+            ):
                 return "TAILSCALE_REACHABLE"
             return "AGENT_CONNECTED"
         observations = status.get("observations")
         if isinstance(observations, dict) and (
-            observations.get("lan") == "reachable" or observations.get("nas_api") == "reachable"
+            observations.get("lan") == "reachable"
+            or observations.get("nas_api") == "reachable"
         ):
             return "NAS_REACHABLE"
         if isinstance(last, dict) and last.get("operation") == "wake_nas":
@@ -1554,9 +1600,7 @@ class BetaAssistantService:
     def _read_skill(
         self, skill: str, arguments: dict[str, object]
     ) -> dict[str, object] | None:
-        execution = self.assistant.skills.execute(
-            skill, arguments, administrator=True
-        )
+        execution = self.assistant.skills.execute(skill, arguments, administrator=True)
         if not execution.ok or execution.result is None:
             return None
         data = getattr(execution.result, "data", None)
@@ -2299,9 +2343,11 @@ class BetaAssistantService:
             )
         message = " ".join(answers)
         if failures:
-            message += " I couldn't answer the rest of that request: " + "; ".join(
-                failures
-            ) + "."
+            message += (
+                " I couldn't answer the rest of that request: "
+                + "; ".join(failures)
+                + "."
+            )
         route = RoutedIntent(
             "matched",
             normalized,
@@ -2650,9 +2696,7 @@ class BetaAssistantService:
                     reason_code="tool_not_offered",
                     fields={"skill": request.name, "action_authorized": False},
                 )
-                return self._cloud_failure(
-                    trace, normalized, "tool_not_offered", route
-                )
+                return self._cloud_failure(trace, normalized, "tool_not_offered", route)
             failure = self.assistant.skills.validate_proposal(
                 request.name, request.arguments, administrator=administrator
             )
@@ -3137,7 +3181,6 @@ class BetaAssistantService:
             routing_path="unsupported",
             policy_status=code,
         )
-
 
 
 _APP_NAME = re.compile(r"[a-z][a-z0-9_]{0,63}")
