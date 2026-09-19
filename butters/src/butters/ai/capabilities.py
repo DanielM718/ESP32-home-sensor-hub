@@ -186,8 +186,10 @@ def _voices(*pairs: tuple[str, str]) -> tuple[VoiceOption, ...]:
     return tuple(VoiceOption(identifier, label) for identifier, label in pairs)
 
 
-# The newer OpenAI speech model carries the expanded voice set and is the only
-# one that consumes speaking instructions. The tts-1 pair predates both.
+# gpt-4o-mini-tts carries the full current voice set and is the only model that
+# consumes speaking instructions. Both lists are the provider's, not Butters'
+# preference: a voice missing here cannot be selected, so an omission is a
+# capability the administrator loses rather than a harmless shortening.
 _EXPRESSIVE_VOICES = _voices(
     ("alloy", "Alloy"),
     ("ash", "Ash"),
@@ -203,12 +205,17 @@ _EXPRESSIVE_VOICES = _voices(
     ("shimmer", "Shimmer"),
     ("verse", "Verse"),
 )
+# The tts-1 pair supports a subset of the expressive set: it lacks Ballad and
+# Verse, and the two newest voices, Cedar and Marin, are gpt-4o-mini-tts only.
 _CLASSIC_VOICES = _voices(
     ("alloy", "Alloy"),
+    ("ash", "Ash"),
+    ("coral", "Coral"),
     ("echo", "Echo"),
     ("fable", "Fable"),
     ("nova", "Nova"),
     ("onyx", "Onyx"),
+    ("sage", "Sage"),
     ("shimmer", "Shimmer"),
 )
 

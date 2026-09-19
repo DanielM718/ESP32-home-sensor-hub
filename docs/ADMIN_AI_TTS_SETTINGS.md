@@ -56,10 +56,42 @@ that.
 | `openai` | `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` | `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` |
 | `local` | *(none — the local LLM is a router, not a chat model)* | `local-piper` |
 
-`gpt-4o-mini-tts` is the only speech model that consumes a speaking style, and
-the only one carrying the expanded voice set (including Cedar and Marin).
+### Voices per speech model
+
+| Model | Voices | Style |
+| --- | --- | --- |
+| `gpt-4o-mini-tts` | alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer, verse (13) | yes |
+| `tts-1`, `tts-1-hd` | alloy, ash, coral, echo, fable, nova, onyx, sage, shimmer (9) | no |
+| `local-piper` | kathleen (1) | no |
+
+The `tts-1` pair is the expressive set minus Ballad and Verse, minus the two
+newest voices, Cedar and Marin. These lists are the provider's, not Butters'
+preference: a voice omitted here is a capability the administrator loses,
+because the server then refuses it. `test_admin_ai_capabilities.py` pins both
+tuples exactly, and `test_admin_tts_runtime.py` walks the catalog the browser
+receives and asserts every listed voice in a real synthesis request.
+
+`gpt-4o-mini-tts` is the only speech model that consumes a speaking style.
 `local-piper` declares exactly one voice, because the bundled Piper model
 directory has exactly one speaker: offering a list there would be a lie.
+
+### Why the Chat dropdown stops at the GPT-5.6 models
+
+The chat catalog is exactly `cloud.pricing`, and that is the boundary on
+purpose. A newer model such as GPT-6 Astra is absent not because it does not
+exist but because Butters holds no reviewed pricing for it, and pricing is
+what authorizes a paid call: `UsageLedger` estimates against it, the
+per-request, daily, and monthly budgets are enforced through it, and
+`OpenAIGeneralReasoner.reason` refuses any model missing from it with
+`model_denied`. Offering a model the ledger cannot price would mean a request
+that either bypasses the budget or fails at the provider.
+
+Admitting a model is therefore a two-part reviewed change, both in
+`assistant_config.py`: add its input, cached, and output rates to
+`CloudSettings.pricing`, and widen the `validated()` assertion that currently
+pins the reviewed Luna/Terra/Sol set. The Admin dropdown then follows with no
+further edit. Deliberately **not** done here: this branch changes how models
+are selected, not which models are authorized.
 
 No reviewed chat model accepts `temperature` or `top_p` — the GPT-5.6 family
 rejects sampling controls — so those fields never render. The capability flags

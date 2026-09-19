@@ -73,6 +73,125 @@ def test_local_provider_offers_exactly_the_one_voice_it_can_produce(registry) ->
     assert local.speech_models[0].supports_instructions is False
 
 
+# The provider's own voice lists, pinned exactly. An omission here is not a
+# harmless shortening: it removes a voice the administrator could otherwise
+# select, and the server would then reject it. A silent drift in either
+# direction fails these tests.
+EXPRESSIVE_VOICES = (
+    "alloy",
+    "ash",
+    "ballad",
+    "cedar",
+    "coral",
+    "echo",
+    "fable",
+    "marin",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+    "verse",
+)
+CLASSIC_VOICES = (
+    "alloy",
+    "ash",
+    "coral",
+    "echo",
+    "fable",
+    "nova",
+    "onyx",
+    "sage",
+    "shimmer",
+)
+
+
+def test_expressive_model_exposes_the_full_current_voice_set(registry) -> None:
+    model = registry.speech_model("openai", "gpt-4o-mini-tts")
+
+    assert model.voice_ids() == EXPRESSIVE_VOICES
+    assert len(model.voice_ids()) == 13
+    assert model.supports_instructions is True
+
+
+@pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd"))
+def test_tts1_pair_exposes_the_documented_nine_voices(registry, model_id: str) -> None:
+    model = registry.speech_model("openai", model_id)
+
+    assert model.voice_ids() == CLASSIC_VOICES
+    assert len(model.voice_ids()) == 9
+    assert model.supports_instructions is False
+
+
+def test_the_tts1_set_is_exactly_the_expressive_set_minus_four(registry) -> None:
+    """Ballad and Verse, plus the two newest voices, are expressive-only."""
+
+    expressive = set(registry.speech_model("openai", "gpt-4o-mini-tts").voice_ids())
+    classic = set(registry.speech_model("openai", "tts-1").voice_ids())
+
+    assert classic < expressive
+    assert expressive - classic == {"ballad", "verse", "cedar", "marin"}
+
+
+@pytest.mark.parametrize(
+    ("model_id", "voices"),
+    (
+        ("gpt-4o-mini-tts", EXPRESSIVE_VOICES),
+        ("tts-1", CLASSIC_VOICES),
+        ("tts-1-hd", CLASSIC_VOICES),
+    ),
+)
+def test_every_catalogued_voice_validates_for_its_own_model(
+    registry, model_id: str, voices: tuple[str, ...]
+) -> None:
+    for voice in voices:
+        accepted = validate_speech(
+            registry, {"provider": "openai", "model": model_id, "voice": voice}
+        )
+        assert accepted.voice == voice
+
+
+@pytest.mark.parametrize("voice", ("ballad", "verse", "cedar", "marin"))
+@pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd"))
+def test_an_expressive_only_voice_is_refused_on_the_tts1_pair(
+    registry, model_id: str, voice: str
+) -> None:
+    with pytest.raises(CapabilityError) as denied:
+        validate_speech(
+            registry, {"provider": "openai", "model": model_id, "voice": voice}
+        )
+    assert denied.value.code == "invalid_voice"
+
+
+def test_the_local_voice_is_refused_on_every_cloud_model(registry) -> None:
+    for model_id in ("gpt-4o-mini-tts", "tts-1", "tts-1-hd"):
+        with pytest.raises(CapabilityError):
+            validate_speech(
+                registry,
+                {"provider": "openai", "model": model_id, "voice": "kathleen"},
+            )
+
+
+def test_the_catalog_the_browser_receives_carries_the_same_voice_lists(registry) -> None:
+    """The UI-derived catalog is the registry, not a second copy of it."""
+
+    speech = next(
+        item
+        for item in registry.as_dict()["speech_providers"]
+        if item["id"] == "openai"
+    )
+    listed = {
+        model["id"]: tuple(voice["id"] for voice in model["voices"])
+        for model in speech["speech_models"]
+    }
+
+    assert listed["gpt-4o-mini-tts"] == EXPRESSIVE_VOICES
+    assert listed["tts-1"] == CLASSIC_VOICES
+    assert listed["tts-1-hd"] == CLASSIC_VOICES
+    # Every voice carries a display label, so the page never renders a bare ID.
+    for model in speech["speech_models"]:
+        assert all(voice["label"] for voice in model["voices"])
+
+
 def test_serialized_catalog_carries_per_model_support_flags(registry) -> None:
     catalog = registry.as_dict()
     openai = next(item for item in catalog["chat_providers"] if item["id"] == "openai")

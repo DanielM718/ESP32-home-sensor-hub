@@ -533,3 +533,115 @@ async def _switching_provider_excludes_stale_incompatible_parameters(tmp_path, m
 
 def test_switching_provider_excludes_stale_incompatible_parameters(tmp_path, monkeypatch) -> None:
     asyncio.run(_switching_provider_excludes_stale_incompatible_parameters(tmp_path, monkeypatch))
+
+
+# ------------------- per-model voice catalogs, end to end -------------------
+
+
+async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkeypatch):
+    """Walk the catalog the browser is given and synthesize with each voice.
+
+    This closes the gap a unit test cannot: a voice can be listed, accepted by
+    validation, and still never reach the provider. Here each one is asserted
+    in the request body that left the process.
+
+    Thirty-one iterations would exhaust the request, administrator, and
+    speech rate limits several times over, and those are controls worth
+    keeping rather than widening for a test. The catalog is therefore fetched
+    over HTTP - it is the exact document the browser builds its dropdowns
+    from - and the loop then calls the same three service methods the
+    endpoints call once they have admitted a request. The HTTP authorization,
+    rate limiting, and error mapping around them are covered by the other
+    tests in this file, including the two-voice end-to-end proof above.
+    """
+
+    app, service, recorder = _application(tmp_path, monkeypatch)
+    async with _client(app) as http:
+        headers = await _mutation_headers(http)
+        catalog = (await http.get("/api/admin/ai/catalog", headers=headers)).json()
+        openai = next(
+            item for item in catalog["speech_providers"] if item["id"] == "openai"
+        )
+        observed: dict[str, list[str]] = {}
+        for model in openai["speech_models"]:
+            observed[model["id"]] = []
+            for voice in model["voices"]:
+                session = service.sessions.get(http.cookies["butters_session"])
+                applied = service.apply_speech_settings(
+                    session,
+                    {
+                        "provider": "openai",
+                        "model": model["id"],
+                        "voice": voice["id"],
+                    },
+                )
+                assert applied["in_sync"]["speech"] is True
+                answer = service.handle_text(
+                    session, "what is the humidity in box three"
+                )
+                service.synthesize_trace_response(session, answer.trace_id)
+                assert recorder.last["model"] == model["id"]
+                observed[model["id"]].append(str(recorder.last["voice"]))
+
+    assert observed["gpt-4o-mini-tts"] == [
+        "alloy",
+        "ash",
+        "ballad",
+        "cedar",
+        "coral",
+        "echo",
+        "fable",
+        "marin",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+        "verse",
+    ]
+    assert observed["tts-1"] == observed["tts-1-hd"] == [
+        "alloy",
+        "ash",
+        "coral",
+        "echo",
+        "fable",
+        "nova",
+        "onyx",
+        "sage",
+        "shimmer",
+    ]
+
+
+def test_every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkeypatch) -> None:
+    asyncio.run(
+        _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkeypatch)
+    )
+
+
+async def _an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch):
+    app, service, recorder = _application(tmp_path, monkeypatch)
+    async with _client(app) as http:
+        headers = await _mutation_headers(http)
+        # A voice that tts-1 genuinely lacks, not merely one Butters omitted.
+        await http.post(
+            "/api/admin/ai/tts",
+            headers=headers,
+            json={"provider": "openai", "model": "tts-1", "voice": "sage"},
+        )
+        for voice in ("ballad", "verse", "cedar", "marin"):
+            rejected = await http.post(
+                "/api/admin/ai/tts",
+                headers=headers,
+                json={"provider": "openai", "model": "tts-1", "voice": voice},
+            )
+            assert rejected.status_code == 400, voice
+            assert rejected.json()["error"] == "invalid_voice", voice
+        await _spoken_chat_answer(http, headers)
+
+    # The last accepted voice is still the effective one.
+    assert service.ai.effective.speech.voice == "sage"
+    assert recorder.last["voice"] == "sage"
+    assert recorder.last["model"] == "tts-1"
+
+
+def test_an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch) -> None:
+    asyncio.run(_an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch))
