@@ -1,7 +1,8 @@
 # Jellyfin bandwidth governor
 
-Status: implementation complete for measurement, classification, and dry-run
-calculation; the first production read-only hardware validation is in progress.
+Status: implementation and the first production read-only hardware validation
+are complete for measurement, classification, and dry-run calculation. The
+branch is merge-ready but remains unmerged pending explicit approval.
 This phase contains no Jellyfin mutation path and rejects
 `policy_mode = "enforce"` at configuration load and again when constructing the
 governor.
@@ -44,6 +45,12 @@ labels. Remote user/item labels are bounded and shown only to an authenticated
 `jellyfin_access` portal session. The portal now keeps the monitor visible and
 offers an explicit **Open Jellyfin** button instead of immediately redirecting
 as soon as Jellyfin becomes ready.
+
+Portal authorization remains explicit. Administrator identity does not imply a
+portal role: the normalized administrator identity was granted only the
+existing `jellyfin_access` role through `AuthStateStore`. It was not granted
+`nas_power`, no unrelated identity was changed, and the existing WebAuthn
+authentication requirement remains in force.
 
 The existing InfluxDB/Grafana implementation belongs to the separate home
 sensor server and has no authenticated NAS Agent ingestion path. This phase
@@ -89,10 +96,17 @@ Real LAN and Tailnet sessions matched the configured LAN and Tailscale CIDRs
 from Jellyfin's server-recorded `RemoteEndPoint`; raw addresses were not exposed
 to the portal. A LAN transcode produced 41.576--50.356 Mbps physical bursts with
 0--0.001 Mbps Tailscale TX and remained outside the remote pool. A remote
-transcode reported 7.122 Mbps and was charged as one remote stream with a stable
-24 Mbps dry-run target.
+transcode was classified from its real `100.64.0.0/10` endpoint and charged as
+one remote stream with a stable 24 Mbps dry-run target. In the final
+counter-bounded run, Jellyfin reported 5.577 Mbps. Tailscale transmitted
+95,617,984 bytes over 102.312 seconds, or 7.476 Mbps: a +1.899 Mbps (+34.1% of
+the Jellyfin figure) reconciliation delta. Five-second smoothed observations
+ranged from 4.704 to 11.896 Mbps. This discrepancy is plausible for segmented
+fetches, audio/container traffic, protocol overhead, and the difference between
+Jellyfin's nominal report and wire bytes, but it is too variable to attribute
+instantaneously to another service.
 
-The remote run also established an important limitation: Jellyfin's reported
+The remote runs also established an important limitation: Jellyfin's reported
 bitrate is nominal, while clients fetch media in large bursts and then play from
 buffer. Five-second Tailscale TX ranged from effectively zero to 14.632 Mbps
 while Jellyfin continued reporting 7.122 Mbps and playback position advanced.
@@ -100,6 +114,21 @@ Therefore instantaneous `T - J` is a useful signed reconciliation diagnostic,
 but is not a truthful measurement of non-Jellyfin traffic while a remote or
 unknown Jellyfin session exists. Enforcement remains blocked on a separately
 reviewed longer-window/attribution design.
+
+A three-minute idle run measured mean physical TX/RX of 0.003/0.024 Mbps,
+mean Tailscale TX/RX of 0.001/0.001 Mbps, and mean attributable other-remote
+traffic of 0.001 Mbps. Quality was `good`, the chargeable count was zero, and no
+target was fabricated. After the remote stream stopped, the target cleared
+immediately and the source returned to `good` quality. Live start/pause/stop
+transitions also verified the 15-second stability window, 1 Mbps change
+threshold, and 30-second cooldown without oscillation.
+
+The validated immutable NAS Agent image is
+`ghcr.io/danielm718/butters-nas-agent@sha256:6de88fe83138b42978641a0b4d84b777574b3e50eb76c3fbf9534fb2e22a0667`,
+built from source revision `ff666f9839bbcde74fda04d291fdddfdabb949a3`.
+The hardened UID/GID, read-only root, dropped capabilities,
+`no-new-privileges`, no-inbound-port/no-Docker-socket boundary, and bounded
+resources/logs were preserved.
 
 ## Measurement sources
 
@@ -429,33 +458,29 @@ Do not tag points with title, session ID, user, device, or arbitrary client
 strings. At most use fixed low-cardinality tags such as host identity, policy
 mode, quality, and source.
 
-## Staging and validation plan
+## Production validation result
 
-Production deployment is blocked until all of the following are supplied or
-verified without changing the existing TrueNAS credentials:
+The read-only stage completed with `network.enabled=true`,
+`session_monitoring_enabled=true`, and `policy_mode="dry_run"`. The fixed
+Jellyfin session read uses a separately revocable NAS-local API key file owned
+by UID/GID 568 with mode `0400`. Jellyfin API keys are globally powerful rather
+than endpoint-scoped; containment is therefore provided by the agent's fixed
+GET, exact projection, filesystem secret, and hardened runtime. The token never
+entered a command argument, log, protocol response, Butters, or the browser.
 
-1. identify the actual physical interface and verify its TrueNAS graph;
-2. verify the NAS Tailscale version is at least 1.78;
-3. verify `100.100.100.100/metrics` is visible inside the current unprivileged,
-   bridged NAS Agent container;
-4. provide a separately reviewed NAS-local Jellyfin API token for the fixed
-   session read (Jellyfin API keys are powerful credentials even though this
-   agent exposes only one GET); and
-5. build/review/publish a new immutable agent image and coordinate the action
-   schema-2 Butters hub deployment.
+Idle, LAN-transcode, remote-transcode, pause/start, and stop states passed. The
+LAN session raised physical TX but not Tailscale TX and never entered the remote
+pool. The remote session raised Tailscale TX and entered the pool. A second
+simultaneous remote client and a real above-target Direct Play session were not
+naturally available and were intentionally not fabricated; those remain
+pre-enforcement hardware tests.
 
-After tests and review, stage with `network.enabled=true`,
-`session_monitoring_enabled=true`, and `policy_mode="dry_run"`. Never mount the
-shutdown key differently or change its identity. Restart only the components
-whose reviewed code/config changed; Jellyfin does not need a restart.
-
-Record at least two samples after start so the monotonic Tailscale sampler has a
-baseline. Validate idle, no-stream, naturally available LAN stream, and
-naturally available remote stream states. For each sample record `T`, `J`, `O`,
-and `D`; expect approximate rather than exact equality because segment bursts
-and protocol overhead are real. A LAN stream must remain classified local and
-outside the chargeable count. A remote stream must be Tailscale-classified and
-charged. Do not fabricate a second client.
+The NAS Agent Custom App and the changed Butters web service were the only
+restarted production components. Jellyfin, Tailscale, power services, and the
+Windows desktop were not restarted or contacted. Existing TrueNAS status and
+shutdown identities were unchanged. No shutdown or wake action was performed.
+The user visually accepted the portal after the explicit role assignment, and
+no enforcement call occurred.
 
 ## Rollback
 
