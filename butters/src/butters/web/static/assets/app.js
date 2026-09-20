@@ -169,6 +169,9 @@ function setSessionReady(ready) {
 function setPending(value) {
   pending = value;
   sendButton.disabled = value || !sessionReady;
+  // The button keeps its label and its footprint while it is busy, so a
+  // second tap has nothing new to hit.
+  sendButton.setAttribute("aria-busy", value ? "true" : "false");
   form.dataset.pending = value ? "true" : "false";
 }
 
@@ -443,8 +446,17 @@ function renderAuthStatus(status) {
   authExpiry = elevated ? Date.now() + Number(status.remaining_seconds) * 1000 : 0;
   authButton.hidden = elevated;
   lockButton.hidden = !elevated;
-  authButton.textContent = "Admin: Locked · Authenticate";
-  if (elevated) lockButton.textContent = `Admin: Elevated · ${formatRemaining(status.remaining_seconds)} · Lock Now`;
+  authButton.textContent = "Admin locked";
+  authButton.setAttribute("aria-label", "Administrator access is locked. Authenticate with a passkey.");
+  if (elevated) renderElevatedLock(status.remaining_seconds);
+}
+
+// Two separate facts, kept separate: the chip shows that elevation is live and
+// how long is left, and its accessible name says what pressing it does.
+function renderElevatedLock(seconds) {
+  const remaining = formatRemaining(seconds);
+  lockButton.textContent = `Admin · ${remaining}`;
+  lockButton.setAttribute("aria-label", `Administrator access is elevated for ${remaining}. Lock now.`);
 }
 
 function formatRemaining(seconds) {
@@ -466,7 +478,9 @@ function showPendingAction(plan) {
   actionCard.hidden = false;
   actionTitle.textContent = "Authentication required";
   actionSummary.textContent = typeof plan.summary === "string" ? plan.summary : "Sensitive action";
-  actionProgress.textContent = `Requires ${String(plan.authentication || "passkey").toUpperCase()} authentication.`;
+  actionProgress.textContent = plan.authentication === "fresh"
+    ? "This needs a fresh passkey confirmation bound to this exact action."
+    : "This needs passkey authentication.";
   actionAuthenticate.hidden = false;
   actionCancel.hidden = false;
 }
@@ -477,9 +491,9 @@ function showJob(job) {
   actionCard.hidden = false;
   actionAuthenticate.hidden = true;
   actionCancel.hidden = !["queued", "running", "waiting"].includes(job.state);
-  actionTitle.textContent = "Action in progress";
+  actionTitle.textContent = "Working on it";
   actionSummary.textContent = job.summary || job.skill || "Sensitive action";
-  actionProgress.textContent = `${job.state} · ${job.stage || "queued"}`;
+  actionProgress.textContent = describeJobProgress(job);
   pollJob(job.job_id);
 }
 
@@ -489,13 +503,13 @@ async function pollJob(jobId) {
     const job = await api(`/api/actions/jobs/${encodeURIComponent(jobId)}`);
     if (!activeJob || activeJob.job_id !== jobId) return;
     activeJob = job;
-    actionProgress.textContent = `${job.state} · ${job.stage || ""}`;
+    actionProgress.textContent = describeJobProgress(job);
     actionCancel.hidden = !["queued", "running", "waiting"].includes(job.state);
     if (["completed", "failed", "cancelled", "expired"].includes(job.state)) {
-      actionTitle.textContent = job.state === "completed" ? "Action completed" : "Action did not complete";
+      actionTitle.textContent = job.state === "completed" ? "Done" : "Did not complete";
       const completion = summarizeCompletedAction(job);
       if (completion) actionProgress.textContent = completion;
-      else if (job.failure_reason) actionProgress.textContent += ` · ${job.failure_reason}`;
+      else if (job.failure_reason) actionProgress.textContent = job.failure_reason;
       return;
     }
     window.setTimeout(() => pollJob(jobId), 1000);
@@ -503,6 +517,22 @@ async function pollJob(jobId) {
     actionTitle.textContent = "Action status unavailable";
     actionProgress.textContent = error.message;
   }
+}
+
+/* Backend job vocabulary, said out loud. Every branch reports only what the
+ * server actually said; nothing here invents a step, a stage, or a result. */
+function describeJobProgress(job) {
+  const stage = typeof job.stage === "string" && job.stage.trim()
+    ? job.stage.replaceAll("_", " ")
+    : "";
+  if (job.state === "queued") return "Queued.";
+  if (job.state === "waiting") return stage ? `Waiting · ${stage}` : "Waiting.";
+  if (job.state === "running") return stage ? `Running · ${stage}` : "Running.";
+  if (job.state === "completed") return "Finished.";
+  if (job.state === "cancelled") return "Cancelled.";
+  if (job.state === "expired") return "Expired before it ran.";
+  if (job.state === "failed") return job.failure_reason || "Did not complete.";
+  return stage || String(job.state);
 }
 
 function summarizeCompletedAction(job) {
@@ -1152,7 +1182,7 @@ initialize();
 window.setInterval(() => {
   if (!authExpiry || lockButton.hidden) return;
   const remaining = Math.max(0, Math.ceil((authExpiry - Date.now()) / 1000));
-  lockButton.textContent = `Admin: Elevated · ${formatRemaining(remaining)} · Lock Now`;
+  renderElevatedLock(remaining);
   if (remaining === 0) renderAuthStatus(null);
 }, 1000);
 window.setInterval(refreshAuthStatus, 30000);

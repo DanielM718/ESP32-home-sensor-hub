@@ -3,32 +3,32 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
-  <meta name="theme-color" content="#101713">
+  <meta name="theme-color" content="#11120F">
   <title>Butters</title>
-  <link rel="stylesheet" href="/assets/styles.css">
-  <link rel="stylesheet" href="/assets/auth.css">
+  <link rel="stylesheet" href="/assets/tokens.css">
+  <link rel="stylesheet" href="/assets/base.css">
+  <link rel="stylesheet" href="/assets/components.css">
+  <link rel="stylesheet" href="/assets/chat.css">
 </head>
 <body class="chat-body">
   <main class="chat-shell" aria-label="Butters conversation">
     <header class="chat-header">
       <div class="identity-mark" aria-hidden="true"><span>B</span></div>
-      <div>
+      <div class="chat-title">
         <h1>Butters</h1>
         <p id="assistant-state" class="assistant-state" data-state="connecting">Connecting</p>
       </div>
       <div class="chat-header-actions">
-        <button id="auth-button" class="quiet-button auth-button" type="button">Admin: Locked · Authenticate</button>
-        <button id="lock-button" class="quiet-button" type="button" hidden>Lock Now</button>
+        <button id="auth-button" class="quiet-button auth-button" type="button">Admin locked</button>
+        <button id="lock-button" class="quiet-button auth-button" type="button" hidden>Lock</button>
         <button id="voice-output-toggle" class="voice-output-toggle" type="button" role="switch" aria-checked="true" aria-label="Voice output on">Voice: On</button>
         <button id="clear-button" class="quiet-button" type="button" aria-label="Clear conversation">Clear</button>
       </div>
     </header>
 
-    <p id="voice-disclosure" class="voice-disclosure" role="note">Voice responses are AI-generated, not a human voice.</p>
-
     <section id="conversation" class="conversation" aria-live="polite" aria-label="Conversation">
       <article class="message assistant-message">
-        <p>Hi. Ask me about the sensors or the home-sensor stack.</p>
+        <p>Hi. Ask me about the sensors or anything else at home.</p>
       </article>
     </section>
 
@@ -43,9 +43,10 @@
     </section>
 
     <div id="partial" class="partial" role="status" aria-live="polite" aria-label="Voice transcript" hidden></div>
+
     <form id="chat-form" class="composer">
       <label class="visually-hidden" for="message-input">Message Butters</label>
-      <input id="message-input" name="message" maxlength="4000" autocomplete="off" placeholder="Ask Butters…" required>
+      <input id="message-input" name="message" maxlength="4000" autocomplete="off" placeholder="Message Butters…" required>
       <button id="mic-button" class="mic-button" type="button" aria-label="Start recording" title="Tap to record" aria-pressed="false">
         <svg class="mic-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">
           <rect x="9" y="2" width="6" height="11" rx="3"></rect>
@@ -56,7 +57,11 @@
       </button>
       <button id="send-button" class="send-button" type="submit">Send</button>
     </form>
-    <button id="stop-audio" class="stop-audio" type="button" hidden>Stop speaking</button>
+
+    <footer class="chat-footer">
+      <p id="voice-disclosure" class="voice-disclosure" role="note">Voice responses are AI-generated, not a human voice.</p>
+      <button id="stop-audio" class="stop-audio" type="button" hidden>Stop speaking</button>
+    </footer>
   </main>
   <script src="/assets/app.js" defer></script>
 </body>

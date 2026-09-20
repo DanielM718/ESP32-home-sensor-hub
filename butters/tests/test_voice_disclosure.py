@@ -12,6 +12,7 @@ import asyncio
 import json
 import re
 from dataclasses import replace
+from html.parser import HTMLParser
 from pathlib import Path
 
 import httpx
@@ -23,7 +24,7 @@ from butters.web.service import BetaAssistantService
 STATIC = Path(__file__).parents[1] / "src/butters/web/static"
 INDEX = (STATIC / "index.html").read_text()
 APP_JS = (STATIC / "assets/app.js").read_text()
-STYLES = (STATIC / "assets/styles.css").read_text()
+from frontend_assets import declarations
 
 
 class NoCloud:
@@ -59,6 +60,52 @@ def _service(tmp_path: Path, monkeypatch):
     return app, service
 
 
+# Elements that never have an end tag, so they never open a nesting level.
+_VOID = frozenset(
+    (
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    )
+)
+
+
+class _ShellChildren(HTMLParser):
+    """The direct children of ``main.chat-shell``, by their first class name."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.depth: int | None = None
+        self.names: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        values = dict(attrs)
+        if self.depth is None:
+            if tag == "main" and "chat-shell" in (values.get("class") or ""):
+                self.depth = 0
+            return
+        if self.depth == 0:
+            classes = (values.get("class") or "").split()
+            assert classes, f"<{tag}> in the chat shell carries no class to style"
+            self.names.append(classes[0])
+        if tag not in _VOID:
+            self.depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.depth is None:
+            return
+        self.depth -= 1
+        if self.depth < 0:
+            self.depth = None
+
+
+def _shell_children(document: str) -> list[str]:
+    parser = _ShellChildren()
+    parser.feed(document)
+    assert parser.names, "the chat shell has no children"
+    return parser.names
+
+
+
 # ------------------------------ the markup ---------------------------------
 
 
@@ -74,9 +121,26 @@ def test_the_chat_page_carries_a_disclosure_before_any_script_runs() -> None:
 
 
 def test_the_disclosure_is_styled_and_does_not_break_the_layout() -> None:
-    assert ".voice-disclosure{" in STYLES
-    # The shell gained a row, so its grid template must account for it.
-    assert ".chat-shell{grid-template-rows:auto auto 1fr auto auto}" in STYLES
+    assert declarations(".voice-disclosure")
+
+    # The shell is a grid with one track per child it lays out, and exactly
+    # one flexible track. That single 1fr has to be the conversation: if any
+    # other row could grow, the disclosure or the composer could be pushed
+    # off the bottom of a phone screen, which is the defect this guards.
+    shell = declarations(".chat-shell")
+    tracks = shell["grid-template-rows"].split()
+    assert tracks.count("1fr") == 1
+
+    children = _shell_children(INDEX)
+    # Every direct child except any the stylesheet takes out of flow.
+    in_flow = [
+        child
+        for child in children
+        if declarations(f".{child}").get("position") != "absolute"
+    ]
+    assert len(tracks) == len(in_flow), (tracks, in_flow)
+    # And the flexible one is the conversation.
+    assert in_flow[tracks.index("1fr")] == "conversation"
 
 
 def test_the_page_takes_its_wording_from_the_server() -> None:

@@ -6,11 +6,15 @@ import asyncio
 from pathlib import Path
 
 import pytest
-
-from beta1_harness import ADMIN_IDENTITY, PRODUCTION_ORIGIN, admin_headers, build_app, client
+from beta1_harness import (
+    ADMIN_IDENTITY,
+    PRODUCTION_ORIGIN,
+    admin_headers,
+    build_app,
+    client,
+)
 from butters.assistant_config import WebSettings
 from butters.web.security import AuthPolicy, SecurityError
-
 
 PRODUCTION: dict[str, object] = {
     "development_mode": False,
@@ -232,7 +236,10 @@ def test_admin_html_is_not_served_from_the_public_asset_mount(tmp_path: Path) ->
                 assert (await http.get("/assets/admin.html")).status_code == 404
                 assert (await http.get("/assets/index.html")).status_code == 404
                 # Shared front-end code stays reachable so the pages still work.
-                assert (await http.get("/assets/styles.css")).status_code == 200
+                for sheet in ("tokens", "base", "components", "chat", "admin", "portal"):
+                    assert (
+                        await http.get(f"/assets/{sheet}.css")
+                    ).status_code == 200, sheet
                 assert (await http.get("/assets/app.js")).status_code == 200
                 assert (await http.get("/assets/admin.js")).status_code == 200
         finally:

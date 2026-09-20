@@ -1,0 +1,127 @@
+/* Butters design tokens.
+ *
+ * Every colour below descends from one five-swatch reference palette:
+ * Axolotl #6A7A5A, Morning Blue #8DAF9B, Jet Stream #BED2BA,
+ * Dark Vanilla #D7CBB2, Opal #AAC4BC — a botanical sage-and-sand family.
+ *
+ * Surfaces carry the Axolotl hue (90deg) down to near-black, so the dark shell
+ * reads warm rather than neutral grey. Ink is Dark Vanilla lifted and cooled
+ * down its scale. The accent is Jet Stream, pressed to Morning Blue. Danger is
+ * the one hue the reference does not supply: a muted clay chosen to sit beside
+ * sage instead of alarming over it.
+ *
+ * Token names describe purpose, never colour. Nothing here is a component.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ---------------------------------------------------------- surfaces -- */
+  --bg: #11120F;
+  --surface: #1A1C17;
+  --surface-raised: #22261F;
+  --surface-sunken: #0B0D0A;
+  --border: #363A31;
+  --border-strong: #4F5747;
+
+  /* --------------------------------------------------------------- ink -- */
+  --text: #EAE5DC;
+  --text-secondary: #B0BFB6;
+  --text-muted: #86988D;
+  --text-disabled: #819288;
+
+  /* ------------------------------------------------------------ accent -- */
+  --accent: #BED2BA;
+  --accent-strong: #8DAF9B;
+  --accent-quiet: #496554;
+  --accent-ink: #172015;
+
+  /* ------------------------------------------------------------ status --
+   * Deliberately restrained. "Healthy" is the accent sage, not a saturated
+   * green, because a calm system should not shout. Only warning and danger
+   * carry extra chroma, so they are the only things that catch the eye.
+   */
+  --success: #8DAF9B;
+  --info: #AAC4BC;
+  --warning: #D5B87B;
+  --danger: #D89783;
+  --neutral: #819288;
+
+  /* Channel triplets, so a tint can be mixed without a second hex literal
+   * drifting away from the colour it is supposed to be a tint of. */
+  --accent-rgb: 190 210 186;
+  --success-rgb: 141 175 155;
+  --info-rgb: 170 196 188;
+  --warning-rgb: 213 184 123;
+  --danger-rgb: 216 151 131;
+  --neutral-rgb: 129 146 136;
+
+  --tint-weak: 8%;
+  --tint: 14%;
+  --tint-strong: 22%;
+
+  /* -------------------------------------------------------- typography -- */
+  --font-sans: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+  --type-page-size: 1.5rem;
+  --type-page-weight: 620;
+  --type-page-tracking: -0.015em;
+
+  --type-section-size: 0.72rem;
+  --type-section-weight: 650;
+  --type-section-tracking: 0.13em;
+
+  --type-card-size: 1.0625rem;
+  --type-card-weight: 600;
+
+  --type-body-size: 0.9375rem;
+  --type-body-leading: 1.55;
+
+  --type-meta-size: 0.8125rem;
+  --type-meta-leading: 1.5;
+
+  --type-value-size: 1.1875rem;
+  --type-value-weight: 600;
+
+  --type-mono-size: 0.8125rem;
+
+  /* ------------------------------------------------------------ layout --
+   * One scale. A margin that is not on it is a mistake, not a nuance. */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+  --space-7: 48px;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+  --radius-pill: 999px;
+
+  --shadow-1: 0 1px 2px rgb(0 0 0 / 22%);
+  --shadow-2: 0 12px 32px rgb(0 0 0 / 28%);
+
+  --measure: 74ch;
+
+  /* ---------------------------------------------------------- controls --
+   * 40px is comfortable with a mouse; coarse pointers get the 44px Apple and
+   * WCAG both ask for. Declared once here rather than per component. */
+  --control-height: 40px;
+  --tap-min: 44px;
+  --focus-ring: 0 0 0 3px rgb(var(--accent-rgb) / 34%);
+
+  /* ------------------------------------------------------------ motion -- */
+  --motion-fast: 110ms;
+  --motion-base: 180ms;
+  --ease: cubic-bezier(0.32, 0.72, 0.3, 1);
+}
+
+@media (pointer: coarse) {
+  :root {
+    --control-height: var(--tap-min);
+  }
+}

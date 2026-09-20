@@ -7,7 +7,7 @@ let selectedJob = null;
 let traceSocket = null;
 let selectedTraceId = null;
 const traceCards = new Map();
-const titles = {overview:"Overview",trace:"Live Trace",sessions:"Conversations / Sessions",routing:"Routing",integrations:"Integrations",models:"Models / STT",voice:"TTS / Voice",skills:"Skills",tools:"Tools",usage:"Usage",system:"System",logs:"Logs",security:"Security / Credential Status",passkeys:"Passkeys / Authentication",actions:"Actions / Broker",capabilities:"Capabilities",codex:"Codex Jobs"};
+const titles = {overview:"Overview",system:"Butters service",desktop:"Desktop",nas:"NAS",chat:"Chat model",voice:"Speech",credentials:"Credentials",usage:"Usage",models:"Models & STT",routing:"Routing test",media:"Jellyfin & bandwidth",portalaccess:"Portal access",skills:"Skills",tools:"Diagnostic tools",actions:"Actions & broker",capabilities:"Capabilities",passkeys:"Authentication",security:"Security posture",trace:"Live trace",sessions:"Conversations",logs:"Logs",codex:"Codex jobs"};
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -39,21 +39,49 @@ function rows(container, values, describe) {
   }
 }
 
+function showPanel(name){
+  if(!titles[name])return;
+  document.querySelectorAll("#admin-nav button[data-panel]").forEach(item=>item.classList.toggle("active",item.dataset.panel===name));
+  document.querySelectorAll(".admin-panel").forEach(panel=>panel.classList.toggle("active",panel.id===`panel-${name}`));
+  document.querySelector("#panel-title").textContent=titles[name];
+  const picker=document.querySelector("#admin-nav-select");
+  if(picker && picker.value!==name) picker.value=name;
+  refresh(name);
+}
+
 document.querySelector("#admin-nav").addEventListener("click", event => {
   const button=event.target.closest("button[data-panel]"); if(!button)return;
-  document.querySelectorAll("#admin-nav button").forEach(item=>item.classList.toggle("active",item===button));
-  document.querySelectorAll(".admin-panel").forEach(panel=>panel.classList.toggle("active",panel.id===`panel-${button.dataset.panel}`));
-  document.querySelector("#panel-title").textContent=titles[button.dataset.panel];
-  refresh(button.dataset.panel);
+  showPanel(button.dataset.panel);
 });
+
+/* Narrow screens get the native grouped picker rather than a drawer: it is
+ * keyboard- and screen-reader-correct for free, and on iOS it is a wheel.
+ * It is built from the sidebar, so the two lists cannot drift apart. */
+function buildMobileNav(){
+  const picker=document.querySelector("#admin-nav-select");
+  if(!picker)return;
+  picker.replaceChildren();
+  for(const group of document.querySelectorAll("#admin-nav .nav-group")){
+    const heading=group.querySelector("h2");
+    const target=heading?document.createElement("optgroup"):picker;
+    if(heading)target.label=heading.textContent;
+    for(const button of group.querySelectorAll("button[data-panel]")){
+      target.append(new Option(button.textContent,button.dataset.panel,false,button.classList.contains("active")));
+    }
+    if(heading)picker.append(target);
+  }
+  picker.addEventListener("change",()=>showPanel(picker.value));
+}
+buildMobileNav();
 
 async function initialize() {
   try {
     const session=await fetch("/api/session",{credentials:"same-origin"}); const data=await session.json();
     if(!session.ok)throw new Error(data.message); csrf=data.csrf_token;
+    // Only the identity is needed here; refreshOverview() renders the panel.
     const {value}=await api("/api/admin/overview");
-    cards(document.querySelector("#overview-grid"),value);
     document.querySelector("#admin-status").textContent=`Authorized · ${value.administrator}`;
+    await refreshOverview();
     const modelData=(await api("/api/admin/models")).value; models=modelData.text.models;
     const select=document.querySelector("#route-model"); select.replaceChildren(...models.map(model=>new Option(model,model)));
     const output=document.querySelector("#route-output"); output.max=String(modelData.text.max_output_tokens); output.value=String(modelData.text.max_output_tokens);
@@ -63,14 +91,19 @@ async function initialize() {
 
 async function refresh(panel) {
   try {
-    if(panel==="overview") cards(document.querySelector("#overview-grid"),(await api("/api/admin/overview")).value);
+    if(panel==="overview") await refreshOverview();
     if(panel==="trace") {await refreshTraces();connectTraceSocket();}
     if(panel==="sessions") rows(document.querySelector("#session-list"),(await api("/api/admin/sessions")).value.sessions,item=>[item.session_id,`${item.message_count} messages · idle ${item.idle_seconds}s · ${item.context_chars} chars`]);
     if(panel==="models") renderObject(document.querySelector("#model-status"),(await api("/api/admin/models")).value);
-    if(panel==="integrations") await refreshIntegrations();
+    if(panel==="credentials") await refreshIntegrations();
+    if(panel==="chat") await refreshAiSettings();
     if(panel==="voice") await refreshVoice();
     if(panel==="skills") await refreshSkills();
-    if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]); await Promise.all([refreshDesktop(),refreshNas(),refreshPortalIdentities()]);}
+    if(panel==="desktop") await refreshDesktop();
+    if(panel==="nas") await refreshNas();
+    if(panel==="media") await refreshMedia();
+    if(panel==="portalaccess") await refreshPortalIdentities();
+    if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
     if(panel==="usage") renderObject(document.querySelector("#usage-view"),(await api("/api/admin/usage")).value);
     if(panel==="system") renderObject(document.querySelector("#system-view"),(await api("/api/admin/system")).value);
     if(panel==="logs") document.querySelector("#logs-view").textContent=pretty((await api("/api/admin/logs")).value);
@@ -150,8 +183,14 @@ initialize();
  *    sent from this file.
  */
 
-const AXIS_TONE = {yes:"good", present:"good", connected:"good", reachable:"good", ready:"good", no:"bad", absent:"bad", unreachable:"bad", unavailable:"bad", not_configured:"bad", unknown:"muted", not_observed:"muted", starting:"warn", heartbeat_aging:"warn", heartbeat_stale:"warn"};
-const AXIS_TEXT = {yes:"Yes", no:"No", unknown:"Unknown", present:"Active", absent:"Not active", not_observed:"Not observed", reachable:"Reachable", unreachable:"Unreachable", ready:"Ready", starting:"Starting", unavailable:"Unavailable", connected:"Connected", not_configured:"Not configured", heartbeat_aging:"Heartbeat aging", heartbeat_stale:"Heartbeat stale", disconnected:"Disconnected"};
+const AXIS_TONE = {yes:"good", present:"good", connected:"good", reachable:"good", ready:"good", no:"bad", absent:"bad", unreachable:"bad", unavailable:"bad", not_configured:"bad", unknown:"muted", not_observed:"muted", starting:"warn", heartbeat_aging:"warn", heartbeat_stale:"warn",
+  // Configuration and policy states. Off, dry run and "not enabled" are
+  // deliberate settings; colouring them like failures would be a lie.
+  enabled:"good", not_enabled:"muted", dry_run:"info", observe:"info", off:"muted",
+  measured:"good", partial:"warn", estimated:"muted", would_enforce:"info"};
+const AXIS_TEXT = {yes:"Yes", no:"No", unknown:"Unknown", present:"Active", absent:"Not active", not_observed:"Not observed", reachable:"Reachable", unreachable:"Unreachable", ready:"Ready", starting:"Starting", unavailable:"Unavailable", connected:"Connected", not_configured:"Not configured", heartbeat_aging:"Heartbeat aging", heartbeat_stale:"Heartbeat stale", disconnected:"Disconnected",
+  enabled:"Enabled", not_enabled:"Not enabled", dry_run:"Dry run · nothing is limited", observe:"Observing only", off:"Off",
+  measured:"Measured", partial:"Partial", estimated:"Estimated"};
 
 function axis(container, entries) {
   container.replaceChildren();
@@ -265,6 +304,13 @@ async function refreshNas() {
       ["NAS OS / API", observations.nas_api],
       ["Tailscale", observations.tailscale],
       ["Jellyfin", observations.jellyfin],
+    ]);
+    axis(document.querySelector("#nas-capability"), [
+      ["Wake", state.capability.wake_configured?"enabled":"not_enabled"],
+      ["Shutdown", state.capability.shutdown_configured?"enabled":"not_enabled"],
+      ["Observation", state.capability.observation_configured?"enabled":"not_enabled"],
+      ["NAS Agent", state.capability.agent_configured?"enabled":"not_enabled",
+        state.nas_agent && state.nas_agent.state ? `agent ${state.nas_agent.state}` : undefined],
     ]);
     renderLastOperation(document.querySelector("#nas-last-operation"), state.last_operation, "No NAS operation has been requested from this console.");
     document.querySelector("#nas-wake").disabled=!state.capability.wake_configured;
@@ -789,3 +835,248 @@ document.querySelector("#openai-remove").addEventListener("click", () => {
     "This deletes Butters' local copy of the OpenAI credential. Cloud chat and cloud speech stop until a new key is stored. It does not revoke anything in your OpenAI account.",
     removeCredential);
 });
+
+
+/* ==================== Overview summary and Media ==========================
+ *
+ * Two rules, the same two the Tools section has always held.
+ *
+ * 1. Nothing here decides a state. Every line is a server field, rendered.
+ *    "Offline" is printed because the server observed offline, never because
+ *    a request failed or a value was missing.
+ * 2. A deliberate configuration is never dressed as a fault. A desktop that
+ *    is switched off, a governor in dry run, and a capability that is not
+ *    enabled are all reported in the neutral tone they deserve.
+ */
+
+function summaryCard({title, state, tone, detail, panel}) {
+  const card=document.createElement("article"); card.className="summary-card";
+  const header=document.createElement("header");
+  const heading=document.createElement("h3"); heading.textContent=title;
+  const pill=document.createElement("span"); pill.className=`pill pill-${tone}`; pill.textContent=state;
+  header.append(heading,pill);
+  const note=document.createElement("p"); note.textContent=detail;
+  card.append(header,note);
+  if(panel){
+    const open=document.createElement("button");
+    open.className="secondary-button"; open.type="button";
+    open.textContent="Open"; open.setAttribute("aria-label",`Open ${title}`);
+    open.addEventListener("click",()=>showPanel(panel));
+    card.append(open);
+  }
+  return card;
+}
+
+function unavailableCard(title, panel, error) {
+  return summaryCard({
+    title,
+    state:"Unavailable",
+    tone:"muted",
+    // The read failed. That is a fact about this console, not about the thing.
+    detail:`This console could not read the state: ${error||"unknown error"}.`,
+    panel,
+  });
+}
+
+function overviewButters(value) {
+  const minutes=Math.round((value.uptime_seconds||0)/60);
+  return summaryCard({
+    title:"Butters",
+    state:"Running",
+    tone:"good",
+    detail:`Up ${minutes} min · ${value.active_sessions} conversation(s) · cloud ${value.cloud_available?"available":"unavailable"} · local model ${value.local_llm_enabled?"enabled":"disabled"}`,
+    panel:"system",
+  });
+}
+
+function overviewDesktop(value) {
+  const power=value.observed.power_network;
+  // A desktop that is switched off is the expected state most of the day.
+  const tone=power==="reachable"?"good":power==="unreachable"?"muted":"muted";
+  const state=power==="reachable"?"Online":power==="unreachable"?"Off":"Unknown";
+  return summaryCard({
+    title:"Desktop",
+    state,
+    tone,
+    detail:value.summary,
+    panel:"desktop",
+  });
+}
+
+function overviewNas(value) {
+  const aggregate=String(value.aggregate||"UNKNOWN");
+  const tone=aggregate==="ONLINE"?"good":aggregate==="UNKNOWN"?"muted":"muted";
+  const state=aggregate.charAt(0)+aggregate.slice(1).toLowerCase();
+  const agent=value.nas_agent&&value.nas_agent.state?value.nas_agent.state:"unknown";
+  return summaryCard({
+    title:"NAS",
+    state,
+    tone,
+    detail:`Jellyfin ${AXIS_TEXT[value.observations.jellyfin]||value.observations.jellyfin} · Tailscale ${AXIS_TEXT[value.observations.tailscale]||value.observations.tailscale} · agent ${agent}`,
+    panel:"nas",
+  });
+}
+
+function overviewAi(value) {
+  const credential=value.credential;
+  const synced=value.in_sync.chat&&value.in_sync.speech;
+  const chat=value.effective.chat;
+  const speech=value.effective.speech;
+  let state="Ready", tone="good";
+  if(!credential.configured){ state="Not configured"; tone="muted"; }
+  else if(!synced){ state="Saved, not active"; tone="warn"; }
+  return summaryCard({
+    title:"AI",
+    state,
+    tone,
+    detail:`${chat.model} · speaks with ${speech.model} / ${speech.voice}`,
+    panel:"chat",
+  });
+}
+
+function overviewMedia(value) {
+  const jellyfin=value.observations.jellyfin;
+  const tone=jellyfin==="ready"?"good":jellyfin==="starting"?"warn":"muted";
+  return summaryCard({
+    title:"Media",
+    state:AXIS_TEXT[jellyfin]||String(jellyfin),
+    tone,
+    // Bandwidth needs a live agent round trip, which Overview deliberately
+    // does not make; the Media panel does.
+    detail:"Streaming bandwidth is read on demand in the Media panel.",
+    panel:"media",
+  });
+}
+
+async function refreshOverview() {
+  const container=document.querySelector("#overview-summary");
+  if(!container)return;
+  // Four independent reads. One failure must not blank the other three, so
+  // each card is built from its own settled result.
+  const [overview, desktop, nas, ai] = await Promise.allSettled([
+    api("/api/admin/overview"),
+    api("/api/admin/tools/desktop"),
+    // No refresh: the cached observation is enough for a summary, and it
+    // keeps Overview from generating NAS Agent traffic on every visit.
+    api("/api/admin/tools/nas"),
+    api("/api/admin/ai/settings"),
+  ]);
+  const built=[];
+  built.push(overview.status==="fulfilled"
+    ? overviewButters(overview.value.value)
+    : unavailableCard("Butters","system",overview.reason&&overview.reason.message));
+  built.push(desktop.status==="fulfilled"
+    ? overviewDesktop(desktop.value.value)
+    : unavailableCard("Desktop","desktop",desktop.reason&&desktop.reason.message));
+  built.push(nas.status==="fulfilled"
+    ? overviewNas(nas.value.value)
+    : unavailableCard("NAS","nas",nas.reason&&nas.reason.message));
+  built.push(ai.status==="fulfilled"
+    ? overviewAi(ai.value.value)
+    : unavailableCard("AI","chat",ai.reason&&ai.reason.message));
+  built.push(nas.status==="fulfilled"
+    ? overviewMedia(nas.value.value)
+    : unavailableCard("Media","media",nas.reason&&nas.reason.message));
+  container.replaceChildren(...built);
+  if(overview.status==="fulfilled") cards(document.querySelector("#overview-grid"),overview.value.value);
+}
+
+/* ---------- Media: Jellyfin and streaming bandwidth ---------- */
+
+function mbps(value){ return value===null||value===undefined?"unavailable":`${Number(value).toFixed(1)} Mbps`; }
+function count(value){ return value===null||value===undefined?"unavailable":String(value); }
+
+function emptyState(container, headline, detail) {
+  const box=document.createElement("div"); box.className="empty-state";
+  const title=document.createElement("strong"); title.textContent=headline;
+  const note=document.createElement("span"); note.textContent=detail;
+  box.append(title,note); container.replaceChildren(box);
+}
+
+function renderMediaStreams(sessions) {
+  const list=document.querySelector("#media-streams");
+  const remote=(Array.isArray(sessions)?sessions:[]).filter(item=>item&&item.classification==="remote"&&item.playing===true);
+  if(!remote.length){
+    emptyState(list,"No remote streams","Nobody is watching from outside the house right now.");
+    return;
+  }
+  list.replaceChildren();
+  for(const stream of remote){
+    const row=document.createElement("div"); row.className="stream-row";
+    // Deliberately partial: the session identifier, client and device the
+    // agent also reports are never rendered here.
+    for(const text of [
+      stream.user||"Viewer",
+      stream.item||"Active item",
+      stream.paused?"Paused":"Playing",
+      String(stream.play_method||"unknown").replaceAll("_"," "),
+      mbps(stream.observed_mbps),
+    ]){
+      const cell=document.createElement("span"); cell.textContent=text; row.append(cell);
+    }
+    list.append(row);
+  }
+}
+
+function renderMediaBandwidth(value) {
+  axis(document.querySelector("#media-observed"), [
+    ["Total remote traffic", mbps(value.total_remote_observed_mbps)],
+    ["Jellyfin reported rate", mbps(value.remote_jellyfin_observed_mbps), "what Jellyfin says it is sending, not a wire measurement"],
+    ["Other remote traffic", mbps(value.other_remote_observed_mbps)],
+    ["Remote streams", count(value.remote_jellyfin_stream_count)],
+    ["Unknown streams", count(value.unknown_stream_count)],
+    ["Measurement quality", String(value.measurement_quality||"unavailable")],
+  ]);
+  axis(document.querySelector("#media-calculated"), [
+    ["Effective capacity", mbps(value.effective_capacity_mbps), "configured, not probed"],
+    ["Safe streaming pool", mbps(value.safe_streaming_budget_mbps)],
+    ["Reserve", mbps(value.reserve_mbps)],
+    ["Available headroom", mbps(value.available_headroom_mbps)],
+    ["Dry-run per-stream target", value.calculated_per_stream_target_mbps===null||value.calculated_per_stream_target_mbps===undefined
+      ? (value.measurement_quality==="unavailable"?"unavailable":value.reason==="no_active_remote_or_unknown_streams"?"No active streams":"Stabilizing")
+      : `${mbps(value.calculated_per_stream_target_mbps)} / stream`],
+    ["Reconciliation delta", mbps(value.reconciliation_delta_mbps)],
+  ]);
+  axis(document.querySelector("#media-policy"), [
+    ["Policy mode", String(value.policy_mode||"off")],
+    ["Streams over target", count(Array.isArray(value.sessions_above_target)?value.sessions_above_target.length:null)],
+    ["Would enforce", value.would_enforce===true?"yes":"no",
+      value.would_enforce===true?"if enforcement were ever enabled":undefined],
+    ["Reason", String(value.reason||"unknown").replaceAll("_"," ")],
+  ]);
+  document.querySelector("#media-policy-note").textContent =
+    value.policy_mode==="dry_run"
+      ? "Dry run. The governor calculates a per-stream target and records which streams exceed it. It does not change any stream's bitrate, and Butters offers no control that would."
+      : `Policy mode is ${value.policy_mode||"off"}. No bitrate enforcement exists in this deployment.`;
+}
+
+async function refreshMedia() {
+  const summary=document.querySelector("#media-summary");
+  try {
+    // The same read the NAS panel makes, with the live refresh that produces
+    // a bandwidth sample. Nothing here is written back.
+    const state=(await api("/api/admin/tools/nas?refresh=1")).value;
+    const jellyfin=state.observations?state.observations.jellyfin:"not_observed";
+    const bandwidth=state.bandwidth;
+    if(!bandwidth){
+      const agent=state.nas_agent&&state.nas_agent.state?state.nas_agent.state:"unknown";
+      summary.textContent=`Jellyfin ${AXIS_TEXT[jellyfin]||jellyfin} · no bandwidth reading`;
+      for(const id of ["#media-observed","#media-calculated","#media-policy"]){
+        emptyState(document.querySelector(id),"No reading",
+          agent==="connected"
+            ? "The NAS Agent is connected but returned no bandwidth sample for this request."
+            : `Bandwidth is reported by the NAS Agent, which is ${agent}.`);
+      }
+      document.querySelector("#media-policy-note").textContent="";
+      emptyState(document.querySelector("#media-streams"),"No reading","Stream detail comes from the same sample.");
+      return;
+    }
+    summary.textContent=`Jellyfin ${AXIS_TEXT[jellyfin]||jellyfin} · ${count(bandwidth.remote_jellyfin_stream_count)} remote stream(s) · ${mbps(bandwidth.available_headroom_mbps)} headroom`;
+    renderMediaBandwidth(bandwidth);
+    renderMediaStreams(bandwidth.sessions);
+  } catch(error) {
+    summary.textContent=`Streaming state unavailable: ${error.message||"unknown error"}`;
+  }
+}
+
+document.querySelector("#media-refresh").addEventListener("click",refreshMedia);

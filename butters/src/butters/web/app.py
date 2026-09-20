@@ -156,7 +156,7 @@ def create_app(
     )
     started = time.monotonic()
     make_stt_engine = stt_engine_factory or _new_stt_engine
-    # These four small immutable files are loaded once. Starlette's FileResponse
+    # These small immutable files are loaded once. Starlette's FileResponse
     # and StaticFiles delegate stat/open to AnyIO threads; on this Python
     # 3.13/aarch64 host that path can hit the same executor wake-up failure that
     # run_blocking() already polls around. An explicit allow-list also preserves
@@ -164,13 +164,33 @@ def create_app(
     index_document = (STATIC_ROOT / "index.html").read_bytes()
     admin_document = (STATIC_ROOT / "admin.html").read_bytes()
     portal_document = (STATIC_ROOT / "portal.html").read_bytes()
+    # The stylesheet is authored as a token layer, a base layer, a shared
+    # component layer and one layer per surface. Each is named explicitly for
+    # the same reason the list existed before: nothing becomes public here by
+    # being dropped into a directory.
     public_assets = {
-        "styles.css": (
-            (ASSET_ROOT / "styles.css").read_bytes(),
+        "tokens.css": (
+            (ASSET_ROOT / "tokens.css").read_bytes(),
             "text/css",
         ),
-        "auth.css": (
-            (ASSET_ROOT / "auth.css").read_bytes(),
+        "base.css": (
+            (ASSET_ROOT / "base.css").read_bytes(),
+            "text/css",
+        ),
+        "components.css": (
+            (ASSET_ROOT / "components.css").read_bytes(),
+            "text/css",
+        ),
+        "chat.css": (
+            (ASSET_ROOT / "chat.css").read_bytes(),
+            "text/css",
+        ),
+        "admin.css": (
+            (ASSET_ROOT / "admin.css").read_bytes(),
+            "text/css",
+        ),
+        "portal.css": (
+            (ASSET_ROOT / "portal.css").read_bytes(),
             "text/css",
         ),
         "app.js": (

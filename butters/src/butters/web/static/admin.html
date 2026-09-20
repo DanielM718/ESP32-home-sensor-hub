@@ -2,87 +2,181 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#111512">
-  <title>Butters Beta 1 · Admin</title>
-  <link rel="stylesheet" href="/assets/styles.css">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#11120F">
+  <title>Butters · Admin</title>
+  <link rel="stylesheet" href="/assets/tokens.css">
+  <link rel="stylesheet" href="/assets/base.css">
+  <link rel="stylesheet" href="/assets/components.css">
+  <link rel="stylesheet" href="/assets/admin.css">
 </head>
 <body class="admin-body">
   <aside class="admin-sidebar">
-    <div class="admin-brand"><div class="identity-mark small"><span>B</span></div><div><strong>Butters</strong><small>Beta 1 instrument</small></div></div>
+    <div class="admin-brand"><div class="identity-mark small" aria-hidden="true"><span>B</span></div><div><strong>Butters</strong><small>Administrator</small></div></div>
     <nav id="admin-nav" aria-label="Administrator sections">
-      <button data-panel="overview" class="active">Overview</button>
-      <button data-panel="trace">Live Trace</button>
-      <button data-panel="sessions">Conversations</button>
-      <button data-panel="routing">Routing</button>
-      <button data-panel="integrations">Integrations</button>
-      <button data-panel="models">Models / STT</button>
-      <button data-panel="voice">TTS / Voice</button>
-      <button data-panel="skills">Skills</button>
-      <button data-panel="tools">Tools</button>
-      <button data-panel="usage">Usage</button>
-      <button data-panel="system">System</button>
-      <button data-panel="logs">Logs</button>
-      <button data-panel="security">Security</button>
-      <button data-panel="passkeys">Passkeys / Auth</button>
-      <button data-panel="actions">Actions / Broker</button>
-      <button data-panel="capabilities">Capabilities</button>
-      <button data-panel="codex">Codex Jobs</button>
+      <div class="nav-group">
+        <button data-panel="overview" class="active">Overview</button>
+      </div>
+      <div class="nav-group">
+        <h2>Systems</h2>
+        <button data-panel="system">Butters</button>
+        <button data-panel="desktop">Desktop</button>
+        <button data-panel="nas">NAS</button>
+      </div>
+      <div class="nav-group">
+        <h2>AI</h2>
+        <button data-panel="chat">Chat</button>
+        <button data-panel="voice">Speech</button>
+        <button data-panel="credentials">Credentials</button>
+        <button data-panel="usage">Usage</button>
+        <button data-panel="models">Models &amp; STT</button>
+        <button data-panel="routing">Routing test</button>
+      </div>
+      <div class="nav-group">
+        <h2>Media</h2>
+        <button data-panel="media">Jellyfin &amp; bandwidth</button>
+        <button data-panel="portalaccess">Portal access</button>
+      </div>
+      <div class="nav-group">
+        <h2>Automation</h2>
+        <button data-panel="skills">Skills</button>
+        <button data-panel="tools">Diagnostic tools</button>
+        <button data-panel="actions">Actions &amp; broker</button>
+        <button data-panel="capabilities">Capabilities</button>
+      </div>
+      <div class="nav-group">
+        <h2>Security</h2>
+        <button data-panel="passkeys">Authentication</button>
+        <button data-panel="security">Posture</button>
+      </div>
+      <div class="nav-group">
+        <h2>Diagnostics</h2>
+        <button data-panel="trace">Live trace</button>
+        <button data-panel="sessions">Conversations</button>
+        <button data-panel="logs">Logs</button>
+        <button data-panel="codex">Codex jobs</button>
+      </div>
     </nav>
-    <a href="/" class="back-link">← Normal mode</a>
+    <a href="/" class="back-link">← Back to Butters</a>
   </aside>
 
   <main class="admin-main">
-    <header class="admin-topbar"><div><p class="eyebrow">Administrator console</p><h1 id="panel-title">Overview</h1></div><span id="admin-status" class="status-pill">Connecting</span></header>
+    <header class="admin-topbar">
+      <div>
+        <p class="eyebrow">Administrator console</p>
+        <h1 id="panel-title">Overview</h1>
+      </div>
+      <div class="row">
+        <label class="admin-nav-mobile"><span class="visually-hidden">Section</span><select id="admin-nav-select"></select></label>
+        <span id="admin-status" class="status-pill">Connecting</span>
+      </div>
+    </header>
 
-    <section id="panel-overview" class="admin-panel active"><div id="overview-grid" class="metric-grid"></div></section>
-
-    <section id="panel-trace" class="admin-panel">
-      <div class="panel-head"><p>Engineering-observable events only. Hidden model reasoning is never requested or displayed.</p><button id="refresh-traces" class="secondary-button">Refresh</button></div>
-      <div id="trace-list" class="trace-list"></div>
+    <!-- ============================== Overview ============================== -->
+    <section id="panel-overview" class="admin-panel active">
+      <div class="admin-section">
+        <h2>Is anything asking for attention?</h2>
+        <div id="overview-summary" class="summary-grid" role="group" aria-label="System summary"></div>
+      </div>
+      <details class="advanced-block">
+        <summary>Service detail</summary>
+        <div id="overview-grid" class="metric-grid"></div>
+      </details>
     </section>
 
-    <section id="panel-sessions" class="admin-panel"><div id="session-list" class="data-list"></div></section>
+    <!-- ============================== Systems =============================== -->
+    <section id="panel-system" class="admin-panel">
+      <div class="admin-section">
+        <h2>Butters service</h2>
+        <div id="system-view" class="data-list"></div>
+      </div>
+    </section>
 
-    <section id="panel-routing" class="admin-panel">
-      <form id="routing-form" class="control-card">
-        <label>Test request<textarea id="routing-text" maxlength="4000" required>Why might box three stay more humid than the others?</textarea></label>
-        <div class="form-row">
-          <label>Route<select id="route-override"><option value="auto">Auto</option><option value="deterministic_local">Deterministic / local only</option><option value="local_diagnostic">Local diagnostic / planner</option><option value="cloud_auto">Cloud automatic</option><option value="force_cloud_model">Force configured cloud model</option><option value="cloud_disabled">Cloud disabled</option></select></label>
-          <label>Model<select id="route-model"></select></label>
-          <label>Effort<select id="route-effort"><option>none</option><option>low</option><option selected>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
-          <label>Max output tokens<input id="route-output" type="number" min="64" max="1200" step="1" value="1200"></label>
+    <section id="panel-desktop" class="admin-panel">
+      <div class="control-card tool-card" id="desktop-card">
+        <div class="tool-head">
+          <h2>Desktop</h2>
+          <span id="desktop-summary" class="tool-headline" role="status">Checking desktop state…</span>
         </div>
-        <button class="primary-button" type="submit">Run one-request test</button>
-      </form>
-      <pre id="routing-result" class="code-output">No test run.</pre>
-    </section>
 
-    <section id="panel-models" class="admin-panel"><div id="model-status" class="data-list"></div><div class="control-card"><label>Cloud STT WAV diagnostic<input id="stt-file" type="file" accept="audio/wav,.wav"></label><button id="stt-test" class="secondary-button" type="button">Transcribe bounded WAV</button><pre id="stt-result" class="code-output">No cloud STT test run. Local browser STT is exercised from normal tap-to-record.</pre></div></section>
+        <h3>Current observed state</h3>
+        <p class="tool-note">Read live for this request. Nothing below is inferred from an earlier wake or shutdown.</p>
+        <div id="desktop-status" class="axis-grid" role="group" aria-label="Current observed desktop state">Select Desktop to load status.</div>
 
-    <section id="panel-integrations" class="admin-panel">
-      <div class="control-card tool-card" id="openai-card">
-        <div class="tool-head"><h2>OpenAI</h2><span id="openai-summary" class="tool-headline" role="status">Checking credential state…</span></div>
-        <h3>Credential</h3>
-        <p class="tool-note">Butters shows the state of the credential, never its value. A stored key is not returned by any endpoint, is not written to logs, audit records, or job payloads, and never reaches this page.</p>
-        <div id="openai-credential" class="axis-grid" role="group" aria-label="OpenAI credential state">Select Integrations to load credential state.</div>
+        <h3>Last operation</h3>
+        <p id="desktop-last-operation" class="tool-note" role="status">No desktop operation has been requested from this console.</p>
+
         <div class="button-row">
-          <button id="openai-test" class="secondary-button" type="button">Test credential</button>
-          <button id="openai-set" class="primary-button" type="button">Set / Replace API key…</button>
-          <button id="openai-remove" class="danger-button" type="button">Remove from Butters…</button>
+          <button id="desktop-refresh" class="secondary-button" type="button">Refresh status</button>
+          <button id="desktop-ssh-test" class="secondary-button" type="button">SSH test</button>
+          <button id="desktop-wake" class="primary-button" type="button">Wake Desktop</button>
         </div>
 
-        <form id="openai-key-form" class="confirm-panel" hidden autocomplete="off">
-          <label>New OpenAI API key<input id="openai-key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="512" placeholder="Pasted once, never stored in this browser"></label>
-          <p class="tool-note">The candidate is validated against OpenAI before it replaces anything. If validation fails the existing credential stays active and the candidate is discarded. Use a project key scoped to Butters rather than a general-purpose key.</p>
-          <div class="button-row"><button id="openai-key-submit" class="primary-button" type="submit">Validate and store</button><button id="openai-key-cancel" class="secondary-button" type="button">Cancel</button></div>
-        </form>
+        <h3>Interactive Desktop Agent</h3>
+        <p id="desktop-agent-status" class="tool-note" role="status">Agent state has not been checked.</p>
+        <div id="desktop-apps" class="app-grid"></div>
+        <p class="tool-note">Application launches require a connected Desktop Agent and an active unlocked Windows session. Butters holds no executable path: the agent resolves every name against its own local allowlist.</p>
 
-        <div id="openai-remove-confirm" class="confirm-panel" role="group" aria-label="Confirm credential removal" hidden></div>
-        <p id="openai-status" class="tool-action-status" role="status" aria-live="polite">No credential operation has been requested.</p>
-        <p class="tool-note">Removing the credential here deletes only Butters&rsquo; local copy. It cannot revoke anything in your OpenAI account; revoke the key in the OpenAI Platform if it is no longer needed.</p>
+        <h3>Streaming</h3>
+        <div class="button-row"><button id="desktop-streaming" class="primary-button" type="button">Prepare for streaming</button></div>
+        <p class="tool-note">Runs the reviewed workflow: wake, wait for SSH, start the fixed Parsec service on demand, verify readiness, then turn the two physical monitors off. Requires a fresh passkey assertion bound to this exact action.</p>
+
+        <h3>Virtual machines</h3>
+        <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>
+
+        <h3>Build / test compute</h3>
+        <p id="desktop-compute-note" class="tool-note">Remote build and test are not available on this architecture. The historical path executed operator-configured commands over a generic SSH endpoint and is intentionally not registered here. Nothing is hidden or silently disabled — the capability is absent.</p>
+
+        <div class="action-result">
+          <p id="desktop-result-summary" class="result-summary" role="status">No action run.</p>
+          <details id="desktop-result-details" class="tech-details"><summary>Technical details</summary><pre id="desktop-result" class="code-output">No action run.</pre></details>
+        </div>
       </div>
 
+      <div class="control-card tool-card danger-card">
+        <div class="tool-head"><h2>Desktop power off</h2><span class="risk-tag">Higher risk</span></div>
+        <p class="tool-note">Shutting the desktop down ends every interactive session, including Parsec, and any running build. Bringing it back needs Wake Desktop above. Butters itself is unaffected.</p>
+        <div class="button-row"><button id="desktop-shutdown" class="danger-button" type="button">Shut Down Desktop…</button></div>
+        <div id="desktop-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm desktop shutdown" hidden></div>
+        <p id="desktop-shutdown-status" class="tool-action-status" role="status">Shutdown has not been requested.</p>
+      </div>
+    </section>
+
+    <section id="panel-nas" class="admin-panel">
+      <div class="control-card tool-card" id="nas-card">
+        <div class="tool-head">
+          <h2>NAS</h2>
+          <span id="nas-summary" class="tool-headline" role="status">Checking NAS state…</span>
+        </div>
+
+        <h3>Current observed state</h3>
+        <p class="tool-note">Four independent observations. Jellyfin being unavailable is never treated as evidence that the NAS is powered off.</p>
+        <div id="nas-status" class="axis-grid" role="group" aria-label="Current observed NAS state">Select NAS to load status.</div>
+
+        <h3>Capability</h3>
+        <div id="nas-capability" class="axis-grid" role="group" aria-label="NAS capability state"></div>
+
+        <h3>Last operation</h3>
+        <p id="nas-last-operation" class="tool-note" role="status">No NAS operation has been requested from this console.</p>
+
+        <div class="button-row">
+          <button id="nas-refresh" class="secondary-button" type="button">Refresh status</button>
+          <button id="nas-wake" class="primary-button" type="button">Wake NAS</button>
+        </div>
+        <p id="nas-action-status" class="tool-action-status" role="status" aria-live="polite">Ready.</p>
+      </div>
+
+      <div class="control-card tool-card danger-card">
+        <div class="tool-head"><h2>NAS power off</h2><span class="risk-tag">Higher risk</span></div>
+        <p class="tool-note">Shutting the NAS down stops Jellyfin and every share it serves. Bringing it back needs Wake NAS above. This requires a fresh passkey assertion bound to this exact action, plus explicit confirmation.</p>
+        <div class="button-row"><button id="nas-shutdown" class="danger-button" type="button">Shut Down NAS…</button></div>
+        <div id="nas-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm NAS shutdown" hidden></div>
+        <p id="nas-shutdown-status" class="tool-action-status" role="status">Shutdown has not been requested.</p>
+      </div>
+    </section>
+
+    <!-- ================================= AI ================================= -->
+    <section id="panel-chat" class="admin-panel">
       <div class="control-card ai-card" id="chat-card">
         <div class="tool-head"><h2>Butters Chat model</h2><span id="chat-effective" class="tool-headline" role="status">Loading effective configuration…</span></div>
         <p class="tool-note">Every control here is offered by the selected model. A setting the model does not support is not shown, is refused if submitted, and is never placed in a request to the provider. A control left blank is omitted rather than sent as a default.</p>
@@ -138,91 +232,96 @@
         <p id="tts-status" class="tool-action-status" role="status" aria-live="polite">Loaded from the running service.</p>
         <audio id="voice-audio" controls></audio>
       </div>
-      <h2>Saved named presets</h2>
-      <p class="tool-note">Historical named presets. Butters Chat speaks with the effective configuration above, not with these.</p>
-      <div id="voice-presets" class="data-list"></div>
+      <div class="admin-section">
+        <h2>Saved named presets</h2>
+        <p class="tool-note">Historical named presets. Butters Chat speaks with the effective configuration above, not with these.</p>
+        <div id="voice-presets" class="data-list"></div>
+      </div>
     </section>
 
-    <section id="panel-skills" class="admin-panel">
-      <div class="panel-head"><input id="skill-search" placeholder="Search skills" aria-label="Search skills"><button id="create-skill-shortcut" class="primary-button">Create Skill</button></div>
-      <div class="split-view"><div id="skill-list" class="data-list"></div><div><pre id="skill-detail" class="code-output">Select a skill.</pre><label class="json-label">Bounded test arguments<textarea id="skill-test-args" maxlength="4000">{}</textarea></label><div class="button-row"><button id="skill-test" class="secondary-button" type="button" disabled>Run test</button><button id="skill-toggle" class="secondary-button" type="button" disabled>Disable</button></div><pre id="skill-test-result" class="code-output">No invocation run.</pre></div></div>
+    <section id="panel-credentials" class="admin-panel">
+      <div class="control-card tool-card" id="openai-card">
+        <div class="tool-head"><h2>OpenAI</h2><span id="openai-summary" class="tool-headline" role="status">Checking credential state…</span></div>
+        <h3>Credential</h3>
+        <p class="tool-note">Butters shows the state of the credential, never its value. A stored key is not returned by any endpoint, is not written to logs, audit records, or job payloads, and never reaches this page.</p>
+        <div id="openai-credential" class="axis-grid" role="group" aria-label="OpenAI credential state">Select Credentials to load credential state.</div>
+        <div class="button-row">
+          <button id="openai-test" class="secondary-button" type="button">Test credential</button>
+          <button id="openai-set" class="primary-button" type="button">Set / replace API key…</button>
+          <button id="openai-remove" class="danger-button" type="button">Remove from Butters…</button>
+        </div>
+
+        <form id="openai-key-form" class="confirm-panel" hidden autocomplete="off">
+          <label>New OpenAI API key<input id="openai-key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="512" placeholder="Pasted once, never stored in this browser"></label>
+          <p class="tool-note">The candidate is validated against OpenAI before it replaces anything. If validation fails the existing credential stays active and the candidate is discarded. Use a project key scoped to Butters rather than a general-purpose key.</p>
+          <div class="button-row"><button id="openai-key-submit" class="primary-button" type="submit">Validate and store</button><button id="openai-key-cancel" class="secondary-button" type="button">Cancel</button></div>
+        </form>
+
+        <div id="openai-remove-confirm" class="confirm-panel" role="group" aria-label="Confirm credential removal" hidden></div>
+        <p id="openai-status" class="tool-action-status" role="status" aria-live="polite">No credential operation has been requested.</p>
+        <p class="tool-note">Removing the credential here deletes only Butters&rsquo; local copy. It cannot revoke anything in your OpenAI account; revoke the key in the OpenAI Platform if it is no longer needed.</p>
+      </div>
     </section>
 
-    <section id="panel-tools" class="admin-panel">
-      <div class="control-card tool-card" id="desktop-card">
-        <div class="tool-head">
-          <h2>Desktop</h2>
-          <span id="desktop-summary" class="tool-headline" role="status">Checking desktop state…</span>
-        </div>
+    <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>
 
-        <h3>Current observed state</h3>
-        <p class="tool-note">Read live for this request. Nothing below is inferred from an earlier wake or shutdown.</p>
-        <div id="desktop-status" class="axis-grid" role="group" aria-label="Current observed desktop state">Select Tools to load desktop status.</div>
-
-        <h3>Last operation</h3>
-        <p id="desktop-last-operation" class="tool-note" role="status">No desktop operation has been requested from this console.</p>
-
-        <div class="button-row">
-          <button id="desktop-refresh" class="secondary-button" type="button">Refresh Status</button>
-          <button id="desktop-ssh-test" class="secondary-button" type="button">SSH Test</button>
-          <button id="desktop-wake" class="primary-button" type="button">Wake Desktop</button>
-        </div>
-
-        <h3>Interactive Desktop Agent</h3>
-        <p id="desktop-agent-status" class="tool-note" role="status">Agent state has not been checked.</p>
-        <div id="desktop-apps" class="app-grid"></div>
-        <p class="tool-note">Application launches require a connected Desktop Agent and an active unlocked Windows session. Butters holds no executable path: the agent resolves every name against its own local allowlist.</p>
-        <div class="button-row"><button id="desktop-streaming" class="primary-button" type="button">Prepare for Streaming</button></div>
-        <p class="tool-note">Runs the reviewed workflow: wake, wait for SSH, start the fixed Parsec service on demand, verify readiness, then turn the two physical monitors off. Requires a fresh passkey assertion bound to this exact action.</p>
-
-        <h3>Virtual machines</h3>
-        <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>
-
-        <h3>Build / test compute</h3>
-        <p id="desktop-compute-note" class="tool-note">Remote build and test are not available on this architecture. The historical path executed operator-configured commands over a generic SSH endpoint and is intentionally not registered here. Nothing is hidden or silently disabled — the capability is absent.</p>
-
-        <div class="action-result">
-          <p id="desktop-result-summary" class="result-summary" role="status">No action run.</p>
-          <details id="desktop-result-details" class="tech-details"><summary>Technical details</summary><pre id="desktop-result" class="code-output">No action run.</pre></details>
-        </div>
+    <section id="panel-models" class="admin-panel">
+      <div class="admin-section">
+        <h2>Model status</h2>
+        <div id="model-status" class="data-list"></div>
       </div>
-
-      <div class="control-card tool-card danger-card">
-        <div class="tool-head"><h2>Desktop power off</h2><span class="risk-tag">Higher risk</span></div>
-        <p class="tool-note">Shutting the desktop down ends every interactive session, including Parsec, and any running build. Bringing it back needs Wake Desktop above. Butters itself is unaffected.</p>
-        <div class="button-row"><button id="desktop-shutdown" class="danger-button" type="button">Shut Down Desktop…</button></div>
-        <div id="desktop-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm desktop shutdown" hidden></div>
-        <p id="desktop-shutdown-status" class="tool-action-status" role="status">Shutdown has not been requested.</p>
+      <div class="control-card">
+        <h3>Cloud STT diagnostic</h3>
+        <label>Bounded WAV file<input id="stt-file" type="file" accept="audio/wav,.wav"></label>
+        <div class="button-row"><button id="stt-test" class="secondary-button" type="button">Transcribe bounded WAV</button></div>
+        <pre id="stt-result" class="code-output">No cloud STT test run. Local browser STT is exercised from normal tap-to-record.</pre>
       </div>
+    </section>
 
-      <div class="control-card tool-card" id="nas-card">
-        <div class="tool-head">
-          <h2>NAS</h2>
-          <span id="nas-summary" class="tool-headline" role="status">Checking NAS state…</span>
+    <section id="panel-routing" class="admin-panel">
+      <form id="routing-form" class="control-card">
+        <label>Test request<textarea id="routing-text" maxlength="4000" required>Why might box three stay more humid than the others?</textarea></label>
+        <div class="form-row">
+          <label>Route<select id="route-override"><option value="auto">Auto</option><option value="deterministic_local">Deterministic / local only</option><option value="local_diagnostic">Local diagnostic / planner</option><option value="cloud_auto">Cloud automatic</option><option value="force_cloud_model">Force configured cloud model</option><option value="cloud_disabled">Cloud disabled</option></select></label>
+          <label>Model<select id="route-model"></select></label>
+          <label>Effort<select id="route-effort"><option>none</option><option>low</option><option selected>medium</option><option>high</option><option>xhigh</option><option>max</option></select></label>
+          <label>Max output tokens<input id="route-output" type="number" min="64" max="1200" step="1" value="1200"></label>
+        </div>
+        <div class="button-row"><button class="primary-button" type="submit">Run one-request test</button></div>
+      </form>
+      <pre id="routing-result" class="code-output">No test run.</pre>
+    </section>
+
+    <!-- =============================== Media ================================ -->
+    <section id="panel-media" class="admin-panel">
+      <div class="control-card tool-card" id="media-card">
+        <div class="tool-head"><h2>Jellyfin &amp; streaming bandwidth</h2><span id="media-summary" class="tool-headline" role="status">Checking streaming state…</span></div>
+        <p class="tool-note">Three different kinds of claim are kept apart below. <strong>Observed</strong> is measured. <strong>Calculated</strong> is derived from those measurements. <strong>Policy</strong> is what the system is configured to do about them.</p>
+
+        <div class="evidence-group evidence-observed">
+          <h3>Observed <small>measured on the NAS</small></h3>
+          <div id="media-observed" class="axis-grid" role="group" aria-label="Observed streaming measurements">Select Jellyfin &amp; bandwidth to load.</div>
         </div>
 
-        <h3>Current observed state</h3>
-        <p class="tool-note">Four independent observations. Jellyfin being unavailable is never treated as evidence that the NAS is powered off.</p>
-        <div id="nas-status" class="axis-grid" role="group" aria-label="Current observed NAS state">Select Tools to load NAS status.</div>
-
-        <h3>Last operation</h3>
-        <p id="nas-last-operation" class="tool-note" role="status">No NAS operation has been requested from this console.</p>
-
-        <div class="button-row">
-          <button id="nas-refresh" class="secondary-button" type="button">Refresh Status</button>
-          <button id="nas-wake" class="primary-button" type="button">Wake NAS</button>
+        <div class="evidence-group evidence-calculated">
+          <h3>Calculated <small>derived, not measured</small></h3>
+          <div id="media-calculated" class="axis-grid" role="group" aria-label="Calculated streaming values"></div>
         </div>
-        <p id="nas-action-status" class="tool-action-status" role="status" aria-live="polite">Ready.</p>
-      </div>
 
-      <div class="control-card tool-card danger-card">
-        <div class="tool-head"><h2>NAS power off</h2><span class="risk-tag">Higher risk</span></div>
-        <p class="tool-note">Shutting the NAS down stops Jellyfin and every share it serves. Bringing it back needs Wake NAS above. This requires a fresh passkey assertion bound to this exact action, plus explicit confirmation.</p>
-        <div class="button-row"><button id="nas-shutdown" class="danger-button" type="button">Shut Down NAS…</button></div>
-        <div id="nas-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm NAS shutdown" hidden></div>
-        <p id="nas-shutdown-status" class="tool-action-status" role="status">Shutdown has not been requested.</p>
-      </div>
+        <div class="evidence-group evidence-policy">
+          <h3>Policy <small>what the governor is allowed to do</small></h3>
+          <div id="media-policy" class="axis-grid" role="group" aria-label="Streaming policy state"></div>
+          <p id="media-policy-note" class="tool-note"></p>
+        </div>
 
+        <h3>Active remote streams</h3>
+        <div id="media-streams" class="stream-list"></div>
+
+        <div class="button-row"><button id="media-refresh" class="secondary-button" type="button">Refresh</button></div>
+      </div>
+    </section>
+
+    <section id="panel-portalaccess" class="admin-panel">
       <div class="control-card tool-card">
         <h2>Jellyfin access portal</h2>
         <p class="tool-note">Enrollment is invite-only. Creating an invitation authorizes exactly one named identity to register its own passkey and hold the <code>jellyfin_access</code> role. That role never implies administrator.</p>
@@ -234,25 +333,58 @@
         <p id="portal-invite-status" class="tool-action-status" role="status" aria-live="polite">No invitation created.</p>
         <div id="portal-identity-list" class="data-list"></div>
       </div>
-
-      <h2>Diagnostic tools</h2><div id="tool-list" class="data-list"></div>
     </section>
-    <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>
-    <section id="panel-system" class="admin-panel"><div id="system-view" class="data-list"></div></section>
-    <section id="panel-logs" class="admin-panel"><pre id="logs-view" class="code-output"></pre></section>
-    <section id="panel-security" class="admin-panel"><div id="security-view" class="data-list"></div></section>
 
-    <section id="panel-passkeys" class="admin-panel">
-      <div class="panel-head"><p id="auth-admin-status">Loading authentication state…</p><div class="button-row"><button id="admin-authenticate" class="primary-button" type="button">Authenticate</button><button id="admin-lock" class="secondary-button" type="button">Lock Now</button><button id="add-passkey" class="secondary-button" type="button">Add Passkey</button></div></div>
-      <div id="passkey-list" class="data-list"></div>
+    <!-- ============================ Automation ============================== -->
+    <section id="panel-skills" class="admin-panel">
+      <div class="panel-head"><label class="visually-hidden" for="skill-search">Search skills</label><input id="skill-search" type="search" placeholder="Search skills" aria-label="Search skills"><button id="create-skill-shortcut" class="primary-button">Create skill</button></div>
+      <div class="split-view">
+        <div id="skill-list" class="data-list"></div>
+        <div>
+          <pre id="skill-detail" class="code-output">Select a skill.</pre>
+          <label class="json-label">Bounded test arguments<textarea id="skill-test-args" maxlength="4000">{}</textarea></label>
+          <div class="button-row"><button id="skill-test" class="secondary-button" type="button" disabled>Run test</button><button id="skill-toggle" class="secondary-button" type="button" disabled>Disable</button></div>
+          <pre id="skill-test-result" class="code-output">No invocation run.</pre>
+        </div>
+      </div>
+    </section>
+
+    <section id="panel-tools" class="admin-panel">
+      <div class="admin-section">
+        <h2>Diagnostic tools</h2>
+        <div id="tool-list" class="data-list"></div>
+      </div>
     </section>
 
     <section id="panel-actions" class="admin-panel"><div id="action-admin-view" class="data-list"></div></section>
     <section id="panel-capabilities" class="admin-panel"><div id="capability-list" class="data-list"></div></section>
 
+    <!-- ============================== Security ============================== -->
+    <section id="panel-passkeys" class="admin-panel">
+      <div class="panel-head"><p id="auth-admin-status">Loading authentication state…</p><div class="button-row"><button id="admin-authenticate" class="primary-button" type="button">Authenticate</button><button id="admin-lock" class="secondary-button" type="button">Lock now</button><button id="add-passkey" class="secondary-button" type="button">Add passkey</button></div></div>
+      <div id="passkey-list" class="data-list"></div>
+    </section>
+
+    <section id="panel-security" class="admin-panel">
+      <div class="admin-section">
+        <h2>Security posture</h2>
+        <p class="tool-note">Distinct states are reported distinctly. Authenticated, administrator, and FRESH are three different things, and a configured credential is not the same claim as a validated one.</p>
+        <div id="security-view" class="data-list"></div>
+      </div>
+    </section>
+
+    <!-- ============================ Diagnostics ============================= -->
+    <section id="panel-trace" class="admin-panel">
+      <div class="panel-head"><p>Engineering-observable events only. Hidden model reasoning is never requested or displayed.</p><button id="refresh-traces" class="secondary-button">Refresh</button></div>
+      <div id="trace-list" class="trace-list"></div>
+    </section>
+
+    <section id="panel-sessions" class="admin-panel"><div id="session-list" class="data-list"></div></section>
+    <section id="panel-logs" class="admin-panel"><pre id="logs-view" class="code-output"></pre></section>
+
     <section id="panel-codex" class="admin-panel">
       <div class="warning-card">Codex jobs are read-only-skill authoring jobs. Completion never deploys or restarts Butters. Applying a tested patch requires a separate explicit approval.</div>
-      <form id="codex-form" class="control-card"><label>Describe the read-only capability<textarea id="codex-description" maxlength="2000" required>Create a read-only skill that tells me which Butters services have restarted during the last 24 hours.</textarea></label><button class="primary-button" type="submit">Create bounded Codex job</button></form>
+      <form id="codex-form" class="control-card"><label>Describe the read-only capability<textarea id="codex-description" maxlength="2000" required>Create a read-only skill that tells me which Butters services have restarted during the last 24 hours.</textarea></label><div class="button-row"><button class="primary-button" type="submit">Create bounded Codex job</button></div></form>
       <pre id="codex-result" class="code-output">No job submitted.</pre>
       <div id="codex-jobs" class="data-list"></div>
       <pre id="codex-job-detail" class="code-output">Select a job to inspect its bounded diff and test results.</pre>

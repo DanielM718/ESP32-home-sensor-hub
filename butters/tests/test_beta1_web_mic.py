@@ -12,9 +12,10 @@ import re
 from pathlib import Path
 from xml.etree import ElementTree
 
+from frontend_assets import ALL_CSS, contrast, declarations, resolve, token
+
 STATIC_ROOT = Path(__file__).resolve().parents[1] / "src/butters/web/static"
 INDEX_HTML = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-STYLES_CSS = (STATIC_ROOT / "assets/styles.css").read_text(encoding="utf-8")
 SVG_NAMESPACE = "{http://www.w3.org/2000/svg}"
 
 
@@ -30,10 +31,9 @@ def _mic_icon() -> ElementTree.Element:
     return ElementTree.fromstring(match.group(0))
 
 
-def _rule(selector: str) -> str:
-    match = re.search(rf"(?<![\w.-]){re.escape(selector)}{{(.*?)}}", STYLES_CSS)
-    assert match is not None, f"missing CSS rule for {selector}"
-    return match.group(1)
+# The stylesheet is now layered and readably formatted, so these assertions
+# read declarations rather than raw substrings. They still check exactly the
+# geometry the iPhone defect was about.
 
 
 def test_the_glyph_is_a_valid_inline_svg_with_a_fixed_viewbox() -> None:
@@ -83,36 +83,40 @@ def test_the_control_keeps_an_accessible_label_and_a_pressed_state() -> None:
 
 
 def test_the_button_centres_the_icon_and_keeps_a_mobile_touch_target() -> None:
-    rule = _rule(".mic-button")
+    button = declarations(".mic-button")
 
-    assert "align-items:center" in rule and "justify-content:center" in rule
-    assert "padding:0" in rule
+    assert button["align-items"] == "center"
+    assert button["justify-content"] == "center"
+    assert button["padding"] == "0"
     # An inline SVG otherwise sits on the text baseline of the inherited font.
-    assert "line-height:0" in rule
-    for declaration in (
-        "width:46px",
-        "height:46px",
-        "min-width:46px",
-        "min-height:46px",
-    ):
-        assert declaration in rule
-    assert "overflow:hidden" not in rule
+    assert button["line-height"] == "0"
+    for axis in ("width", "height", "min-width", "min-height"):
+        assert button[axis] == "46px", axis
+    # Comfortably past the 44px minimum the token layer declares for a touch.
+    assert int(button["min-height"].removesuffix("px")) >= int(
+        token("--tap-min").removesuffix("px")
+    )
+    assert "overflow" not in button
 
 
 def test_the_icon_has_an_explicit_block_box() -> None:
-    rule = _rule(".mic-icon")
+    icon = declarations(".mic-icon")
 
-    assert "display:block" in rule
-    assert "width:22px" in rule and "height:22px" in rule
+    assert icon["display"] == "block"
+    assert icon["width"] == "22px" and icon["height"] == "22px"
 
 
 def test_the_listening_state_recolours_the_glyph_without_moving_it() -> None:
-    rule = _rule(".mic-button.active")
+    active = declarations(".mic-button.active")
 
-    assert "background:var(--accent)" in rule
-    assert "color:#172015" in rule
+    assert active["background"] == "var(--accent)"
+    # The glyph is drawn in currentColor, so the state is a colour swap and
+    # never a size or position change: nothing here may move the button.
+    assert not {"width", "height", "padding", "transform", "margin"} & set(active)
+    # Whatever ink the token layer names, it has to be legible on the accent.
+    assert contrast(resolve(active["color"]), resolve(active["background"])) >= 4.5
     # currentColor carries the state, so no per-shape border rules remain.
-    assert ".mic-button span" not in STYLES_CSS
+    assert ".mic-button span" not in ALL_CSS
 
 
 def _points(element: ElementTree.Element) -> list[tuple[float, float]]:

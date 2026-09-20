@@ -31,8 +31,8 @@ function registrationOptions(value){const options={...value,challenge:decodeBase
 function assertionJson(c){return{id:c.id,rawId:encodeBase64url(c.rawId),type:c.type,authenticatorAttachment:c.authenticatorAttachment||null,clientExtensionResults:c.getClientExtensionResults(),response:{authenticatorData:encodeBase64url(c.response.authenticatorData),clientDataJSON:encodeBase64url(c.response.clientDataJSON),signature:encodeBase64url(c.response.signature),userHandle:c.response.userHandle?encodeBase64url(c.response.userHandle):null}};}
 function registrationJson(c){const transports=typeof c.response.getTransports==="function"?c.response.getTransports():[];return{id:c.id,rawId:encodeBase64url(c.rawId),type:c.type,authenticatorAttachment:c.authenticatorAttachment||null,clientExtensionResults:c.getClientExtensionResults(),response:{attestationObject:encodeBase64url(c.response.attestationObject),clientDataJSON:encodeBase64url(c.response.clientDataJSON),transports}};}
 
-const TONE={reachable:"good",ready:"good",unreachable:"bad",unavailable:"bad",starting:"warn",not_observed:"muted"};
-const TEXT={reachable:"Reachable",unreachable:"Unreachable",ready:"Ready",starting:"Starting",unavailable:"Unavailable",not_observed:"Not observed"};
+const TONE={reachable:"good",ready:"good",unreachable:"bad",unavailable:"bad",starting:"warn",not_observed:"muted",dry_run:"info",observe:"info",off:"muted",estimated:"muted",measured:"good"};
+const TEXT={reachable:"Reachable",unreachable:"Unreachable",ready:"Ready",starting:"Starting",unavailable:"Unavailable",not_observed:"Not observed",dry_run:"Dry run · nothing is limited",observe:"Observing only",off:"Off"};
 
 function axis(container, entries){
   container.replaceChildren();
@@ -50,6 +50,14 @@ function renderBandwidth(value){
   const section=document.querySelector("#portal-bandwidth");
   if(!value){section.hidden=true;return;}
   section.hidden=false;
+  // What someone in this house actually wants to know, in three cells: how
+  // much room is left, how much is in use, and how many people are watching
+  // from outside. Everything else is one disclosure away.
+  axis(document.querySelector("#portal-bandwidth-summary"),[
+    ["Room left",mbps(value.available_headroom_mbps)],
+    ["In use now",value.total_remote_observed_mbps===null?"unavailable":`${mbps(value.total_remote_observed_mbps)} / ${mbps(value.effective_capacity_mbps)}`],
+    ["Watching from away",value.remote_jellyfin_stream_count===null?"unavailable":String(value.remote_jellyfin_stream_count)],
+  ]);
   axis(document.querySelector("#portal-bandwidth-metrics"),[
     ["Remote bandwidth",value.total_remote_observed_mbps===null?"unavailable":`${mbps(value.total_remote_observed_mbps)} / ${mbps(value.effective_capacity_mbps)}`],
     ["Safe streaming pool",mbps(value.safe_streaming_budget_mbps)],

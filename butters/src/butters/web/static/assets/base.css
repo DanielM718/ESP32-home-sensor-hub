@@ -1,0 +1,155 @@
+/* Element defaults, typography classes, focus, and motion policy.
+ * No component lives here: everything below styles either a bare element or
+ * one of the named text roles the token layer defines.
+ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-leading);
+  -webkit-font-smoothing: antialiased;
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button[disabled],
+input[disabled],
+select[disabled],
+textarea[disabled] {
+  cursor: not-allowed;
+}
+
+h1, h2, h3, h4, p, figure {
+  margin: 0;
+}
+
+code, pre, samp, kbd {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-size);
+}
+
+a {
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------------- focus --
+ * One visible ring everywhere. Pointer interaction does not draw it; the
+ * keyboard always does. Nothing is allowed to remove it without replacing it.
+ */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* ------------------------------------------------------- text roles -- */
+
+.t-page {
+  font-size: var(--type-page-size);
+  font-weight: var(--type-page-weight);
+  letter-spacing: var(--type-page-tracking);
+  line-height: 1.2;
+}
+
+.t-section {
+  font-size: var(--type-section-size);
+  font-weight: var(--type-section-weight);
+  letter-spacing: var(--type-section-tracking);
+  text-transform: uppercase;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.t-card {
+  font-size: var(--type-card-size);
+  font-weight: var(--type-card-weight);
+  line-height: 1.3;
+}
+
+.t-body {
+  font-size: var(--type-body-size);
+  line-height: var(--type-body-leading);
+}
+
+.t-meta {
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+  color: var(--text-muted);
+}
+
+.t-value {
+  font-size: var(--type-value-size);
+  font-weight: var(--type-value-weight);
+  line-height: 1.25;
+  font-variant-numeric: tabular-nums;
+}
+
+.t-mono {
+  font-family: var(--font-mono);
+  font-size: var(--type-mono-size);
+}
+
+/* Long prose stays readable; long technical strings stay inside their box. */
+.measure {
+  max-width: var(--measure);
+}
+
+.break-anywhere {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ------------------------------------------------------------ motion --
+ * Transitions exist to explain a state change, never to decorate one. A
+ * viewer who has asked for less motion gets none of them.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
+}

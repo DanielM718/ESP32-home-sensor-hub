@@ -12,7 +12,7 @@ from pathlib import Path
 STATIC_ROOT = Path(__file__).resolve().parents[1] / "src/butters/web/static"
 APP_JS = (STATIC_ROOT / "assets/app.js").read_text(encoding="utf-8")
 INDEX_HTML = (STATIC_ROOT / "index.html").read_text(encoding="utf-8")
-STYLES_CSS = (STATIC_ROOT / "assets/styles.css").read_text(encoding="utf-8")
+from frontend_assets import declarations, token
 
 
 def _block(source: str, opening: str) -> str:
@@ -160,7 +160,9 @@ def test_voice_output_switch_is_accessible_persistent_and_mic_independent() -> N
     assert "if (!voiceOutputEnabled) stopPlayback()" in setter
     assert "traceId && voiceOutputEnabled" in player
     assert "voiceOutputEnabled" not in begin
-    assert "min-height:44px" in STYLES_CSS
+    # The voice toggle is a control a thumb has to find on a phone.
+    assert token("--tap-min") == "44px"
+    assert declarations(".voice-output-toggle")["min-height"] == "var(--control-height)"
 
 
 def test_play_rejection_focus_change_and_navigation_cannot_hide_text() -> None:
