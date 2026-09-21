@@ -25,6 +25,12 @@ The local typed registry and PolicyValidator are authoritative and may deny any 
 When tools are available, request at most one tool at a time. Distinguish OBSERVED data, CALCULATED local statistics, INFERRED interpretation, and UNKNOWN information. Correlation is not proof of causation.
 Return a concise useful answer. Do not expose hidden reasoning or chain-of-thought."""
 
+# A provider-generated reasoning summary is bounded before it is stored or
+# shown. The provider decides how long its summary is; Butters decides how much
+# of one it is willing to carry.
+MAX_REASONING_SUMMARY_CHARS = 2000
+MAX_REASONING_SUMMARY_PARTS = 8
+
 
 @dataclass(frozen=True, slots=True)
 class GeneralCloudTurn:
@@ -36,6 +42,9 @@ class GeneralCloudTurn:
     response_text: str | None = None
     usage: CloudTokenUsage = field(default_factory=CloudTokenUsage)
     stopping_reason: str = "complete"
+    # The provider's own summary of its reasoning, when one was requested and
+    # returned. Never the answer, and never spoken.
+    reasoning_summary: str | None = None
 
 
 class GeneralCloudReasoner(ABC):
@@ -57,6 +66,7 @@ class GeneralCloudReasoner(ABC):
         tool_output: dict[str, object] | None = None,
         timeout_seconds: float | None = None,
         parameters: ChatSettings | None = None,
+        reasoning_summary: str | None = None,
     ) -> GeneralCloudTurn: ...
 
 
@@ -93,6 +103,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
         tool_output: dict[str, object] | None = None,
         timeout_seconds: float | None = None,
         parameters: ChatSettings | None = None,
+        reasoning_summary: str | None = None,
     ) -> GeneralCloudTurn:
         if not self._api_key:
             raise CloudReasonerError(
@@ -120,6 +131,7 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
             previous_response_id=previous_response_id,
             tool_output=tool_output,
             parameters=parameters,
+            reasoning_summary=reasoning_summary,
         )
         encoded_body = json.dumps(
             body, separators=(",", ":"), ensure_ascii=True
@@ -207,13 +219,21 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
         previous_response_id: str | None,
         tool_output: dict[str, object] | None,
         parameters: ChatSettings | None = None,
+        reasoning_summary: str | None = None,
     ) -> dict[str, object]:
+        # `reasoning.summary` is the documented way to obtain a *summary* of
+        # the model's reasoning. Butters never asks a model to print its
+        # private chain-of-thought, and omits the field entirely when the
+        # administrator has not enabled summaries.
+        reasoning: dict[str, object] = {"effort": effort}
+        if reasoning_summary is not None:
+            reasoning["summary"] = reasoning_summary
         body: dict[str, object] = {
             "model": model,
             "instructions": GENERAL_SYSTEM_INSTRUCTIONS,
             "max_output_tokens": max_output_tokens,
             "store": self.settings.store_responses,
-            "reasoning": {"effort": effort},
+            "reasoning": reasoning,
             "tools": list(tools),
             "tool_choice": "auto" if tools else "none",
             "parallel_tool_calls": False,
@@ -247,9 +267,12 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
             )
         tool_requests: list[ToolRequest] = []
         text_parts: list[str] = []
+        summary_parts: list[str] = []
         for item in output:
             if not isinstance(item, Mapping):
                 continue
+            if item.get("type") == "reasoning":
+                summary_parts.extend(_summary_parts(item.get("summary")))
             if item.get("type") == "function_call":
                 name = item.get("name")
                 call_id = item.get("call_id")
@@ -309,7 +332,54 @@ class OpenAIGeneralReasoner(GeneralCloudReasoner):
             response_text=response_text or None,
             usage=_usage(payload.get("usage")),
             stopping_reason="tool_call" if tool_requests else "complete",
+            reasoning_summary=bounded_summary(summary_parts),
         )
+
+
+def _summary_parts(value: object) -> list[str]:
+    """The readable `summary_text` parts of one documented reasoning item.
+
+    A reasoning item legitimately arrives with an empty summary array - that
+    is what reasoning tokens with no requested summary look like - so an
+    empty result is ordinary, not an error. A part that does not match the
+    documented shape is skipped rather than raised on: an optional,
+    presentational field must never be able to destroy an otherwise valid
+    final answer.
+    """
+
+    if not isinstance(value, list):
+        return []
+    parts: list[str] = []
+    for part in value[:MAX_REASONING_SUMMARY_PARTS]:
+        if not isinstance(part, Mapping) or part.get("type") != "summary_text":
+            continue
+        text = part.get("text")
+        if not isinstance(text, str):
+            continue
+        cleaned = text.strip()
+        if cleaned:
+            parts.append(cleaned)
+    return parts
+
+
+def bounded_summary(parts: list[str]) -> str | None:
+    """Join reasoning summary parts into one bounded, de-duplicated block.
+
+    Multi-round tool use produces one reasoning item per provider round, and
+    consecutive rounds often repeat a preamble verbatim. Repeats are dropped
+    so the reader is not shown the same fragment twice.
+    """
+
+    unique: list[str] = []
+    for part in parts:
+        if part not in unique:
+            unique.append(part)
+    if not unique:
+        return None
+    joined = "\n\n".join(unique[:MAX_REASONING_SUMMARY_PARTS])
+    if len(joined) > MAX_REASONING_SUMMARY_CHARS:
+        joined = joined[:MAX_REASONING_SUMMARY_CHARS].rstrip() + "…"
+    return joined
 
 
 # One stable key lets OpenAI route repeated Butters prefixes to the same cache

@@ -99,9 +99,11 @@ def test_a_late_reply_cannot_repopulate_a_cleared_conversation() -> None:
     send = _block(APP_JS, "async function sendText")
     success = send[send.index("if (response.ok)") :]
 
-    # The generation guard must precede every render of the reply.
+    # The generation guard must precede every render of the reply. Matched on
+    # the call's opening rather than its full argument list, so adding
+    # response metadata to the render cannot silently retire this assertion.
     assert success.index("if (!isCurrentTurn(turn))") < success.index(
-        'addMessage("assistant", data.response_text)'
+        'addMessage("assistant", data.response_text'
     )
 
 

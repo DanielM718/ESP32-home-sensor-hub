@@ -175,14 +175,72 @@ function setPending(value) {
   form.dataset.pending = value ? "true" : "false";
 }
 
-function addMessage(role, text) {
+function addMessage(role, text, meta = null) {
   const item = document.createElement("article");
   item.className = `message ${role === "user" ? "user-message" : "assistant-message"}`;
   const paragraph = document.createElement("p");
   paragraph.textContent = text;
   item.append(paragraph);
+  if (role !== "user") {
+    // Both of these are siblings of the answer, never part of it. The
+    // answer paragraph above is the only thing that carries the text the
+    // server also stored and will speak.
+    const line = cloudMetadata(meta);
+    if (line) item.append(line);
+    const summary = reasoningSummary(meta);
+    if (summary) item.append(summary);
+  }
   conversation.append(item);
   conversation.scrollTop = conversation.scrollHeight;
+}
+
+/* "gpt-5.6-terra" reads as "Terra". An identifier this page does not
+ * recognise is shown as itself rather than renamed into something friendlier
+ * that might not be the model that actually answered. */
+function modelLabel(model) {
+  if (typeof model !== "string" || !model) return "";
+  const tail = model.split("-").pop();
+  return /^[a-z]+$/.test(tail) ? tail.charAt(0).toUpperCase() + tail.slice(1) : model;
+}
+
+/* A local answer says nothing at all here: a deterministic reply is the
+ * normal case and does not need a badge announcing that no model ran. The
+ * line appears only when a cloud model genuinely produced the answer, and it
+ * claims "Escalating" only when a tier change genuinely happened. */
+function cloudMetadata(meta) {
+  if (!meta || meta.cloud_used !== true) return null;
+  const parts = [meta.tier_escalated === true ? "Escalating reasoning" : "Using cloud reasoning"];
+  const label = modelLabel(meta.model);
+  if (label) parts.push(label);
+  if (typeof meta.reasoning_effort === "string" && meta.reasoning_effort) parts.push(meta.reasoning_effort);
+  if (typeof meta.routing_tier === "string" && meta.routing_tier) {
+    parts.push(meta.routing_tier.charAt(0).toUpperCase() + meta.routing_tier.slice(1));
+  }
+  const node = document.createElement("p");
+  node.className = "message-meta";
+  node.textContent = parts.join(" · ");
+  // Butters' own deterministic routing reasons — never the model's reasoning.
+  if (Array.isArray(meta.routing_reason_codes) && meta.routing_reason_codes.length) {
+    node.title = `Routing reasons: ${meta.routing_reason_codes.join(", ")}`;
+  }
+  return node;
+}
+
+/* A summary the provider generated of its own reasoning. Collapsed by
+ * default, labelled for what it is, and kept out of the answer bubble so it
+ * cannot be mistaken for part of the reply, for an instruction, or for a
+ * tool result. Absent or empty produces no panel at all. */
+function reasoningSummary(meta) {
+  const text = meta && typeof meta.reasoning_summary === "string" ? meta.reasoning_summary.trim() : "";
+  if (!text) return null;
+  const block = document.createElement("details");
+  block.className = "reasoning-summary";
+  const label = document.createElement("summary");
+  label.textContent = "Reasoning summary";
+  const body = document.createElement("p");
+  body.textContent = text;
+  block.append(label, body);
+  return block;
 }
 
 /* The voice is synthetic and the interface says so. The wording comes from
@@ -347,7 +405,7 @@ async function sendText(text) {
         }
         // A result that outlived its generation is discarded, never rendered.
         if (!isCurrentTurn(turn)) return noteClientStop(CLIENT_STOP.SUPPRESSED);
-        addMessage("assistant", data.response_text);
+        addMessage("assistant", data.response_text, data);
         traceId = typeof data.trace_id === "string" ? data.trace_id : null;
         if (data.pending_action && typeof data.pending_action === "object") {
           showPendingAction(data.pending_action);

@@ -17,8 +17,9 @@ from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
 from butters.actions.nas_agent import NasAgentHub
 from butters.actions.store import ActionStateStore
-from butters.ai.capabilities import build_registry
+from butters.ai.capabilities import CapabilityError, build_registry
 from butters.ai.credentials import CREDENTIAL_CLASS
+from butters.ai.model import ChatSettings
 from butters.ai.runtime import AIRuntimeController, ProviderBundle
 from butters.appearance import Appearance, AppearanceStore
 from butters.appearance import state as appearance_state
@@ -31,7 +32,16 @@ from butters.assistant import (
 from butters.assistant_config import AssistantSettings
 from butters.auth.manager import PasskeyManager
 from butters.auth.store import AuthStateStore
-from butters.cloud.general import GeneralCloudReasoner, OpenAIGeneralReasoner
+from butters.cloud.adaptive import (
+    AdaptiveCloudRouter,
+    CloudRoutingDecision,
+    classify_complexity,
+)
+from butters.cloud.general import (
+    GeneralCloudReasoner,
+    OpenAIGeneralReasoner,
+    bounded_summary,
+)
 from butters.cloud.model import (
     CloudReasonerError,
     CloudTokenUsage,
@@ -155,6 +165,22 @@ class ServiceResponse:
     authentication_required: str | None = None
     pending_action: dict[str, object] | None = None
     jobs: tuple[dict[str, object], ...] = ()
+    # ----- cloud routing metadata -------------------------------------
+    # `response_text` stays the answer and nothing else. Everything a surface
+    # needs in order to describe *how* the answer was produced is a separate
+    # field, so no presentation decision can leak into the spoken text.
+    cloud_used: bool = False
+    routing_mode: str | None = None
+    routing_tier: str | None = None
+    routing_reason_codes: tuple[str, ...] = ()
+    estimated_complexity: int | None = None
+    # True only when one request actually moved from one tier to another.
+    # A request that simply started at Terra did not escalate, and the UI
+    # must not say it did.
+    tier_escalated: bool = False
+    # A provider-generated summary of the model's reasoning. Optional,
+    # bounded, and never part of the answer or of anything spoken.
+    reasoning_summary: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -278,6 +304,10 @@ class BetaAssistantService:
         self.general_reasoner = general_reasoner or OpenAIGeneralReasoner(
             settings.cloud
         )
+        # Deterministic, local, no-network tier selection for ordinary Chat.
+        # It reads the same complexity classification the trace already
+        # records, so a routing decision can be re-derived from the trace.
+        self.cloud_router = AdaptiveCloudRouter(settings.cloud)
         self.voice_presets = VoicePresetStore(self.state_dir / "state.sqlite3")
         # A visual preference, so it lives beside the other runtime
         # settings rather than in the production-approval overlay, which
@@ -893,8 +923,7 @@ class BetaAssistantService:
                     session,
                     text,
                     current_trace,
-                    model=effective_chat.model,
-                    effort=effective_chat.reasoning_effort or "high",
+                    decision=self._chat_routing_decision(features, effective_chat),
                     max_output_tokens=output_limit,
                     route=route,
                     reason_code="open_ended_reasoning_required",
@@ -938,13 +967,16 @@ class BetaAssistantService:
                 True,
             )
         elif override in {RouteOverride.CLOUD_AUTO, RouteOverride.FORCE_CLOUD_MODEL}:
+            # An explicit administrator override is authoritative and is never
+            # re-tiered: the operator asked for exactly this model and effort.
             model = forced_model or effective_chat.model
             response = self._general_cloud(
                 session,
                 text,
                 current_trace,
-                model=model,
-                effort=reasoning_effort,
+                decision=self.cloud_router.fixed(
+                    model, reasoning_effort, reason="admin_forced_cloud"
+                ),
                 max_output_tokens=output_limit,
                 route=route,
                 reason_code="admin_forced_cloud",
@@ -1013,8 +1045,7 @@ class BetaAssistantService:
                 session,
                 text,
                 current_trace,
-                model=effective_chat.model,
-                effort=effective_chat.reasoning_effort or "high",
+                decision=self._chat_routing_decision(features, effective_chat),
                 max_output_tokens=output_limit,
                 route=route,
                 reason_code="open_ended_reasoning_required",
@@ -2737,8 +2768,7 @@ class BetaAssistantService:
         text: str,
         trace: ExecutionTrace,
         *,
-        model: str,
-        effort: str,
+        decision: CloudRoutingDecision,
         max_output_tokens: int,
         route: RoutedIntent,
         reason_code: str,
@@ -2749,8 +2779,7 @@ class BetaAssistantService:
                 session,
                 text,
                 trace,
-                model=model,
-                effort=effort,
+                decision=decision,
                 max_output_tokens=max_output_tokens,
                 route=route,
                 reason_code=reason_code,
@@ -2763,13 +2792,18 @@ class BetaAssistantService:
         text: str,
         trace: ExecutionTrace,
         *,
-        model: str,
-        effort: str,
+        decision: CloudRoutingDecision,
         max_output_tokens: int,
         route: RoutedIntent,
         reason_code: str,
         administrator: bool = False,
     ) -> ServiceResponse:
+        # The selected model is the model everything downstream uses: the
+        # pricing check, the conservative budget estimate, the request body,
+        # and the ledger row. There is no separate "configured" model that
+        # could be priced while a different one is called.
+        model = decision.model
+        effort = decision.effort
         normalized = normalize_transcript(text, self.vocabulary)
         if model not in self.settings.cloud.pricing:
             return self._cloud_failure(trace, normalized, "model_denied", route)
@@ -2822,6 +2856,7 @@ class BetaAssistantService:
                 fields={"model": model, "estimated_ceiling_usd": estimate},
             )
             return self._cloud_failure(trace, normalized, "budget_denied", route)
+        summary_mode = self._reasoning_summary_mode(model)
         trace.emit(
             TraceStage.MODEL,
             "started",
@@ -2832,6 +2867,9 @@ class BetaAssistantService:
                 "reasoning_effort": effort,
                 "max_output_tokens": max_output_tokens,
                 "tools_exposed": [item["name"] for item in tools],
+                # Butters' own deterministic routing reasons, not the model's.
+                "routing": decision.as_dict(),
+                "reasoning_summary_requested": summary_mode is not None,
             },
         )
         previous: str | None = None
@@ -2840,6 +2878,7 @@ class BetaAssistantService:
         tool_calls = 0
         seen_calls: set[tuple[str, str]] = set()
         total_cost = 0.0
+        summary_parts: list[str] = []
         cloud_started = time.perf_counter()
         for round_index in range(request_limit):
             if (
@@ -2866,10 +2905,11 @@ class BetaAssistantService:
                     # Only the controls the administrator set for exactly this
                     # model; everything unset stays out of the request body.
                     parameters=self._chat_parameters(model),
+                    reasoning_summary=summary_mode,
                 )
             except CloudReasonerError as exc:
                 configuration = ReasoningConfiguration(
-                    EscalationLevel.ANALYSIS, model, effort
+                    decision.tier.escalation_level, model, effort
                 )
                 self.ledger.record(
                     "general",
@@ -2887,7 +2927,7 @@ class BetaAssistantService:
                 )
                 return self._cloud_failure(trace, normalized, exc.code, route)
             configuration = ReasoningConfiguration(
-                EscalationLevel.ANALYSIS, model, effort
+                decision.tier.escalation_level, model, effort
             )
             record = self.ledger.record(
                 "general",
@@ -2910,6 +2950,8 @@ class BetaAssistantService:
                 total_usage.output_tokens + turn.usage.output_tokens,
                 total_usage.reasoning_tokens + turn.usage.reasoning_tokens,
             )
+            if turn.reasoning_summary:
+                summary_parts.append(turn.reasoning_summary)
             trace.emit(
                 TraceStage.MODEL,
                 "turn_complete",
@@ -2927,6 +2969,11 @@ class BetaAssistantService:
                 },
             )
             if turn.response_text is not None:
+                # `response_text` is the answer and only the answer. The
+                # reasoning summary travels in its own field and is never
+                # concatenated into it, which is what keeps the spoken
+                # answer free of it: speech reads the stored assistant
+                # message, and the stored message is this string.
                 return ServiceResponse(
                     trace.trace_id,
                     trace.request_id,
@@ -2942,6 +2989,13 @@ class BetaAssistantService:
                         "tool_calls": tool_calls,
                     },
                     stopping_reason=turn.stopping_reason,
+                    cloud_used=True,
+                    routing_mode=decision.mode,
+                    routing_tier=decision.tier_name,
+                    routing_reason_codes=decision.reason_codes,
+                    estimated_complexity=decision.estimated_complexity,
+                    tier_escalated=False,
+                    reasoning_summary=bounded_summary(summary_parts),
                 )
             if turn.tool_request is None:
                 return self._cloud_failure(
@@ -3167,34 +3221,45 @@ class BetaAssistantService:
         diagnostic: DiagnosticRequest | None,
         override: RouteOverride,
     ) -> dict[str, object]:
-        return {
-            "deterministic_route_matched": route.matched,
-            "complete_required_slots": route.matched and not route.missing_arguments,
-            "missing_required_arguments": list(route.missing_arguments),
-            "single_operation": len(
-                [word for word in (" and ", " also ", " then ") if word in text]
-            )
-            == 0,
-            "historical_data_required": any(
-                word in text for word in ("history", "trend", "yesterday", "baseline")
-            ),
-            "comparison_or_aggregation": route.aggregate
-            or any(
-                word in text
-                for word in ("compare", "most", "highest", "average", "mean")
-            ),
-            "diagnostic_domain_recognized": diagnostic is not None,
-            "open_ended_causal_request": any(
-                word in text
-                for word in ("why", "might", "causing", "caused", "affected")
-            ),
-            "external_general_knowledge_required": diagnostic is None
-            and not route.matched
-            and len(text.split()) > 4,
-            "admin_override": override.value
+        """One classification per request, shared by the trace and the router.
+
+        There is deliberately no second classifier: adaptive tier selection
+        reads exactly the dictionary that the ``complexity`` trace stage
+        records, so the reasons shown for a decision are the reasons that
+        produced it.
+        """
+
+        return classify_complexity(
+            text,
+            route_matched=route.matched,
+            aggregate=route.aggregate,
+            missing_arguments=route.missing_arguments,
+            diagnostic_recognized=diagnostic is not None,
+            admin_override=override.value
             if override is not RouteOverride.AUTO
             else None,
-        }
+        )
+
+    def _chat_routing_decision(
+        self, features: dict[str, object], effective_chat: ChatSettings
+    ) -> CloudRoutingDecision:
+        """The model and effort for one ordinary Chat cloud request.
+
+        Fixed mode - which is what every configuration saved before this
+        feature resolves to - returns the administrator's exact saved pair,
+        so adopting this release changes nothing until Adaptive is chosen.
+        """
+
+        if not effective_chat.adaptive:
+            return self.cloud_router.fixed(
+                effective_chat.model,
+                effective_chat.reasoning_effort or "high",
+            )
+        return self.cloud_router.select(
+            features,
+            max_automatic_tier=effective_chat.effective_max_automatic_tier,
+            fallback_effort=effective_chat.reasoning_effort or "high",
+        )
 
     def _relevant_skill_tools(
         self, text: str, administrator: bool = False
@@ -3395,6 +3460,29 @@ class BetaAssistantService:
 
         effective = self.ai.effective.chat
         return effective if effective.model == model else None
+
+    def _reasoning_summary_mode(self, model: str) -> str | None:
+        """`reasoning.summary` for this request, or None to omit the field.
+
+        This is a Butters display preference rather than a per-model tuning
+        control, so it survives adaptive tier selection choosing a model other
+        than the saved one - but only if the *selected* model declares the
+        capability. Asking a model for something it does not support is the
+        mismatch the capability registry exists to prevent.
+
+        Butters requests a provider-generated *summary*. It never asks any
+        model to reveal its private chain-of-thought.
+        """
+
+        if not self.ai.effective.chat.reasoning_summary_enabled:
+            return None
+        try:
+            capability = self.ai_registry.chat_model(
+                self.settings.cloud.provider, model
+            )
+        except CapabilityError:
+            return None
+        return "auto" if capability.supports_reasoning_summary else None
 
     # ------------------- effective AI/TTS provider wiring -------------------
     #

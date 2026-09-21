@@ -21,6 +21,12 @@ from butters.ai.capabilities import (
     CapabilityError,
     CapabilityRegistry,
 )
+from butters.cloud.adaptive import (
+    DEFAULT_MAX_AUTOMATIC_TIER,
+    DEFAULT_ROUTING_MODE,
+    ROUTING_MODES,
+    TIER_MODELS,
+)
 
 MAX_INSTRUCTIONS_CHARS = 1000
 
@@ -39,9 +45,33 @@ class ChatSettings:
     max_tool_calls: int | None = None
     store_responses: bool | None = None
     prompt_cache_enabled: bool | None = None
+    # How the per-request cloud model and effort are chosen. Unset means this
+    # profile was written before adaptive routing existed, and an unset
+    # profile keeps behaving exactly as it did: fixed.
+    routing_mode: str | None = None
+    # The strongest model adaptive mode may reach on its own. Unset means the
+    # whole reviewed ladder; the MAXIMUM rung stays separately gated by
+    # `cloud.allow_automatic_maximum`.
+    max_automatic_tier: str | None = None
+    # Whether to ask the provider for a summary of its own reasoning and show
+    # it. Display and request behaviour only - it never changes effort, and
+    # it never reaches the spoken answer.
+    reasoning_summary_enabled: bool | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
+
+    @property
+    def effective_routing_mode(self) -> str:
+        return self.routing_mode or DEFAULT_ROUTING_MODE
+
+    @property
+    def effective_max_automatic_tier(self) -> str:
+        return self.max_automatic_tier or DEFAULT_MAX_AUTOMATIC_TIER
+
+    @property
+    def adaptive(self) -> bool:
+        return self.effective_routing_mode == "adaptive"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +164,20 @@ def validate_chat(
     if prompt_cache is not None:
         _require(model.supports_prompt_cache_key, "prompt_cache_enabled", model.id)
 
+    routing_mode = _optional_string(payload, "routing_mode")
+    if routing_mode is not None and routing_mode not in ROUTING_MODES:
+        raise CapabilityError("invalid_routing_mode", "routing mode is not allow-listed")
+
+    max_tier = _optional_string(payload, "max_automatic_tier")
+    if max_tier is not None and max_tier not in TIER_MODELS:
+        raise CapabilityError(
+            "invalid_max_automatic_tier", "maximum automatic tier is not allow-listed"
+        )
+
+    reasoning_summary = _optional_bool(payload, "reasoning_summary_enabled")
+    if reasoning_summary:
+        _require(model.supports_reasoning_summary, "reasoning_summary", model.id)
+
     return ChatSettings(
         provider.id,
         model.id,
@@ -147,6 +191,9 @@ def validate_chat(
         tool_calls,
         store_responses,
         prompt_cache,
+        routing_mode,
+        max_tier,
+        reasoning_summary,
     )
 
 
@@ -263,6 +310,8 @@ def clear_unsupported(
         changes["store_responses"] = None
     if not model.supports_prompt_cache_key:
         changes["prompt_cache_enabled"] = None
+    if not model.supports_reasoning_summary:
+        changes["reasoning_summary_enabled"] = None
     return replace(settings, **changes) if changes else settings
 
 

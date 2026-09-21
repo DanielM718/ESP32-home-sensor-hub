@@ -491,8 +491,8 @@ function renderEffectiveHeadlines() {
   // SAVED and EFFECTIVE are separate server fields and are reported
   // separately. A saved row is never announced as a running configuration.
   if(chatNode) chatNode.textContent = aiState.in_sync.chat
-    ? `Effective: ${chat.provider} · ${chat.model}${chat.reasoning_effort?` · ${chat.reasoning_effort}`:""}`
-    : `Saved configuration is not active. Still running ${chat.provider} · ${chat.model}.`;
+    ? `Effective: ${chat.provider} · ${effectiveChatSummary(chat)}`
+    : `Saved configuration is not active. Still running ${chat.provider} · ${effectiveChatSummary(chat)}.`;
   if(ttsNode) ttsNode.textContent = aiState.in_sync.speech
     ? `Effective: ${speech.provider} · ${speech.model} · ${speech.voice}`
     : `Saved configuration is not active. Still speaking with ${speech.model} · ${speech.voice}.`;
@@ -501,6 +501,16 @@ function renderEffectiveHeadlines() {
     if(chatNode && !aiState.in_sync.chat) chatNode.textContent = message;
     if(ttsNode && !aiState.in_sync.speech) ttsNode.textContent = message;
   }
+}
+
+/* In Adaptive mode the saved model and effort are not what any individual
+ * request uses, so reporting them as the effective pair would be untrue.
+ * The headline reports the mechanism that is actually in force instead. */
+function effectiveChatSummary(chat) {
+  if(chat.routing_mode === "adaptive") {
+    return `adaptive routing · ceiling ${chat.max_automatic_tier || "sol"}`;
+  }
+  return `${chat.model}${chat.reasoning_effort?` · ${chat.reasoning_effort}`:""} · fixed routing`;
 }
 
 /* ---------- Butters Chat model ---------- */
@@ -512,7 +522,46 @@ function renderChatForm() {
   if(!providerSelect) return;
   providerSelect.replaceChildren(...providers.map(item => option(item.id, item.label)));
   providerSelect.value = providerById(providers, saved.provider).id;
+  renderChatRouting(saved);
   renderChatModels(saved);
+}
+
+/* Routing mode governs what the Model and Reasoning effort controls mean, so
+ * it is rendered first and says plainly which of the two it is. A profile
+ * saved before adaptive routing existed reports no mode at all; that is
+ * Fixed, and it is shown as Fixed rather than quietly upgraded. */
+const ROUTING_LABELS = {
+  adaptive: "Adaptive — selected per request",
+  fixed: "Fixed — one model and effort for every request",
+};
+const TIER_LABELS = {luna: "Luna (light)", terra: "Terra (balanced / analysis)", sol: "Sol (deep / maximum)"};
+
+function renderChatRouting(saved) {
+  const modes = aiCatalog.routing_modes || ["adaptive", "fixed"];
+  const mode = document.querySelector("#chat-routing-mode");
+  if(!mode) return;
+  mode.replaceChildren(...modes.map(value => option(value, ROUTING_LABELS[value] || value)));
+  mode.value = saved && saved.routing_mode ? saved.routing_mode : "fixed";
+
+  const tiers = aiCatalog.automatic_tiers || ["luna", "terra", "sol"];
+  const tier = document.querySelector("#chat-max-tier");
+  tier.replaceChildren(...tiers.map(value => option(value, TIER_LABELS[value] || value)));
+  tier.value = saved && saved.max_automatic_tier ? saved.max_automatic_tier : "sol";
+
+  document.querySelector("#chat-summary").checked = Boolean(saved && saved.reasoning_summary_enabled);
+  applyRoutingMode();
+}
+
+function applyRoutingMode() {
+  const adaptive = document.querySelector("#chat-routing-mode").value === "adaptive";
+  show(document.querySelector("#chat-max-tier-field"), adaptive);
+  const note = document.querySelector("#chat-routing-note");
+  // The fixed controls are never removed — they stay available for
+  // debugging, benchmarks and a temporary operator preference — but in
+  // Adaptive mode this says outright that they are not what picks the model.
+  note.textContent = adaptive
+    ? `Model and reasoning effort are selected per request from local complexity, up to the maximum automatic tier. The Model and Reasoning effort controls below are the saved fixed profile and are not the per-request selector in this mode. Maximum reasoning remains separately gated by the reviewed automatic-maximum policy.`
+    : `Every cloud request uses exactly the model and reasoning effort selected below.`;
 }
 
 function renderChatModels(saved) {
@@ -571,6 +620,7 @@ function renderChatCapabilities(saved) {
   show(document.querySelector("#chat-store-field"), supports.store);
   document.querySelector("#chat-cache").checked = Boolean(saved && saved.prompt_cache_enabled);
   show(document.querySelector("#chat-cache-field"), supports.prompt_cache_key);
+  show(document.querySelector("#chat-summary-field"), supports.reasoning_summary !== false);
 }
 
 function numberOrNull(selector) {
@@ -604,6 +654,9 @@ function chatBody() {
     parallel_tool_calls: checkedOrNull("#chat-parallel", supports.parallel_tool_calls),
     store_responses: checkedOrNull("#chat-store", supports.store),
     prompt_cache_enabled: checkedOrNull("#chat-cache", supports.prompt_cache_key),
+    routing_mode: textOrNull("#chat-routing-mode"),
+    max_automatic_tier: textOrNull("#chat-max-tier"),
+    reasoning_summary_enabled: checkedOrNull("#chat-summary", supports.reasoning_summary !== false),
   };
 }
 
@@ -761,6 +814,7 @@ async function removeCredential() {
 
 /* ---------- wiring ---------- */
 
+document.querySelector("#chat-routing-mode").addEventListener("change", applyRoutingMode);
 document.querySelector("#chat-provider").addEventListener("change", () => renderChatModels(aiState.saved.chat));
 document.querySelector("#chat-model").addEventListener("change", () => renderChatCapabilities(
   aiState.saved.chat.model === document.querySelector("#chat-model").value ? aiState.saved.chat : null));

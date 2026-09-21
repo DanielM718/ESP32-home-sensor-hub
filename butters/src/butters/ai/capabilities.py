@@ -22,6 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from butters.assistant_config import AssistantSettings
+from butters.cloud.adaptive import ROUTING_MODES, TIER_MODELS
 
 
 class CapabilityError(ValueError):
@@ -43,6 +44,9 @@ REASONING_EFFORTS: tuple[str, ...] = (
     "max",
 )
 VERBOSITY_LEVELS: tuple[str, ...] = ("low", "medium", "high")
+# Provider-generated reasoning *summaries*, never raw chain-of-thought. These
+# are the values the OpenAI Responses API documents for `reasoning.summary`.
+REASONING_SUMMARY_MODES: tuple[str, ...] = ("auto", "concise", "detailed")
 TRUNCATION_MODES: tuple[str, ...] = ("auto", "disabled")
 
 # Display names for the reviewed cloud model identifiers. A model that reaches
@@ -89,6 +93,10 @@ class ChatModel:
     supports_max_tool_calls: bool = True
     supports_store: bool = True
     supports_prompt_cache_key: bool = True
+    # A reasoning model can be asked for a summary of its own reasoning. This
+    # is a distinct capability from reasoning *effort*: effort changes how
+    # much the model thinks, the summary only asks it to describe that.
+    supports_reasoning_summary: bool = True
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -105,6 +113,7 @@ class ChatModel:
                 "max_tool_calls": self.supports_max_tool_calls,
                 "store": self.supports_store,
                 "prompt_cache_key": self.supports_prompt_cache_key,
+                "reasoning_summary": self.supports_reasoning_summary,
             },
             "reasoning_efforts": list(self.reasoning_efforts),
         }
@@ -325,6 +334,8 @@ class CapabilityRegistry:
             "max_output_tokens": self.max_output_tokens,
             "reasoning_efforts": list(REASONING_EFFORTS),
             "verbosity_levels": list(VERBOSITY_LEVELS),
+            "routing_modes": list(ROUTING_MODES),
+            "automatic_tiers": list(TIER_MODELS),
             "truncation_modes": list(TRUNCATION_MODES),
             "chat_providers": [item.as_dict() for item in self.chat_providers()],
             "speech_providers": [item.as_dict() for item in self.speech_providers()],
