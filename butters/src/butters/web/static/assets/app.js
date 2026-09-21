@@ -8,6 +8,15 @@ const micButton = document.querySelector("#mic-button");
 const sendButton = document.querySelector("#send-button");
 const partial = document.querySelector("#partial");
 const clearButton = document.querySelector("#clear-button");
+const historyButton = document.querySelector("#history-button");
+const historyDrawer = document.querySelector("#history-drawer");
+const historyBackdrop = document.querySelector("#history-backdrop");
+const historyClose = document.querySelector("#history-close");
+const historyNew = document.querySelector("#history-new");
+const historyList = document.querySelector("#history-list");
+const historyStatus = document.querySelector("#history-status");
+const historyRetention = document.querySelector("#history-retention");
+const historyDeleteAll = document.querySelector("#history-delete-all");
 const stopAudio = document.querySelector("#stop-audio");
 const voiceOutputToggle = document.querySelector("#voice-output-toggle");
 const authButton = document.querySelector("#auth-button");
@@ -67,6 +76,10 @@ let activeJob = null;
 let authExpiry = 0;
 let sessionReady = false;
 let renewing = null;
+// Which stored conversation this page is writing to. The server owns the
+// value; this copy only decides which row the drawer marks as current.
+let activeConversationId = null;
+let retentionDays = 30;
 // Every abortable request this generation owns. Retiring a generation aborts
 // what can be aborted; whatever cannot is suppressed by the isCurrentTurn
 // guard at each mutation site instead.
@@ -431,9 +444,14 @@ async function initialize() {
     if (Number.isSafeInteger(serverGeneration) && serverGeneration >= 0) {
       currentTurn = Math.max(currentTurn, serverGeneration);
     }
+    applyConversationState(data);
     if (Array.isArray(data.messages) && data.messages.length) {
       conversation.replaceChildren();
-      for (const message of data.messages) addMessage(message.role, message.text);
+      // `message.metadata` is the stored routing block, so a reloaded answer
+      // gets the same provenance line and reasoning summary a fresh one does.
+      for (const message of data.messages) {
+        addMessage(message.role, message.text, message.metadata);
+      }
     }
     setSessionReady(true);
     setState("Ready", "idle");
@@ -545,6 +563,10 @@ async function sendText(text) {
         // A result that outlived its generation is discarded, never rendered.
         if (!isCurrentTurn(turn)) return noteClientStop(CLIENT_STOP.SUPPRESSED);
         addMessage("assistant", data.response_text, data);
+        if (typeof data.conversation_id === "string") {
+          activeConversationId = data.conversation_id;
+          if (!historyDrawer.hidden) refreshHistory();
+        }
         traceId = typeof data.trace_id === "string" ? data.trace_id : null;
         if (data.pending_action && typeof data.pending_action === "object") {
           showPendingAction(data.pending_action);
@@ -947,25 +969,31 @@ form.addEventListener("submit", event => {
 // every mutation site suppresses whatever could not be aborted. A backend turn
 // that already started may still finish server-side, so this reports only what
 // the browser actually did.
-async function clearConversation() {
+//
+// This is "New chat", not "erase": the conversation that was open stays in
+// the saved list, and the server simply detaches this session from it. The
+// only way to destroy a transcript is the delete control in the drawer.
+async function startNewChat() {
   const turn = beginTurn();
   noteClientStop(CLIENT_STOP.SUPPRESSED);
   stopPlayback();
   cleanupVoice();
   setPending(false);
   conversation.replaceChildren();
-  setState("Clearing", "processing");
+  setState("Starting", "processing");
   const controller = new AbortController();
   generationWork.clear = controller;
   try {
     if (!(await awaitPendingRenewal(turn))) throw new Error();
-    const response = await fetch("/api/session/conversation", {
-      method: "DELETE",
+    const response = await fetch("/api/chat/conversations", {
+      method: "POST",
       credentials: "same-origin",
       headers: {
+        "Content-Type": "application/json",
         "X-Butters-CSRF": csrf,
         "X-Butters-Generation": String(turn),
       },
+      body: "{}",
       signal: controller.signal,
     });
     if (generationWork.clear === controller) generationWork.clear = null;
@@ -974,19 +1002,237 @@ async function clearConversation() {
     if (typeof data.csrf_token !== "string" || !data.csrf_token) throw new Error();
     if (!isCurrentTurn(turn)) return;
     csrf = data.csrf_token;
-    addMessage("assistant", "Conversation cleared.");
+    activeConversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
+    addMessage("assistant", "New chat. The previous one is in Chats.");
     setState("Ready", "idle");
+    if (!historyDrawer.hidden) refreshHistory();
   } catch (_) {
     if (!isCurrentTurn(turn)) return;
     // The browser side is already terminated and idle; only the server-side
-    // clear is unconfirmed, so the composer stays usable.
-    setState("Could not clear", "error");
+    // detach is unconfirmed, so the composer stays usable.
+    setState("Could not start a new chat", "error");
   } finally {
     if (generationWork.clear === controller) generationWork.clear = null;
   }
 }
 
-clearButton.addEventListener("click", clearConversation);
+/* ===================== saved conversations ==============================
+ *
+ * The drawer lists what the server says this identity owns. It never sends
+ * an owner: every route below is answered for whoever the browser session
+ * already is, and a conversation belonging to somebody else comes back as
+ * "not found" exactly as a nonexistent one does.
+ *
+ * Nothing here touches innerHTML. Titles and timestamps are server strings
+ * derived from the person's own messages, and they are set with textContent.
+ */
+
+/* Two endpoints report which conversation is open under two names: the
+ * session calls it `conversation_id`, the history list calls it
+ * `active_conversation_id`. Both are the same server-owned fact, and a
+ * payload that carries neither leaves the current value alone rather than
+ * silently clearing the highlight. */
+function applyConversationState(data) {
+  if (!data || typeof data !== "object") return;
+  for (const key of ["conversation_id", "active_conversation_id"]) {
+    if (key in data) {
+      activeConversationId = typeof data[key] === "string" ? data[key] : null;
+      break;
+    }
+  }
+  const days = Number(data.retention_days);
+  if (Number.isSafeInteger(days) && days > 0) {
+    retentionDays = days;
+    historyRetention.textContent = `Chats are kept for ${days} ${days === 1 ? "day" : "days"}.`;
+  }
+}
+
+function setHistoryStatus(text) {
+  historyStatus.textContent = text;
+  historyStatus.hidden = !text;
+}
+
+/* A recency label, not a precise timestamp: the drawer answers "which chat
+ * was I in", and an exact clock reading would be noise at that size. */
+function describeWhen(seconds) {
+  const value = Number(seconds);
+  if (!Number.isFinite(value) || value <= 0) return "";
+  const when = new Date(value * 1000);
+  const elapsed = Date.now() - when.getTime();
+  if (elapsed < 60000) return "Just now";
+  if (elapsed < 3600000) return `${Math.floor(elapsed / 60000)} min ago`;
+  if (elapsed < 86400000) return `${Math.floor(elapsed / 3600000)} h ago`;
+  if (elapsed < 172800000) return "Yesterday";
+  try {
+    return when.toLocaleDateString(undefined, {month: "short", day: "numeric"});
+  } catch (_) {
+    return `${Math.floor(elapsed / 86400000)} days ago`;
+  }
+}
+
+function historyRow(item) {
+  const row = document.createElement("li");
+  row.className = "history-item";
+  const current = item.conversation_id === activeConversationId;
+  row.setAttribute("aria-current", current ? "true" : "false");
+
+  const open = document.createElement("button");
+  open.type = "button";
+  open.className = "history-open";
+  const title = document.createElement("span");
+  title.className = "history-title";
+  title.textContent = typeof item.title === "string" && item.title ? item.title : "New chat";
+  const when = document.createElement("span");
+  when.className = "history-when";
+  const count = Number(item.message_count) || 0;
+  const recency = describeWhen(item.updated_at);
+  when.textContent = [recency, `${count} ${count === 1 ? "message" : "messages"}`]
+    .filter(Boolean)
+    .join(" · ");
+  open.append(title, when);
+  open.addEventListener("click", () => openConversation(item.conversation_id));
+
+  // Two taps to destroy something, with the second one labelled for what it
+  // does. A native dialog would be a heavier interruption for one chat.
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "history-delete";
+  remove.textContent = "Delete";
+  remove.setAttribute("aria-label", `Delete chat: ${title.textContent}`);
+  remove.addEventListener("click", () => {
+    if (remove.dataset.confirming === "true") {
+      deleteConversation(item.conversation_id);
+      return;
+    }
+    resetHistoryConfirmations();
+    remove.dataset.confirming = "true";
+    remove.textContent = "Confirm";
+    remove.setAttribute("aria-label", `Confirm deleting chat: ${title.textContent}`);
+  });
+
+  row.append(open, remove);
+  return row;
+}
+
+function resetHistoryConfirmations() {
+  for (const button of historyList.querySelectorAll('.history-delete[data-confirming="true"]')) {
+    delete button.dataset.confirming;
+    button.textContent = "Delete";
+  }
+  if (historyDeleteAll.dataset.confirming === "true") {
+    delete historyDeleteAll.dataset.confirming;
+    historyDeleteAll.textContent = "Delete all history";
+  }
+}
+
+function renderHistory(data) {
+  applyConversationState(data);
+  const items = Array.isArray(data.conversations) ? data.conversations : [];
+  historyList.replaceChildren(...items.map(historyRow));
+  setHistoryStatus(items.length ? "" : "No saved chats yet.");
+}
+
+async function refreshHistory() {
+  try {
+    renderHistory(await api("/api/chat/conversations"));
+  } catch (_) {
+    historyList.replaceChildren();
+    setHistoryStatus("Could not load saved chats.");
+  }
+}
+
+function setHistoryOpen(open) {
+  historyDrawer.hidden = !open;
+  historyBackdrop.hidden = !open;
+  historyButton.setAttribute("aria-expanded", open ? "true" : "false");
+  if (!open) {
+    resetHistoryConfirmations();
+    historyButton.focus();
+    return;
+  }
+  refreshHistory();
+  historyClose.focus();
+}
+
+async function openConversation(conversationId) {
+  if (typeof conversationId !== "string" || !conversationId) return;
+  const turn = beginTurn();
+  stopPlayback();
+  cleanupVoice();
+  setPending(false);
+  setState("Opening", "processing");
+  try {
+    if (!(await awaitPendingRenewal(turn))) throw new Error();
+    const data = await api(`/api/chat/conversations/${encodeURIComponent(conversationId)}/open`, {
+      method: "POST",
+      headers: {"X-Butters-Generation": String(turn)},
+      body: JSON.stringify({}),
+    });
+    if (!isCurrentTurn(turn)) return;
+    activeConversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
+    const messages = Array.isArray(data.messages) ? data.messages : [];
+    conversation.replaceChildren();
+    // Stored canonical Markdown, rendered now by the same sanitizing path a
+    // live answer takes. No stored HTML is injected anywhere.
+    for (const message of messages) addMessage(message.role, message.text, message.metadata);
+    setHistoryOpen(false);
+    setState("Ready", "idle");
+  } catch (_) {
+    if (!isCurrentTurn(turn)) return;
+    setHistoryStatus("Could not open that chat.");
+    setState("Could not open chat", "error");
+  }
+}
+
+async function deleteConversation(conversationId) {
+  if (typeof conversationId !== "string" || !conversationId) return;
+  try {
+    const data = await api(`/api/chat/conversations/${encodeURIComponent(conversationId)}`, {
+      method: "DELETE",
+    });
+    if (conversationId === activeConversationId) {
+      activeConversationId = typeof data.conversation_id === "string" ? data.conversation_id : null;
+      conversation.replaceChildren();
+      addMessage("assistant", "That chat was deleted. This is a new chat.");
+    }
+    await refreshHistory();
+  } catch (_) {
+    setHistoryStatus("Could not delete that chat.");
+  }
+}
+
+async function deleteAllHistory() {
+  if (historyDeleteAll.dataset.confirming !== "true") {
+    resetHistoryConfirmations();
+    historyDeleteAll.dataset.confirming = "true";
+    historyDeleteAll.textContent = "Delete everything?";
+    return;
+  }
+  resetHistoryConfirmations();
+  try {
+    await api("/api/chat/conversations", {method: "DELETE"});
+    activeConversationId = null;
+    conversation.replaceChildren();
+    addMessage("assistant", "Your chat history was deleted. This is a new chat.");
+    await refreshHistory();
+  } catch (_) {
+    setHistoryStatus("Could not delete your chat history.");
+  }
+}
+
+historyButton.addEventListener("click", () => setHistoryOpen(historyDrawer.hidden));
+historyClose.addEventListener("click", () => setHistoryOpen(false));
+historyBackdrop.addEventListener("click", () => setHistoryOpen(false));
+historyDeleteAll.addEventListener("click", deleteAllHistory);
+historyNew.addEventListener("click", () => {
+  setHistoryOpen(false);
+  startNewChat();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !historyDrawer.hidden) setHistoryOpen(false);
+});
+
+clearButton.addEventListener("click", startNewChat);
 
 stopAudio.addEventListener("click", stopPlayback);
 voiceOutputToggle.addEventListener("click", () => {

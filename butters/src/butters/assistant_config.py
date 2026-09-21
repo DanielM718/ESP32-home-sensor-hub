@@ -425,6 +425,11 @@ class WebSettings:
     trace_capacity: int = 256
     trace_ttl_seconds: float = 900.0
     clarification_timeout_seconds: float = 30.0
+    # Rolling Chat-history retention. Transcripts are kept this many days
+    # after their last message and are then purged, messages included.
+    # A transcript store with no expiry is a transcript store that keeps
+    # everything forever, which is not what a home assistant should do.
+    chat_history_retention_days: int = 30
 
     def validated(self) -> WebSettings:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
@@ -463,6 +468,8 @@ class WebSettings:
             raise ConfigError("web.trace_ttl_seconds must be 60 to 86400")
         if not 5 <= self.clarification_timeout_seconds <= 300:
             raise ConfigError("web.clarification_timeout_seconds must be 5 to 300")
+        if not 1 <= self.chat_history_retention_days <= 365:
+            raise ConfigError("web.chat_history_retention_days must be 1 to 365")
         return self
 
     @property
@@ -863,6 +870,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         trace_ttl_seconds=float(web_table.get("trace_ttl_seconds", 900.0)),
         clarification_timeout_seconds=float(
             web_table.get("clarification_timeout_seconds", 30.0)
+        ),
+        chat_history_retention_days=int(
+            web_table.get("chat_history_retention_days", 30)
         ),
     ).validated()
 

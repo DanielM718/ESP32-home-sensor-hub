@@ -203,6 +203,10 @@ trace_capacity = 256
 # Traces quote conversation text, so they expire by time as well as by count.
 trace_ttl_seconds = 900.0
 clarification_timeout_seconds = 30.0
+# Durable Chat history is kept this many days after a conversation's last
+# message, then purged along with its messages. Viewing a conversation does
+# not extend it.
+chat_history_retention_days = 30
 
 [browser_audio]
 max_utterance_seconds = 30.0

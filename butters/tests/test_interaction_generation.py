@@ -90,7 +90,13 @@ def test_http_clear_preserves_csrf_and_reports_the_server_generation(
                     },
                 )
                 assert cleared.status_code == 200
-                assert cleared.json() == {"status": "cleared", "csrf_token": csrf}
+                assert cleared.json() == {
+                    "status": "cleared",
+                    "csrf_token": csrf,
+                    # Clear is now "new chat": it detaches from the stored
+                    # conversation rather than destroying it.
+                    "conversation_id": None,
+                }
 
                 answered = await http.post(
                     "/api/chat",

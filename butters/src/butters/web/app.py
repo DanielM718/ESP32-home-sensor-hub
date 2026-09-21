@@ -37,6 +37,7 @@ from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
 from butters.remediation.skill_builder import SkillAuthoringError
 from butters.stt.normalization import DomainVocabulary, load_domain_vocabulary
 from butters.web.audio import BrowserAudioError, BrowserAudioStream
+from butters.web.chat_history import ChatHistoryError, valid_conversation_id
 from butters.web.locality import LocalityClassifier
 from butters.web.portal import PortalError, PortalService
 from butters.web.security import AuthPolicy, RateLimiter, SecurityError
@@ -53,6 +54,10 @@ STATIC_ROOT = WEB_ROOT / "static"
 # stay outside the mount so /admin cannot be fetched anonymously.
 ASSET_ROOT = STATIC_ROOT / "assets"
 SESSION_COOKIE = "butters_session"
+# Which stored conversation this browser had open. A pointer, not an
+# authorization: it survives a `butters-web` restart, and the server re-checks
+# that the authenticated identity owns whatever it names before binding it.
+CHAT_COOKIE = "butters_chat"
 
 
 class SecurityHeadersMiddleware:
@@ -369,20 +374,25 @@ def create_app(
                 )
             else:
                 _require_session_peer(request, existing, auth)
+            # A fresh session after a reload, an expiry or a `butters-web`
+            # restart re-adopts the conversation the browser had open, but
+            # only after the store confirms this identity owns it. A forged
+            # or stale pointer simply does not bind.
+            await run_blocking(
+                runtime.rebind_conversation,
+                existing,
+                request.cookies.get(CHAT_COOKIE),
+            )
+            messages = await run_blocking(_session_messages, runtime, existing)
             response = JSONResponse(
                 {
                     "session": "ready",
                     "csrf_token": existing.csrf_token,
                     "interaction_generation": existing.interaction_generation,
                     "voice_disclosure": runtime.voice_disclosure(),
-                    "messages": [
-                        {
-                            "role": item.role,
-                            "text": item.text,
-                            "trace_id": item.trace_id,
-                        }
-                        for item in existing.messages
-                    ],
+                    "conversation_id": existing.conversation_id,
+                    "retention_days": runtime.chat_history.retention_days,
+                    "messages": messages,
                 }
             )
             response.set_cookie(
@@ -394,6 +404,7 @@ def create_app(
                 samesite="strict",
                 path="/",
             )
+            _set_chat_pointer(response, existing.conversation_id, configured)
             return response
         except (SecurityError, SessionError, ValueError) as exc:
             return _exception_response(exc)
@@ -411,12 +422,119 @@ def create_app(
                 session,
                 interaction_generation=generation,
             )
-            return JSONResponse(
+            response = JSONResponse(
                 {
                     "status": "cleared" if cleared else "superseded",
                     "csrf_token": session.csrf_token,
+                    "conversation_id": session.conversation_id,
                 }
             )
+            # Clearing now detaches from the stored conversation rather than
+            # destroying it, so the pointer has to be released too.
+            _set_chat_pointer(response, session.conversation_id, configured)
+            return response
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    # ----- durable Chat history ------------------------------------------
+    #
+    # Every route below reads its owner from the browser session the server
+    # issued, never from the request. `_bound_session` already refuses a
+    # session whose creating identity is not the one calling now, so a stolen
+    # or guessed conversation id has no identity to be paired with.
+
+    async def chat_conversations(request: Request) -> Response:
+        try:
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(
+                await run_blocking(runtime.chat_conversations, session)
+            )
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def new_chat_conversation(request: Request) -> Response:
+        """Start a clean conversation. Nothing stored is deleted."""
+
+        try:
+            session = _mutation_session(request, runtime, auth)
+            generation = _interaction_generation(
+                request.headers.get("x-butters-generation")
+            )
+            started = await run_blocking(
+                runtime.new_conversation,
+                session,
+                interaction_generation=generation,
+            )
+            response = JSONResponse(
+                {
+                    "status": "started" if started else "superseded",
+                    "conversation_id": session.conversation_id,
+                    "csrf_token": session.csrf_token,
+                }
+            )
+            _set_chat_pointer(response, session.conversation_id, configured)
+            return response
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def chat_conversation(request: Request) -> Response:
+        """Read one stored transcript without changing anything."""
+
+        try:
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(
+                await run_blocking(
+                    runtime.read_conversation,
+                    session,
+                    _conversation_id(request),
+                )
+            )
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def open_chat_conversation(request: Request) -> Response:
+        """Reopen a stored transcript and continue it in this session."""
+
+        try:
+            session = _mutation_session(request, runtime, auth)
+            generation = _interaction_generation(
+                request.headers.get("x-butters-generation")
+            )
+            found = await run_blocking(
+                runtime.open_conversation,
+                session,
+                _conversation_id(request),
+                interaction_generation=generation,
+            )
+            response = JSONResponse(found)
+            _set_chat_pointer(response, session.conversation_id, configured)
+            return response
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def delete_chat_conversation(request: Request) -> Response:
+        try:
+            session = _mutation_session(request, runtime, auth)
+            await run_blocking(
+                runtime.delete_conversation, session, _conversation_id(request)
+            )
+            response = JSONResponse(
+                {"status": "deleted", "conversation_id": session.conversation_id}
+            )
+            _set_chat_pointer(response, session.conversation_id, configured)
+            return response
+        except (SecurityError, SessionError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def delete_chat_history(request: Request) -> Response:
+        """Delete this identity's whole Chat history, and nothing else."""
+
+        try:
+            session = _mutation_session(request, runtime, auth)
+            removed = await run_blocking(runtime.delete_all_conversations, session)
+            response = JSONResponse({"status": "deleted", "deleted": removed})
+            _set_chat_pointer(response, None, configured)
+            return response
         except (SecurityError, SessionError, ValueError) as exc:
             return _exception_response(exc)
 
@@ -448,7 +566,14 @@ def create_app(
                 text,
                 interaction_generation=generation,
             )
-            return JSONResponse(result.as_dict())
+            # The conversation identifier is session state, not part of the
+            # answer, so it is attached here rather than added to
+            # ServiceResponse - nothing about it reaches the model or TTS.
+            response = JSONResponse(
+                {**result.as_dict(), "conversation_id": session.conversation_id}
+            )
+            _set_chat_pointer(response, session.conversation_id, configured)
+            return response
         except (SecurityError, SessionError, ValueError, PermissionError) as exc:
             return _exception_response(exc)
 
@@ -2400,6 +2525,20 @@ def create_app(
         Route("/api/session", session_endpoint),
         Route("/api/session/conversation", clear_session, methods=["DELETE"]),
         Route("/api/chat", chat, methods=["POST"]),
+        Route("/api/chat/conversations", chat_conversations),
+        Route("/api/chat/conversations", new_chat_conversation, methods=["POST"]),
+        Route("/api/chat/conversations", delete_chat_history, methods=["DELETE"]),
+        Route("/api/chat/conversations/{conversation_id}", chat_conversation),
+        Route(
+            "/api/chat/conversations/{conversation_id}",
+            delete_chat_conversation,
+            methods=["DELETE"],
+        ),
+        Route(
+            "/api/chat/conversations/{conversation_id}/open",
+            open_chat_conversation,
+            methods=["POST"],
+        ),
         Route("/api/planner", conversational_plan, methods=["POST"]),
         Route("/api/speech", speech, methods=["POST"]),
         Route("/api/auth/status", auth_status),
@@ -2725,6 +2864,87 @@ def _audio_seconds_header(value: float | None, digits: int) -> str:
     return "unknown" if value is None else str(round(value, digits))
 
 
+def _conversation_id(request: Request) -> str:
+    """The conversation named by the path, shape-checked before any query.
+
+    A malformed identifier is refused with the same "not found" that an
+    unowned one gets, so the two cases are indistinguishable from outside.
+    """
+
+    value = request.path_params.get("conversation_id")
+    if not valid_conversation_id(value):
+        raise ChatHistoryError("conversation_not_found", "conversation was not found")
+    return str(value)
+
+
+def _session_messages(
+    runtime: BetaAssistantService, session: BrowserSession
+) -> list[dict[str, object]]:
+    """The conversation to paint on load.
+
+    When the session is attached to a stored conversation the transcript is
+    read from the store, so a reload restores the routing metadata and the
+    reasoning summary that the in-memory buffer never carried. Otherwise the
+    in-memory working set is used, exactly as before.
+    """
+
+    if session.conversation_id is not None:
+        try:
+            found = runtime.read_conversation(session, session.conversation_id)
+        except ChatHistoryError:
+            found = None
+        if found is not None:
+            messages = found["messages"]
+            assert isinstance(messages, list)
+            return [
+                {
+                    "role": item["role"],
+                    "text": item["text"],
+                    "trace_id": item["trace_id"],
+                    "metadata": item["metadata"],
+                }
+                for item in messages
+            ]
+    return [
+        {
+            "role": item.role,
+            "text": item.text,
+            "trace_id": item.trace_id,
+            "metadata": None,
+        }
+        for item in session.messages
+    ]
+
+
+def _set_chat_pointer(
+    response: Response, conversation_id: str | None, configured: AssistantSettings
+) -> None:
+    """Remember, or forget, which conversation this browser had open.
+
+    HttpOnly so page script cannot read or forge it, and re-verified against
+    the session identity on every use, so it carries no authority of its own.
+    """
+
+    if conversation_id:
+        response.set_cookie(
+            CHAT_COOKIE,
+            conversation_id,
+            max_age=int(configured.web.chat_history_retention_days * 86400),
+            httponly=True,
+            secure=not configured.web.development_mode,
+            samesite="strict",
+            path="/",
+        )
+    else:
+        response.delete_cookie(
+            CHAT_COOKIE,
+            httponly=True,
+            secure=not configured.web.development_mode,
+            samesite="strict",
+            path="/",
+        )
+
+
 def _admin(request: Request, auth: AuthPolicy) -> str:
     client = request.client.host if request.client else None
     return auth.admin_identity(request.headers, client)
@@ -2924,6 +3144,10 @@ def _exception_response(
             safe_to_retry=safe_to_retry and exc.code == "invalid_session",
         )
     if isinstance(exc, PortalError):
+        return _error(exc.code, str(exc), exc.status_code)
+    if isinstance(exc, ChatHistoryError):
+        # A conversation owned by somebody else is reported exactly as one
+        # that does not exist, so an identifier cannot be probed by its code.
         return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SpeechProviderError):
         return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)

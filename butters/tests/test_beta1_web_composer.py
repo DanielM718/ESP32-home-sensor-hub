@@ -304,7 +304,10 @@ def test_a_malformed_voice_event_does_not_escape_its_handler() -> None:
 def test_the_browser_client_still_sends_its_session_and_csrf_proof() -> None:
     """Composer changes must not weaken the authenticated-request contract."""
 
-    for endpoint in ("/api/chat", "/api/speech", "/api/session/conversation"):
+    # "New chat" moved from DELETE /api/session/conversation to
+    # POST /api/chat/conversations when history became durable. The contract
+    # under test is the same one: every mutating fetch proves its session.
+    for endpoint in ("/api/chat", "/api/speech", "/api/chat/conversations"):
         body = _block(APP_JS, f'fetch("{endpoint}"')
         assert '"X-Butters-CSRF": csrf' in body
     assert APP_JS.count('credentials: "same-origin"') >= 4

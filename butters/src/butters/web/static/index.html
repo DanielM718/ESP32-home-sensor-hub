@@ -23,9 +23,28 @@
         <button id="auth-button" class="quiet-button auth-button" type="button">Admin locked</button>
         <button id="lock-button" class="quiet-button auth-button" type="button" hidden>Lock</button>
         <button id="voice-output-toggle" class="voice-output-toggle" type="button" role="switch" aria-checked="true" aria-label="Voice output on">Voice: On</button>
-        <button id="clear-button" class="quiet-button" type="button" aria-label="Clear conversation">Clear</button>
+        <button id="history-button" class="quiet-button" type="button" aria-label="Saved chats" aria-expanded="false" aria-controls="history-drawer">Chats</button>
+        <button id="clear-button" class="quiet-button" type="button" aria-label="Start a new chat">New chat</button>
       </div>
     </header>
+
+    <!-- History is a drawer on every width, not a column. It overlays the
+         conversation when asked for and takes no horizontal space otherwise,
+         so an iPhone keeps the full width for the chat itself. -->
+    <div id="history-backdrop" class="history-backdrop" hidden></div>
+    <aside id="history-drawer" class="history-drawer" aria-label="Saved chats" hidden>
+      <header class="history-header">
+        <h2>Saved chats</h2>
+        <button id="history-close" class="quiet-button" type="button" aria-label="Close saved chats">Close</button>
+      </header>
+      <button id="history-new" class="secondary-button history-new" type="button">New chat</button>
+      <p id="history-retention" class="history-retention">Chats are kept for 30 days.</p>
+      <ul id="history-list" class="history-list"></ul>
+      <p id="history-status" class="history-status" role="status">No saved chats yet.</p>
+      <footer class="history-footer">
+        <button id="history-delete-all" class="danger-button history-delete-all" type="button">Delete all history</button>
+      </footer>
+    </aside>
 
     <section id="conversation" class="conversation" aria-live="polite" aria-label="Conversation">
       <article class="message assistant-message">

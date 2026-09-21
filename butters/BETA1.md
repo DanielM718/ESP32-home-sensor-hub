@@ -84,6 +84,7 @@ Session allocation is admission-controlled before anything is allocated:
 - non-secret mutable state: `/var/lib/butters` mode 0700;
 - usage ledger: `/var/lib/butters/usage.sqlite3`;
 - voice presets: `/var/lib/butters/state.sqlite3`;
+- Chat transcripts: `/var/lib/butters/chat-history.sqlite3` mode 0600;
 - Codex job metadata/worktrees: `/var/lib/butters/{skill-jobs.sqlite3,codex-jobs}`;
 - secrets: `/etc/butters/butters.env` root:butters mode 0640;
 - non-secret deployment overrides: `/etc/butters/butters.conf`.
@@ -91,8 +92,19 @@ Session allocation is admission-controlled before anything is allocated:
 Sessions and detailed traces are memory-only and bounded by both count and
 time. Traces quote conversation text, so they expire after
 `web.trace_ttl_seconds` and are dropped when their conversation is cleared or
-expires. Full transcripts, prompts, responses, evidence, audio, and keys are
-absent from the usage DB. Persistent rows contain IDs, route/provider/model
+expires.
+
+Chat history is the one transcript that is deliberately durable, so that a
+conversation survives a restart or a deployment. It lives in its own database,
+scoped to the authenticated identity that created it, and holds canonical
+message text plus the small allow-listed routing block the Chat page already
+displays - never rendered HTML, never hidden reasoning, never audio or keys.
+Conversations expire `web.chat_history_retention_days` (default 30) after
+their last message; opening one does not extend it. Purging is opportunistic,
+on startup and on ordinary history access, and cascades to messages. A person
+can delete one conversation or all of their own from the Chat history drawer;
+that reaches chat history and nothing else. Full transcripts, prompts,
+responses, evidence, audio, and keys are absent from the usage DB. Persistent rows contain IDs, route/provider/model
 categories, actual provider token counts where supplied, costs, latencies, and
 safe error codes. Unknown pricing fails closed. Request, daily, monthly,
 output, retry, tool, cloud-round, escalation, and wall-time ceilings remain

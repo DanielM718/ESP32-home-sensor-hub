@@ -498,10 +498,20 @@ def test_a_typed_newline_survives_but_typed_markdown_does_not() -> None:
 
 
 def test_a_fresh_answer_and_a_reloaded_one_render_the_same_way() -> None:
-    """One renderer, reached through one function, from both paths."""
+    """One renderer, reached through one function, from every path.
 
-    assert "for (const message of data.messages) addMessage(message.role, message.text);" in APP_JS
+    There are now three ways an assistant message reaches the page - a fresh
+    answer, a reload, and reopening a stored conversation - and all three go
+    through `addMessage`, which is the only caller of the renderer.
+    """
+
+    assert "addMessage(message.role, message.text, message.metadata);" in APP_JS
     assert 'addMessage("assistant", data.response_text, data);' in APP_JS
+    # The reopen path renders stored Markdown through the same function.
+    assert (
+        "for (const message of messages) addMessage(message.role, message.text, message.metadata);"
+        in APP_JS
+    )
     # renderAssistantMarkdown is called from addMessage and the summary only.
     assert APP_JS.count("renderAssistantMarkdown(") == 3  # 1 definition + 2 uses
 
@@ -521,13 +531,20 @@ def test_the_session_endpoint_returns_canonical_text(tmp_path: Path) -> None:
             assert first.status_code == 200
             payload = first.json()
             assert payload["messages"] == []
-            keys = {"role", "text", "trace_id"}
+            keys = {"role", "text", "trace_id", "metadata"}
             # The shape the browser restores from: text, and nothing rendered.
-            assert all(key in keys for key in ("role", "text", "trace_id"))
+            assert all(
+                key in keys for key in ("role", "text", "trace_id", "metadata")
+            )
 
     asyncio.run(scenario())
-    assert '"text": item.text' in APP_PY
-    assert "html" not in APP_PY[APP_PY.index('"messages": ['): APP_PY.index('"messages": [') + 400]
+    # `_session_messages` builds that payload, whether the messages come from
+    # the durable store or from the in-memory working set.
+    builder = APP_PY[APP_PY.index("def _session_messages(") :]
+    builder = builder[: builder.index("\ndef ", 1)]
+    assert '"text": item.text' in builder
+    assert '"text": item["text"]' in builder
+    assert "html" not in builder.casefold()
 
 
 # =============== 9. the canonical text, persistence and speech ============

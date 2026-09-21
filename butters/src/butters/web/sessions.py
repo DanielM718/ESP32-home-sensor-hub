@@ -1,4 +1,10 @@
-"""Bounded in-memory browser conversations; no long-term transcript store."""
+"""Bounded in-memory browser conversations, cached in front of the store.
+
+This layer is still the working set: the bounded, per-session window the model
+is shown and the browser renders during one visit. It is no longer the only
+copy. `butters.web.chat_history` holds the durable transcript, and a session
+carries the identifier of the conversation it is currently writing to.
+"""
 
 from __future__ import annotations
 
@@ -54,6 +60,11 @@ class BrowserSession:
     peer_key: str = ANONYMOUS_PEER
     administrator: bool = False
     pending_clarification: PendingClarification | None = None
+    # The durable conversation this browser session is currently writing to,
+    # or None before its first message and after "New chat". The identifier is
+    # assigned by the server and is only ever bound after an ownership check;
+    # it is never taken from a request body.
+    conversation_id: str | None = None
     # Monotonic browser interaction number. Shipped browser clients attach one
     # number to every text turn, voice turn, and Clear request so an older
     # request that waited behind newer work cannot mutate the conversation.
@@ -186,10 +197,45 @@ class SessionManager:
             for item in reversed(selected)
         )
 
+    def replace_messages(
+        self,
+        session: BrowserSession,
+        messages: tuple[tuple[str, str, str | None], ...],
+    ) -> None:
+        """Refill the in-memory context buffer from a durable transcript.
+
+        Reopening an old conversation should let the next turn continue it, so
+        the bounded working set the model sees is rebuilt from the stored
+        messages under exactly the same caps a live conversation obeys.
+        """
+
+        with self._lock:
+            session.messages.clear()
+            for role, text, trace_id in messages:
+                if role not in {"user", "assistant"}:
+                    continue
+                clean = normalize_message_text(text, limit=4000)
+                if clean:
+                    session.messages.append(
+                        ConversationMessage(role, clean, trace_id, self.clock())
+                    )
+            if len(session.messages) > self.max_messages:
+                del session.messages[: len(session.messages) - self.max_messages]
+            while (
+                len(session.messages) > 1
+                and sum(len(item.text) for item in session.messages)
+                > self.max_context_chars
+            ):
+                session.messages.pop(0)
+            session.last_active_monotonic = self.clock()
+
     def clear(self, session: BrowserSession, *, rotate_csrf: bool = True) -> None:
         with self._lock:
             session.messages.clear()
             session.pending_clarification = None
+            # Detach from the durable conversation without deleting it: a new
+            # chat starts a new transcript, it does not destroy the old one.
+            session.conversation_id = None
             if rotate_csrf:
                 session.csrf_token = secrets.token_urlsafe(24)
             session.last_active_monotonic = self.clock()

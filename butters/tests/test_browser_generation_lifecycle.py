@@ -60,28 +60,32 @@ def test_the_speech_request_is_registered_so_it_can_be_retired() -> None:
     assert "signal: controller.signal" in speak
 
 
-# --- Clear ----------------------------------------------------------------
+# --- New chat -------------------------------------------------------------
+#
+# "Clear" became "New chat" when history became durable: the same generation,
+# abort and CSRF contract, over the endpoint that detaches this session from
+# its stored conversation instead of one that erased it.
 
 
 def test_clear_terminates_playback_capture_and_the_voice_socket() -> None:
-    clear = _block(APP_JS, "async function clearConversation()")
+    clear = _block(APP_JS, "async function startNewChat()")
 
     assert clear.index("beginTurn()") < clear.index("stopPlayback()")
     assert "cleanupVoice()" in clear
     assert "setPending(false)" in clear
-    assert clear.index("stopPlayback()") < clear.index('fetch("/api/session/conversation"')
+    assert clear.index("stopPlayback()") < clear.index('fetch("/api/chat/conversations"')
 
 
 def test_clear_empties_the_view_before_waiting_for_the_server() -> None:
-    clear = _block(APP_JS, "async function clearConversation()")
+    clear = _block(APP_JS, "async function startNewChat()")
 
     assert clear.index("conversation.replaceChildren()") < clear.index(
-        'fetch("/api/session/conversation"'
+        'fetch("/api/chat/conversations"'
     )
 
 
 def test_clear_is_abortable_and_carries_its_server_ordering_generation() -> None:
-    clear = _block(APP_JS, "async function clearConversation()")
+    clear = _block(APP_JS, "async function startNewChat()")
 
     assert "generationWork.clear = controller" in clear
     assert '"X-Butters-Generation": String(turn)' in clear
@@ -123,11 +127,11 @@ def test_a_retired_generation_cannot_restore_a_newer_composer() -> None:
 
 
 def test_clear_returns_the_browser_to_a_usable_idle_state() -> None:
-    clear = _block(APP_JS, "async function clearConversation()")
+    clear = _block(APP_JS, "async function startNewChat()")
 
     assert 'setState("Ready", "idle")' in clear
-    # Even a failed server clear leaves the composer usable rather than stuck.
-    assert 'setState("Could not clear", "error")' in clear
+    # Even a failed server detach leaves the composer usable rather than stuck.
+    assert 'setState("Could not start a new chat", "error")' in clear
     assert "setPending(false)" in clear
 
 
@@ -184,7 +188,7 @@ def test_renewal_installs_cookie_coupled_state_before_new_requests_proceed() -> 
     assert "isCurrentTurn(turn)" in barrier
 
     send = _block(APP_JS, "async function sendText")
-    clear = _block(APP_JS, "async function clearConversation")
+    clear = _block(APP_JS, "async function startNewChat")
     assert "await awaitPendingRenewal(turn)" in send
     assert "await awaitPendingRenewal(turn)" in clear
 
@@ -314,7 +318,7 @@ def test_text_and_voice_send_the_same_interaction_generation_to_the_server() -> 
 
 
 def test_a_stale_clear_response_cannot_replace_a_newer_csrf_token() -> None:
-    clear = _block(APP_JS, "async function clearConversation()")
+    clear = _block(APP_JS, "async function startNewChat()")
 
     assert clear.index("if (!isCurrentTurn(turn)) return;") < clear.index(
         "csrf = data.csrf_token"

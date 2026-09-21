@@ -26,6 +26,9 @@
   box-shadow: var(--shadow-2);
   overflow: hidden;
   min-height: 0;
+  /* The history drawer is positioned against the shell, so it is clipped by
+   * the same rounded corners as the conversation it slides over. */
+  position: relative;
 }
 
 /* ------------------------------------------------------------- header -- */
@@ -433,6 +436,167 @@
   white-space: nowrap;
 }
 
+/* ------------------------------------------------------------ history --
+ * Saved conversations. A drawer at every width rather than a column: the
+ * conversation is the page, and history is something you go and get.
+ *
+ * Visibility is the `hidden` attribute alone. Nothing here declares
+ * `display` on the drawer or the backdrop in their default state, because an
+ * author `display` would outrank the user-agent `[hidden]` rule — see the
+ * note in base.css. The layout `display` is applied only when not hidden.
+ */
+
+.history-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  background: rgb(0 0 0 / 46%);
+}
+
+.history-drawer {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  z-index: 3;
+  width: min(320px, 84%);
+  background: var(--surface-raised);
+  border-inline-end: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-2);
+  min-height: 0;
+}
+
+.history-drawer:not([hidden]) {
+  display: grid;
+  /* header · new · retention · list · status · footer. The list is the only
+   * flexible track, so the delete control cannot be pushed out of reach. */
+  grid-template-rows: auto auto auto 1fr auto auto;
+}
+
+.history-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-block-end: 1px solid var(--border);
+}
+
+.history-header h2 {
+  font-size: var(--type-section-size);
+  font-weight: var(--type-section-weight);
+  letter-spacing: var(--type-section-tracking);
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  margin-inline-end: auto;
+}
+
+.history-new { margin: var(--space-3) var(--space-4) 0; }
+
+.history-retention {
+  padding: var(--space-2) var(--space-4) var(--space-1);
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  line-height: 1.45;
+}
+
+.history-list {
+  list-style: none;
+  margin: 0;
+  padding: var(--space-1) var(--space-2) var(--space-3);
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.history-item {
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-1);
+  border-radius: var(--radius-md);
+}
+
+.history-item + .history-item { margin-block-start: var(--space-1); }
+
+.history-open {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  text-align: start;
+  padding: var(--space-2) var(--space-3);
+  min-height: var(--tap-min);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text);
+}
+
+.history-item[aria-current="true"] .history-open {
+  background: var(--surface);
+  border-color: var(--accent-quiet);
+}
+
+.history-title {
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+  /* One line per chat: a long first message names the conversation, it does
+   * not get to own three rows of the drawer. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-when {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-delete {
+  flex: none;
+  min-width: var(--tap-min);
+  min-height: var(--tap-min);
+  padding-inline: var(--space-2);
+  border: 1px solid transparent;
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
+  font-weight: 600;
+}
+
+/* The armed second tap is a state, so it is styled unconditionally. Hover is
+ * only ever an enhancement: a phone has none, and nothing may depend on it. */
+.history-delete[data-confirming="true"] {
+  color: var(--danger);
+  border-color: rgb(var(--danger-rgb) / 38%);
+  background: rgb(var(--danger-rgb) / var(--tint-weak));
+}
+
+@media (hover: hover) {
+  .history-open:hover { background: var(--surface); }
+  .history-delete:hover {
+    color: var(--danger);
+    border-color: rgb(var(--danger-rgb) / 38%);
+    background: rgb(var(--danger-rgb) / var(--tint-weak));
+  }
+}
+
+.history-status {
+  padding: 0 var(--space-4) var(--space-2);
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
+  line-height: var(--type-meta-leading);
+}
+
+.history-footer {
+  padding: var(--space-3) var(--space-4)
+           calc(var(--space-3) + env(safe-area-inset-bottom));
+  border-block-start: 1px solid var(--border);
+}
+
+.history-delete-all { width: 100%; }
+
 /* ------------------------------------------------------------- mobile -- */
 
 @media (max-width: 760px) {
@@ -458,6 +622,9 @@
   .message-body td { padding: var(--space-1) var(--space-2); }
   .action-card,
   .partial { margin-inline: var(--space-3); }
+  /* A phone-width drawer is a sheet: wide enough to read a title, still
+   * clearly overlaying the conversation rather than replacing the page. */
+  .history-drawer { width: min(340px, 88%); }
 }
 
 /* Below ~400px the brand word and three controls cannot share one line

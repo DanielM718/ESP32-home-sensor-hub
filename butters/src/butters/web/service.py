@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import secrets
+import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, is_dataclass, replace
@@ -81,6 +82,11 @@ from butters.skills.model import (
 )
 from butters.skills.nas_agent import register_nas_agent_skills
 from butters.stt.normalization import DomainVocabulary, normalize_transcript
+from butters.web.chat_history import (
+    ChatHistoryError,
+    ChatHistoryStore,
+    assistant_metadata,
+)
 from butters.web.sessions import BrowserSession, SessionError, SessionManager
 from butters.web.speech import (
     LocalTTSProvider,
@@ -187,6 +193,10 @@ class ServiceResponse:
         return asdict(self)
 
 
+def _optional_text(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
 class _ForcedDiagnosticPolicy:
     """One-request diagnostic model override; it never changes global policy."""
 
@@ -245,6 +255,7 @@ class BetaAssistantService:
         state_dir: Path | None = None,
         local_tts: LocalTTSProvider | None = None,
         planner_provider: PlannerProvider | None = None,
+        chat_history: ChatHistoryStore | None = None,
     ) -> None:
         self.settings = settings
         self.vocabulary = vocabulary
@@ -309,6 +320,14 @@ class BetaAssistantService:
         # It reads the same complexity classification the trace already
         # records, so a routing decision can be re-derived from the trace.
         self.cloud_router = AdaptiveCloudRouter(settings.cloud)
+        # Durable Chat transcripts, in a file of their own. Keeping them out
+        # of usage.sqlite3, actions.sqlite3 and security.sqlite3 is what makes
+        # "delete my chat history" structurally unable to touch accounting,
+        # the action audit, or credential material.
+        self.chat_history = chat_history or ChatHistoryStore(
+            self.state_dir / "chat-history.sqlite3",
+            retention_days=settings.web.chat_history_retention_days,
+        )
         self.voice_presets = VoicePresetStore(self.state_dir / "state.sqlite3")
         # A visual preference, so it lives beside the other runtime
         # settings rather than in the production-approval overlay, which
@@ -704,6 +723,7 @@ class BetaAssistantService:
             },
         )
         self.sessions.add_message(session, "user", text, current_trace.trace_id)
+        self._remember_user(session, text, current_trace.trace_id)
         normalized = normalize_transcript(text, self.vocabulary)
         current_trace.emit(
             TraceStage.NORMALIZATION,
@@ -2492,6 +2512,213 @@ class BetaAssistantService:
             self.traces.drop_sessions((session.session_id,))
             return True
 
+    # ----- durable Chat history ------------------------------------------
+    #
+    # `session.peer_key` is the server-computed identity of the browser
+    # session and is the only thing used as an owner. Nothing below ever reads
+    # an owner from a request body, a query string or message metadata, so a
+    # client cannot claim to be somebody else by asking nicely.
+
+    def _remember_user(
+        self, session: BrowserSession, text: str, trace_id: str | None
+    ) -> None:
+        """Persist one user turn, opening a conversation on the first one.
+
+        A conversation is created by the first message that has content, so
+        pressing "New chat" and walking away leaves no empty row behind, and
+        creating one costs no provider call: the title is derived locally.
+        """
+
+        if session.conversation_id is None:
+            try:
+                session.conversation_id = self.chat_history.start_conversation(
+                    session.peer_key, text
+                )
+            except (ChatHistoryError, sqlite3.Error):
+                # History is a convenience, never a precondition for answering.
+                # The turn proceeds unrecorded rather than failing.
+                logging.getLogger("uvicorn.error.butters.chat_history").warning(
+                    "could not open a chat history conversation"
+                )
+                return
+        self._append_history(session, "user", text, trace_id, None)
+
+    def _remember_assistant(
+        self,
+        session: BrowserSession,
+        response: ServiceResponse,
+        trace_id: str | None,
+    ) -> None:
+        """Persist one assistant turn and the badge line that describes it.
+
+        The canonical `response_text` is stored, never rendered HTML, and the
+        metadata is the allow-listed routing block - it is stored alongside
+        the answer, never concatenated into it.
+        """
+
+        if session.conversation_id is None:
+            return
+        self._append_history(
+            session,
+            "assistant",
+            response.response_text,
+            trace_id,
+            assistant_metadata(response),
+        )
+
+    def _append_history(
+        self,
+        session: BrowserSession,
+        role: str,
+        text: str,
+        trace_id: str | None,
+        metadata: dict[str, object] | None,
+    ) -> None:
+        """Write one message, never failing the turn if the write fails.
+
+        A conversation the user deleted from another tab mid-turn, a database
+        that has gone read-only, a full disk: none of those are reasons to
+        lose an answer the assistant already produced. The failure is counted
+        by dropping the binding, not by raising into the turn - and nothing
+        about the message text is logged.
+        """
+
+        conversation_id = session.conversation_id
+        if conversation_id is None:
+            return
+        try:
+            stored = self.chat_history.append(
+                conversation_id,
+                session.peer_key,
+                role,
+                text,
+                trace_id=trace_id,
+                metadata=metadata,
+            )
+        except (ChatHistoryError, sqlite3.Error):
+            # The role is the only detail recorded. Message text, titles and
+            # identities stay out of the service log: a transcript store that
+            # leaks its transcripts into journald has defeated itself.
+            logging.getLogger("uvicorn.error.butters.chat_history").warning(
+                "could not persist a %s message to chat history", role
+            )
+            return
+        if not stored and role == "user":
+            # The conversation disappeared underneath this turn. Detach rather
+            # than resurrect it; the next user message opens a fresh one.
+            session.conversation_id = None
+
+    def chat_conversations(self, session: BrowserSession) -> dict[str, object]:
+        """This identity's history list, bounded and newest-activity first."""
+
+        return {
+            "conversations": list(self.chat_history.conversations(session.peer_key)),
+            "active_conversation_id": session.conversation_id,
+            "retention_days": self.chat_history.retention_days,
+        }
+
+    def read_conversation(
+        self, session: BrowserSession, conversation_id: str
+    ) -> dict[str, object]:
+        """One of this identity's transcripts, without binding the session."""
+
+        found = self.chat_history.conversation(conversation_id, session.peer_key)
+        if found is None:
+            raise ChatHistoryError("conversation_not_found", "conversation was not found")
+        return found
+
+    def open_conversation(
+        self,
+        session: BrowserSession,
+        conversation_id: str,
+        *,
+        interaction_generation: int | None = None,
+    ) -> dict[str, object]:
+        """Reopen a stored conversation and continue it.
+
+        Binding happens only after the store has confirmed this identity owns
+        the conversation. The in-memory working set is rebuilt from the
+        transcript so the next turn continues where the last one stopped, and
+        `updated_at` is deliberately not written: reading an old conversation
+        must not keep it from expiring.
+        """
+
+        with session.turn_lock:
+            self._claim_interaction_generation(session, interaction_generation)
+            found = self.read_conversation(session, conversation_id)
+            session.conversation_id = str(found["conversation_id"])
+            session.pending_clarification = None
+            messages = found["messages"]
+            assert isinstance(messages, list)
+            self.sessions.replace_messages(
+                session,
+                tuple(
+                    (str(item["role"]), str(item["text"]), _optional_text(item.get("trace_id")))
+                    for item in messages
+                ),
+            )
+            return found
+
+    def new_conversation(
+        self,
+        session: BrowserSession,
+        *,
+        interaction_generation: int | None = None,
+    ) -> bool:
+        """Start a clean conversation without deleting the previous one."""
+
+        return self.clear_conversation(
+            session, interaction_generation=interaction_generation
+        )
+
+    def delete_conversation(
+        self, session: BrowserSession, conversation_id: str
+    ) -> bool:
+        """Delete one of this identity's conversations and its messages."""
+
+        with session.turn_lock:
+            deleted = self.chat_history.delete(conversation_id, session.peer_key)
+            if not deleted:
+                raise ChatHistoryError(
+                    "conversation_not_found", "conversation was not found"
+                )
+            if session.conversation_id == conversation_id:
+                self.sessions.clear(session, rotate_csrf=False)
+                self.traces.drop_sessions((session.session_id,))
+            return True
+
+    def delete_all_conversations(self, session: BrowserSession) -> int:
+        """Delete every conversation of this identity, and only this one's.
+
+        Nothing outside `chat-history.sqlite3` is touched: no usage row, no
+        accounting snapshot, no action-audit entry, no passkey, no portal role.
+        """
+
+        with session.turn_lock:
+            removed = self.chat_history.delete_all(session.peer_key)
+            self.sessions.clear(session, rotate_csrf=False)
+            self.traces.drop_sessions((session.session_id,))
+            return removed
+
+    def rebind_conversation(self, session: BrowserSession, conversation_id: object) -> bool:
+        """Re-attach a session to a conversation named by the browser pointer.
+
+        Used only when a session is re-created - after an expiry or a service
+        restart - to restore which conversation was open. The pointer is a
+        hint: ownership is re-checked against this session's identity, so a
+        forged or stale value simply does not bind.
+        """
+
+        if session.conversation_id is not None:
+            return True
+        if not self.chat_history.owns(conversation_id, session.peer_key):
+            return False
+        try:
+            self.open_conversation(session, str(conversation_id))
+        except ChatHistoryError:
+            return False
+        return True
+
     @staticmethod
     def _claim_interaction_generation(
         session: BrowserSession,
@@ -3202,6 +3429,7 @@ class BetaAssistantService:
         self.sessions.add_message(
             session, "assistant", response.response_text, trace.trace_id
         )
+        self._remember_assistant(session, response, trace.trace_id)
         if not any(event.stage == TraceStage.RESPONSE.value for event in trace.events):
             trace.emit(
                 TraceStage.RESPONSE,
