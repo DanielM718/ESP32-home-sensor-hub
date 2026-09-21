@@ -1530,7 +1530,13 @@ function handleVoiceEvent(event, turn) {
       return;
     }
     // Text is committed to the visible conversation before optional TTS.
-    addMessage("assistant", data.response_text);
+    // `data` is this frame, so the routing facts rendered beside the answer
+    // are that answer's own: there is no carry-over from a previous turn, and
+    // an error, cancellation or empty transcript never reaches this call at
+    // all. The whole frame is handed over exactly as `sendText` hands over
+    // the /api/chat body, so one renderer describes both transports and
+    // neither can drift from the other.
+    addMessage("assistant", data.response_text, data);
     voiceSession.terminal = true;
     const traceId = typeof data.trace_id === "string" ? data.trace_id : null;
     cleanupVoice(turn);

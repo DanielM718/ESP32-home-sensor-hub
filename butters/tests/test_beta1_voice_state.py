@@ -137,7 +137,10 @@ def test_real_partial_and_final_transcripts_are_shown_in_normal_chat() -> None:
 def test_assistant_text_is_visible_before_optional_audio_playback() -> None:
     handler = _block(APP_JS, "function handleVoiceEvent(event, turn)")
 
-    text_index = handler.index('addMessage("assistant", data.response_text)')
+    # Matched on the call's opening rather than its full argument list, so
+    # passing the frame's routing metadata to the shared renderer cannot
+    # silently retire this ordering assertion.
+    text_index = handler.index('addMessage("assistant", data.response_text')
     cleanup_index = handler.index("cleanupVoice(turn)")
     playback_index = handler.index("playResponse(turn, traceId)")
     assert text_index < cleanup_index < playback_index
