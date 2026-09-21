@@ -555,15 +555,40 @@ def _detail(aggregate: str) -> str:
     return _HEADLINES.get(aggregate, _HEADLINES["UNKNOWN"])[1]
 
 
+# The Portal's own name for each power action, so the browser never has to
+# recognise an internal skill identifier. `wake_nas` and `nas.system.shutdown`
+# are server-side names; if either is ever renamed, this map is the one place
+# that has to follow, and an unmapped operation yields no label at all rather
+# than a wrong one.
+_POWER_ACTIONS = {
+    "wake_nas": "wake",
+    "nas.system.shutdown": "shutdown",
+}
+
+
 def _portal_last_operation(record: object) -> dict[str, object] | None:
-    """Expose only the operation, outcome, and age -- never internal detail."""
+    """Expose only the action, outcome, and age -- never internal detail.
+
+    `power_action` is derived from the operation that was requested and from
+    nothing else. It deliberately does not consult the observations: a NAS that
+    is unreachable has not thereby been shut down, and one that answers has not
+    thereby been woken. Reachability is a fact about now; this is a fact about
+    what somebody asked for, and the card states the second without guessing it
+    from the first.
+
+    It is also independent of `outcome`, which stays in the payload beside it.
+    The line reports what was *requested*, so a shutdown that stopped at its
+    authentication step is still a shutdown request rather than a wake.
+    """
 
     if not isinstance(record, dict):
         return None
     at = float(record.get("at", 0.0))
+    operation = record.get("operation")
     return {
-        "operation": record.get("operation"),
+        "operation": operation,
         "outcome": record.get("outcome"),
+        "power_action": _POWER_ACTIONS.get(str(operation)),
         "at": at,
         "age_seconds": max(0.0, time.time() - at),
     }

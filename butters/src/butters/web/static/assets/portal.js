@@ -82,6 +82,11 @@ function renderBandwidth(value){
   }
 }
 
+/* Wake really is a packet leaving this host, so it says so. Shutdown is a
+ * request to the NAS Agent over an authenticated session -- not Wake-on-LAN --
+ * so calling it a packet would describe the wrong mechanism. */
+const POWER_ACTION_LABELS={wake:"Wake packet sent",shutdown:"Shutdown requested"};
+
 function ago(seconds){if(seconds===null||seconds===undefined)return "";const value=Math.round(seconds);if(value<60)return `${value} second${value===1?"":"s"} ago`;const minutes=Math.round(value/60);return `${minutes} minute${minutes===1?"":"s"} ago`;}
 
 function show(section){
@@ -153,11 +158,15 @@ async function refreshState(){
       ["Jellyfin",state.observations.jellyfin],
     ]);
     renderBandwidth(state.bandwidth);
-    // Last operation is rendered on its own line and never changes the lines above.
+    // Last operation is rendered on its own line and never changes the lines
+    // above. The label comes from the server's `power_action` and from nothing
+    // else -- not from the observations, which describe now rather than what
+    // was asked for. An action this client does not recognise shows no line,
+    // which is why the lookup drives `hidden` as well as the text.
     const last=document.querySelector("#portal-last-operation");
-    last.textContent=state.last_operation
-      ? `Wake packet sent ${ago(state.last_operation.age_seconds)}`
-      : "Nothing has been requested yet.";
+    const action=state.last_operation&&POWER_ACTION_LABELS[state.last_operation.power_action];
+    last.hidden=!action;
+    last.textContent=action?`${action} ${ago(state.last_operation.age_seconds)}`:"";
     const wake=document.querySelector("#portal-wake");
     const open=document.querySelector("#portal-open");
     const shutdown=document.querySelector("#portal-shutdown");
