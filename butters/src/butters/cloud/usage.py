@@ -44,6 +44,15 @@ class CloudUsageRecord:
     # UNRECORDED keeps rows written before this column honest rather than
     # retroactively claiming a basis they were never given.
     cost_basis: str = str(CostBasis.UNRECORDED)
+    # Characters submitted to a speech model, when that is the billable
+    # dimension the caller measured. None everywhere else, and None for every
+    # row written before the column existed.
+    #
+    # This is a count, never the text. It exists so a future recalibration of
+    # the speech reservation factor can read the characters directly: the
+    # 2026-09-21 exercise had to recover them by inverting estimated_cost_usd
+    # through the factor, which stops working the moment the factor moves.
+    input_characters: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -82,6 +91,7 @@ CREATE TABLE IF NOT EXISTS provider_usage (
     wall_seconds REAL NOT NULL,
     estimated_cost_usd REAL NOT NULL,
     cost_basis TEXT NOT NULL DEFAULT 'unrecorded',
+    input_characters INTEGER,
     success INTEGER NOT NULL,
     escalation_occurred INTEGER NOT NULL,
     error_code TEXT,
@@ -148,6 +158,14 @@ class UsageLedger:
                     connection.execute(
                         "ALTER TABLE provider_usage ADD COLUMN cost_basis TEXT "
                         "NOT NULL DEFAULT 'unrecorded'"
+                    )
+                # Same additive shape, same reason: existing rows become NULL
+                # rather than being given a character count reconstructed
+                # from their cost, which would be a guess wearing the costume
+                # of a measurement.
+                if "input_characters" not in columns:
+                    connection.execute(
+                        "ALTER TABLE provider_usage ADD COLUMN input_characters INTEGER"
                     )
                 count = int(connection.execute("SELECT COUNT(*) FROM spend_totals").fetchone()[0])
                 if count == 0:
@@ -263,7 +281,16 @@ class UsageLedger:
         request_id: str | None = None,
         session_id: str | None = None,
         estimated_cost_override: float | None = None,
+        cost_basis: str = str(CostBasis.UNRECORDED),
     ) -> CloudUsageRecord:
+        """Record one cloud reasoning operation.
+
+        `cost_basis` is supplied by the caller because only the caller knows
+        where the token counts came from. It defaults to UNRECORDED so a call
+        site that has not thought about provenance cannot accidentally assert
+        one; that default is what historical rows carry, and it stays.
+        """
+
         context = getattr(self._context, "value", {})
         request_id = request_id or context.get("request_id")
         session_id = session_id or context.get("session_id")
@@ -299,6 +326,7 @@ class UsageLedger:
             route_category[:64],
             request_id[:128] if request_id else None,
             session_id[:128] if session_id else None,
+            str(cost_basis)[:32],
         )
         self._append_provider_record(record)
         return record
@@ -344,6 +372,7 @@ class UsageLedger:
         output_tokens: int = 0,
         error_code: str | None = None,
         cost_basis: str = str(CostBasis.ESTIMATED_UPPER_BOUND),
+        input_characters: int | None = None,
     ) -> CloudUsageRecord:
         """Record a pre-priced STT/TTS operation without storing its content.
 
@@ -377,6 +406,7 @@ class UsageLedger:
             request_id[:128] if request_id else None,
             session_id[:128] if session_id else None,
             str(cost_basis)[:32],
+            None if input_characters is None else max(0, int(input_characters)),
         )
         self._append_provider_record(record)
         return record
@@ -471,8 +501,8 @@ class UsageLedger:
                             input_tokens, cached_tokens, cache_write_tokens, output_tokens,
                             reasoning_tokens, tool_rounds, tool_calls, wall_seconds,
                             estimated_cost_usd, success, escalation_occurred, error_code,
-                            request_id, session_id, cost_basis
-                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                            request_id, session_id, cost_basis, input_characters
+                        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (
                             record.timestamp,
                             record.provider,
@@ -497,6 +527,7 @@ class UsageLedger:
                             record.request_id,
                             record.session_id,
                             record.cost_basis,
+                            record.input_characters,
                         ),
                     )
                     connection.execute(

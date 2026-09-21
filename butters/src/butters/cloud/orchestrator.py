@@ -26,6 +26,7 @@ from butters.diagnostics.model import (
 )
 from butters.diagnostics.session import DiagnosticSession
 from butters.diagnostics.tools import DiagnosticToolRegistry
+from butters.pricing import CostBasis
 
 
 class CloudDiagnosticEscalator:
@@ -120,6 +121,9 @@ class CloudDiagnosticEscalator:
                         escalation_occurred=escalation_steps > 1,
                         error_code=exc.code,
                         estimated_cost_override=estimate,
+                        # No usage was returned; this is the conservative
+                        # preflight reservation, labelled as such.
+                        cost_basis=str(CostBasis.ESTIMATED_UPPER_BOUND),
                     )
                     return _local_fallback(request, local_assessment, session, exc.code)
                 session.input_tokens += turn.usage.input_tokens
@@ -134,6 +138,8 @@ class CloudDiagnosticEscalator:
                     wall_seconds=turn.elapsed_seconds,
                     success=True,
                     escalation_occurred=escalation_steps > 1,
+                    # Token dimensions came from the Responses usage object.
+                    cost_basis=str(CostBasis.PROVIDER_REPORTED),
                 )
                 session.estimated_cost_usd += usage_record.estimated_cost_usd
                 previous_response_id = turn.response_id

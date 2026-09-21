@@ -68,6 +68,7 @@ from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
 from butters.planner.model import PlannerError, PlannerRequest
 from butters.planner.provider import DisabledPlannerProvider, PlannerProvider
 from butters.planner.validator import PlannerValidator
+from butters.pricing import CostBasis
 from butters.remediation.skill_builder import CodexSkillBuilder
 from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
@@ -2322,6 +2323,9 @@ class BetaAssistantService:
                     session_id=session_id,
                     error_code=exc.code,
                     cost_basis=str(preflight.basis),
+                    # The same count the preflight priced, so a later
+                    # recalibration reads it instead of inverting the cost.
+                    input_characters=len(text),
                 )
                 raise
             if result.estimated_cost_usd is None:
@@ -2337,6 +2341,7 @@ class BetaAssistantService:
                 success=True,
                 request_id=request_id,
                 session_id=session_id,
+                input_characters=len(text),
                 # Recorded with the basis the provider result carries, so an
                 # upper bound is never filed as a measured charge.
                 cost_basis=str(
@@ -2924,6 +2929,11 @@ class BetaAssistantService:
                     route_category="general_cloud",
                     request_id=trace.request_id,
                     session_id=session.session_id,
+                    # The call failed, so no dimension was reported. What is
+                    # recorded is the conservative preflight reservation, and
+                    # it is labelled as the ceiling it is rather than left
+                    # looking like an oversight.
+                    cost_basis=str(CostBasis.ESTIMATED_UPPER_BOUND),
                 )
                 return self._cloud_failure(trace, normalized, exc.code, route)
             configuration = ReasoningConfiguration(
@@ -2941,6 +2951,13 @@ class BetaAssistantService:
                 route_category="general_cloud",
                 request_id=trace.request_id,
                 session_id=session.session_id,
+                # Every billable dimension in this cost came from the
+                # Responses usage object: input, cached, cache-write and
+                # output tokens. This says the *dimensions* were reported by
+                # the provider; it is not a claim that OpenAI quoted this
+                # dollar figure. Provider billing totals stay with the
+                # separate organization-accounting reconciliation.
+                cost_basis=str(CostBasis.PROVIDER_REPORTED),
             )
             total_cost += record.estimated_cost_usd
             total_usage = CloudTokenUsage(
