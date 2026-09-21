@@ -28,10 +28,17 @@ Endpoints, from the official OpenAPI specification
   carrying ``amount.value``/``amount.currency`` and, when grouped,
   ``line_item``/``project_id``.
 * ``GET /v1/organization/usage/completions`` — token quantities and
-  ``num_model_requests``. Carries no cost.
+  ``num_model_requests``. Carries no cost. Observed 2026-09-21: this is
+  where ``gpt-4o-mini-tts`` appears, because it is billed on text input and
+  audio output *tokens*. It is not in the audio-speeches feed at all.
 * ``GET /v1/organization/usage/audio_speeches`` — ``characters`` and
-  ``num_model_requests``. Carries **no cost and no tokens**, which is exactly
-  why the local TTS figure cannot be reconciled per request.
+  ``num_model_requests``. Carries no cost and no tokens. Observed
+  2026-09-21: only the character-billed legacy models (``tts-1``) appear
+  here.
+
+Neither usage endpoint carries money, and both aggregate by day, so a local
+TTS request can never be reconciled individually. Cost comes only from the
+Costs endpoint, per day and per line item, and stays at that grain.
 
 All three take ``start_time`` (Unix seconds, inclusive, required),
 ``end_time`` (exclusive), ``project_ids``, ``limit`` and a ``page`` cursor,
@@ -495,6 +502,23 @@ class ProviderAccountingStore:
             ]
         }
 
+    def coverage(self, provider: str, scope: str) -> tuple[int | None, int | None]:
+        """The span the stored buckets actually cover.
+
+        This is not the range that was *requested*. The query asks for a
+        window that runs slightly into the future so the current day is
+        included; what came back is what the provider actually has.
+        """
+
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                """SELECT MIN(bucket_start), MAX(bucket_end)
+                   FROM provider_accounting_snapshots
+                   WHERE provider=? AND scope=?""",
+                (provider, scope),
+            ).fetchone()
+        return (None, None) if row is None else (row[0], row[1])
+
     def cost_by_line_item(self, provider: str, scope: str, start: int, end: int) -> list[dict[str, object]]:
         with self._lock, self._connect() as connection:
             rows = connection.execute(
@@ -757,6 +781,12 @@ class ProviderAccountingService:
                 reported[label] = self.store.cost_between(PROVIDER, scope, start, end)
         window_start = sync.get("window_start")
         window_end = sync.get("window_end")
+        # What the provider actually returned, as opposed to what was asked
+        # for. The requested end runs into the future on purpose so the
+        # current day is included; reporting it as coverage would claim data
+        # that does not exist yet.
+        data_from, data_through = self.store.coverage(PROVIDER, scope)
+        current_bucket_open = bool(data_through is not None and data_through > now)
         return {
             "provider": PROVIDER,
             "configured": configured,
@@ -766,7 +796,15 @@ class ProviderAccountingService:
             "freshness": freshness,
             "last_attempt_at": sync.get("last_attempt_at"),
             "last_success_at": success,
-            "reporting_window": {"start": window_start, "end": window_end},
+            # `requested` is the query bound; `data_from`/`data_through` are
+            # the buckets that came back. They are different facts.
+            "reporting_window": {
+                "requested_start": window_start,
+                "requested_end": window_end,
+                "data_from": data_from,
+                "data_through": data_through,
+                "current_bucket_open": current_bucket_open,
+            },
             "failure_code": sync.get("failure_code"),
             "failure_message": sync.get("failure_message"),
             "reported_cost_usd": reported,

@@ -554,6 +554,65 @@ def test_no_project_means_the_scope_says_organization(configured) -> None:
 # =========================== 4. freshness / outage =========================
 
 
+def test_coverage_is_what_came_back_not_what_was_asked_for(configured) -> None:
+    """The query reaches past now so the current day is included.
+
+    Reporting that bound as coverage would claim data that does not exist
+    yet. The live page said "reported through" a future instant because of
+    exactly this confusion.
+    """
+
+    service, _store, _credentials, _recorder = configured
+    state = service.sync(force=True)
+    window = state["reporting_window"]
+    now = float(BASE + 2 * DAY)
+    # Requested end is deliberately in the future.
+    assert window["requested_end"] > now
+    # Coverage is bounded by the buckets the provider actually returned.
+    assert window["data_from"] == BASE
+    assert window["data_through"] == BASE + 2 * DAY
+    assert window["data_through"] <= window["requested_end"]
+
+
+def test_an_open_current_bucket_is_declared(tmp_path) -> None:
+    """A daily bucket for today is still filling, and the page must say so."""
+
+    credentials = UsageAdminCredentialStore(tmp_path)
+    credentials.store(SECRET)
+    store = ProviderAccountingStore(tmp_path / "u.sqlite3")
+    # Mid-day: the newest bucket ends after now.
+    service = ProviderAccountingService(
+        credentials, store, OpenAIAccountingClient(credentials, opener=Recorder()),
+        clock=lambda: float(BASE + DAY + 3600),
+    )
+    state = service.sync(force=True)
+    assert state["reporting_window"]["current_bucket_open"] is True
+
+
+def test_a_settled_window_is_not_declared_open(configured) -> None:
+    service, _store, _credentials, _recorder = configured
+    state = service.sync(force=True)
+    # Buckets end exactly at `now`, so nothing is still filling.
+    assert state["reporting_window"]["current_bucket_open"] is False
+
+
+def test_the_intended_deployment_needs_only_usage_read() -> None:
+    """Usage API Scope: Read, and nothing else.
+
+    Verified against a live key configured that way on 2026-09-21: all three
+    reads succeeded with Organization Administration, Audit Logs and
+    Fine-tuning all set to None.
+    """
+
+    body = executable("cloud/provider_accounting.py")
+    # Nothing in the client depends on a surface those scopes would unlock.
+    for surface in ("audit_logs", "fine_tuning", "admin_api_keys", "invites",
+                    "users", "service_accounts", "rate_limits", "certificates"):
+        assert surface not in body, surface
+    # And project enumeration is not how the scope is chosen.
+    assert "/v1/organization/projects" not in body
+
+
 def test_state_before_any_sync_says_never_synced(configured) -> None:
     service = configured[0]
     state = service.state()

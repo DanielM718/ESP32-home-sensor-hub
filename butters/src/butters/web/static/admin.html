@@ -268,7 +268,8 @@
       </div>
       <div class="control-card tool-card" id="openai-usage-card">
         <div class="tool-head"><h2>OpenAI usage reporting</h2><span id="usage-admin-summary" class="tool-headline" role="status">Checking…</span></div>
-        <p class="tool-note">A separate <strong>organization Admin API key</strong>, used only to read what OpenAI says was spent. It is never passed to Chat, speech or transcription. OpenAI offers no usage-only Admin scope, so the key itself is powerful; Butters restricts its own use of it to GET requests against three reviewed endpoints and can issue no organization mutation.</p>
+        <p class="tool-note">A separate <strong>organization Admin API key</strong>, used only to read what OpenAI says was spent. It is never passed to Chat, speech or transcription.</p>
+        <p class="tool-note">Create it in the OpenAI organization settings with <strong>Usage API Scope: Read</strong> and every other permission left at <strong>None</strong> &mdash; Butters needs nothing else, and in particular needs no Organization Administration, Audit Logs or Fine-tuning access. It is still an organization-level credential, so it is stored and gated like one: Butters only ever issues GET requests to three reviewed endpoints and can express no organization mutation.</p>
         <div id="usage-admin-state" class="axis-grid" role="group" aria-label="OpenAI usage reporting state">Select Credentials to load.</div>
 
         <h3>Reporting scope</h3>

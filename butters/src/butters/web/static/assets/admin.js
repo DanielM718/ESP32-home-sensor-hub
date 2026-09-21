@@ -1726,9 +1726,15 @@ function renderReconciliation(local, provider) {
     ? `project ${provider.scope}`
     : "the whole organization (no project scope is set, so this is not Butters-only)";
   const window = provider.reporting_window || {};
+  // Say what the provider actually returned, not what was asked for. The
+  // query deliberately reaches past now so the current day is included, and
+  // presenting that bound as coverage would claim data that does not exist.
+  const covers = window.data_from
+    ? `Daily buckets from ${utcDay(window.data_from)} to ${utcDay(window.data_through)}`
+      + (window.current_bucket_open ? ", and today's bucket is still filling." : ".")
+    : "No buckets have been returned yet.";
   note.textContent =
-    `OpenAI reported for ${scope}. Last sync ${relativeTime(provider.last_success_at)}`
-    + (window.start ? `, covering ${utcDay(window.start)} to ${utcDay(window.end)}.` : ".")
+    `OpenAI reported for ${scope}. Last sync ${relativeTime(provider.last_success_at)}. ${covers}`
     + (provider.freshness === "stale" ? " This reading is stale; provider billing also lags." : "")
     + (provider.failure_message ? ` Last attempt failed: ${provider.failure_message}` : "");
 }
@@ -1749,6 +1755,14 @@ function renderUsageAdminState(provider) {
     ["Last sync", relativeTime(provider.last_success_at),
       provider.last_attempt_at ? `attempted ${relativeTime(provider.last_attempt_at)}` : undefined,
       FRESHNESS_TONE[provider.freshness] || "muted"],
+    ["Data covers",
+      (provider.reporting_window || {}).data_through
+        ? `to ${utcDay(provider.reporting_window.data_through)}`
+        : "nothing yet",
+      (provider.reporting_window || {}).current_bucket_open
+        ? "today's daily bucket is still filling"
+        : undefined,
+      "muted"],
     ["Freshness", provider.freshness.replaceAll("_", " "), undefined,
       FRESHNESS_TONE[provider.freshness] || "muted"],
     ["Last failure", provider.failure_code ? provider.failure_code.replaceAll("_", " ") : "none",
@@ -1863,9 +1877,13 @@ document.querySelector("#usage-admin-sync").addEventListener("click", async () =
   status.textContent = "Reading provider usage and costs…";
   try {
     const provider = (await api("/api/admin/integrations/openai-usage/sync", {method: "POST", body: JSON.stringify({})})).value;
+    const covered = provider.reporting_window && provider.reporting_window.data_through;
     status.textContent = provider.failure_message
       ? `Sync did not complete: ${provider.failure_message}`
-      : `Synced. Provider reported through ${utcDay(provider.reporting_window && provider.reporting_window.end)}.`;
+      : covered
+        ? `Synced. OpenAI has daily buckets to ${utcDay(covered)}`
+          + (provider.reporting_window.current_bucket_open ? "; today's is still filling." : ".")
+        : "Synced, but OpenAI returned no buckets for this scope and window.";
     renderUsageAdminState(provider);
   } catch (error) { status.textContent = `Sync failed: ${error.message || "unknown error"}`; }
 });

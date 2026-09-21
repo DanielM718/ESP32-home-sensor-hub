@@ -268,9 +268,16 @@ def test_the_credential_card_exists_and_never_shows_a_key() -> None:
     card = card[: card.index("</section>")]
     assert 'id="usage-admin-key" type="password"' in card
     assert "never stored in this browser" in card
-    # The powerful nature of an Admin key is stated, not glossed.
+    # The scope the key should actually have, named exactly as OpenAI's own
+    # key dialog names it, with everything else off.
     assert "organization Admin API key" in card
-    assert "no usage-only Admin scope" in card
+    assert "Usage API Scope: Read" in card
+    assert "None" in card
+    assert "no Organization Administration" in card
+    # And the older, wrong claim is gone.
+    assert "no usage-only Admin scope" not in card
+    # Still not described as harmless.
+    assert "organization-level credential" in card
 
 
 def test_both_mutations_use_the_distinct_fresh_purpose() -> None:
@@ -333,6 +340,25 @@ def test_freshness_and_window_are_shown() -> None:
     # Never claimed as an exact current figure.
     assert "current exact spend" not in section
     assert "Provider reported" in ADMIN_HTML or "OpenAI reported" in section
+
+
+def test_coverage_is_reported_from_returned_buckets_not_the_query_bound() -> None:
+    """The live page said "reported through" a time 24 hours in the future.
+
+    That was the requested query end, not the data. The wording now comes
+    from the buckets the provider actually returned.
+    """
+
+    section = ADMIN_JS[ADMIN_JS.index("/* ====================== Provider-reported accounting"):]
+    assert "data_through" in section
+    assert "data_from" in section
+    assert "current_bucket_open" in section
+    assert "still filling" in section
+    # The misleading phrasing is gone.
+    assert "reported through" not in section.lower()
+    # And the requested bound is never presented as coverage.
+    assert "window.end" not in section
+    assert "reporting_window.end" not in section
 
 
 def test_the_raw_provider_payload_is_not_rendered() -> None:
