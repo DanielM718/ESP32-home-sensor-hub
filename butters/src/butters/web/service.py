@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import secrets
 import threading
@@ -2262,12 +2261,19 @@ class BetaAssistantService:
         return True
 
     def credential_status(self) -> dict[str, object]:
+        """Posture, derived from the credential store rather than the process.
+
+        This used to answer `configured` from `os.getenv("OPENAI_API_KEY")`
+        alone, which predates the Butters credential store. A key stored by an
+        administrator through Admin therefore read as *not configured* here
+        while the AI control plane correctly reported it as stored, and the
+        two Admin pages contradicted each other about the same credential.
+        Both now read one CredentialState, which already implements the
+        precedence: a stored credential first, then the unit environment.
+        """
+
         return {
-            "openai": {
-                "configured": bool(os.getenv("OPENAI_API_KEY")),
-                "provider": "openai",
-                "last_verification": None,
-            },
+            "openai": self.ai.credential_posture(),
             "paid_text_enabled": self.settings.cloud.enabled
             and self.settings.cloud.allow_paid_calls,
             "paid_stt_enabled": self.settings.providers.allow_paid_stt,

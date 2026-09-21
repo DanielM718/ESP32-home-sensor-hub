@@ -146,6 +146,11 @@ class AIRuntimeController:
     def credential_state(self) -> dict[str, object]:
         return self.credentials.state().as_dict()
 
+    def credential_posture(self) -> dict[str, object]:
+        """The same authoritative state, projected for the posture surface."""
+
+        return self.credentials.state().as_posture()
+
     def test_credential(self, *, model: str | None = None) -> dict[str, object]:
         secret = self.credentials.secret()
         if secret is None:

@@ -34,6 +34,20 @@ def default_assistant_config_path() -> Path:
     return subsystem_root() / "config" / "assistant.toml"
 
 
+def effective_assistant_config_path() -> Path:
+    """The configuration file this process is actually configured by.
+
+    `BUTTERS_CONFIG` is what the systemd units set, and it is the only
+    override. Resolving it in one place is the point: the uvicorn listener and
+    the application object used to answer this question separately, so a second
+    instance pointed at another file still took its host and port from the
+    packaged defaults and tried to bind the running service's port.
+    """
+
+    override = os.getenv("BUTTERS_CONFIG", "").strip()
+    return Path(override) if override else default_assistant_config_path()
+
+
 @dataclass(frozen=True, slots=True)
 class IntegrationSettings:
     dashboard_url: str = "http://127.0.0.1:8080"
@@ -764,7 +778,15 @@ class AssistantSettings:
 
 
 def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
-    config_path = (path or default_assistant_config_path()).expanduser()
+    """Load the effective configuration.
+
+    An explicit `path` always wins, for tests and tooling that mean one exact
+    file. Otherwise `BUTTERS_CONFIG` decides, and only then the packaged
+    default. A configured file that is missing or malformed still raises
+    ConfigError rather than silently falling back.
+    """
+
+    config_path = (path or effective_assistant_config_path()).expanduser()
     try:
         with config_path.open("rb") as source:
             data = tomllib.load(source)

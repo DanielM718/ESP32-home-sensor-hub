@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -102,9 +101,9 @@ def create_app(
     *,
     trusted_peers: frozenset[str] | None = None,
 ) -> Starlette:
-    configured = settings or load_assistant_settings(
-        Path(os.environ["BUTTERS_CONFIG"]) if os.getenv("BUTTERS_CONFIG") else None
-    )
+    # The loader resolves BUTTERS_CONFIG itself, so the application object and
+    # the uvicorn listener cannot end up configured by different files.
+    configured = settings or load_assistant_settings()
     domain_vocabulary = vocabulary or load_domain_vocabulary(default_vocabulary_path())
     runtime = service or BetaAssistantService(configured, domain_vocabulary)
     auth = AuthPolicy(configured.web, trusted_peers=trusted_peers)

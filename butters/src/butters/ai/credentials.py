@@ -103,6 +103,23 @@ class CredentialState:
             "last_validation": self.last_validation,
         }
 
+    def as_posture(self) -> dict[str, object]:
+        """The subset the security-posture surface reports.
+
+        Presence and provenance, nothing more. The fingerprint belongs to the
+        credential control plane, which is where an administrator manages the
+        key; a posture page only has to answer whether one is configured and
+        where it came from. Both projections read the same CredentialState, so
+        they cannot disagree about whether a credential exists.
+        """
+
+        return {
+            "configured": self.configured,
+            "provider": "openai",
+            "source": self.source,
+            "last_verification": self.last_validated_at,
+        }
+
 
 def normalize_candidate(raw: object) -> str:
     """Reject anything that is not a plausible bearer credential.
