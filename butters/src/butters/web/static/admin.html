@@ -435,6 +435,7 @@
       <div class="control-card tool-card">
         <h2>Jellyfin access portal</h2>
         <p class="tool-note">Enrollment is invite-only. Creating an invitation authorizes exactly one named identity to register its own passkey and hold the <code>jellyfin_access</code> role. That role never implies administrator.</p>
+        <p class="tool-note"><code>nas_power</code> is never granted by an invitation. Add it to an enrolled identity below, after they hold a passkey. It confers the authority to begin the one fixed NAS shutdown ceremony &mdash; which still requires that person&rsquo;s own fresh passkey assertion &mdash; and granting it powers nothing off. Each change asks for your passkey.</p>
         <div class="form-row">
           <label>Tailnet identity<input id="portal-identity" maxlength="160" placeholder="person@example.com"></label>
           <label>Label<input id="portal-label" maxlength="80" placeholder="Partner · phone"></label>

@@ -2178,6 +2178,50 @@ class BetaAssistantService:
                 "fresh authorization targets another credential operation",
             )
 
+    def require_fresh_portal_role_grant(
+        self, session: BrowserSession, fresh_grant: object, *, identity: str
+    ) -> None:
+        """Consume a FRESH grant bound to one portal identity's role update.
+
+        The same rule applies whichever roles are being set. Making the guard
+        depend on the requested role set would let the sensitivity of a request
+        follow the payload, so a caller who sent `jellyfin_access` past a weaker
+        check could then argue about how the body was parsed. One purpose, one
+        strength, bound to the person whose authority is changing.
+        """
+
+        self._require_action_admin(session)
+        if not isinstance(fresh_grant, str) or not fresh_grant:
+            raise ActionCoordinatorError(
+                "fresh_required", "fresh passkey authentication is required"
+            )
+        bound = self.auth_state.consume_fresh_grant(
+            fresh_grant,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            purpose="portal_role_update",
+        )
+        if bound != identity:
+            raise ActionCoordinatorError(
+                "fresh_binding_denied",
+                "fresh authorization targets another portal identity",
+            )
+
+    def audit_portal_roles(
+        self,
+        session: BrowserSession,
+        arguments: dict[str, object],
+    ) -> None:
+        """Record a role change under the same audit path as other actions."""
+
+        self._audit_ai(
+            "portal.roles.set",
+            session,
+            arguments,
+            authentication=AuthenticationLevel.FRESH,
+            method="fresh_webauthn",
+        )
+
     def _audit_ai(
         self,
         skill: str,

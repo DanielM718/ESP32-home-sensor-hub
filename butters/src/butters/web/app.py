@@ -913,6 +913,44 @@ def create_app(
         except (SecurityError, SessionError, PortalError, ValueError) as exc:
             return _exception_response(exc)
 
+    async def portal_roles_set(request: Request) -> Response:
+        """Set the roles of one already-enrolled portal identity.
+
+        The only path that can assign `nas_power`. It carries the standard
+        administrator-mutation guard *and* a FRESH assertion bound to the target
+        identity, because this is where authority over the NAS power action is
+        handed to somebody.
+        """
+
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("portal-roles:" + identity):
+                return _error("rate_limited", "role change rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"identity", "roles", "fresh_grant", "confirm"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    portal.set_roles,
+                    session,
+                    identity=payload.get("identity"),
+                    roles=payload.get("roles"),
+                    fresh_grant=payload.get("fresh_grant"),
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            PortalError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     async def portal_revoke(request: Request) -> Response:
         try:
             _admin_mutation(request, runtime, auth)
@@ -2427,6 +2465,7 @@ def create_app(
         Route("/api/admin/portal/identities", portal_identities),
         Route("/api/admin/portal/invite", portal_invite, methods=["POST"]),
         Route("/api/admin/portal/revoke", portal_revoke, methods=["POST"]),
+        Route("/api/admin/portal/roles", portal_roles_set, methods=["POST"]),
         Route("/portal", portal_page),
         Route("/api/portal/status", portal_status),
         Route(

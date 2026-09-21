@@ -155,6 +155,34 @@ Portal registration is **never** open to an unauthenticated visitor.
 3. The person opens `/portal` as that identity, redeems it, and registers their
    own passkey. They hold `jellyfin_access` and nothing else.
 
+## Granting `nas_power`
+
+`nas_power` is never carried by an invitation, so nobody is enrolled straight
+into power authority. It is added afterwards, to an identity that already holds
+a passkey, in the same Admin panel: tick the roles that identity should hold and
+press **Update roles**. The control sends the *complete* role set, because the
+store replaces rather than merges — the checkboxes are pre-filled from what the
+identity holds today so the full set is what an administrator is editing.
+
+Each change requires the administrator's own FRESH passkey assertion, bound to
+the identity being changed (`purpose="portal_role_update"`), plus an explicit
+confirmation. An assertion collected for one person cannot be replayed against
+another. Granting the role powers nothing off: it confers the authority to
+*begin* the fixed shutdown ceremony, which still demands that person's own FRESH
+assertion bound to the frozen plan's digest.
+
+Two things this path deliberately will not do. It will not create an identity —
+a name nobody has enrolled is refused rather than granted a role it has no
+passkey to use. And it will not reinstate a revoked identity, so revocation is
+not quietly undone by a role edit. Note the consequence honestly: revocation
+leaves credentials intact while `begin_portal_registration` excludes the
+identity's live credentials, so a revoked person cannot be re-invited onto the
+*same* authenticator either. Reinstating one is not a supported operation today.
+
+An added role takes effect at the holder's next portal sign-in, since a session
+records what was granted at sign-in and is intersected with the current grant on
+every request. A removed role takes effect on their next request.
+
 `jellyfin_access` never implies administrator. Administrator authorization is
 decided by `AuthPolicy` from the tailnet identity and the configured
 administrator list, and consults nothing the portal writes. An administrator who

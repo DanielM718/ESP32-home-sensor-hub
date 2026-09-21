@@ -238,6 +238,15 @@ class PasskeyManager:
             # credential, so it carries its own purpose. A grant collected to
             # change the inference key cannot be replayed to change this one.
             "openai_usage_admin_credential",
+            # Assigning a portal role is its own sensitive operation. The
+            # `nas_power` role carries authority over a destructive physical
+            # action, so moving it needs stronger proof than an authenticated
+            # administrator session. The name says `update` rather than `grant`
+            # because one endpoint both adds and removes roles, and the grant is
+            # bound to the target identity as its subject, so an assertion
+            # collected to change one person's roles cannot be replayed against
+            # another's. It never yields an elevation or a pending action.
+            "portal_role_update",
         }
     )
     # The portal's own sign-in purpose. It is deliberately not in PURPOSES: the

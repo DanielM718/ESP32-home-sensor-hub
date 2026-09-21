@@ -17,6 +17,14 @@ There is no Desktop control, administrator tool, caller-selected skill, JSON
 executor, broker control, or caller-selected target/host/method in this module.
 Administrator authorization remains solely an AuthPolicy decision based on the
 tailnet identity and never consults portal roles.
+
+``nas_power`` is assigned only through :meth:`PortalService.set_roles`, which an
+administrator reaches at ``POST /api/admin/portal/roles``. Enrollment cannot
+grant it: an invitation carries ``jellyfin_access`` and nothing else, so a new
+person is never enrolled straight into power authority, and role changes apply
+only to identities that are already enrolled and unrevoked. Because a role is
+read from the identity's current grant on every request, an addition takes
+effect at the holder's next portal sign-in and a removal at their next request.
 """
 
 from __future__ import annotations
@@ -26,7 +34,12 @@ import time
 from dataclasses import dataclass
 
 from butters.assistant_config import NasEndpointSettings, PortalSettings
-from butters.auth.store import JELLYFIN_ACCESS, NAS_POWER, AuthStateError
+from butters.auth.store import (
+    JELLYFIN_ACCESS,
+    NAS_POWER,
+    PORTAL_ROLES,
+    AuthStateError,
+)
 from butters.skills.model import AuthenticationContext, AuthenticationLevel
 from butters.web.locality import LocalityClassifier, jellyfin_destination
 from butters.web.sessions import BrowserSession
@@ -428,6 +441,84 @@ class PortalService:
         _store_call(self.runtime.auth_state.revoke_portal_identity, identity)
         return {"status": "revoked", "identity": identity}
 
+    def set_roles(
+        self,
+        session: BrowserSession,
+        *,
+        identity: str,
+        roles: object,
+        fresh_grant: object,
+        confirmed: bool,
+    ) -> dict[str, object]:
+        """Replace the role set of an identity that is *already* enrolled.
+
+        This is the only administrator path that can assign ``nas_power``, and
+        it is deliberately not an enrollment path. An identity with no live
+        portal record is refused rather than created, so a role can never be
+        granted to someone who holds no passkey to exercise it; enrollment stays
+        with the invitation, which remains ``jellyfin_access``-only.
+
+        A *revoked* identity is likewise refused here, so revocation cannot be
+        quietly undone by editing a role. Note what that costs, rather than
+        pretending it does not: :meth:`PasskeyManager.begin_portal_registration`
+        passes the identity's live credentials as ``exclude_credentials``, and
+        revocation leaves those credentials in place, so a revoked person cannot
+        simply be re-invited onto the *same* authenticator either. Reinstating
+        one is therefore not a supported operation today -- it needs either a
+        different authenticator or a deliberate reinstatement path, and that is
+        a decision about what revocation means, not something to infer here.
+
+        Nothing here touches administrator authorization: that is an AuthPolicy
+        decision about the tailnet identity, and no value written by this method
+        is ever read by it. Nor does granting ``nas_power`` act on the NAS --
+        it confers the authority to *begin* the fixed shutdown ceremony, which
+        then demands its own FRESH assertion bound to the frozen plan's digest.
+        """
+
+        if not self.settings.enabled:
+            raise PortalError("portal_disabled", "the access portal is disabled", 404)
+        target = _identity_field(identity)
+        requested = _role_set(roles)
+        # Bind the assertion to the subject before reading any other input, so
+        # a request without proof cannot even learn whether an identity exists.
+        self.runtime.require_fresh_portal_role_grant(
+            session, fresh_grant, identity=target
+        )
+        if confirmed is not True:
+            raise PortalError(
+                "confirmation_required",
+                "changing portal roles requires explicit confirmation",
+            )
+        record = self.runtime.auth_state.portal_identity(target)
+        if record is None or record.revoked:
+            raise PortalError(
+                "identity_denied",
+                "no enrolled portal identity holds this name",
+                404,
+            )
+        previous = tuple(sorted(record.roles))
+        updated = _store_call(
+            self.runtime.auth_state.grant_portal_roles,
+            target,
+            record.label,
+            requested,
+            maximum=self.runtime.settings.authentication.max_credentials,
+        )
+        self.runtime.audit_portal_roles(
+            session,
+            {
+                "identity": target,
+                "previous_roles": list(previous),
+                "roles": sorted(updated.roles),
+            },
+        )
+        return {
+            "status": "roles_updated",
+            "identity": target,
+            "previous_roles": list(previous),
+            **updated.safe_dict(),
+        }
+
     def identities(self) -> dict[str, object]:
         return {
             "identities": [
@@ -530,6 +621,36 @@ def _portal_bandwidth(value: object) -> dict[str, object] | None:
 
 def _request_suffix() -> str:
     return secrets.token_urlsafe(12)
+
+
+def _identity_field(value: object) -> str:
+    if not isinstance(value, str):
+        raise PortalError("invalid_identity", "portal identity must be a string")
+    clean = value.strip()
+    if not clean or len(clean) > 160 or not clean.isprintable():
+        raise PortalError("invalid_identity", "portal identity is invalid")
+    return clean
+
+
+def _role_set(value: object) -> frozenset[str]:
+    """Accept a non-empty set drawn only from the two declared portal roles.
+
+    The recognised names are checked here and again in the store. Neither check
+    is redundant: this one rejects a malformed request with a clear error, and
+    the store's refuses an unrecognised role no matter which call site asks.
+    """
+
+    if not isinstance(value, list) or not value:
+        raise PortalError("invalid_roles", "at least one portal role is required")
+    if not all(isinstance(item, str) for item in value):
+        raise PortalError("invalid_roles", "each portal role must be a string")
+    requested = frozenset(item.strip() for item in value)
+    unknown = requested - PORTAL_ROLES
+    if unknown:
+        # The offending names are not echoed: the set of legal roles is fixed
+        # and public, so naming what was rejected adds nothing but noise.
+        raise PortalError("role_denied", "role is not recognised")
+    return requested
 
 
 def _store_call(function, *args, **kwargs):

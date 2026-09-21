@@ -368,6 +368,11 @@ async function shutdownNas() {
 
 /* ---------- Portal enrollment ---------- */
 
+/* The two roles the server recognises. Listing them here only draws the editor;
+ * `PortalService` rejects anything outside its own set, so a stale copy of this
+ * list can omit a control but can never authorize one. */
+const PORTAL_ROLES=["jellyfin_access","nas_power"];
+
 async function refreshPortalIdentities() {
   try {
     const data=(await api("/api/admin/portal/identities")).value;
@@ -379,9 +384,29 @@ async function refreshPortalIdentities() {
       const detail=document.createElement("p"); detail.textContent=`${item.roles.join(", ")}${item.revoked?" · revoked":""}`;
       content.append(title,detail); row.append(content);
       if(!item.revoked){
+        /* The server replaces the whole role set, so the editor shows the whole
+         * role set: every role is listed, pre-checked from what this identity
+         * currently holds, and Update sends exactly what is ticked. An implicit
+         * "add this one" button would hide the replacement from the person
+         * responsible for it. `toggle-row` already carries the checkbox sizing
+         * and the 44px tap target, so this needs no styling of its own. */
+        const editor=document.createElement("div"); editor.className="toggle-row role-editor";
+        const boxes=new Map();
+        for(const role of PORTAL_ROLES){
+          const field=document.createElement("label");
+          const box=document.createElement("input"); box.type="checkbox";
+          box.checked=item.roles.includes(role); box.value=role;
+          field.append(box,document.createTextNode(role));
+          boxes.set(role,box); editor.append(field);
+        }
+        const update=document.createElement("button"); update.className="quiet-button"; update.type="button";
+        update.textContent="Update roles";
+        update.addEventListener("click",()=>setPortalRoles(item.identity,item.roles,
+          [...boxes.entries()].filter(([,box])=>box.checked).map(([role])=>role)));
         const revoke=document.createElement("button"); revoke.className="secondary-button"; revoke.textContent="Revoke access";
         revoke.addEventListener("click",()=>revokePortalIdentity(item.identity));
-        row.append(revoke);
+        content.append(editor);
+        row.append(update,revoke);
       }
       container.append(row);
     }
@@ -406,6 +431,26 @@ async function createPortalInvite() {
     status.textContent=`Invitation for ${result.identity}: ${result.invite_token} — give this to them over a channel you trust. It is single-use and expires ${new Date(result.expires_at*1000).toLocaleString()}.`;
     await refreshPortalIdentities();
   } catch(error) { status.textContent=`Invitation failed: ${error.message||"unknown error"}`; }
+}
+
+/* Role changes are a server decision. This states an intent and carries a fresh
+ * assertion; every check that matters runs in `PortalService`, and the roles the
+ * next screen shows are the ones the server sent back, not the ones ticked. */
+async function setPortalRoles(identity, current, next) {
+  const status=document.querySelector("#portal-invite-status");
+  if(!next.length){status.textContent="An identity must keep at least one role. Revoke access instead.";return;}
+  const before=[...current].sort().join(",");
+  if(before===[...next].sort().join(",")){status.textContent=`${identity} already holds exactly those roles.`;return;}
+  const gaining=next.includes("nas_power")&&!current.includes("nas_power");
+  const question=`Set roles for ${identity} to ${next.join(", ")}? This replaces ${current.join(", ")||"nothing"}.`
+    +(gaining?" They will be able to begin the fixed NAS shutdown ceremony, which still requires their own passkey. Nothing is powered off now.":"");
+  if(!confirm(question))return;
+  try {
+    const grantToken=(await authenticatePurpose("portal_role_update",identity)).fresh_grant;
+    const result=(await api("/api/admin/portal/roles",{method:"POST",body:JSON.stringify({identity,roles:next,fresh_grant:grantToken,confirm:true})})).value;
+    status.textContent=`${result.identity} now holds: ${result.roles.join(", ")}. An added role applies at their next portal sign-in; a removed one on their next request.`;
+    await refreshPortalIdentities();
+  } catch(error) { status.textContent=`Role change failed: ${error.message||"unknown error"}`; }
 }
 
 async function revokePortalIdentity(identity) {
