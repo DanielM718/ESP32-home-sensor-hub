@@ -257,15 +257,27 @@ ADMIN_CONTROLS = {
     "portal-identity", "portal-label", "portal-invite", "portal-invite-status",
     "portal-identity-list",
     # remaining panels
-    "tool-list", "usage-view", "system-view", "security-view",
+    "tool-list", "system-view", "security-view",
     "auth-admin-status", "admin-authenticate", "admin-lock", "add-passkey",
     "passkey-list", "action-admin-view", "capability-list",
 }
 
 
+# Controls that were deliberately replaced rather than dropped, and what
+# replaced them. A removal has to be recorded here to pass.
+ADMIN_REPLACED = {
+    # one raw object dump -> a rendered dashboard over the same payload
+    "usage-view": "usage-windows",
+}
+
+
 def test_no_admin_control_was_lost_in_the_restructure() -> None:
-    missing = ADMIN_CONTROLS - _ids(ADMIN_HTML)
+    present = _ids(ADMIN_HTML)
+    missing = ADMIN_CONTROLS - present
     assert not missing, f"controls disappeared from Admin: {sorted(missing)}"
+    for removed, replacement in ADMIN_REPLACED.items():
+        assert removed not in present, f"{removed} was supposed to be replaced"
+        assert replacement in present, f"{removed} lost its replacement"
 
 
 def test_every_admin_panel_is_reachable_and_named() -> None:

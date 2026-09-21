@@ -343,3 +343,122 @@ def test_unknown_complex_request_remains_unresolved(router: IntentRouter) -> Non
 
     assert route.status == "unsupported"
     assert route.skill is None
+
+
+# --------------------- NAS and Jellyfin availability ------------------------
+#
+# A live Butters test asked "What is the current status of my NAS and
+# Jellyfin?" and got "Which sensor did you mean?". The NAS status skill was
+# fine; the deterministic matcher only knew the two phrases "nas status" and
+# "is my nas online", so anything else fell through to sensor handling, found
+# no sensor entity, and asked for clarification.
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "nas status",
+        "is my nas online",
+        "what is the current status of my nas",
+        "what is the current status of my nas and jellyfin",
+        "how are my nas and jellyfin doing",
+        "is the nas healthy",
+        "is my nas reachable",
+        # Jellyfin alone is legitimate here: NasAdapter.status() carries the
+        # jellyfin observation, so this skill can actually answer it.
+        "is jellyfin running",
+        "is jellyfin available",
+        "what is the status of jellyfin",
+    ],
+)
+def test_nas_and_jellyfin_availability_is_answered_deterministically(
+    router: IntentRouter, phrase: str
+) -> None:
+    route = router.route(phrase)
+
+    assert route.status == "matched", route.message
+    assert route.skill == "get_nas_status"
+    assert route.arguments == {}
+    # Deterministic: high confidence and no model is consulted for any of them.
+    assert route.confidence >= 0.9
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "what is the current status of my nas and jellyfin",
+        "what is the status of jellyfin",
+        "what is the current status of my nas",
+    ],
+)
+def test_the_nas_question_never_asks_which_sensor(
+    router: IntentRouter, phrase: str
+) -> None:
+    route = router.route(phrase)
+
+    assert route.status != "clarification"
+    assert "Which sensor" not in (route.message or "")
+    assert route.skill not in {"get_sensor_status", "get_sensor_value"}
+
+
+@pytest.mark.parametrize(
+    ("phrase", "skill"),
+    [
+        # "status" belongs to whichever subject the sentence actually names.
+        ("what is the status of all sensors", "get_sensor_status"),
+        ("is filament box 1 online", "get_sensor_status"),
+        ("printer status", "get_printer_status"),
+        ("desktop status", "get_desktop_status"),
+        ("butters service status", "get_butters_service_status"),
+        ("what is the server status", "get_server_health"),
+        ("heater status", "get_environment_control_status"),
+        ("storage status", "get_storage_status"),
+        ("action broker status", "get_action_broker_status"),
+        ("pi status", "get_butters_host_status"),
+        ("dependency health", "get_network_service_health"),
+    ],
+)
+def test_other_status_questions_are_not_stolen_by_the_nas_matcher(
+    router: IntentRouter, phrase: str, skill: str
+) -> None:
+    route = router.route(phrase)
+
+    assert route.status == "matched", route.message
+    assert route.skill == skill
+
+
+def test_a_sensor_question_still_asks_which_sensor(router: IntentRouter) -> None:
+    route = router.route("what is the humidity sensor status")
+
+    assert route.status == "clarification"
+    assert "Which sensor" in (route.message or "")
+
+
+@pytest.mark.parametrize(
+    ("phrase", "skill"),
+    [
+        ("wake the nas", "wake_nas"),
+        ("wake my nas", "wake_nas"),
+        ("turn on my nas", "wake_nas"),
+    ],
+)
+def test_naming_the_nas_in_an_action_still_acts(
+    router: IntentRouter, phrase: str, skill: str
+) -> None:
+    """Reporting must not swallow acting. "up" and "down" are deliberately
+    not operational words for this matcher, because "shut down the nas" and
+    "wake up the nas" contain them."""
+
+    route = router.route(phrase)
+
+    assert route.status == "matched"
+    assert route.skill == skill
+
+
+@pytest.mark.parametrize("phrase", ["shut down the nas", "shutdown nas", "open jellyfin"])
+def test_naming_the_nas_without_asking_after_it_is_not_a_status_request(
+    router: IntentRouter, phrase: str
+) -> None:
+    route = router.route(phrase)
+
+    assert route.skill != "get_nas_status"

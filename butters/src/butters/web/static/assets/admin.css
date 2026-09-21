@@ -362,3 +362,98 @@
   color: var(--warning);
   font-weight: 600;
 }
+
+/* =============================================================== usage ==
+ * Composed from the existing tokens: a label, a figure, and where a
+ * proportion is meaningful, a bar. Every numeric column is tabular so the
+ * digits line up down the page.
+ */
+
+.usage-rows,
+.usage-bars,
+.usage-table { display: grid; gap: var(--space-1); }
+
+.usage-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: var(--space-3);
+  align-items: baseline;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: var(--type-meta-size);
+  min-width: 0;
+}
+
+.usage-row > :first-child { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.usage-row > :last-child { font-variant-numeric: tabular-nums; font-weight: 650; }
+
+/* The bar is a background on the row itself, so a long label never collides
+ * with it and nothing needs a fixed column width. */
+.usage-bar {
+  position: relative;
+  overflow: hidden;
+}
+
+.usage-bar::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline-start: 0;
+  inline-size: var(--usage-share, 0%);
+  background: var(--accent-quiet);
+  opacity: 0.55;
+}
+
+.usage-bar > * { position: relative; }
+
+/* Latency: four columns that become two lines on a phone rather than a
+ * table that scrolls sideways. */
+.usage-latency {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  gap: var(--space-2) var(--space-4);
+  align-items: baseline;
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  font-size: var(--type-meta-size);
+  min-width: 0;
+}
+
+.usage-latency > :first-child { min-width: 0; overflow-wrap: anywhere; color: var(--text); }
+.usage-latency > :not(:first-child) { font-variant-numeric: tabular-nums; color: var(--text-secondary); }
+
+.usage-latency-head {
+  border: 0;
+  background: transparent;
+  padding-block: 0;
+  color: var(--text-muted);
+  font-size: var(--type-section-size);
+  font-weight: var(--type-section-weight);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.usage-latency-head > * { color: inherit; }
+
+@media (max-width: 560px) {
+  .usage-latency { grid-template-columns: minmax(0, 1fr) auto; }
+  .usage-latency > :first-child { grid-column: 1 / -1; }
+  .usage-latency-head { display: none; }
+  /* Each figure keeps its name when the header row is gone. */
+  .usage-latency > :not(:first-child)::before {
+    content: attr(data-label) " ";
+    color: var(--text-muted);
+    font-variant-numeric: normal;
+  }
+}
+
+.metric-card .usage-detail {
+  color: var(--text-muted);
+  font-size: var(--type-meta-size);
+  font-variant-numeric: tabular-nums;
+  margin-block-start: var(--space-1);
+}

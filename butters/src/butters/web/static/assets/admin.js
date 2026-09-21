@@ -105,7 +105,7 @@ async function refresh(panel) {
     if(panel==="portalaccess") await refreshPortalIdentities();
     if(panel==="appearance") await refreshAppearance();
     if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
-    if(panel==="usage") renderObject(document.querySelector("#usage-view"),(await api("/api/admin/usage")).value);
+    if(panel==="usage") await refreshUsage();
     if(panel==="system") renderObject(document.querySelector("#system-view"),(await api("/api/admin/system")).value);
     if(panel==="logs") document.querySelector("#logs-view").textContent=pretty((await api("/api/admin/logs")).value);
     if(panel==="security") renderObject(document.querySelector("#security-view"),(await api("/api/admin/security")).value);
@@ -1376,3 +1376,256 @@ appearanceSwatch.addEventListener("change", () => {
 document.querySelector("#appearance-save").addEventListener("click", saveAppearance);
 document.querySelector("#appearance-revert").addEventListener("click", revertAppearance);
 document.querySelector("#appearance-reset").addEventListener("click", resetAppearance);
+
+
+/* ================================ Usage ===================================
+ *
+ * Presentation only. Every figure here is a field of /api/admin/usage
+ * rendered as-is; nothing is recomputed, combined, or converted, so the page
+ * cannot disagree with the ledger.
+ *
+ * Two rules worth stating, because both are easy to get wrong:
+ *
+ * 1. Sub-cent costs keep their precision. Rounding $0.007476 to "$0.01" is a
+ *    40% error at this scale and makes the figure useless for noticing that
+ *    something started spending.
+ * 2. A missing or unfamiliar field renders as an em dash, never "undefined".
+ *    The payload grows over time and an older page must degrade quietly.
+ */
+
+const USAGE_WINDOWS = [
+  ["today", "Today"],
+  ["last_7_days", "Last 7 days"],
+  ["current_month", "This month"],
+];
+
+/* Provider identifiers are few and their casing is well known. Model
+ * identifiers are not humanised at all: an operator matches them against the
+ * model dropdown, and inventing a display name for one risks describing a
+ * model the server never named. */
+const PROVIDER_LABELS = {openai: "OpenAI", local: "Local", none: "None"};
+
+const COST_BASIS_NOTES = {
+  provider_reported: "the provider reported this charge",
+  input_measured: "computed from measured input tokens",
+  estimated_upper_bound: "a ceiling, not an observed charge",
+  unavailable: "no basis was available",
+  unrecorded: "no cost was recorded",
+};
+
+/* Words that are initialisms rather than words, so "tts" reads as TTS and
+ * not "Tts". Everything else is just sentence-cased. */
+const ACRONYMS = new Set(["tts", "stt", "ai", "api", "nas", "ssh", "llm", "vm", "url", "id"]);
+
+function humanize(key) {
+  const words = String(key ?? "").replaceAll("_", " ").trim().split(/\s+/).filter(Boolean);
+  if (!words.length) return "—";
+  return words
+    .map((word, index) =>
+      ACRONYMS.has(word.toLowerCase())
+        ? word.toUpperCase()
+        : index === 0
+          ? word.charAt(0).toUpperCase() + word.slice(1)
+          : word)
+    .join(" ");
+}
+
+function providerLabel(key) {
+  return PROVIDER_LABELS[key] || humanize(key);
+}
+
+function usageNumber(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  return Number(value).toLocaleString();
+}
+
+/* Currency that stays honest at both ends of the range. */
+function usageCost(value) {
+  if (value === null || value === undefined || Number.isNaN(Number(value))) return "—";
+  const amount = Number(value);
+  if (amount === 0) return "$0.00";
+  if (Math.abs(amount) < 1) {
+    let text = amount.toFixed(6).replace(/0+$/, "");
+    if (text.endsWith(".")) text = text.slice(0, -1);
+    const [whole, fraction = ""] = text.split(".");
+    // Six decimals still round a very small charge to nothing. Saying it is
+    // below the smallest figure we print is true; saying it is zero is not.
+    if (Number(text) === 0) return amount < 0 ? "> -$0.000001" : "< $0.000001";
+    return `$${whole}.${fraction.padEnd(2, "0")}`;
+  }
+  return `$${amount.toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}`;
+}
+
+function usageDuration(milliseconds) {
+  if (milliseconds === null || milliseconds === undefined || Number.isNaN(Number(milliseconds))) return "—";
+  // Round first: 999.6ms is a second, and printing "1000 ms" for it is the
+  // one place this scale reads wrong.
+  const value = Math.round(Number(milliseconds));
+  if (value < 1000) return `${value} ms`;
+  const seconds = value / 1000;
+  return `${seconds.toFixed(seconds >= 10 ? 1 : 2)} s`;
+}
+
+function usageTimestamp(value) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? String(value) : parsed.toLocaleString();
+}
+
+function emptyRow(container, message) {
+  const note = document.createElement("p");
+  note.className = "tool-note";
+  note.textContent = message;
+  container.replaceChildren(note);
+}
+
+function usageRow(label, value, {share = null, mono = false} = {}) {
+  const row = document.createElement("div");
+  row.className = share === null ? "usage-row" : "usage-row usage-bar";
+  if (share !== null) row.style.setProperty("--usage-share", `${share}%`);
+  const name = document.createElement("span");
+  name.textContent = label;
+  if (mono) name.className = "t-mono";
+  const count = document.createElement("span");
+  count.textContent = value;
+  row.append(name, count);
+  return row;
+}
+
+function renderUsageWindows(value) {
+  const container = document.querySelector("#usage-windows");
+  container.replaceChildren();
+  for (const [key, label] of USAGE_WINDOWS) {
+    const window = value[key] || {};
+    const card = document.createElement("article");
+    card.className = "metric-card";
+    const heading = document.createElement("small");
+    heading.textContent = label;
+    const cost = document.createElement("strong");
+    cost.textContent = usageCost(window.cost_usd);
+    const requests = document.createElement("span");
+    requests.className = "usage-detail";
+    const count = Number(window.requests ?? 0);
+    requests.textContent = `${usageNumber(window.requests)} request${count === 1 ? "" : "s"}`;
+    const tokens = document.createElement("span");
+    tokens.className = "usage-detail";
+    tokens.textContent =
+      `${usageNumber(window.input_tokens)} in · ${usageNumber(window.output_tokens)} out · ` +
+      `${usageNumber(window.errors)} error${Number(window.errors ?? 0) === 1 ? "" : "s"}`;
+    card.append(heading, cost, requests, tokens);
+    container.append(card);
+  }
+}
+
+function renderUsageDistribution(selector, distribution, {labeller = humanize, mono = false, bars = false, empty}) {
+  const container = document.querySelector(selector);
+  const entries = Object.entries(distribution || {}).sort((first, second) => second[1] - first[1]);
+  if (!entries.length) return emptyRow(container, empty);
+  const highest = Math.max(...entries.map(entry => Number(entry[1]) || 0), 1);
+  container.replaceChildren(
+    ...entries.map(([key, count]) =>
+      usageRow(labeller(key), usageNumber(count), {
+        share: bars ? Math.round((Number(count) || 0) / highest * 100) : null,
+        mono,
+      })));
+}
+
+function renderUsageLatency(selector, table, empty) {
+  const container = document.querySelector(selector);
+  const entries = Object.entries(table || {}).sort(
+    (first, second) => (second[1].count || 0) - (first[1].count || 0));
+  if (!entries.length) return emptyRow(container, empty);
+  const header = document.createElement("div");
+  header.className = "usage-latency usage-latency-head";
+  for (const label of ["", "Count", "Average", "Max"]) {
+    const cell = document.createElement("span");
+    cell.textContent = label;
+    header.append(cell);
+  }
+  const rows = entries.map(([key, measure]) => {
+    const row = document.createElement("div");
+    row.className = "usage-latency";
+    const name = document.createElement("span");
+    name.textContent = humanize(key);
+    row.append(name);
+    for (const [label, text] of [
+      ["Count", usageNumber(measure.count)],
+      ["Average", usageDuration(measure.average_ms)],
+      ["Max", usageDuration(measure.max_ms)],
+    ]) {
+      const cell = document.createElement("span");
+      cell.dataset.label = label;
+      cell.textContent = text;
+      row.append(cell);
+    }
+    return row;
+  });
+  container.replaceChildren(header, ...rows);
+}
+
+function renderUsageErrors(errors) {
+  const container = document.querySelector("#usage-errors");
+  if (!Array.isArray(errors) || !errors.length) {
+    return emptyRow(container, "No recent AI provider errors.");
+  }
+  container.replaceChildren(
+    ...errors.map(error => {
+      const row = document.createElement("article");
+      row.className = "data-row";
+      const content = document.createElement("div");
+      const title = document.createElement("h3");
+      // Only the fields the endpoint exposes. No request or response content.
+      title.textContent = `${error.error_code || "error"} · ${error.model || "unknown model"}`;
+      const detail = document.createElement("p");
+      detail.textContent =
+        `${usageTimestamp(error.timestamp)} · ${providerLabel(error.provider)} · route ${humanize(error.route)}`;
+      content.append(title, detail);
+      row.append(content);
+      return row;
+    }));
+}
+
+function renderUsagePricing(pricing) {
+  const value = pricing || {};
+  axis(document.querySelector("#usage-pricing"), [
+    ["Pricing source", value.source ? String(value.source) : "—"],
+    ["Pricing date", value.date ? String(value.date) : "—"],
+    ["Unknown models", value.unknown_models_fail_closed ? "yes" : "unknown",
+      "a model with no published price is refused rather than billed blind", "muted"],
+  ]);
+}
+
+async function refreshUsage() {
+  const payload = (await api("/api/admin/usage")).value;
+  // The endpoint returns the aggregate under `summary`, alongside per-request
+  // history this page does not present. Falling back to the payload itself
+  // keeps an older or newer server rendering something rather than nothing.
+  const value = payload.summary || payload;
+  renderUsageWindows(value);
+  renderUsageDistribution("#usage-routes", value.route_distribution, {
+    bars: true, empty: "No requests have been routed yet."});
+  const avoided = value.deterministic_or_model_avoided;
+  document.querySelector("#usage-avoided").textContent =
+    avoided === null || avoided === undefined
+      ? ""
+      : `${usageNumber(avoided)} request(s) were answered without calling a model. ` +
+        "That is a count of requests, not a measured saving.";
+  renderUsageDistribution("#usage-models", value.model_distribution, {
+    labeller: String, mono: true, empty: "No model has been called yet."});
+  renderUsageDistribution("#usage-providers", value.provider_distribution, {
+    labeller: providerLabel, empty: "No provider has been called yet."});
+  const basis = document.querySelector("#usage-cost-basis");
+  const bases = Object.entries(value.cost_basis_distribution || {});
+  if (!bases.length) emptyRow(basis, "Nothing has been costed yet.");
+  else axis(basis, bases.map(([key, count]) =>
+    [humanize(key), usageNumber(count), COST_BASIS_NOTES[key] || "", "muted"]));
+  renderUsageLatency("#usage-route-latency", value.latency_by_route, "No latency has been recorded yet.");
+  renderUsageLatency("#usage-operation-latency", value.latency_by_operation, "No operation latency has been recorded yet.");
+  renderUsageErrors(value.recent_errors);
+  renderUsagePricing(value.pricing);
+  // Diagnostics only, two disclosures deep, and deliberately scoped to the
+  // aggregate: the full payload also carries per-request rows whose session
+  // identifiers have no business being painted onto an Admin page. Live
+  // request history belongs to Diagnostics, which already shows it.
+  document.querySelector("#usage-raw").textContent = pretty(value);
+}

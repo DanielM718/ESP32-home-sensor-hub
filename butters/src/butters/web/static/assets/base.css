@@ -13,6 +13,24 @@ html {
   -webkit-text-size-adjust: 100%;
 }
 
+/* The HTML `hidden` attribute means "not rendered", and this layer is what
+ * guarantees it.
+ *
+ * Browsers express `hidden` as `[hidden]{display:none}` in the user-agent
+ * stylesheet, which *any* author `display` overrides. This stylesheet sets
+ * display on buttons, cards, labels and range fields, so without this rule a
+ * control the scripts hid with `element.hidden = true` still painted. That is
+ * how the Portal's NAS shutdown button became visible to identities without
+ * the nas_power role: the server correctly withheld the capability and the
+ * client correctly set `hidden`, and the stylesheet drew it anyway.
+ *
+ * !important is deliberate. The attribute is a statement about the document,
+ * not a style suggestion, and no component rule may outrank it.
+ */
+[hidden] {
+  display: none !important;
+}
+
 body {
   margin: 0;
   background: var(--bg);

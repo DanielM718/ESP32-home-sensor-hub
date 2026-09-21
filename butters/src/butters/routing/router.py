@@ -1287,6 +1287,49 @@ class IntentRouter:
                 return skill
         return None
 
+    # Asking whether the NAS or Jellyfin is up. Both halves are required.
+    #
+    # "status" on its own belongs to the sensor, printer, desktop, host and
+    # service routes, so the subject is what distinguishes this one. And a
+    # subject on its own is not enough either: "wake the nas" and "open
+    # jellyfin" name the same things without asking after them.
+    #
+    # Deliberately absent from the operational words: "up" and "down". They
+    # read as state, but "shut down the nas" and "wake up the nas" would then
+    # report status instead of acting.
+    _NAS_SUBJECTS = frozenset({"nas", "jellyfin"})
+    _NAS_OPERATIONAL = frozenset(
+        {
+            "status",
+            "online",
+            "offline",
+            "running",
+            "available",
+            "unavailable",
+            "reachable",
+            "unreachable",
+            "health",
+            "healthy",
+            "doing",
+            "working",
+            "alive",
+        }
+    )
+
+    @staticmethod
+    def _nas_status_request(text: str) -> bool:
+        """True for a question about NAS or Jellyfin availability.
+
+        Whole words only: a substring test would match "nas" inside unrelated
+        words, and the point of this matcher is that it fires on an explicit
+        subject rather than on a phrase that happens to contain three letters.
+        """
+
+        words = set(re.findall(r"[a-z]+", text))
+        return bool(words & IntentRouter._NAS_SUBJECTS) and bool(
+            words & IntentRouter._NAS_OPERATIONAL
+        )
+
     @staticmethod
     def _capability_status_request(text: str) -> str | None:
         if "environment control" in text or any(
@@ -1294,7 +1337,7 @@ class IntentRouter:
             for phrase in ("heater status", "dehumidifier status", "ventilation status")
         ):
             return "get_environment_control_status"
-        if any(phrase in text for phrase in ("nas status", "is my nas online")):
+        if IntentRouter._nas_status_request(text):
             return "get_nas_status"
         if "action broker" in text:
             return "get_action_broker_status"

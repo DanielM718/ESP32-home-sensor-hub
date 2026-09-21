@@ -268,7 +268,61 @@
       </div>
     </section>
 
-    <section id="panel-usage" class="admin-panel"><div id="usage-view" class="data-list"></div></section>
+    <section id="panel-usage" class="admin-panel">
+      <div class="admin-section">
+        <h2>Spend</h2>
+        <div id="usage-windows" class="metric-grid" role="group" aria-label="Usage by period"></div>
+      </div>
+
+      <div class="admin-section">
+        <h2>How requests were handled</h2>
+        <div id="usage-routes" class="usage-bars" role="group" aria-label="Requests by route"></div>
+        <p id="usage-avoided" class="tool-note"></p>
+      </div>
+
+      <div class="admin-section">
+        <h2>Models and providers</h2>
+        <div class="split-view">
+          <div>
+            <h3 class="t-section">Models and operations</h3>
+            <div id="usage-models" class="usage-rows" role="group" aria-label="Requests by model"></div>
+          </div>
+          <div>
+            <h3 class="t-section">Providers</h3>
+            <div id="usage-providers" class="usage-rows" role="group" aria-label="Requests by provider"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="admin-section">
+        <h2>Cost accounting</h2>
+        <p class="tool-note">How each recorded figure was arrived at. An estimated upper bound is a ceiling awaiting reconciliation against the provider&rsquo;s own billing, not a charge Butters observed.</p>
+        <div id="usage-cost-basis" class="axis-grid" role="group" aria-label="Cost basis of recorded spend"></div>
+      </div>
+
+      <div class="admin-section">
+        <h2>Latency</h2>
+        <div id="usage-route-latency" class="usage-table" role="group" aria-label="Latency by route"></div>
+        <details class="advanced-block">
+          <summary>By operation</summary>
+          <div id="usage-operation-latency" class="usage-table" role="group" aria-label="Latency by operation"></div>
+        </details>
+      </div>
+
+      <div class="admin-section">
+        <h2>Provider errors</h2>
+        <div id="usage-errors" class="data-list" role="group" aria-label="Recent provider errors"></div>
+      </div>
+
+      <details class="advanced-block">
+        <summary>Technical details</summary>
+        <div id="usage-pricing" class="axis-grid" role="group" aria-label="Pricing provenance"></div>
+        <details class="advanced-block">
+          <summary>Raw usage data</summary>
+          <pre id="usage-raw" class="code-output">Not loaded.</pre>
+        </details>
+      </details>
+    </section>
 
     <section id="panel-models" class="admin-panel">
       <div class="admin-section">

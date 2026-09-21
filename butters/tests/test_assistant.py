@@ -153,3 +153,45 @@ def test_async_responder_keeps_live_handoff_bounded_and_closes() -> None:
         "Printer room CO2 is 742 ppm."
     ]
     assert not responder.submit("what is the printer room CO2 level")
+
+
+class NoNas:
+    """A NAS adapter that reports, so the route can be exercised offline."""
+
+    def status(self) -> dict[str, object]:
+        return {
+            "device": "nas",
+            "configured": True,
+            "observed": True,
+            "status": "READY",
+            "observations": {
+                "lan": "reachable",
+                "nas_api": "reachable",
+                "tailscale": "reachable",
+                "jellyfin": "ready",
+            },
+        }
+
+
+def test_the_nas_and_jellyfin_question_is_not_answered_with_which_sensor() -> None:
+    """The live failure, end to end.
+
+    "What is the current status of my NAS and Jellyfin?" used to fall past
+    the deterministic NAS matcher into sensor handling and come back asking
+    which sensor was meant.
+    """
+
+    settings = load_assistant_settings()
+    vocabulary = load_domain_vocabulary(default_vocabulary_path())
+    assistant = create_assistant(
+        settings,
+        vocabulary,
+        sensor_adapter=Sensors(),  # type: ignore[arg-type]
+        server_adapter=Health(),  # type: ignore[arg-type]
+    )
+
+    response = assistant.handle_text("What is the current status of my NAS and Jellyfin?")
+
+    assert response.route.skill == "get_nas_status"
+    assert response.route.status == "matched"
+    assert "Which sensor" not in response.response_text
