@@ -1461,13 +1461,14 @@ def test_a_missing_summary_produces_no_empty_panel() -> None:
     assert "if (!text) return null;" in block
 
 
-def test_the_summary_is_never_placed_in_the_answer_paragraph() -> None:
+def test_the_summary_is_never_placed_in_the_answer_body() -> None:
     block = APP_JS[APP_JS.index("function addMessage"):]
     block = block[: block.index("\n}\n")]
 
-    # The answer paragraph carries `text` and nothing else; the metadata and
-    # the summary are appended to the article as siblings.
-    assert "paragraph.textContent = text;" in block
+    # The answer body carries `text` and nothing else; the metadata and the
+    # summary are appended to the article as siblings of it.
+    assert "renderAssistantMarkdown(text)" in block
+    assert "paragraph.textContent = text;" in block  # the user branch
     assert "reasoning_summary" not in block
 
 
@@ -1490,7 +1491,9 @@ def test_the_metadata_is_visually_secondary_to_the_answer() -> None:
 
 
 def test_the_summary_uses_the_design_system_and_survives_a_narrow_screen() -> None:
-    body = declarations(".reasoning-summary > p", STYLESHEETS["chat.css"])
+    # The summary is rendered through the safe Markdown path, so its styled
+    # element is the rendered body rather than a bare paragraph.
+    body = declarations(".reasoning-summary > .message-body", STYLESHEETS["chat.css"])
     trigger = declarations(".reasoning-summary > summary", STYLESHEETS["chat.css"])
 
     assert body["font-size"] == "var(--type-meta-size)"

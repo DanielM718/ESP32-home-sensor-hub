@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import secrets
 import threading
 import time
@@ -10,8 +11,29 @@ from dataclasses import dataclass, field
 
 from butters.routing.model import PendingClarification
 
-
 ANONYMOUS_PEER = "peer:unknown"
+
+# C0 controls have no place in conversation text. Tab and newline do: an
+# assistant answer is Markdown, and Markdown is a whitespace-significant
+# format - collapsing its newlines would turn a heading, a list and a table
+# back into one run-on paragraph when the page reloads and rebuilds the
+# conversation from here.
+_CONTROL_CHARACTERS = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+_BLANK_RUN = re.compile(r"\n{3,}")
+
+
+def normalize_message_text(text: str, *, limit: int) -> str:
+    """Bound and de-control one conversation message without reflowing it.
+
+    Line structure and leading indentation survive, because both carry
+    meaning in Markdown - indentation is how a fenced block's contents and a
+    nested list item are written. Trailing spaces, stray carriage returns and
+    long runs of blank lines do not survive, because they carry none.
+    """
+
+    without_controls = _CONTROL_CHARACTERS.sub("", text.replace("\r\n", "\n").replace("\r", "\n"))
+    lines = [line.rstrip() for line in without_controls.split("\n")]
+    return _BLANK_RUN.sub("\n\n", "\n".join(lines)).strip()[:limit]
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +162,7 @@ class SessionManager:
     ) -> None:
         if role not in {"user", "assistant"}:
             raise SessionError("invalid_role", "conversation role is invalid", 400)
-        clean = " ".join(text.replace("\x00", "").split())[:4000]
+        clean = normalize_message_text(text, limit=4000)
         if not clean:
             return
         with self._lock:

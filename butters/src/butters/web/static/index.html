@@ -64,6 +64,11 @@
       <button id="stop-audio" class="stop-audio" type="button" hidden>Stop speaking</button>
     </footer>
   </main>
+  <!-- Deferred scripts execute in document order, so both libraries are
+       defined before app.js renders its first assistant message. Served
+       from this origin; the page never contacts a CDN. -->
+  <script src="/assets/markdown-it.umd.min.js" defer></script>
+  <script src="/assets/purify.min.js" defer></script>
   <script src="/assets/app.js" defer></script>
 </body>
 </html>

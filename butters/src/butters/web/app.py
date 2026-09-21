@@ -208,6 +208,19 @@ def create_app(
             (ASSET_ROOT / "portal.js").read_bytes(),
             "text/javascript",
         ),
+        # Vendored browser libraries for safe Markdown presentation. They live
+        # in assets/vendor/ so the licences and provenance sit beside them, but
+        # they are published under flat names here: the route matches one path
+        # segment, and the rule that nothing becomes public merely by being in
+        # a directory is the reason this list exists.
+        "markdown-it.umd.min.js": (
+            (ASSET_ROOT / "vendor" / "markdown-it.umd.min.js").read_bytes(),
+            "text/javascript",
+        ),
+        "purify.min.js": (
+            (ASSET_ROOT / "vendor" / "purify.min.js").read_bytes(),
+            "text/javascript",
+        ),
     }
     stt_pool = STTEnginePool(
         make_stt_engine,

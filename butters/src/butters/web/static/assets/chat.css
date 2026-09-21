@@ -151,8 +151,15 @@
 }
 
 .message p {
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* The person's own words keep every newline they typed, because nothing
+ * parses them. A rendered assistant answer must not: the parser has already
+ * decided where its breaks are, and pre-wrap would lay the source's newlines
+ * on top of them. */
+.user-message p {
+  white-space: pre-wrap;
 }
 
 .assistant-message {
@@ -169,6 +176,132 @@
   border: 1px solid transparent;
   border-end-end-radius: var(--radius-sm);
   color: var(--text);
+}
+
+/* --------------------------------------------------- rendered Markdown --
+ *
+ * An assistant answer is a small document inside a bubble, so everything
+ * here is scaled to a bubble. A model writing `# Heading` gets a heading
+ * that leads its own message; it does not get to compete with the page.
+ */
+
+.message-body > :first-child { margin-block-start: 0; }
+.message-body > :last-child  { margin-block-end: 0; }
+
+.message-body p,
+.message-body ul,
+.message-body ol,
+.message-body pre,
+.message-body blockquote,
+.message-body .table-scroll {
+  margin-block: var(--space-3) 0;
+}
+
+.message-body h1,
+.message-body h2,
+.message-body h3,
+.message-body h4,
+.message-body h5,
+.message-body h6 {
+  margin-block: var(--space-4) var(--space-1);
+  line-height: 1.25;
+  font-weight: 650;
+}
+
+/* Three sizes rather than six. A chat answer does not need a document's
+ * full hierarchy, and even the largest stays below the page title. */
+.message-body h1 { font-size: 1.15rem; }
+.message-body h2 { font-size: 1.05rem; }
+.message-body h3,
+.message-body h4,
+.message-body h5,
+.message-body h6 { font-size: 1rem; }
+
+.message-body ul,
+.message-body ol { padding-inline-start: var(--space-5); }
+.message-body li { margin-block: var(--space-1); }
+
+/* A nested list belongs to its parent item, so it does not restate the gap. */
+.message-body li > ul,
+.message-body li > ol { margin-block: var(--space-1) 0; }
+
+.message-body strong { font-weight: 650; }
+.message-body em { font-style: italic; }
+.message-body s,
+.message-body del { text-decoration: line-through; color: var(--text-muted); }
+
+.message-body a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.message-body code {
+  font-family: var(--font-mono);
+  font-size: 0.875em;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 1px var(--space-1);
+}
+
+.message-body pre {
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: var(--space-3);
+  /* A long line scrolls inside the block. It never widens the bubble and it
+   * never gets broken in a place that would change what the code says. */
+  overflow-x: auto;
+}
+
+.message-body pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: var(--type-mono-size);
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+.message-body blockquote {
+  margin-inline: 0;
+  padding-inline-start: var(--space-3);
+  border-inline-start: 3px solid var(--accent-quiet);
+  color: var(--text-secondary);
+}
+
+.message-body hr {
+  margin-block: var(--space-4);
+  border: 0;
+  border-block-start: 1px solid var(--border);
+}
+
+/* The wrapper scrolls, not the table, so columns keep their intrinsic widths
+ * instead of being squeezed into an unreadable shape on a phone. */
+.table-scroll {
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+.message-body table {
+  border-collapse: collapse;
+  font-size: var(--type-meta-size);
+}
+
+.message-body th,
+.message-body td {
+  border: 1px solid var(--border);
+  padding: var(--space-2) var(--space-3);
+  text-align: start;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+
+.message-body thead th {
+  background: var(--surface-sunken);
+  font-weight: 650;
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------- answer provenance --
@@ -204,12 +337,14 @@
   gap: var(--space-2);
 }
 
-.reasoning-summary > p {
+/* The summary is rendered by the same safe Markdown path as the answer, so
+ * it is the rendered body that is styled here - quieter than the answer, and
+ * still inside its disclosure. */
+.reasoning-summary > .message-body {
   margin-block-start: var(--space-2);
   font-size: var(--type-meta-size);
   line-height: var(--type-meta-leading);
   color: var(--text-secondary);
-  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -316,7 +451,11 @@
   /* At iPhone width the provenance line wraps rather than widening the
    * bubble or forcing the conversation to scroll sideways. */
   .message-meta,
-  .reasoning-summary > p { overflow-wrap: anywhere; }
+  .reasoning-summary > .message-body { overflow-wrap: anywhere; }
+  /* Tables keep readable type and give back padding instead, so a narrow
+   * screen scrolls a legible table rather than showing a shrunken one. */
+  .message-body th,
+  .message-body td { padding: var(--space-1) var(--space-2); }
   .action-card,
   .partial { margin-inline: var(--space-3); }
 }

@@ -175,15 +175,152 @@ function setPending(value) {
   form.dataset.pending = value ? "true" : "false";
 }
 
+/* ------------------------------------------------- Markdown rendering --
+ *
+ * Assistant text is UNTRUSTED. It is model output, and a model can be talked
+ * into emitting anything, so it is never treated as markup by this page. It
+ * passes through two independent layers that are both configured here:
+ *
+ *   1. markdown-it with `html: false`. Raw HTML in the model's text is
+ *      escaped into visible characters and never becomes markup, so the only
+ *      markup that exists downstream is what the parser itself produced from
+ *      Markdown syntax.
+ *   2. DOMPurify against the explicit allow-list below, returning a DOM
+ *      fragment rather than a string.
+ *
+ * Neither layer is trusted to be sufficient on its own. User-authored text
+ * never enters this path at all - see addMessage.
+ */
+
+// Only schemes a reader can safely be sent to. DOMPurify blocks `javascript:`
+// and friends by default; stating the allowed set positively means a future
+// default change cannot quietly widen it, and it covers case-mangled and
+// entity-encoded spellings because DOMPurify normalises before testing.
+const SAFE_URI = /^(?:https?:|mailto:)/i;
+
+// Exactly the elements markdown-it produces for the constructs Chat supports.
+// `img` is absent deliberately, and so is every embedding, scripting and
+// styling element.
+const MARKDOWN_TAGS = [
+  "p", "br", "hr",
+  "h1", "h2", "h3", "h4", "h5", "h6",
+  "strong", "em", "s", "del", "code", "pre",
+  "ul", "ol", "li",
+  "blockquote",
+  "table", "thead", "tbody", "tr", "th", "td",
+  "a",
+];
+
+const PURIFY_CONFIG = {
+  ALLOWED_TAGS: MARKDOWN_TAGS,
+  // `title` is markdown-it's [text](url "title"). Nothing else is carried:
+  // no class, no id, no style, and therefore no event handler.
+  ALLOWED_ATTR: ["href", "title", "start", "colspan", "rowspan"],
+  ALLOWED_URI_REGEXP: SAFE_URI,
+  // Belt and braces: these can never be produced by markdown-it with
+  // `html: false`, so naming them costs nothing and fails loudly if that
+  // assumption ever stops holding.
+  FORBID_TAGS: ["script", "style", "iframe", "object", "embed", "svg", "math", "form", "img", "link", "base"],
+  FORBID_ATTR: ["srcset", "src", "style", "onerror", "onload", "onclick", "formaction", "xlink:href"],
+  ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
+  RETURN_DOM_FRAGMENT: true,
+};
+
+const markdown = typeof window.markdownit === "function"
+  ? window.markdownit({
+    html: false,        // the important one: model HTML is text, not markup
+    linkify: false,     // only an explicit [text](url) becomes a link
+    breaks: true,       // a lone newline is a line break, as chat readers expect
+    typographer: false, // leave technical text exactly as written
+  })
+  : null;
+
+if (markdown) {
+  // No images. A model-supplied image URL would make the browser fetch a
+  // third-party resource before the reader decided to trust it, and the page
+  // must not be able to leak "this answer was read" that way. With the rule
+  // off, `![alt](url)` stays visible as its own literal text.
+  //
+  // `true` means "do not throw if the rule is gone". A renamed rule in some
+  // future release must not take the whole of Chat down at load time, and it
+  // cannot make images appear either: `img` is outside the sanitizer's
+  // allow-list and inside its forbidden list, and the CSP permits no remote
+  // image source.
+  markdown.disable("image", true);
+}
+
+if (window.DOMPurify) {
+  // Added once, at load. A hook registered per render would stack up.
+  window.DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+    if (node.tagName !== "A") return;
+    const href = node.getAttribute("href");
+    if (!href || !SAFE_URI.test(href)) {
+      // Keep the words, drop the destination: the reader still sees the link
+      // text, and there is nothing left to navigate to.
+      node.removeAttribute("href");
+      node.removeAttribute("target");
+      return;
+    }
+    // A link leaves Butters in its own context and cannot reach back into the
+    // opener, so a model-authored link cannot drive this page.
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noopener noreferrer nofollow ugc");
+  });
+}
+
+/* Untrusted Markdown in, safe DOM out. Returns an element, never a string,
+ * and never touches innerHTML. */
+function renderAssistantMarkdown(text) {
+  const source = typeof text === "string" ? text : "";
+  const body = document.createElement("div");
+  body.className = "message-body";
+  if (!markdown || !window.DOMPurify) {
+    // A library that failed to load degrades to plain text. It must never
+    // degrade to unsanitized markup.
+    body.textContent = source;
+    return body;
+  }
+  let fragment;
+  try {
+    // ---- TRUST BOUNDARY -------------------------------------------------
+    // `source` above is untrusted model text. `markdown.render` produces
+    // markup containing no model-authored HTML; `DOMPurify.sanitize` reduces
+    // that to the allow-list above and hands back nodes. Everything below
+    // this line is trusted DOM.
+    fragment = window.DOMPurify.sanitize(markdown.render(source), PURIFY_CONFIG);
+  } catch (error) {
+    body.textContent = source;
+    return body;
+  }
+  body.append(fragment);
+  // A wide GFM table must scroll inside the message rather than widen the
+  // conversation column. Applied to sanitized nodes, after the boundary.
+  for (const table of body.querySelectorAll("table")) {
+    const scroller = document.createElement("div");
+    scroller.className = "table-scroll";
+    table.replaceWith(scroller);
+    scroller.append(table);
+  }
+  return body;
+}
+
 function addMessage(role, text, meta = null) {
   const item = document.createElement("article");
   item.className = `message ${role === "user" ? "user-message" : "assistant-message"}`;
-  const paragraph = document.createElement("p");
-  paragraph.textContent = text;
-  item.append(paragraph);
+  if (role === "user") {
+    // The person's own words are shown exactly as typed. They are never
+    // parsed as Markdown, so `**text**`, `# heading` and a literal
+    // `<script>` stay the characters the person entered.
+    const paragraph = document.createElement("p");
+    paragraph.textContent = text;
+    item.append(paragraph);
+  } else {
+    item.append(renderAssistantMarkdown(text));
+  }
   if (role !== "user") {
     // Both of these are siblings of the answer, never part of it. The
-    // answer paragraph above is the only thing that carries the text the
+    // rendered body above is the only thing that carries the text the
     // server also stored and will speak.
     const line = cloudMetadata(meta);
     if (line) item.append(line);
@@ -237,8 +374,10 @@ function reasoningSummary(meta) {
   block.className = "reasoning-summary";
   const label = document.createElement("summary");
   label.textContent = "Reasoning summary";
-  const body = document.createElement("p");
-  body.textContent = text;
+  // The summary is model output too, so it gets the same untrusted treatment
+  // as the answer - and stays in its own disclosure, outside the answer body.
+  const body = renderAssistantMarkdown(text);
+  body.classList.add("reasoning-summary-body");
   block.append(label, body);
   return block;
 }
