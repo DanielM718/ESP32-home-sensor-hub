@@ -507,6 +507,29 @@ def test_unsaved_changes_are_announced_and_reversible() -> None:
     assert "clearThemeTokens()" in failure
 
 
+def test_preview_requests_are_coalesced_and_survive_the_rate_limit() -> None:
+    """The administrator rate limit is low and a colour well is chatty.
+
+    Without coalescing, a few seconds of dragging the picker spends the burst
+    and the page starts calling a perfectly good theme invalid.
+    """
+
+    section = ADMIN_JS[ADMIN_JS.index("/* ============================== Appearance"):]
+    assert "appearanceInFlight" in section
+    assert "appearanceQueued" in section
+    # A rate limit is not a verdict on the theme.
+    guard = section[section.index("async function previewAppearance"):]
+    guard = guard[: guard.index("\n}\n")]
+    assert "/rate limit/i.test(message)" in guard
+    assert "appearanceValid = false" in guard
+    assert guard.index("rate limit") < guard.index("appearanceValid = false")
+    # The colour well resolves on commit, not on every drag frame.
+    assert 'appearanceSwatch.addEventListener("change"' in section
+    wiring = section[section.index('appearanceSwatch.addEventListener("input"'):]
+    wiring = wiring[: wiring.index('appearanceSwatch.addEventListener("change"')]
+    assert "scheduleAppearancePreview" not in wiring
+
+
 def test_no_appearance_control_leaks_onto_chat_or_portal() -> None:
     for page in ("index.html", "portal.html"):
         document = (STATIC / page).read_text()

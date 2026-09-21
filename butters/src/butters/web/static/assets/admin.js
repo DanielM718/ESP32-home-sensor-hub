@@ -1230,17 +1230,53 @@ async function previewAppearance() {
       ? "Matches the saved theme."
       : "Previewing. Nothing is stored until you save.";
   } catch (error) {
+    const message = error.message || "That theme was refused.";
+    if (/rate limit/i.test(message)) {
+      // Not a verdict on the theme. Leave the last verdict standing and ask
+      // again shortly rather than telling the user their colour is invalid.
+      status.textContent = "Catching up…";
+      scheduleAppearancePreview(1200);
+      return;
+    }
     // Refused: say why, keep what they typed so it can be corrected, and do
     // not offer Save.
     appearanceValid = false;
-    status.textContent = error.message || "That theme was refused.";
+    status.textContent = message;
+  } finally {
+    renderAppearanceState();
   }
-  renderAppearanceState();
 }
 
-function scheduleAppearancePreview() {
+/* One request at a time, and only ever the latest value.
+ *
+ * Preview asks the server to resolve the candidate, and the administrator
+ * rate limit is deliberately low. A colour input emits a change per drag
+ * frame, so without coalescing a few seconds of picking would spend the whole
+ * burst and start reporting rate-limit errors for a perfectly valid theme.
+ */
+let appearanceInFlight = false;
+let appearanceQueued = false;
+
+async function runAppearancePreview() {
+  if (appearanceInFlight) {
+    appearanceQueued = true;
+    return;
+  }
+  appearanceInFlight = true;
+  try {
+    await previewAppearance();
+  } finally {
+    appearanceInFlight = false;
+    if (appearanceQueued) {
+      appearanceQueued = false;
+      scheduleAppearancePreview();
+    }
+  }
+}
+
+function scheduleAppearancePreview(delay = 320) {
   window.clearTimeout(appearanceTimer);
-  appearanceTimer = window.setTimeout(previewAppearance, 180);
+  appearanceTimer = window.setTimeout(runAppearancePreview, delay);
 }
 
 async function saveAppearance() {
@@ -1316,19 +1352,26 @@ document.querySelector("#appearance-preset").addEventListener("change", () => {
     control.accent.value = chosen.id === "custom" ? control.accent.value : chosen.accent;
     if (chosen.id !== "custom") control.tone.value = chosen.surface_tone;
   }
-  previewAppearance();
+  scheduleAppearancePreview(0);
 });
-document.querySelector("#appearance-tone").addEventListener("change", previewAppearance);
+document.querySelector("#appearance-tone").addEventListener("change", () => scheduleAppearancePreview(0));
 document.querySelector("#appearance-accent").addEventListener("input", () => {
   const control = appearanceControls();
   const value = control.accent.value.trim();
   if (/^#[0-9a-fA-F]{6}$/.test(value)) control.swatch.value = value.toLowerCase();
   scheduleAppearancePreview();
 });
-document.querySelector("#appearance-accent-swatch").addEventListener("input", () => {
+const appearanceSwatch = document.querySelector("#appearance-accent-swatch");
+// `input` keeps the hex field in step while the well is open, without asking
+// the server anything; `change` is the commit, and that is what resolves.
+appearanceSwatch.addEventListener("input", () => {
   const control = appearanceControls();
   control.accent.value = control.swatch.value.toUpperCase();
-  scheduleAppearancePreview();
+});
+appearanceSwatch.addEventListener("change", () => {
+  const control = appearanceControls();
+  control.accent.value = control.swatch.value.toUpperCase();
+  scheduleAppearancePreview(0);
 });
 document.querySelector("#appearance-save").addEventListener("click", saveAppearance);
 document.querySelector("#appearance-revert").addEventListener("click", revertAppearance);
