@@ -7,7 +7,7 @@ let selectedJob = null;
 let traceSocket = null;
 let selectedTraceId = null;
 const traceCards = new Map();
-const titles = {overview:"Overview",system:"Butters service",desktop:"Desktop",nas:"NAS",chat:"Chat model",voice:"Speech",credentials:"Credentials",usage:"Usage",models:"Models & STT",routing:"Routing test",media:"Jellyfin & bandwidth",portalaccess:"Portal access",skills:"Skills",tools:"Diagnostic tools",actions:"Actions & broker",capabilities:"Capabilities",passkeys:"Authentication",security:"Security posture",trace:"Live trace",sessions:"Conversations",logs:"Logs",codex:"Codex jobs"};
+const titles = {overview:"Overview",appearance:"Appearance",system:"Butters service",desktop:"Desktop",nas:"NAS",chat:"Chat model",voice:"Speech",credentials:"Credentials",usage:"Usage",models:"Models & STT",routing:"Routing test",media:"Jellyfin & bandwidth",portalaccess:"Portal access",skills:"Skills",tools:"Diagnostic tools",actions:"Actions & broker",capabilities:"Capabilities",passkeys:"Authentication",security:"Security posture",trace:"Live trace",sessions:"Conversations",logs:"Logs",codex:"Codex jobs"};
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -103,6 +103,7 @@ async function refresh(panel) {
     if(panel==="nas") await refreshNas();
     if(panel==="media") await refreshMedia();
     if(panel==="portalaccess") await refreshPortalIdentities();
+    if(panel==="appearance") await refreshAppearance();
     if(panel==="tools") {const data=(await api("/api/admin/tools")).value; rows(document.querySelector("#tool-list"),data.tools,item=>[item.name,`${item.action_class} · ${item.timeout_seconds}s · ${item.description}`]);}
     if(panel==="usage") renderObject(document.querySelector("#usage-view"),(await api("/api/admin/usage")).value);
     if(panel==="system") renderObject(document.querySelector("#system-view"),(await api("/api/admin/system")).value);
@@ -194,8 +195,8 @@ const AXIS_TEXT = {yes:"Yes", no:"No", unknown:"Unknown", present:"Active", abse
 
 function axis(container, entries) {
   container.replaceChildren();
-  for (const [label, raw, note] of entries) {
-    const cell=document.createElement("article"); cell.className=`axis-cell axis-${AXIS_TONE[raw]||"muted"}`;
+  for (const [label, raw, note, tone] of entries) {
+    const cell=document.createElement("article"); cell.className=`axis-cell axis-${tone||AXIS_TONE[raw]||"muted"}`;
     const name=document.createElement("small"); name.textContent=label;
     const value=document.createElement("strong"); value.textContent=AXIS_TEXT[raw]||String(raw);
     cell.append(name,value);
@@ -1080,3 +1081,255 @@ async function refreshMedia() {
 }
 
 document.querySelector("#media-refresh").addEventListener("click",refreshMedia);
+
+
+/* ============================== Appearance ================================
+ *
+ * Three rules, mirroring the rest of this file.
+ *
+ * 1. The server owns the theme. Every colour shown here was resolved by
+ *    /api/admin/appearance; nothing in this file derives a shade, and there is
+ *    no second copy of the contrast rules to drift away from the first.
+ * 2. A preview is visibly a preview. Unsaved values are applied to the live
+ *    document so they can be judged in situ, and the page says plainly that
+ *    they are not stored. A reload restores whatever is actually saved.
+ * 3. Save is offered only for a theme the server has already accepted. An
+ *    accent that cannot produce a readable family disables Save and says why.
+ */
+
+const THEME_TOKENS = [
+  "--bg", "--surface", "--surface-raised", "--surface-sunken",
+  "--border", "--border-strong",
+  "--text", "--text-secondary", "--text-muted", "--text-disabled",
+  "--accent", "--accent-strong", "--accent-quiet", "--accent-ink",
+  "--accent-rgb",
+];
+
+let appearanceSaved = null;   // the persisted appearance, as the server reports it
+let appearanceDraft = null;   // what the controls currently say
+let appearanceValid = false;
+let appearanceTimer = 0;
+
+function applyThemeTokens(tokens) {
+  const root = document.documentElement;
+  for (const name of THEME_TOKENS) {
+    if (typeof tokens[name] === "string") root.style.setProperty(name, tokens[name]);
+  }
+}
+
+function clearThemeTokens() {
+  // Back to whatever /assets/theme.css delivered for the saved theme.
+  const root = document.documentElement;
+  for (const name of THEME_TOKENS) root.style.removeProperty(name);
+}
+
+function appearanceControls() {
+  return {
+    preset: document.querySelector("#appearance-preset"),
+    tone: document.querySelector("#appearance-tone"),
+    accent: document.querySelector("#appearance-accent"),
+    swatch: document.querySelector("#appearance-accent-swatch"),
+  };
+}
+
+function readAppearanceForm() {
+  const control = appearanceControls();
+  const preset = control.preset.value;
+  if (preset !== "custom") return {preset};
+  return {
+    preset: "custom",
+    accent: control.accent.value.trim().toUpperCase(),
+    surface_tone: control.tone.value,
+  };
+}
+
+function writeAppearanceForm(appearance) {
+  const control = appearanceControls();
+  control.preset.value = appearance.preset;
+  control.tone.value = appearance.surface_tone;
+  control.accent.value = appearance.accent;
+  // A colour input only accepts lowercase #rrggbb.
+  control.swatch.value = appearance.accent.toLowerCase();
+  const custom = appearance.preset === "custom";
+  // A preset is a reviewed pair, so its accent and tone are shown, not edited.
+  control.accent.disabled = !custom;
+  control.swatch.disabled = !custom;
+  control.tone.disabled = !custom;
+}
+
+function sameAppearance(first, second) {
+  if (!first || !second) return false;
+  if (first.preset !== second.preset) return false;
+  if (first.preset !== "custom") return true;
+  return first.accent === second.accent && first.surface_tone === second.surface_tone;
+}
+
+function renderAppearanceContrast(rows) {
+  axis(document.querySelector("#appearance-contrast"), (rows || []).map(row => [
+    row.label,
+    `${row.ratio}:1`,
+    `needs ${row.minimum}:1`,
+    row.passes ? "good" : "bad",
+  ]));
+}
+
+let appearanceCatalog = {presets: [], surface_tones: []};
+
+function renderAppearanceState() {
+  const dirty = !sameAppearance(appearanceDraft, appearanceSaved);
+  const state = document.querySelector("#appearance-state");
+  state.textContent = dirty
+    ? "Unsaved changes — previewing on this page only"
+    : `Saved: ${appearanceSaved ? appearanceSaved.preset : "unknown"}`;
+  state.classList.toggle("appearance-dirty", dirty);
+  document.querySelector("#appearance-save").disabled = !dirty || !appearanceValid;
+  document.querySelector("#appearance-revert").disabled = !dirty;
+  const preset = (appearanceCatalog.presets || []).find(
+    item => item.id === (appearanceDraft ? appearanceDraft.preset : null));
+  document.querySelector("#appearance-preset-note").textContent = preset ? preset.note : "";
+}
+
+function renderAppearanceCatalog(state) {
+  appearanceCatalog = state;
+  const control = appearanceControls();
+  control.preset.replaceChildren(
+    ...state.presets.map(item => option(item.id, item.label)));
+  control.tone.replaceChildren(
+    ...state.surface_tones.map(item => option(item.id, item.label)));
+}
+
+async function refreshAppearance() {
+  const state = (await api("/api/admin/appearance")).value;
+  renderAppearanceCatalog(state);
+  appearanceSaved = state.appearance;
+  appearanceDraft = state.appearance;
+  appearanceValid = true;
+  writeAppearanceForm(state.appearance);
+  renderAppearanceContrast(state.contrast);
+  clearThemeTokens();
+  renderAppearanceState();
+  document.querySelector("#appearance-status").textContent = "Loaded from the running service.";
+}
+
+/* Ask the server what the candidate resolves to. Nothing is stored. */
+async function previewAppearance() {
+  const candidate = readAppearanceForm();
+  appearanceDraft = candidate;
+  const status = document.querySelector("#appearance-status");
+  try {
+    const state = (await api("/api/admin/appearance?preview=1", {
+      method: "POST",
+      body: JSON.stringify(candidate),
+    })).value;
+    appearanceValid = true;
+    appearanceDraft = state.appearance;
+    writeAppearanceForm(state.appearance);
+    applyThemeTokens(state.tokens);
+    renderAppearanceContrast(state.contrast);
+    status.textContent = sameAppearance(state.appearance, appearanceSaved)
+      ? "Matches the saved theme."
+      : "Previewing. Nothing is stored until you save.";
+  } catch (error) {
+    // Refused: say why, keep what they typed so it can be corrected, and do
+    // not offer Save.
+    appearanceValid = false;
+    status.textContent = error.message || "That theme was refused.";
+  }
+  renderAppearanceState();
+}
+
+function scheduleAppearancePreview() {
+  window.clearTimeout(appearanceTimer);
+  appearanceTimer = window.setTimeout(previewAppearance, 180);
+}
+
+async function saveAppearance() {
+  const button = document.querySelector("#appearance-save");
+  const status = document.querySelector("#appearance-status");
+  button.disabled = true;
+  button.setAttribute("aria-busy", "true");
+  try {
+    const state = (await api("/api/admin/appearance", {
+      method: "POST",
+      body: JSON.stringify(readAppearanceForm()),
+    })).value;
+    appearanceSaved = state.appearance;
+    appearanceDraft = state.appearance;
+    appearanceValid = true;
+    writeAppearanceForm(state.appearance);
+    renderAppearanceContrast(state.contrast);
+    // The saved theme now comes from /assets/theme.css on every surface, so
+    // the local overrides are dropped rather than left shadowing it.
+    clearThemeTokens();
+    applyThemeTokens(state.tokens);
+    status.textContent = "Saved. Chat, Admin and the Portal use this on every device.";
+  } catch (error) {
+    // Nothing was stored. Put the previously saved theme back on screen so
+    // what is displayed is what is actually active.
+    clearThemeTokens();
+    appearanceValid = false;
+    status.textContent = `Not saved: ${error.message || "unknown error"}. The previous theme is still active.`;
+  } finally {
+    button.removeAttribute("aria-busy");
+    renderAppearanceState();
+  }
+}
+
+function revertAppearance() {
+  if (!appearanceSaved) return;
+  clearThemeTokens();
+  appearanceDraft = appearanceSaved;
+  appearanceValid = true;
+  writeAppearanceForm(appearanceSaved);
+  renderAppearanceState();
+  document.querySelector("#appearance-status").textContent = "Reverted to the saved theme.";
+}
+
+async function resetAppearance() {
+  const status = document.querySelector("#appearance-status");
+  status.textContent = "Restoring Meadow…";
+  try {
+    const state = (await api("/api/admin/appearance", {
+      method: "POST",
+      body: JSON.stringify({preset: "meadow"}),
+    })).value;
+    appearanceSaved = state.appearance;
+    appearanceDraft = state.appearance;
+    appearanceValid = true;
+    writeAppearanceForm(state.appearance);
+    renderAppearanceContrast(state.contrast);
+    clearThemeTokens();
+    status.textContent = "Reset to Meadow.";
+  } catch (error) {
+    status.textContent = `Reset failed: ${error.message || "unknown error"}`;
+  }
+  renderAppearanceState();
+}
+
+/* ---------- wiring ---------- */
+
+document.querySelector("#appearance-preset").addEventListener("change", () => {
+  const control = appearanceControls();
+  const chosen = (appearanceCatalog.presets || []).find(item => item.id === control.preset.value);
+  if (chosen) {
+    // Moving to Custom starts from what is on screen rather than from nothing.
+    control.accent.value = chosen.id === "custom" ? control.accent.value : chosen.accent;
+    if (chosen.id !== "custom") control.tone.value = chosen.surface_tone;
+  }
+  previewAppearance();
+});
+document.querySelector("#appearance-tone").addEventListener("change", previewAppearance);
+document.querySelector("#appearance-accent").addEventListener("input", () => {
+  const control = appearanceControls();
+  const value = control.accent.value.trim();
+  if (/^#[0-9a-fA-F]{6}$/.test(value)) control.swatch.value = value.toLowerCase();
+  scheduleAppearancePreview();
+});
+document.querySelector("#appearance-accent-swatch").addEventListener("input", () => {
+  const control = appearanceControls();
+  control.accent.value = control.swatch.value.toUpperCase();
+  scheduleAppearancePreview();
+});
+document.querySelector("#appearance-save").addEventListener("click", saveAppearance);
+document.querySelector("#appearance-revert").addEventListener("click", revertAppearance);
+document.querySelector("#appearance-reset").addEventListener("click", resetAppearance);

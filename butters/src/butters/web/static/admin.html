@@ -9,6 +9,7 @@
   <link rel="stylesheet" href="/assets/base.css">
   <link rel="stylesheet" href="/assets/components.css">
   <link rel="stylesheet" href="/assets/admin.css">
+  <link rel="stylesheet" href="/assets/theme.css">
 </head>
 <body class="admin-body">
   <aside class="admin-sidebar">
@@ -43,6 +44,10 @@
         <button data-panel="tools">Diagnostic tools</button>
         <button data-panel="actions">Actions &amp; broker</button>
         <button data-panel="capabilities">Capabilities</button>
+      </div>
+      <div class="nav-group">
+        <h2>Interface</h2>
+        <button data-panel="appearance">Appearance</button>
       </div>
       <div class="nav-group">
         <h2>Security</h2>
@@ -358,6 +363,66 @@
 
     <section id="panel-actions" class="admin-panel"><div id="action-admin-view" class="data-list"></div></section>
     <section id="panel-capabilities" class="admin-panel"><div id="capability-list" class="data-list"></div></section>
+
+    <!-- ============================= Appearance ============================= -->
+    <section id="panel-appearance" class="admin-panel">
+      <div class="control-card" id="appearance-card">
+        <div class="tool-head">
+          <h2>Appearance</h2>
+          <span id="appearance-state" class="tool-headline" role="status">Loading the saved theme…</span>
+        </div>
+        <p class="tool-note">Applies to Chat, Admin and the Portal, on every device. Status colours &mdash; healthy, warning, danger, informational &mdash; keep their meanings and are not changed by the accent.</p>
+
+        <div class="form-row">
+          <label>Theme<select id="appearance-preset"></select></label>
+          <label>Surface tone<select id="appearance-tone"></select></label>
+        </div>
+        <p id="appearance-preset-note" class="tool-note"></p>
+
+        <label id="appearance-accent-field">Accent
+          <span class="accent-input">
+            <input id="appearance-accent-swatch" type="color" aria-label="Pick an accent colour">
+            <input id="appearance-accent" type="text" inputmode="text" spellcheck="false" autocapitalize="characters" maxlength="7" aria-label="Accent colour as a hex value" placeholder="#BED2BA">
+          </span>
+        </label>
+
+        <h3>Preview</h3>
+        <div class="theme-preview" id="appearance-preview">
+          <article class="card theme-preview-card">
+            <div class="card-head">
+              <h2 class="t-card">Example card</h2>
+              <span class="pill pill-good">Ready</span>
+            </div>
+            <p class="t-body">Primary text sits here, at the weight and size a card actually uses.</p>
+            <p class="t-meta">Secondary text, for the detail underneath it.</p>
+            <div class="axis-grid">
+              <article class="axis-cell axis-good"><small>Healthy</small><strong>Ready</strong></article>
+              <article class="axis-cell axis-info"><small>Policy</small><strong>Dry run</strong></article>
+              <article class="axis-cell axis-muted"><small>Desktop</small><strong>Off</strong></article>
+            </div>
+            <label>A form field<input id="appearance-preview-field" type="text" value="Focus me to see the ring"></label>
+            <div class="button-row">
+              <button class="primary-button" type="button">Primary</button>
+              <button class="secondary-button" type="button">Secondary</button>
+              <button class="danger-button" type="button">Destructive</button>
+              <button class="primary-button" type="button" disabled>Disabled</button>
+            </div>
+          </article>
+        </div>
+
+        <details class="advanced-block">
+          <summary>Contrast check</summary>
+          <div id="appearance-contrast" class="axis-grid" role="group" aria-label="Contrast measurements"></div>
+        </details>
+
+        <div class="button-row">
+          <button id="appearance-save" class="primary-button" type="button" disabled>Save</button>
+          <button id="appearance-revert" class="secondary-button" type="button" disabled>Revert unsaved changes</button>
+          <button id="appearance-reset" class="secondary-button" type="button">Reset to Meadow</button>
+        </div>
+        <p id="appearance-status" class="tool-action-status" role="status" aria-live="polite">Loaded from the running service.</p>
+      </div>
+    </section>
 
     <!-- ============================== Security ============================== -->
     <section id="panel-passkeys" class="admin-panel">

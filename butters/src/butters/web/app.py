@@ -25,6 +25,8 @@ from butters.actions.coordinator import ActionCoordinatorError
 from butters.actions.store import ActionStateError
 from butters.ai.capabilities import CapabilityError
 from butters.ai.credentials import CredentialError
+from butters.appearance import AppearanceError
+from butters.appearance import stylesheet as appearance_stylesheet
 from butters.assistant_config import AssistantSettings, load_assistant_settings
 from butters.audio.wav import WavFormatError, measure_wav
 from butters.auth.manager import WebAuthnError
@@ -256,6 +258,31 @@ def create_app(
     async def admin_page(request: Request) -> Response:
         _admin(request, auth)
         return Response(admin_document, media_type="text/html")
+
+    async def theme_stylesheet(_request: Request) -> Response:
+        """The saved appearance, as a render-blocking stylesheet.
+
+        Every surface links this in <head>, so the browser has the chosen
+        colours before it paints and there is no flash of the default palette.
+        It is public for the same reason the other stylesheets are: Chat and
+        the Portal sign-in page both render before any session exists, and the
+        body is nothing but colour values an administrator already picked.
+
+        Generated per request and never cached, so a saved change is visible
+        on the next reload of any device.
+        """
+
+        try:
+            body = appearance_stylesheet(runtime.effective_appearance())
+        except AppearanceError:
+            # A theme must never be able to stop a page rendering. Falling
+            # through to the shipped tokens is a working page, not a broken one.
+            body = "/* appearance unavailable; using the built-in palette */\n"
+        return Response(
+            body,
+            media_type="text/css",
+            headers={"Cache-Control": "no-store"},
+        )
 
     async def public_asset(request: Request) -> Response:
         asset = public_assets.get(request.path_params["asset_name"])
@@ -1516,6 +1543,40 @@ def create_app(
         except (SecurityError, SessionError, ActionCoordinatorError) as exc:
             return _exception_response(exc)
 
+    async def appearance_settings(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.appearance_settings(session))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def apply_appearance(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not admin_rate.check(identity):
+                return _error("rate_limited", "administrator rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            # A preview resolves and validates exactly as a save does, and
+            # stores nothing, so what the page shows is what a save would keep.
+            apply = (
+                runtime.preview_appearance
+                if request.query_params.get("preview") == "1"
+                else runtime.apply_appearance
+            )
+            return JSONResponse(await run_blocking(apply, session, payload))
+        except AppearanceError as exc:
+            return _error(exc.code, exc.message, 400)
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     async def ai_settings(request: Request) -> Response:
         try:
             _admin(request, auth)
@@ -2280,6 +2341,11 @@ def create_app(
         ),
         WebSocketRoute("/ws/voice", voice_socket),
         WebSocketRoute("/ws/admin/traces", trace_socket),
+        Route("/api/admin/appearance", appearance_settings),
+        Route("/api/admin/appearance", apply_appearance, methods=["POST"]),
+        # Registered ahead of the wildcard so the generated stylesheet is not
+        # shadowed by the static allow-list lookup.
+        Route("/assets/theme.css", theme_stylesheet),
         Route("/assets/{asset_name:str}", public_asset),
     ]
     # The route is absent under the committed default. It is reachable only

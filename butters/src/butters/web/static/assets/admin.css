@@ -317,3 +317,48 @@
   .stream-row span:nth-child(5) { grid-column: 1 / -1; grid-row: 4; }
   .admin-topbar h1 { font-size: 1.3rem; }
 }
+
+/* ========================================================== appearance ==
+ * The preview is a real card built from the real components, so what it
+ * shows is what the theme will actually do. It is deliberately not a grid of
+ * colour chips: chips tell you the hex, a card tells you whether it works.
+ */
+
+.accent-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: var(--space-2);
+  align-items: center;
+  max-width: 320px;
+}
+
+.accent-input input[type="color"] {
+  inline-size: 46px;
+  block-size: var(--control-height);
+  min-height: var(--control-height);
+  padding: 3px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--surface-sunken);
+  cursor: pointer;
+}
+
+.accent-input input[type="text"] {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+}
+
+.theme-preview {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: var(--space-4);
+}
+
+.theme-preview-card { gap: var(--space-3); }
+
+/* An unsaved theme is live on the page, so the page has to say so. */
+.appearance-dirty {
+  color: var(--warning);
+  font-weight: 600;
+}

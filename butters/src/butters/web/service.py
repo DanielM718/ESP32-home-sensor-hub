@@ -20,6 +20,9 @@ from butters.actions.store import ActionStateStore
 from butters.ai.capabilities import build_registry
 from butters.ai.credentials import CREDENTIAL_CLASS
 from butters.ai.runtime import AIRuntimeController, ProviderBundle
+from butters.appearance import Appearance, AppearanceStore
+from butters.appearance import state as appearance_state
+from butters.appearance import validate as validate_appearance
 from butters.assistant import (
     AssistantResponse,
     DeterministicAssistant,
@@ -243,6 +246,10 @@ class BetaAssistantService:
             settings.cloud
         )
         self.voice_presets = VoicePresetStore(self.state_dir / "state.sqlite3")
+        # A visual preference, so it lives beside the other runtime
+        # settings rather than in the production-approval overlay, which
+        # is reserved for reviewed behaviour and security gates.
+        self.appearance = AppearanceStore(self.state_dir / "state.sqlite3")
         self.skill_builder = CodexSkillBuilder(
             settings.remediation,
             self.state_dir / "skill-jobs.sqlite3",
@@ -1828,6 +1835,50 @@ class BetaAssistantService:
         state = self.ai.apply_speech(payload)
         self._audit_ai("ai.tts.configure", session, state["saved"]["speech"])
         return state
+
+    # ----- appearance ------------------------------------------------------
+
+    def effective_appearance(self) -> Appearance:
+        """The saved appearance, or the reviewed default if it is unusable.
+
+        Unauthenticated: this feeds the stylesheet every surface loads, and it
+        carries nothing but colours the administrator already chose.
+        """
+
+        return self.appearance.load()
+
+    def appearance_settings(self, session: BrowserSession) -> dict[str, object]:
+        self._require_action_admin(session)
+        return appearance_state(self.appearance.load())
+
+    def preview_appearance(
+        self, session: BrowserSession, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """Resolve a candidate without storing it.
+
+        The page asks the server what a theme would look like rather than
+        re-deriving colours in JavaScript, so there is exactly one place that
+        knows how an accent becomes a family and what counts as readable.
+        """
+
+        self._require_action_admin(session)
+        return appearance_state(validate_appearance(payload))
+
+    def apply_appearance(
+        self, session: BrowserSession, payload: dict[str, object]
+    ) -> dict[str, object]:
+        """Validate, then store. A refused theme leaves the saved one active.
+
+        Administrator-only, like every other Admin setting, but deliberately
+        not FRESH: this changes a colour, and the existing convention reserves
+        a fresh assertion for credential and power operations.
+        """
+
+        self._require_action_admin(session)
+        chosen = validate_appearance(payload)
+        self.appearance.save(chosen)
+        self._audit_ai("ui.appearance.configure", session, chosen.as_dict())
+        return appearance_state(chosen)
 
     def openai_credential_state(self, session: BrowserSession) -> dict[str, object]:
         self._require_action_admin(session)
