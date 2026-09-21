@@ -266,18 +266,59 @@
         <p id="openai-status" class="tool-action-status" role="status" aria-live="polite">No credential operation has been requested.</p>
         <p class="tool-note">Removing the credential here deletes only Butters&rsquo; local copy. It cannot revoke anything in your OpenAI account; revoke the key in the OpenAI Platform if it is no longer needed.</p>
       </div>
+      <div class="control-card tool-card" id="openai-usage-card">
+        <div class="tool-head"><h2>OpenAI usage reporting</h2><span id="usage-admin-summary" class="tool-headline" role="status">Checking…</span></div>
+        <p class="tool-note">A separate <strong>organization Admin API key</strong>, used only to read what OpenAI says was spent. It is never passed to Chat, speech or transcription. OpenAI offers no usage-only Admin scope, so the key itself is powerful; Butters restricts its own use of it to GET requests against three reviewed endpoints and can issue no organization mutation.</p>
+        <div id="usage-admin-state" class="axis-grid" role="group" aria-label="OpenAI usage reporting state">Select Credentials to load.</div>
+
+        <h3>Reporting scope</h3>
+        <p class="tool-note">With no project set, provider figures are <strong>organization-wide</strong> and are labelled as such &mdash; they are not presented as Butters&rsquo; spend. Set the project that Butters uses to scope them.</p>
+        <div class="form-row">
+          <label>OpenAI project ID<input id="usage-admin-project" maxlength="80" spellcheck="false" placeholder="proj_…"></label>
+        </div>
+        <div class="button-row"><button id="usage-admin-project-save" class="secondary-button" type="button">Save scope</button></div>
+
+        <div class="button-row">
+          <button id="usage-admin-sync" class="secondary-button" type="button">Sync now</button>
+          <button id="usage-admin-test" class="secondary-button" type="button">Test key</button>
+          <button id="usage-admin-set" class="primary-button" type="button">Set / replace Admin key…</button>
+          <button id="usage-admin-remove" class="danger-button" type="button">Remove from Butters…</button>
+        </div>
+
+        <form id="usage-admin-form" class="confirm-panel" hidden autocomplete="off">
+          <label>OpenAI Admin API key<input id="usage-admin-key" type="password" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" maxlength="512" placeholder="Pasted once, never stored in this browser"></label>
+          <p class="tool-note">Create this in the OpenAI organization settings, not in a project. It is stored with the same protections as the inference key and is never returned by any endpoint. Storing it requires a fresh passkey confirmation.</p>
+          <div class="button-row"><button id="usage-admin-submit" class="primary-button" type="submit">Store and verify</button><button id="usage-admin-cancel" class="secondary-button" type="button">Cancel</button></div>
+        </form>
+
+        <div id="usage-admin-remove-confirm" class="confirm-panel" role="group" aria-label="Confirm Admin key removal" hidden></div>
+        <p id="usage-admin-status" class="tool-action-status" role="status" aria-live="polite">No operation has been requested.</p>
+      </div>
     </section>
 
     <section id="panel-usage" class="admin-panel">
       <div class="admin-section">
         <h2>Spend</h2>
-        <div id="usage-windows" class="metric-grid" role="group" aria-label="Usage by period"></div>
+        <div id="usage-reconciliation" class="metric-grid" role="group" aria-label="Provider reported against local accounting"></div>
+        <p id="usage-reconciliation-note" class="tool-note"></p>
+      </div>
+
+      <div class="admin-section">
+        <h2>Butters local accounting</h2>
+        <p class="tool-note">What Butters reserved before each paid call, so a budget can fail closed. Where a billable dimension is not observable this is a deliberate ceiling, not a charge. <strong>Butters requests</strong> counts conversation turns; a turn may make several provider operations, or none.</p>
+        <div id="usage-windows" class="metric-grid" role="group" aria-label="Local accounting by period"></div>
       </div>
 
       <div class="admin-section">
         <h2>How requests were handled</h2>
         <div id="usage-routes" class="usage-bars" role="group" aria-label="Requests by route"></div>
         <p id="usage-avoided" class="tool-note"></p>
+      </div>
+
+      <div class="admin-section">
+        <h2>OpenAI reported cost, by line item</h2>
+        <p class="tool-note">Straight from <code>/v1/organization/costs</code>, which reports per day and per line item. It is not distributed across individual Butters requests, because OpenAI does not report it that way.</p>
+        <div id="usage-provider-lines" class="usage-rows" role="group" aria-label="Provider cost by line item"></div>
       </div>
 
       <div class="admin-section">

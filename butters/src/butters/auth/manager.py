@@ -234,6 +234,10 @@ class PasskeyManager:
             # the subject "set" or "remove", so an assertion collected for one
             # cannot authorize the other.
             "openai_credential",
+            # The organization Admin key is a second, more dangerous
+            # credential, so it carries its own purpose. A grant collected to
+            # change the inference key cannot be replayed to change this one.
+            "openai_usage_admin_credential",
         }
     )
     # The portal's own sign-in purpose. It is deliberately not in PURPOSES: the

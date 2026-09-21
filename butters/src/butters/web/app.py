@@ -30,6 +30,8 @@ from butters.assistant_config import AssistantSettings, load_assistant_settings
 from butters.audio.wav import WavFormatError, measure_wav
 from butters.auth.manager import WebAuthnError
 from butters.auth.store import AuthStateError
+from butters.cloud.provider_accounting import AccountingError
+from butters.cloud.usage_admin_credential import UsageAdminCredentialError
 from butters.config import default_vocabulary_path, load_stt_settings
 from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
 from butters.remediation.skill_builder import SkillAuthoringError
@@ -1576,6 +1578,141 @@ def create_app(
         ) as exc:
             return _exception_response(exc)
 
+    # ---- provider-reported accounting (organization Admin key) ----------
+
+    async def usage_admin_state(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            session = _bound_session(request, runtime, auth)
+            return JSONResponse(runtime.usage_admin_state(session))
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def usage_admin_sync(request: Request) -> Response:
+        """Manual refresh. Rate limited, and it never raises upstream failure."""
+
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("accounting:" + identity):
+                return _error("rate_limited", "sync rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            return JSONResponse(
+                await run_blocking(
+                    runtime.sync_provider_accounting, session, force=True
+                )
+            )
+        except (SecurityError, SessionError, ActionCoordinatorError, ValueError) as exc:
+            return _exception_response(exc)
+
+    async def usage_admin_test(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("accounting:" + identity):
+                return _error("rate_limited", "sync rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            return JSONResponse(
+                await run_blocking(runtime.test_usage_admin_credential, session)
+            )
+        except AccountingError as exc:
+            return _error(exc.code, exc.message, 400)
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def usage_admin_key_set(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("credential:" + identity):
+                return _error(
+                    "rate_limited", "credential change rate limit exceeded", 429
+                )
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"admin_api_key", "fresh_grant", "confirm"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.set_usage_admin_credential,
+                    session,
+                    candidate=payload.get("admin_api_key"),
+                    fresh_grant=payload.get("fresh_grant"),
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except AccountingError as exc:
+            return _error(exc.code, exc.message, 400)
+        except (
+            SecurityError,
+            SessionError,
+            UsageAdminCredentialError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def usage_admin_key_remove(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not expensive_rate.check("credential:" + identity):
+                return _error(
+                    "rate_limited", "credential change rate limit exceeded", 429
+                )
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"fresh_grant", "confirm"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.remove_usage_admin_credential,
+                    session,
+                    fresh_grant=payload.get("fresh_grant"),
+                    confirmed=payload.get("confirm") is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            UsageAdminCredentialError,
+            ActionCoordinatorError,
+            AuthStateError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
+    async def usage_admin_project(request: Request) -> Response:
+        try:
+            identity = _admin_mutation(request, runtime, auth)
+            if not admin_rate.check(identity):
+                return _error("rate_limited", "administrator rate limit exceeded", 429)
+            session = _session_from_request(request, runtime)
+            assert session is not None
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) - {"project_id"}:
+                raise ValueError("request contains unsupported fields")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.set_usage_reporting_project, session, payload.get("project_id")
+                )
+            )
+        except AccountingError as exc:
+            return _error(exc.code, exc.message, 400)
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     async def ai_settings(request: Request) -> Response:
         try:
             _admin(request, auth)
@@ -2340,6 +2477,32 @@ def create_app(
         ),
         WebSocketRoute("/ws/voice", voice_socket),
         WebSocketRoute("/ws/admin/traces", trace_socket),
+        Route("/api/admin/integrations/openai-usage", usage_admin_state),
+        Route(
+            "/api/admin/integrations/openai-usage/sync",
+            usage_admin_sync,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/integrations/openai-usage/test",
+            usage_admin_test,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/integrations/openai-usage/key",
+            usage_admin_key_set,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/integrations/openai-usage/key",
+            usage_admin_key_remove,
+            methods=["DELETE"],
+        ),
+        Route(
+            "/api/admin/integrations/openai-usage/project",
+            usage_admin_project,
+            methods=["POST"],
+        ),
         Route("/api/admin/appearance", appearance_settings),
         Route("/api/admin/appearance", apply_appearance, methods=["POST"]),
         # Registered ahead of the wildcard so the generated stylesheet is not

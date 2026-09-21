@@ -95,7 +95,7 @@ async function refresh(panel) {
     if(panel==="trace") {await refreshTraces();connectTraceSocket();}
     if(panel==="sessions") rows(document.querySelector("#session-list"),(await api("/api/admin/sessions")).value.sessions,item=>[item.session_id,`${item.message_count} messages · idle ${item.idle_seconds}s · ${item.context_chars} chars`]);
     if(panel==="models") renderObject(document.querySelector("#model-status"),(await api("/api/admin/models")).value);
-    if(panel==="credentials") await refreshIntegrations();
+    if(panel==="credentials") {await refreshIntegrations(); await refreshUsageAdmin();}
     if(panel==="chat") await refreshAiSettings();
     if(panel==="voice") await refreshVoice();
     if(panel==="skills") await refreshSkills();
@@ -1601,6 +1601,8 @@ async function refreshUsage() {
   // history this page does not present. Falling back to the payload itself
   // keeps an older or newer server rendering something rather than nothing.
   const value = payload.summary || payload;
+  renderReconciliation(value, payload.provider);
+  renderProviderUsage(payload.provider);
   renderUsageWindows(value);
   renderUsageDistribution("#usage-routes", value.route_distribution, {
     bars: true, empty: "No requests have been routed yet."});
@@ -1629,3 +1631,254 @@ async function refreshUsage() {
   // request history belongs to Diagnostics, which already shows it.
   document.querySelector("#usage-raw").textContent = pretty(value);
 }
+
+
+/* ====================== Provider-reported accounting ======================
+ *
+ * Two numbers that are allowed to differ, shown side by side with the reason.
+ *
+ * Butters' own figure is what the admission controller reserved *before* each
+ * paid call. Where a billable dimension is not observable — `POST
+ * /v1/audio/speech` returns audio and no usage object — that reservation is a
+ * deliberate ceiling. OpenAI's figure is what was actually billed, read after
+ * the fact. Their difference is a reconciliation difference. This file never
+ * calls it a saving, and never lets provider reporting overwrite the local
+ * total, because the local total is the evidence of what was reserved.
+ */
+
+const RECONCILIATION_WINDOWS = [
+  ["today", "Today"],
+  ["last_7_days", "Last 7 days"],
+  ["current_month", "This month"],
+];
+
+const FRESHNESS_TONE = {
+  fresh: "good",
+  stale: "warn",
+  never_synced: "muted",
+  not_configured: "muted",
+};
+
+function relativeTime(seconds) {
+  if (!seconds) return "never";
+  const delta = Math.max(0, Date.now() / 1000 - Number(seconds));
+  if (delta < 90) return `${Math.round(delta)}s ago`;
+  if (delta < 5400) return `${Math.round(delta / 60)} min ago`;
+  if (delta < 172800) return `${Math.round(delta / 3600)} h ago`;
+  return `${Math.round(delta / 86400)} days ago`;
+}
+
+function utcDay(seconds) {
+  if (!seconds) return "—";
+  return new Date(Number(seconds) * 1000).toISOString().slice(0, 16).replace("T", " ") + "Z";
+}
+
+/* The three spend cards: provider beside local, with the difference named. */
+function renderReconciliation(local, provider) {
+  const container = document.querySelector("#usage-reconciliation");
+  container.replaceChildren();
+  const reported = (provider && provider.reported_cost_usd) || {};
+  const comparable = provider && provider.configured && provider.freshness !== "never_synced";
+  for (const [key, label] of RECONCILIATION_WINDOWS) {
+    const card = document.createElement("article");
+    card.className = "metric-card";
+    const heading = document.createElement("small");
+    heading.textContent = label;
+
+    const providerLine = document.createElement("strong");
+    const providerValue = reported[key];
+    providerLine.textContent = !provider || !provider.configured
+      ? "Not configured"
+      : providerValue === null || providerValue === undefined
+        ? "No provider data"
+        : usageCost(providerValue);
+    const providerNote = document.createElement("span");
+    providerNote.className = "usage-detail";
+    providerNote.textContent = provider && provider.configured
+      ? `OpenAI reported · ${provider.scope_kind === "project" ? "this project" : "organization-wide"}`
+      : "OpenAI reported";
+
+    const localLine = document.createElement("span");
+    localLine.className = "usage-detail usage-local-line";
+    localLine.textContent = `Butters reserved ${usageCost((local[key] || {}).cost_usd)}`;
+
+    card.append(heading, providerLine, providerNote, localLine);
+
+    // Only subtract figures that describe the same window and the same scope.
+    if (comparable && typeof providerValue === "number") {
+      const difference = Number((local[key] || {}).cost_usd || 0) - providerValue;
+      const line = document.createElement("span");
+      line.className = "usage-detail";
+      line.textContent = `Difference ${usageCost(Math.abs(difference))} — unreconciled estimate, not a saving`;
+      card.append(line);
+    }
+    container.append(card);
+  }
+
+  const note = document.querySelector("#usage-reconciliation-note");
+  if (!provider || !provider.configured) {
+    note.textContent =
+      "Provider reporting is not configured. Add an OpenAI Admin API key under "
+      + "AI → Credentials to see what OpenAI actually billed.";
+    return;
+  }
+  const scope = provider.scope_kind === "project"
+    ? `project ${provider.scope}`
+    : "the whole organization (no project scope is set, so this is not Butters-only)";
+  const window = provider.reporting_window || {};
+  note.textContent =
+    `OpenAI reported for ${scope}. Last sync ${relativeTime(provider.last_success_at)}`
+    + (window.start ? `, covering ${utcDay(window.start)} to ${utcDay(window.end)}.` : ".")
+    + (provider.freshness === "stale" ? " This reading is stale; provider billing also lags." : "")
+    + (provider.failure_message ? ` Last attempt failed: ${provider.failure_message}` : "");
+}
+
+function renderUsageAdminState(provider) {
+  const summary = document.querySelector("#usage-admin-summary");
+  if (!provider) return;
+  summary.textContent = provider.configured
+    ? `Configured · ${provider.freshness.replaceAll("_", " ")}`
+    : "No Admin API key is configured";
+  axis(document.querySelector("#usage-admin-state"), [
+    ["Admin key", provider.configured ? "present" : "absent"],
+    ["Reporting scope",
+      provider.scope_kind === "project" ? provider.scope : "Organization-wide",
+      provider.scope_kind === "project" ? "provider figures cover this project only"
+        : "no project set, so figures are not Butters-only",
+      provider.scope_kind === "project" ? "good" : "warn"],
+    ["Last sync", relativeTime(provider.last_success_at),
+      provider.last_attempt_at ? `attempted ${relativeTime(provider.last_attempt_at)}` : undefined,
+      FRESHNESS_TONE[provider.freshness] || "muted"],
+    ["Freshness", provider.freshness.replaceAll("_", " "), undefined,
+      FRESHNESS_TONE[provider.freshness] || "muted"],
+    ["Last failure", provider.failure_code ? provider.failure_code.replaceAll("_", " ") : "none",
+      provider.failure_message || undefined, provider.failure_code ? "bad" : "muted"],
+  ]);
+  const project = document.querySelector("#usage-admin-project");
+  if (document.activeElement !== project) {
+    project.value = provider.scope_kind === "project" ? provider.scope : "";
+  }
+  document.querySelector("#usage-admin-test").disabled = !provider.configured;
+  document.querySelector("#usage-admin-sync").disabled = !provider.configured;
+  document.querySelector("#usage-admin-remove").disabled = !provider.configured;
+}
+
+function renderProviderUsage(provider) {
+  const container = document.querySelector("#usage-provider-lines");
+  if (!container) return;
+  const rows = (provider && provider.cost_by_line_item) || [];
+  if (!rows.length) {
+    return emptyRow(container, provider && provider.configured
+      ? "No provider cost has been reported for this window yet."
+      : "Provider reporting is not configured.");
+  }
+  container.replaceChildren(...rows.map(row =>
+    usageRow(row.line_item, usageCost(row.cost_usd), {mono: true})));
+}
+
+async function refreshUsageAdmin() {
+  const provider = (await api("/api/admin/integrations/openai-usage")).value;
+  renderUsageAdminState(provider);
+  return provider;
+}
+
+function clearUsageAdminField() {
+  const field = document.querySelector("#usage-admin-key");
+  field.value = "";
+  field.setAttribute("value", "");
+}
+
+async function submitUsageAdminKey(event) {
+  event.preventDefault();
+  const status = document.querySelector("#usage-admin-status");
+  const candidate = document.querySelector("#usage-admin-key").value;
+  if (!candidate) { status.textContent = "Enter the Admin API key first."; return; }
+  status.textContent = "Fresh passkey authentication bound to this change is required…";
+  try {
+    const grant = (await authenticatePurpose("openai_usage_admin_credential", "set")).fresh_grant;
+    status.textContent = "Storing and verifying with a bounded usage read…";
+    const result = (await api("/api/admin/integrations/openai-usage/key", {
+      method: "POST",
+      body: JSON.stringify({admin_api_key: candidate, fresh_grant: grant, confirm: true}),
+    })).value;
+    status.textContent = result.validation.authenticated
+      ? "Stored. OpenAI accepted the key for a read-only usage request."
+      : `Not stored: ${result.validation.detail}`;
+    renderUsageAdminState(result);
+  } catch (error) {
+    // Never echo the candidate, not even in a failure message.
+    status.textContent = `Storing the Admin key failed: ${error.message || "unknown error"}`;
+  } finally {
+    clearUsageAdminField();
+    document.querySelector("#usage-admin-form").hidden = true;
+    await refreshUsageAdmin();
+  }
+}
+
+async function removeUsageAdminKey() {
+  const status = document.querySelector("#usage-admin-status");
+  status.textContent = "Fresh passkey authentication bound to this removal is required…";
+  try {
+    const grant = (await authenticatePurpose("openai_usage_admin_credential", "remove")).fresh_grant;
+    const result = (await api("/api/admin/integrations/openai-usage/key", {
+      method: "DELETE",
+      body: JSON.stringify({fresh_grant: grant, confirm: true}),
+    })).value;
+    status.textContent = `${result.removed ? "Removed from Butters." : "Nothing to remove."} ${result.notice}`;
+    renderUsageAdminState(result);
+  } catch (error) {
+    status.textContent = `Removing the Admin key failed: ${error.message || "unknown error"}`;
+  }
+  await refreshUsageAdmin();
+}
+
+document.querySelector("#usage-admin-set").addEventListener("click", () => {
+  clearUsageAdminField();
+  document.querySelector("#usage-admin-form").hidden = false;
+  document.querySelector("#usage-admin-key").focus();
+});
+document.querySelector("#usage-admin-cancel").addEventListener("click", () => {
+  clearUsageAdminField();
+  document.querySelector("#usage-admin-form").hidden = true;
+});
+document.querySelector("#usage-admin-form").addEventListener("submit", submitUsageAdminKey);
+document.querySelector("#usage-admin-remove").addEventListener("click", () => {
+  confirmPanel(document.querySelector("#usage-admin-remove-confirm"),
+    "This deletes Butters' copy of the OpenAI Admin key. Provider-reported spend stops updating. It does not revoke the key in your OpenAI organization.",
+    removeUsageAdminKey);
+});
+document.querySelector("#usage-admin-test").addEventListener("click", async () => {
+  const status = document.querySelector("#usage-admin-status");
+  status.textContent = "Requesting one day of costs, read-only…";
+  try {
+    const result = (await api("/api/admin/integrations/openai-usage/test", {method: "POST", body: JSON.stringify({})})).value;
+    status.textContent = result.validation.authenticated
+      ? "OpenAI accepted the key for a read-only usage request."
+      : `Key rejected: ${result.validation.detail}`;
+    renderUsageAdminState(result);
+  } catch (error) { status.textContent = `Test failed: ${error.message || "unknown error"}`; }
+});
+document.querySelector("#usage-admin-sync").addEventListener("click", async () => {
+  const status = document.querySelector("#usage-admin-status");
+  status.textContent = "Reading provider usage and costs…";
+  try {
+    const provider = (await api("/api/admin/integrations/openai-usage/sync", {method: "POST", body: JSON.stringify({})})).value;
+    status.textContent = provider.failure_message
+      ? `Sync did not complete: ${provider.failure_message}`
+      : `Synced. Provider reported through ${utcDay(provider.reporting_window && provider.reporting_window.end)}.`;
+    renderUsageAdminState(provider);
+  } catch (error) { status.textContent = `Sync failed: ${error.message || "unknown error"}`; }
+});
+document.querySelector("#usage-admin-project-save").addEventListener("click", async () => {
+  const status = document.querySelector("#usage-admin-status");
+  try {
+    const provider = (await api("/api/admin/integrations/openai-usage/project", {
+      method: "POST",
+      body: JSON.stringify({project_id: document.querySelector("#usage-admin-project").value.trim()}),
+    })).value;
+    status.textContent = provider.scope_kind === "project"
+      ? `Provider figures are now scoped to ${provider.scope}.`
+      : "No project set. Provider figures are organization-wide and are labelled so.";
+    renderUsageAdminState(provider);
+  } catch (error) { status.textContent = `Could not set the scope: ${error.message || "unknown error"}`; }
+});

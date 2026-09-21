@@ -9,6 +9,7 @@ import secrets
 import threading
 import time
 from dataclasses import asdict, dataclass, is_dataclass, replace
+from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
 
@@ -39,7 +40,18 @@ from butters.cloud.model import (
 )
 from butters.cloud.openai_responses import OpenAIResponsesReasoner
 from butters.cloud.orchestrator import CloudDiagnosticEscalator
+from butters.cloud.provider_accounting import (
+    OpenAIAccountingClient,
+    ProviderAccountingService,
+    ProviderAccountingStore,
+)
 from butters.cloud.usage import UsageLedger
+from butters.cloud.usage_admin_credential import (
+    UsageAdminCredentialStore,
+)
+from butters.cloud.usage_admin_credential import (
+    normalize_candidate as normalize_usage_admin_candidate,
+)
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticRequest, RequestDepth
 from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
@@ -170,6 +182,28 @@ class _ForcedDiagnosticPolicy:
         return None
 
 
+def _accounting_windows() -> dict[str, tuple[int, int]]:
+    """The three local windows, as UTC-day-aligned Unix ranges.
+
+    Provider cost buckets are whole UTC days. Expressing the local windows on
+    the same boundaries is what makes the two figures comparable at all; a
+    window that started mid-day would compare part of a bucket against all of
+    it and invent a difference.
+    """
+
+    now = datetime.now(timezone.utc)
+    midnight = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    end = int((midnight + timedelta(days=1)).timestamp())
+    return {
+        "today": (int(midnight.timestamp()), end),
+        "last_7_days": (int((midnight - timedelta(days=6)).timestamp()), end),
+        "current_month": (
+            int(datetime(now.year, now.month, 1, tzinfo=timezone.utc).timestamp()),
+            end,
+        ),
+    }
+
+
 class BetaAssistantService:
     def __init__(
         self,
@@ -249,6 +283,15 @@ class BetaAssistantService:
         # settings rather than in the production-approval overlay, which
         # is reserved for reviewed behaviour and security gates.
         self.appearance = AppearanceStore(self.state_dir / "state.sqlite3")
+        # Provider-reported accounting. Isolated from the inference credential
+        # and from the admission ledger: it can read OpenAI's billing view and
+        # nothing else, and no admission decision consults it.
+        self.usage_admin_credentials = UsageAdminCredentialStore(self.state_dir)
+        self.provider_accounting = ProviderAccountingService(
+            self.usage_admin_credentials,
+            ProviderAccountingStore(self.state_dir / "usage.sqlite3"),
+            OpenAIAccountingClient(self.usage_admin_credentials),
+        )
         self.skill_builder = CodexSkillBuilder(
             settings.remediation,
             self.state_dir / "skill-jobs.sqlite3",
@@ -1879,6 +1922,138 @@ class BetaAssistantService:
         self._audit_ai("ui.appearance.configure", session, chosen.as_dict())
         return appearance_state(chosen)
 
+    # ----- provider-reported accounting -----------------------------------
+
+    def provider_accounting_state(self) -> dict[str, object]:
+        """Observational only; never consulted before a paid call."""
+
+        return self.provider_accounting.state(_accounting_windows())
+
+    def usage_admin_state(self, session: BrowserSession) -> dict[str, object]:
+        self._require_action_admin(session)
+        return self.provider_accounting_state()
+
+    def sync_provider_accounting(
+        self, session: BrowserSession, *, force: bool = False
+    ) -> dict[str, object]:
+        """Refresh the cached provider view. Failure is reported, not raised."""
+
+        self._require_action_admin(session)
+        self.provider_accounting.sync(force=force)
+        return self.provider_accounting_state()
+
+    def test_usage_admin_credential(self, session: BrowserSession) -> dict[str, object]:
+        """One bounded, read-only costs request. Nothing is mutated at OpenAI."""
+
+        self._require_action_admin(session)
+        outcome = self.provider_accounting.validate()
+        self._audit_ai(
+            "ai.usage_admin.test",
+            session,
+            {"authenticated": outcome["authenticated"], "code": outcome["code"]},
+        )
+        return {"validation": outcome, **self.provider_accounting_state()}
+
+    def set_usage_admin_credential(
+        self,
+        session: BrowserSession,
+        *,
+        candidate: object,
+        fresh_grant: str,
+        confirmed: bool,
+    ) -> dict[str, object]:
+        """Store the Admin key, then prove it with a bounded read.
+
+        Unlike the inference credential this is stored before validation and
+        removed again if validation fails, because the validating read is
+        itself authenticated by the candidate and there is nothing else to
+        preserve: there is no previously working Admin key to protect.
+        """
+
+        self._require_fresh_usage_admin_grant(session, fresh_grant, subject="set")
+        if confirmed is not True:
+            raise ActionCoordinatorError(
+                "confirmation_required",
+                "storing the OpenAI Admin key requires explicit confirmation",
+            )
+        secret = normalize_usage_admin_candidate(candidate)
+        previous = self.usage_admin_credentials.secret()
+        self.usage_admin_credentials.store(secret)
+        outcome = self.provider_accounting.validate()
+        if not outcome["authenticated"]:
+            if previous is None:
+                self.usage_admin_credentials.remove()
+            else:
+                self.usage_admin_credentials.store(previous)
+        self._audit_ai(
+            "ai.usage_admin.set",
+            session,
+            {
+                "credential_class": "openai_usage_admin_key",
+                "stored": bool(outcome["authenticated"]),
+                "validation_code": outcome["code"],
+            },
+            authentication=AuthenticationLevel.FRESH,
+            method="fresh_webauthn",
+        )
+        return {"validation": outcome, **self.provider_accounting_state()}
+
+    def remove_usage_admin_credential(
+        self, session: BrowserSession, *, fresh_grant: str, confirmed: bool
+    ) -> dict[str, object]:
+        self._require_fresh_usage_admin_grant(session, fresh_grant, subject="remove")
+        if confirmed is not True:
+            raise ActionCoordinatorError(
+                "confirmation_required",
+                "removing the OpenAI Admin key requires explicit confirmation",
+            )
+        removed = self.usage_admin_credentials.remove()
+        self._audit_ai(
+            "ai.usage_admin.remove",
+            session,
+            {"credential_class": "openai_usage_admin_key", "removed": removed},
+            authentication=AuthenticationLevel.FRESH,
+            method="fresh_webauthn",
+        )
+        return {
+            "removed": removed,
+            "notice": "Removed from Butters. Revoke the key in the OpenAI "
+            "organization settings if it is no longer needed.",
+            **self.provider_accounting_state(),
+        }
+
+    def set_usage_reporting_project(
+        self, session: BrowserSession, project_id: object
+    ) -> dict[str, object]:
+        """A non-secret scope, so administrator-only but not FRESH."""
+
+        self._require_action_admin(session)
+        value = self.provider_accounting.set_project_id(project_id)
+        self._audit_ai("ai.usage_admin.scope", session, {"project_id": value})
+        return self.provider_accounting_state()
+
+    def _require_fresh_usage_admin_grant(
+        self, session: BrowserSession, fresh_grant: object, *, subject: str
+    ) -> None:
+        self._require_action_admin(session)
+        if not isinstance(fresh_grant, str) or not fresh_grant:
+            raise ActionCoordinatorError(
+                "fresh_required", "fresh passkey authentication is required"
+            )
+        bound = self.auth_state.consume_fresh_grant(
+            fresh_grant,
+            session_id=session.session_id,
+            identity=session.peer_key,
+            # A distinct purpose: a grant for the inference credential is not
+            # interchangeable with one for the organization Admin key.
+            purpose="openai_usage_admin_credential",
+        )
+        if bound != subject:
+            raise ActionCoordinatorError(
+                "fresh_binding_denied",
+                "fresh authorization targets another credential operation",
+            )
+
     def openai_credential_state(self, session: BrowserSession) -> dict[str, object]:
         self._require_action_admin(session)
         return self.ai.credential_state()
@@ -2197,6 +2372,11 @@ class BetaAssistantService:
             ),
             "recent": self.ledger.recent(100),
             "recent_requests": self.ledger.recent_requests(100),
+            # What OpenAI says was actually spent, alongside — never merged
+            # into — the local figures above. Reading it cannot fail this
+            # report: an unconfigured or unreachable provider is a state, not
+            # an error.
+            "provider": self.provider_accounting_state(),
         }
 
     def repository_status(self) -> dict[str, object]:

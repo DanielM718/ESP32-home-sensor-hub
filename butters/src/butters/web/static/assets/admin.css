@@ -457,3 +457,11 @@
   font-variant-numeric: tabular-nums;
   margin-block-start: var(--space-1);
 }
+
+/* The local figure sits under the provider one, visibly secondary: they are
+ * different claims, and the provider number is the billing answer. */
+.metric-card .usage-local-line {
+  padding-block-start: var(--space-1);
+  border-block-start: 1px solid var(--border);
+  margin-block-start: var(--space-1);
+}
