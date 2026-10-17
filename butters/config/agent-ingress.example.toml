@@ -2,7 +2,9 @@
 enabled = false
 
 # Bind only private IPv4 addresses assigned to these named LAN interfaces.
-bind_interfaces = ["eth0", "wlan0"]
+# Every listed interface is required. Keep the production listener on the
+# primary wired LAN; add another interface only for a deliberate migration.
+bind_interfaces = ["eth0"]
 port = 8443
 
 certificate = "/etc/butters/desktop-agent/tls.crt"

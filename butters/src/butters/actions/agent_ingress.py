@@ -24,6 +24,11 @@ import tomllib
 from butters.actions.file_security import require_private_regular_file
 
 AGENT_PATHS = frozenset({"/agent/v1/session", "/nas-agent/v1/session"})
+BIND_ADDRESS_CHECK_INTERVAL = 5.0
+
+
+class InterfaceAddressUnavailable(ValueError):
+    """A configured interface does not currently have an IPv4 address."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,8 +101,10 @@ def bind_addresses(config: IngressConfig | dict[str, object]) -> list[str]:
                     packed = struct.pack("256s", name.encode("ascii"))
                     value = fcntl.ioctl(probe.fileno(), 0x8915, packed)
                     addresses.append(socket.inet_ntoa(value[20:24]))
-                except OSError:
-                    continue
+                except OSError as exc:
+                    raise InterfaceAddressUnavailable(
+                        f"interface_address_unavailable:{name}"
+                    ) from exc
     else:
         if not isinstance(bind_host, str) or not bind_host:
             raise ValueError("bind_source_required")
@@ -109,6 +116,35 @@ def bind_addresses(config: IngressConfig | dict[str, object]) -> list[str]:
         if parsed.version != 4 or not parsed.is_private or parsed.is_unspecified:
             raise ValueError("private_lan_binding_required")
     return sorted(set(addresses))
+
+
+async def wait_for_bind_addresses(
+    config: IngressConfig, retry_delay: float = BIND_ADDRESS_CHECK_INTERVAL
+) -> list[str]:
+    """Wait until every explicitly selected interface has an IPv4 address."""
+
+    while True:
+        try:
+            return bind_addresses(config)
+        except InterfaceAddressUnavailable:
+            await asyncio.sleep(retry_delay)
+
+
+async def wait_for_bind_address_change(
+    config: IngressConfig,
+    bound_addresses: list[str],
+    check_interval: float = BIND_ADDRESS_CHECK_INTERVAL,
+) -> None:
+    """Return when DHCP or link state makes the active binding stale."""
+
+    while True:
+        await asyncio.sleep(check_interval)
+        try:
+            current_addresses = bind_addresses(config)
+        except InterfaceAddressUnavailable:
+            return
+        if current_addresses != bound_addresses:
+            return
 
 
 def validate_handshake(raw: bytes) -> bytes:
@@ -234,16 +270,23 @@ async def run(config: IngressConfig) -> None:
             if upstream is not None:
                 upstream.close()
 
-    server = await asyncio.start_server(
-        accept,
-        bind_addresses(config),
-        config.port,
-        ssl=context,
-        ssl_handshake_timeout=5,
-        limit=8192,
-    )
-    async with server:
-        await server.serve_forever()
+    while True:
+        addresses = await wait_for_bind_addresses(config)
+        server = await asyncio.start_server(
+            accept,
+            addresses,
+            config.port,
+            ssl=context,
+            ssl_handshake_timeout=5,
+            limit=8192,
+        )
+        try:
+            await wait_for_bind_address_change(config, addresses)
+        finally:
+            server.close()
+            await server.wait_closed()
+            for writer in tuple(active):
+                writer.close()
 
 
 def main() -> None:
