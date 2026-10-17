@@ -108,6 +108,10 @@ leave the process permanently bound to a stale address. Wildcard and Tailscale
 addresses remain excluded unless an operator explicitly names such an
 interface (which still must pass the private-IPv4 checks).
 
+Interface wait, recovery, bind, and address-change events are recorded in the
+systemd journal without logging request headers or credentials. Listener
+replacement closes and awaits existing client transports before rebinding.
+
 Production should normally use `bind_interfaces = ["eth0"]`. A migration may
 temporarily list both `eth0` and `wlan0`, but that exposes the authenticated TLS
 ingress on both LAN adapters and makes both addresses required. Update the

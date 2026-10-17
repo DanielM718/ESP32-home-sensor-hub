@@ -11,11 +11,13 @@ import asyncio
 import base64
 import binascii
 import ipaddress
+import logging
 import os
 import re
 import socket
 import ssl
 import struct
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +27,7 @@ from butters.actions.file_security import require_private_regular_file
 
 AGENT_PATHS = frozenset({"/agent/v1/session", "/nas-agent/v1/session"})
 BIND_ADDRESS_CHECK_INTERVAL = 5.0
+LOGGER = logging.getLogger(__name__)
 
 
 class InterfaceAddressUnavailable(ValueError):
@@ -123,10 +126,17 @@ async def wait_for_bind_addresses(
 ) -> list[str]:
     """Wait until every explicitly selected interface has an IPv4 address."""
 
+    unavailable: str | None = None
     while True:
         try:
-            return bind_addresses(config)
-        except InterfaceAddressUnavailable:
+            addresses = bind_addresses(config)
+            if unavailable is not None:
+                LOGGER.info("configured ingress interfaces are available")
+            return addresses
+        except InterfaceAddressUnavailable as exc:
+            if str(exc) != unavailable:
+                unavailable = str(exc)
+                LOGGER.warning("%s; waiting for IPv4", unavailable)
             await asyncio.sleep(retry_delay)
 
 
@@ -141,9 +151,11 @@ async def wait_for_bind_address_change(
         await asyncio.sleep(check_interval)
         try:
             current_addresses = bind_addresses(config)
-        except InterfaceAddressUnavailable:
+        except InterfaceAddressUnavailable as exc:
+            LOGGER.warning("%s; recreating ingress listeners", exc)
             return
         if current_addresses != bound_addresses:
+            LOGGER.info("ingress IPv4 addresses changed; recreating listeners")
             return
 
 
@@ -255,7 +267,13 @@ async def run(config: IngressConfig) -> None:
             for pump in pending:
                 pump.cancel()
             await asyncio.gather(*pumps, return_exceptions=True)
-        except (ValueError, OSError, asyncio.TimeoutError, asyncio.LimitOverrunError):
+        except (
+            ValueError,
+            OSError,
+            asyncio.TimeoutError,
+            asyncio.IncompleteReadError,
+            asyncio.LimitOverrunError,
+        ):
             # Do not log request headers: future protocol fields may be sensitive.
             try:
                 writer.write(
@@ -269,6 +287,11 @@ async def run(config: IngressConfig) -> None:
             writer.close()
             if upstream is not None:
                 upstream.close()
+            with suppress(Exception):
+                await writer.wait_closed()
+            if upstream is not None:
+                with suppress(Exception):
+                    await upstream.wait_closed()
 
     while True:
         addresses = await wait_for_bind_addresses(config)
@@ -280,16 +303,22 @@ async def run(config: IngressConfig) -> None:
             ssl_handshake_timeout=5,
             limit=8192,
         )
+        LOGGER.info("ingress listening on %s:%d", ", ".join(addresses), config.port)
         try:
             await wait_for_bind_address_change(config, addresses)
         finally:
             server.close()
             await server.wait_closed()
-            for writer in tuple(active):
+            writers = tuple(active)
+            for writer in writers:
                 writer.close()
+            await asyncio.gather(
+                *(writer.wait_closed() for writer in writers), return_exceptions=True
+            )
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     path = Path(
         os.environ.get(
             "BUTTERS_AGENT_INGRESS_CONFIG", "/etc/butters/agent-ingress.toml"
