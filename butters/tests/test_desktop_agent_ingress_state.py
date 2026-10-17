@@ -14,14 +14,18 @@ import time
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Self
 
 import httpx
 import pytest
 from butters.actions.agent import AgentHub
 from butters.actions.agent_ingress import (
+    InterfaceAddressUnavailable,
     bind_addresses,
     load_config,
     validate_handshake,
+    wait_for_bind_address_change,
+    wait_for_bind_addresses,
 )
 from butters.assistant_config import (
     AgentIngressSettings,
@@ -493,6 +497,7 @@ def test_transport_config_is_default_disabled_and_root_managed(tmp_path: Path) -
     config.chmod(0o640)
     loaded = load_config(config)
     assert loaded.enabled is False
+    assert loaded.bind_interfaces == ("eth0",)
     assert loaded.upstream_host == "127.0.0.1"
     config.chmod(0o666)
     with pytest.raises(ValueError, match="unsafe_configuration"):
@@ -653,6 +658,82 @@ def test_transport_refuses_wildcard_or_public_binding(
     monkeypatch.setattr("socket.gethostbyname_ex", lambda _host: ("x", [], [address]))
     with pytest.raises(ValueError, match="private_lan_binding_required"):
         bind_addresses({"bind_host": "agent.internal"})
+
+
+def test_transport_requires_every_configured_interface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class Probe:
+        def __enter__(self) -> Self:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+        def fileno(self) -> int:
+            return 1
+
+    def ioctl(_file_descriptor: int, _operation: int, packed: bytes) -> bytes:
+        interface = packed.rstrip(b"\0").decode("ascii")
+        if interface == "wlan0":
+            raise OSError("address not assigned")
+        return b"\0" * 20 + bytes((192, 168, 1, 157)) + b"\0" * 232
+
+    monkeypatch.setattr(
+        "butters.actions.agent_ingress.socket.socket", lambda *_args: Probe()
+    )
+    monkeypatch.setattr("fcntl.ioctl", ioctl)
+    with pytest.raises(
+        InterfaceAddressUnavailable,
+        match="interface_address_unavailable:wlan0",
+    ):
+        bind_addresses({"bind_interfaces": ("eth0", "wlan0")})
+
+
+def test_transport_waits_for_delayed_interface_address(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[list[str] | Exception] = [
+        InterfaceAddressUnavailable("interface_address_unavailable:eth0"),
+        ["192.168.1.157"],
+    ]
+    sleeps: list[float] = []
+
+    def observe(_config: object) -> list[str]:
+        observation = observations.pop(0)
+        if isinstance(observation, Exception):
+            raise observation
+        return observation
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr("butters.actions.agent_ingress.bind_addresses", observe)
+    monkeypatch.setattr("butters.actions.agent_ingress.asyncio.sleep", sleep)
+    addresses = asyncio.run(wait_for_bind_addresses(SimpleNamespace(), retry_delay=0.1))
+    assert addresses == ["192.168.1.157"]
+    assert sleeps == [0.1]
+
+
+def test_transport_detects_dhcp_address_change(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        "butters.actions.agent_ingress.bind_addresses",
+        lambda _config: ["192.168.1.159"],
+    )
+    monkeypatch.setattr("butters.actions.agent_ingress.asyncio.sleep", sleep)
+    asyncio.run(
+        wait_for_bind_address_change(
+            SimpleNamespace(), ["192.168.1.157"], check_interval=0.1
+        )
+    )
+    assert sleeps == [0.1]
 
 
 def _identity_config(tmp_path, agent_id: str):

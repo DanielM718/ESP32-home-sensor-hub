@@ -18,7 +18,7 @@ gates. There are no Admin controls and no conversational planner exposure.
 | Replay protection | `AgentHub.socket` requires strictly increasing heartbeat sequence numbers and rejects duplicate terminal responses. The agent's bounded `ReplayCache` binds request IDs and idempotency keys to an action/target/parameter fingerprint; conflicting reuse fails closed. An error without a valid request ID is never assigned to the only pending request. |
 | Browser `Origin` refusal | `AgentHub.socket` rejects any Origin-bearing socket before acceptance. The TLS ingress handshake allowlist also rejects `Origin`. |
 | Browser identity stripping | `agent_ingress.validate_handshake` accepts only Host and the four required WebSocket upgrade headers. Cookie, Authorization, Tailscale identity, forwarded identity, CSRF, and all other headers are rejected and never reach Butters. |
-| Private-only listener | `agent_ingress.bind_addresses` resolves only explicitly configured interfaces or a host and refuses wildcard, unspecified, public, or non-IPv4 addresses. Only `/agent/v1/session` is forwarded to the loopback web daemon. |
+| Private-only listener | `agent_ingress.bind_addresses` resolves every explicitly configured interface (or an explicit host) and refuses missing interfaces, wildcard, unspecified, public, or non-IPv4 addresses. Only `/agent/v1/session` and `/nas-agent/v1/session` are forwarded to the loopback web daemon. |
 | Secrets at rest | The committed configs contain placeholders only. `/etc/butters/desktop-agent.toml` stores a token hash and a command-key file reference; the key and TLS private key remain separate root-managed files. Both key files must be regular, owned by root or the running service identity, and no more permissive than group-readable (`0640` is supported). No secret is placed in a systemd unit. |
 
 ## Truthful state
@@ -95,6 +95,30 @@ root-managed example configs, and the hardened unit. With no arguments it does
 not enable or start the unit and does not generate credentials. Configure both
 files and provision the referenced TLS/key material before explicitly enabling
 the service.
+
+### Listener interface lifecycle
+
+`bind_interfaces` is an explicit security boundary, not a preference list.
+Every named interface must have a private IPv4 address before the ingress opens
+any listener. The service waits for delayed network initialization instead of
+silently binding whichever interface happens to be ready first. While running,
+it checks the selected address set every five seconds and closes and recreates
+the listeners after an address is removed or changed, so a DHCP change does not
+leave the process permanently bound to a stale address. Wildcard and Tailscale
+addresses remain excluded unless an operator explicitly names such an
+interface (which still must pass the private-IPv4 checks).
+
+Interface wait, recovery, bind, and address-change events are recorded in the
+systemd journal without logging request headers or credentials. Listener
+replacement closes and awaits existing client transports before rebinding.
+
+Production should normally use `bind_interfaces = ["eth0"]`. A migration may
+temporarily list both `eth0` and `wlan0`, but that exposes the authenticated TLS
+ingress on both LAN adapters and makes both addresses required. Update the
+`butters.lan` router record and DHCP reservation to the Ethernet address before
+removing `wlan0` from the live configuration. The certificate is issued to the
+hostname, so clients should continue to use `wss://butters.lan:8443/...` rather
+than embedding either DHCP address.
 
 ## Deployment status
 
