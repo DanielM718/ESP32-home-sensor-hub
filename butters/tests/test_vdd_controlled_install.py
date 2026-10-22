@@ -25,9 +25,13 @@ def test_vdd_validator_does_not_equate_delayed_cim_metadata_with_unsigned() -> N
     source = _installer_source()
 
     assert "Signed driver record is absent or unsigned" not in source
+    assert "Windows explicitly reports the installed driver as unsigned" not in source
     assert "DEVPKEY_Device_DriverInfPath" in source
-    assert "Windows explicitly reports the installed driver as unsigned" in source
     assert "signed_driver_record_available = $signedDriver.Count -ge 1" in source
+    assert "signed_driver_metadata_only = $true" in source
+    assert "package_signature_validated = $packageSignatureValidated" in source
+    assert "Driver package catalog is valid" in source
+    assert "Signer Name\\s*=\\s*SignPath Foundation" in source
     assert "$retainInstalledDriver" in source
     assert "if (-not $retainInstalledDriver) { Invoke-Rollback }" in source
 

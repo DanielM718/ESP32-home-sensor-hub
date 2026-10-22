@@ -260,6 +260,15 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
     $setupSlice = @(Get-Content -LiteralPath $setupLog -ErrorAction SilentlyContinue | Select-Object -Skip $setupLineCount)
     $setupSlice | Set-Content -LiteralPath (Join-Path $backupRoot 'setupapi-attempt.log') -Encoding UTF8
     $rebootRequested = [bool](@($setupSlice | Where-Object { $_ -match '(?i)restart required|0x00000bc3|ERROR_SUCCESS_REBOOT_REQUIRED' }).Count)
+    $setupText = $setupSlice -join "`n"
+    $packageSignatureValidated = [bool](
+        $setupText -match '(?i)Driver package catalog is valid' -and
+        $setupText -match '(?i)Success: File is signed in Authenticode\(tm\) catalog' -and
+        $setupText -match '(?i)Signer Name\s*=\s*SignPath Foundation' -and
+        $setupText -match '(?i)DRIVERSTORE IMPORT VALIDATE: exit\(0x00000000\)' -and
+        $setupText -match '(?i)Publish Driver Package: exit\(0x00000000\)' -and
+        $setupText -match '(?i)Exit status: SUCCESS'
+    )
     $rootInstanceIds = @($roots | Select-Object -ExpandProperty InstanceId)
     $rootInfPaths = @($roots | ForEach-Object { [string](Get-DevicePropertyValue $_ 'DEVPKEY_Device_DriverInfPath') })
     $signedDriver = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {
@@ -279,8 +288,8 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
         $genuineFailure = $true; $failureReason = "Root\\MttVDD is not healthy: status=$($roots[0].Status), problem=$($roots[0].Problem)"
     } elseif ($rootInfPaths.Count -lt 1 -or -not @($rootInfPaths | Where-Object { $_ -ieq $publishedInf }).Count) {
         $genuineFailure = $true; $failureReason = "Root\\MttVDD is not bound to the published INF $publishedInf"
-    } elseif (@($signedDriver | Where-Object { $_.IsSigned -eq $false }).Count -gt 0) {
-        $genuineFailure = $true; $failureReason = 'Windows explicitly reports the installed driver as unsigned'
+    } elseif (-not $packageSignatureValidated) {
+        $genuineFailure = $true; $failureReason = 'SetupAPI did not record complete signed-catalog validation and package publication success'
     } elseif ($children.Count -lt 1 -and -not $rebootRequested) {
         $genuineFailure = $true; $failureReason = 'MTT1337 child monitor did not enumerate and Windows did not request a reboot'
     } elseif ($children.Count -ge 1 -and -not $childHealthy -and -not $rebootRequested) {
@@ -329,6 +338,8 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
         active_virtual_monitors = $activeChildren
         signed_driver = $signedDriver
         signed_driver_record_available = $signedDriver.Count -ge 1
+        signed_driver_metadata_only = $true
+        package_signature_validated = $packageSignatureValidated
         root_driver_inf_paths = $rootInfPaths
         archive_sha256 = $archiveHash
         catalog_sha256 = $catalogHash
