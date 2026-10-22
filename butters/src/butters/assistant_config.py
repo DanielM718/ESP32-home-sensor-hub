@@ -5,13 +5,21 @@ from __future__ import annotations
 import ipaddress
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
 import tomllib
 
+from butters.ai.audio_models import (
+    DEPRECATED_OPENAI_STT_MODELS,
+    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_REALTIME_VOICES,
+    OPENAI_STT_MODEL,
+    OPENAI_TTS_MODEL,
+    migrated_realtime_voice,
+)
 from butters.config import ConfigError, subsystem_root
 from butters.config_overlay import load_overlay, local_config_path, merge_overlay
 from butters.pricing import (
@@ -534,35 +542,69 @@ class SpeechProviderSettings:
     tts_default: str = "local"
     allow_paid_stt: bool = False
     allow_paid_tts: bool = False
-    cloud_stt_model: str = "gpt-4o-mini-transcribe"
-    cloud_tts_model: str = "gpt-4o-mini-tts"
+    cloud_stt_model: str = OPENAI_STT_MODEL
+    cloud_tts_model: str = OPENAI_TTS_MODEL
     cloud_tts_voice: str = "cedar"
     cloud_tts_speed: float = 1.0
     cloud_tts_instructions: str = "Warm, concise, calm home assistant."
-    cloud_stt_price_per_minute_usd: float | None = None
+    cloud_stt_price_per_minute_usd: float | None = 0.0045
     cloud_tts_price_per_million_characters_usd: float | None = None
 
     def validated(self) -> SpeechProviderSettings:
-        if self.stt_default not in {"local", "openai"}:
+        # Exact legacy model IDs are migrated at the configuration boundary so
+        # an existing /etc/butters/assistant.toml keeps booting after upgrade.
+        # Unknown IDs still fail closed instead of being guessed into a model.
+        migrated = self
+        if self.cloud_stt_model in DEPRECATED_OPENAI_STT_MODELS:
+            migrated = replace(
+                migrated,
+                cloud_stt_model=OPENAI_STT_MODEL,
+                cloud_stt_price_per_minute_usd=0.0045,
+            )
+        if self.cloud_tts_model in DEPRECATED_OPENAI_TTS_MODELS:
+            migrated = replace(
+                migrated,
+                cloud_tts_model=OPENAI_TTS_MODEL,
+                cloud_tts_voice=migrated_realtime_voice(self.cloud_tts_voice),
+                # Realtime has no numeric speed field. One is retained here
+                # only for the legacy preset schema's neutral default.
+                cloud_tts_speed=1.0,
+            )
+        if migrated.cloud_stt_model != OPENAI_STT_MODEL:
+            raise ConfigError(
+                f"providers.cloud_stt_model must be {OPENAI_STT_MODEL}"
+            )
+        if migrated.cloud_tts_model != OPENAI_TTS_MODEL:
+            raise ConfigError(
+                f"providers.cloud_tts_model must be {OPENAI_TTS_MODEL}"
+            )
+        if migrated.cloud_tts_voice not in OPENAI_REALTIME_VOICES:
+            raise ConfigError(
+                "providers.cloud_tts_voice is not supported by the Realtime model"
+            )
+        if migrated.stt_default not in {"local", "openai"}:
             raise ConfigError("providers.stt_default must be local or openai")
-        if self.tts_default not in {"local", "openai"}:
+        if migrated.tts_default not in {"local", "openai"}:
             raise ConfigError("providers.tts_default must be local or openai")
-        if not self.cloud_stt_model.strip() or not self.cloud_tts_model.strip():
+        if not migrated.cloud_stt_model.strip() or not migrated.cloud_tts_model.strip():
             raise ConfigError("providers cloud model names cannot be empty")
-        if not 0.25 <= self.cloud_tts_speed <= 4.0:
+        if not 0.25 <= migrated.cloud_tts_speed <= 4.0:
             raise ConfigError("providers.cloud_tts_speed must be 0.25 to 4")
-        if len(self.cloud_tts_instructions) > 1000:
+        if len(migrated.cloud_tts_instructions) > 1000:
             raise ConfigError("providers.cloud_tts_instructions is too long")
         for name, value in (
-            ("cloud_stt_price_per_minute_usd", self.cloud_stt_price_per_minute_usd),
+            (
+                "cloud_stt_price_per_minute_usd",
+                migrated.cloud_stt_price_per_minute_usd,
+            ),
             (
                 "cloud_tts_price_per_million_characters_usd",
-                self.cloud_tts_price_per_million_characters_usd,
+                migrated.cloud_tts_price_per_million_characters_usd,
             ),
         ):
             if value is not None and value <= 0:
                 raise ConfigError(f"providers.{name} must be positive when configured")
-        return self
+        return migrated
 
 
 @dataclass(frozen=True, slots=True)
@@ -907,9 +949,9 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         allow_paid_stt=bool(provider_table.get("allow_paid_stt", False)),
         allow_paid_tts=bool(provider_table.get("allow_paid_tts", False)),
         cloud_stt_model=str(
-            provider_table.get("cloud_stt_model", "gpt-4o-mini-transcribe")
+            provider_table.get("cloud_stt_model", OPENAI_STT_MODEL)
         ),
-        cloud_tts_model=str(provider_table.get("cloud_tts_model", "gpt-4o-mini-tts")),
+        cloud_tts_model=str(provider_table.get("cloud_tts_model", OPENAI_TTS_MODEL)),
         cloud_tts_voice=str(provider_table.get("cloud_tts_voice", "cedar")),
         cloud_tts_speed=float(provider_table.get("cloud_tts_speed", 1.0)),
         cloud_tts_instructions=str(
@@ -918,7 +960,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
             )
         ),
         cloud_stt_price_per_minute_usd=_optional_float(
-            provider_table.get("cloud_stt_price_per_minute_usd")
+            provider_table.get("cloud_stt_price_per_minute_usd", 0.0045)
         ),
         cloud_tts_price_per_million_characters_usd=_optional_float(
             provider_table.get("cloud_tts_price_per_million_characters_usd")

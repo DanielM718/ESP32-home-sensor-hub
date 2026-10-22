@@ -231,12 +231,14 @@ stt_default = "local"
 tts_default = "local"
 allow_paid_stt = false
 allow_paid_tts = false
-cloud_stt_model = "gpt-4o-mini-transcribe"
-cloud_tts_model = "gpt-4o-mini-tts"
+cloud_stt_model = "gpt-transcribe"
+cloud_tts_model = "gpt-realtime-2.1-mini"
 cloud_tts_voice = "cedar"
+# The Realtime replacement has no numeric speed parameter. This neutral value
+# remains only for compatibility with the legacy voice-preset table.
 cloud_tts_speed = 1.0
 cloud_tts_instructions = "Warm, concise, calm home assistant."
-# cloud_stt_price_per_minute_usd = <reviewed positive value>
+cloud_stt_price_per_minute_usd = 0.0045
 # cloud_tts_price_per_million_characters_usd = <reviewed positive value>
 
 # Optional semantic fallback. This connects only to a manually started local
@@ -284,7 +286,7 @@ max_usage_records = 50000
 # Provenance for the reviewed rates in butters/pricing.py. Both are updated
 # in the same change as the rates themselves.
 pricing_source = "https://developers.openai.com/api/docs/pricing"
-pricing_date = "2026-09-19"
+pricing_date = "2026-10-22"
 
 # Codex engineering jobs are rendered locally by default. Programmatic Codex
 # execution and every production deployment operation remain disabled.

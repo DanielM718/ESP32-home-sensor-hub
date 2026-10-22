@@ -21,6 +21,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from butters.ai.audio_models import (
+    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_REALTIME_VOICES,
+    OPENAI_TTS_MODEL,
+    OPENAI_TTS_SHUTDOWN_DATE,
+)
 from butters.assistant_config import AssistantSettings
 from butters.cloud.adaptive import ROUTING_MODES, TIER_MODELS
 
@@ -176,6 +182,12 @@ class Provider:
         for item in self.speech_models:
             if item.id == model_id:
                 return item
+        if self.id == "openai" and model_id in DEPRECATED_OPENAI_TTS_MODELS:
+            raise CapabilityError(
+                "model_retired",
+                f"{model_id} is deprecated and shuts down on "
+                f"{OPENAI_TTS_SHUTDOWN_DATE}; use {OPENAI_TTS_MODEL}",
+            )
         raise CapabilityError(
             "model_denied", f"{model_id} is not a speech model for {self.id}"
         )
@@ -195,58 +207,31 @@ def _voices(*pairs: tuple[str, str]) -> tuple[VoiceOption, ...]:
     return tuple(VoiceOption(identifier, label) for identifier, label in pairs)
 
 
-# gpt-4o-mini-tts carries the full current voice set and is the only model that
-# consumes speaking instructions. Both lists are the provider's, not Butters'
-# preference: a voice missing here cannot be selected, so an omission is a
-# capability the administrator loses rather than a harmless shortening.
-_EXPRESSIVE_VOICES = _voices(
-    ("alloy", "Alloy"),
-    ("ash", "Ash"),
-    ("ballad", "Ballad"),
-    ("cedar", "Cedar"),
-    ("coral", "Coral"),
-    ("echo", "Echo"),
-    ("fable", "Fable"),
-    ("marin", "Marin"),
-    ("nova", "Nova"),
-    ("onyx", "Onyx"),
-    ("sage", "Sage"),
-    ("shimmer", "Shimmer"),
-    ("verse", "Verse"),
-)
-# The tts-1 pair supports a subset of the expressive set: it lacks Ballad and
-# Verse, and the two newest voices, Cedar and Marin, are gpt-4o-mini-tts only.
-_CLASSIC_VOICES = _voices(
-    ("alloy", "Alloy"),
-    ("ash", "Ash"),
-    ("coral", "Coral"),
-    ("echo", "Echo"),
-    ("fable", "Fable"),
-    ("nova", "Nova"),
-    ("onyx", "Onyx"),
-    ("sage", "Sage"),
-    ("shimmer", "Shimmer"),
+_REALTIME_VOICE_LABELS = {
+    "alloy": "Alloy",
+    "ash": "Ash",
+    "ballad": "Ballad",
+    "cedar": "Cedar",
+    "coral": "Coral",
+    "echo": "Echo",
+    "marin": "Marin",
+    "sage": "Sage",
+    "shimmer": "Shimmer",
+    "verse": "Verse",
+}
+_REALTIME_VOICES = _voices(
+    *((identifier, _REALTIME_VOICE_LABELS[identifier]) for identifier in OPENAI_REALTIME_VOICES)
 )
 
 OPENAI_SPEECH_MODELS: tuple[SpeechModel, ...] = (
     SpeechModel(
-        "gpt-4o-mini-tts",
-        "GPT-4o mini TTS",
-        _EXPRESSIVE_VOICES,
-        note="Accepts a speaking style instruction.",
+        OPENAI_TTS_MODEL,
+        "GPT Realtime 2.1 Mini",
+        _REALTIME_VOICES,
+        note="Current Realtime speech model. Accepts speaking instructions.",
         supports_instructions=True,
-    ),
-    SpeechModel(
-        "tts-1",
-        "TTS-1",
-        _CLASSIC_VOICES,
-        note="Lower latency. Ignores speaking style.",
-    ),
-    SpeechModel(
-        "tts-1-hd",
-        "TTS-1 HD",
-        _CLASSIC_VOICES,
-        note="Higher fidelity. Ignores speaking style.",
+        supports_speed=False,
+        speed_range=(1.0, 1.0),
     ),
 )
 

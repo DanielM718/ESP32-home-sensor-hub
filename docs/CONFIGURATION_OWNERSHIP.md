@@ -181,8 +181,7 @@ Each model declares the dimension OpenAI actually bills:
 | Model | Billing dimension |
 | --- | --- |
 | `gpt-5.6-luna` / `terra` / `sol` | input, cached input, output tokens (`TokenPricing`) |
-| `tts-1`, `tts-1-hd` | input characters (`CharacterPricing`) |
-| `gpt-4o-mini-tts` | text input tokens + audio output tokens (`SpeechTokenPricing`) |
+| `gpt-realtime-2.1-mini` | text input tokens + audio output tokens (`SpeechTokenPricing`) |
 
 A model with no entry is denied before any HTTP call, in both the chat and
 speech paths.
@@ -198,11 +197,10 @@ OpenAI billing, and nothing in it claims to be a settled charge.
 Recorded rows keep their request-time figure. They are a snapshot for audit,
 not a recomputation, so a later rate change never rewrites history.
 
-`POST /v1/audio/speech` returns audio bytes and no usage object, so for
-`gpt-4o-mini-tts` neither billable dimension is observable. Its cost is
-therefore an openly labelled ceiling (`estimated_upper_bound`,
-`reconciliation_required: true`), never a measurement, and audio tokens are
-never inferred from the encoded audio's size or duration — OpenAI defines no
-such conversion. Budget admission uses that same ceiling, so a request whose
-worst case exceeds the budget is refused rather than admitted on the grounds
-that its true cost is unknowable.
+Budget admission occurs before a Realtime response exists, so it uses an
+openly labelled ceiling (`estimated_upper_bound`, `reconciliation_required:
+true`). A request whose worst case exceeds the budget is refused. On success,
+`response.done` supplies text-input and audio-output tokens and the recorded
+cost is `provider_reported`; audio tokens are never inferred from encoded byte
+length or duration. A failed request retains its conservative preflight audit
+record.
