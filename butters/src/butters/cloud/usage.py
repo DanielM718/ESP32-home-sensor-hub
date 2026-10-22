@@ -226,10 +226,9 @@ class UsageLedger:
     def speech_cost(self, model: str, *, characters: int) -> SpeechCost:
         """Cost a speech request and state how trustworthy the figure is.
 
-        Character-priced models are measured exactly from the submitted text.
-        `gpt-4o-mini-tts` is billed on text input and audio output tokens that
-        `/v1/audio/speech` does not report, so its figure is an explicit
-        conservative ceiling awaiting reconciliation, never a measurement.
+        This preflight runs before Realtime usage exists, so token-priced
+        speech returns an explicit conservative ceiling. The successful call
+        later records the token counts from the provider's terminal event.
         """
 
         return speech_cost(model, characters=characters)

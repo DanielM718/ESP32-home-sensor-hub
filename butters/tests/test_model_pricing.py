@@ -2,7 +2,7 @@
 
 Two defects motivated this file. The chat rates had drifted from OpenAI's
 published prices, and the speech rate was a single characters-per-million
-number that is simply not how `gpt-4o-mini-tts` is billed. The tests below
+number that is simply not how Realtime speech is billed. The tests below
 pin the current rates and, more importantly, pin the distinction between a
 cost Butters measured and a cost it could only bound.
 """
@@ -94,7 +94,7 @@ def test_cache_writes_bill_at_the_documented_multiplier() -> None:
 def test_pricing_provenance_travels_with_the_rates(settings) -> None:
     assert settings.cloud.pricing_source == PRICING_SOURCE
     assert settings.cloud.pricing_date == PRICING_DATE
-    assert PRICING_DATE == "2026-09-19"
+    assert PRICING_DATE == "2026-10-22"
 
 
 def test_an_unpriced_chat_model_stays_fail_closed(ledger) -> None:
@@ -117,36 +117,19 @@ def test_the_chat_catalog_still_equals_the_priced_models(settings) -> None:
 # =========================== speech pricing ================================
 
 
-def test_tts1_family_is_character_priced() -> None:
-    for model, rate in (("tts-1", 15.00), ("tts-1-hd", 30.00)):
-        pricing = SPEECH_PRICING[model]
-        assert isinstance(pricing, CharacterPricing)
-        assert pricing.input_per_million_characters_usd == rate
-
-
-@pytest.mark.parametrize(("model", "rate"), (("tts-1", 15.00), ("tts-1-hd", 30.00)))
-def test_character_priced_speech_is_measured_not_estimated(model: str, rate: float) -> None:
-    cost = speech_cost(model, characters=2000)
-
-    assert cost.basis is CostBasis.INPUT_MEASURED
-    assert cost.reconciliation_required is False
-    assert cost.amount_usd == pytest.approx(2000 * rate / 1_000_000)
-
-
-def test_gpt_4o_mini_tts_is_not_character_priced() -> None:
-    pricing = SPEECH_PRICING["gpt-4o-mini-tts"]
+def test_realtime_tts_is_token_priced() -> None:
+    pricing = SPEECH_PRICING["gpt-realtime-2.1-mini"]
 
     assert not isinstance(pricing, CharacterPricing)
     assert isinstance(pricing, SpeechTokenPricing)
     assert pricing.text_input_per_million_usd == 0.60
-    assert pricing.audio_output_per_million_usd == 12.00
+    assert pricing.audio_output_per_million_usd == 20.00
 
 
-def test_gpt_4o_mini_tts_token_accounting_when_usage_is_reported() -> None:
-    """The branch a future usage-reporting speech response would take."""
+def test_realtime_tts_uses_provider_reported_token_accounting() -> None:
 
     cost = speech_cost(
-        "gpt-4o-mini-tts",
+        "gpt-realtime-2.1-mini",
         characters=100,
         reported_text_input_tokens=50,
         reported_audio_output_tokens=400,
@@ -154,20 +137,20 @@ def test_gpt_4o_mini_tts_token_accounting_when_usage_is_reported() -> None:
 
     assert cost.basis is CostBasis.PROVIDER_REPORTED
     assert cost.reconciliation_required is False
-    assert cost.amount_usd == pytest.approx((50 * 0.60 + 400 * 12.00) / 1_000_000)
+    assert cost.amount_usd == pytest.approx((50 * 0.60 + 400 * 20.00) / 1_000_000)
 
 
 def test_missing_speech_usage_is_an_openly_labelled_ceiling() -> None:
     """No fake precision: the figure says what it is."""
 
-    cost = speech_cost("gpt-4o-mini-tts", characters=100)
+    cost = speech_cost("gpt-realtime-2.1-mini", characters=100)
 
     assert cost.basis is CostBasis.ESTIMATED_UPPER_BOUND
     assert cost.reconciliation_required is True
-    assert "not a measured charge" in cost.detail
+    assert "preflight ceiling" in cost.detail
     # A ceiling must never sit below what the request could actually cost.
     plausible = speech_cost(
-        "gpt-4o-mini-tts",
+        "gpt-realtime-2.1-mini",
         characters=100,
         reported_text_input_tokens=25,
         reported_audio_output_tokens=300,
@@ -224,17 +207,15 @@ def test_preflight_refuses_a_request_whose_worst_case_exceeds_the_budget(
 
     tight = replace(settings.cloud, max_estimated_cost_per_request_usd=0.001).validated()
     ledger = UsageLedger(tight, tmp_path / "usage.sqlite3")
-    bounded = ledger.speech_cost("gpt-4o-mini-tts", characters=2000)
+    bounded = ledger.speech_cost("gpt-realtime-2.1-mini", characters=2000)
 
     assert bounded.basis is CostBasis.ESTIMATED_UPPER_BOUND
     assert ledger.permits(bounded.amount_usd) is False
-    # The same text on a character-priced model is cheap enough to admit.
-    assert ledger.permits(ledger.speech_cost("tts-1", characters=20).amount_usd) is True
 
 
 def test_the_ceiling_scales_with_the_bounded_input(ledger) -> None:
-    small = ledger.speech_cost("gpt-4o-mini-tts", characters=100).amount_usd
-    large = ledger.speech_cost("gpt-4o-mini-tts", characters=2000).amount_usd
+    small = ledger.speech_cost("gpt-realtime-2.1-mini", characters=100).amount_usd
+    large = ledger.speech_cost("gpt-realtime-2.1-mini", characters=2000).amount_usd
 
     assert large > small
     assert math.isfinite(large)
@@ -346,7 +327,12 @@ def test_a_typed_pricing_entry_exists_for_every_catalogued_speech_model(settings
     from butters.ai.capabilities import build_registry
 
     registry = build_registry(settings)
-    catalogued = {item.id for item in registry.provider("openai").speech_models}
+    catalogued = {
+        model.id
+        for provider in registry.speech_providers()
+        for model in provider.speech_models
+        if provider.requires_credential
+    }
 
     assert catalogued == set(SPEECH_PRICING)
     for model in catalogued:

@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import ClassVar
 
 from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
@@ -1367,6 +1368,7 @@ class BetaAssistantService:
             "power_network": _reach_value(reachability, "network_reachable"),
             "ssh": _reach_value(reachability, "ssh_ready"),
             "parsec": _reach_value(reachability, "parsec_ready"),
+            "sunshine": _reach_value(reachability, "sunshine_ready"),
             "agent": agent["state"],
             "agent_connected": agent["agent_connected"],
             "agent_heartbeat_age_seconds": agent[
@@ -1381,7 +1383,10 @@ class BetaAssistantService:
                 "agent": agent["configured"],
                 "wake": self.settings.desktop.wake_enabled,
                 "shutdown": self.settings.desktop.shutdown_enabled,
-                "streaming": self.settings.desktop.parsec_ensure_enabled,
+                "streaming": (
+                    self.settings.desktop.parsec_ensure_enabled
+                    or self.settings.desktop.sunshine_ensure_enabled
+                ),
             },
             "observed": observed,
             "agent_detail": agent,
@@ -1891,8 +1896,9 @@ class BetaAssistantService:
     # engine cannot leave the UI claiming OpenAI, and enabling OpenAI cannot
     # leave it silent. It is shown once in the interface, not spoken before
     # every answer.
-    _VOICE_DISCLOSURE = {
+    _VOICE_DISCLOSURE: ClassVar[dict[str, str]] = {
         "openai": "Voice responses are AI-generated using OpenAI TTS.",
+        "openai_realtime": "Voice responses are AI-generated using OpenAI Realtime TTS.",
         "local": "Voice responses are AI-generated using an on-device model.",
     }
 
@@ -2358,14 +2364,12 @@ class BetaAssistantService:
         validate_preset(preset, registry=self.ai_registry)
         if preset.provider == "local":
             return self.local_tts.synthesize(text, preset)
-        if preset.provider != "openai":
+        if preset.provider not in {"openai", "openai_realtime"}:
             raise SpeechProviderError("provider_denied", "TTS provider is not allowed")
-        # Preflight on the model's own billing dimension. For a character-priced
-        # model this equals the final charge. For gpt-4o-mini-tts, whose audio
-        # output tokens the speech endpoint never reports, it is a deliberate
-        # ceiling: a request is admitted only if even the worst case fits the
-        # budget, so an unknowable final cost can never be an excuse to admit
-        # a request. An unpriced model yields infinity and is refused.
+        # Budget admission has to happen before either paid API path. Realtime
+        # later reports token usage; the traditional Speech endpoint does not,
+        # so its token-priced models retain the labelled upper-bound basis. An
+        # unpriced model yields infinity and is refused.
         preflight = self.ledger.speech_cost(preset.model, characters=len(text))
         estimate = preflight.amount_usd
         with self._paid_operation_gate:
@@ -2377,7 +2381,7 @@ class BetaAssistantService:
                 result = self.cloud_tts.synthesize(text, preset)
             except SpeechProviderError as exc:
                 self.ledger.record_external(
-                    provider="openai",
+                    provider=preset.provider,
                     operation_category="tts",
                     model=preset.model,
                     estimated_cost_usd=estimate,
@@ -2624,7 +2628,9 @@ class BetaAssistantService:
 
         found = self.chat_history.conversation(conversation_id, session.peer_key)
         if found is None:
-            raise ChatHistoryError("conversation_not_found", "conversation was not found")
+            raise ChatHistoryError(
+                "conversation_not_found", "conversation was not found"
+            )
         return found
 
     def open_conversation(
@@ -2653,7 +2659,11 @@ class BetaAssistantService:
             self.sessions.replace_messages(
                 session,
                 tuple(
-                    (str(item["role"]), str(item["text"]), _optional_text(item.get("trace_id")))
+                    (
+                        str(item["role"]),
+                        str(item["text"]),
+                        _optional_text(item.get("trace_id")),
+                    )
                     for item in messages
                 ),
             )
@@ -2700,7 +2710,9 @@ class BetaAssistantService:
             self.traces.drop_sessions((session.session_id,))
             return removed
 
-    def rebind_conversation(self, session: BrowserSession, conversation_id: object) -> bool:
+    def rebind_conversation(
+        self, session: BrowserSession, conversation_id: object
+    ) -> bool:
         """Re-attach a session to a conversation named by the browser pointer.
 
         Used only when a session is re-created - after an expiry or a service
@@ -2998,10 +3010,13 @@ class BetaAssistantService:
                 session_ttl_seconds=engine.session_ttl_seconds,
                 max_evidence_bytes=engine.max_evidence_bytes,
             )
-        with self._paid_operation_gate, self.ledger.request_context(
-            request_id=trace.request_id,
-            session_id=trace.session_id,
-            route_category="diagnostic_cloud",
+        with (
+            self._paid_operation_gate,
+            self.ledger.request_context(
+                request_id=trace.request_id,
+                session_id=trace.session_id,
+                route_category="diagnostic_cloud",
+            ),
         ):
             answer = selected_engine.diagnose(request)
         trace.emit(
@@ -3917,7 +3932,7 @@ def _direct_desktop_action(text: str) -> bool:
 def _action_summary(skill: str, arguments: dict[str, object]) -> str:
     labels = {
         "wake_desktop": "Wake the configured desktop",
-        "start_remote_desktop_session": "Wake the configured desktop and prepare its remote session",
+        "start_remote_desktop_session": "Wake the configured desktop and prepare an available streaming backend",
         "monitors_off": "Turn off the configured desktop monitors through Home Assistant",
         "monitors_on": "Turn on the configured desktop monitors through Home Assistant",
         "ensure_parsec_running": "Make the configured desktop's fixed Parsec service ready",

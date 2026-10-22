@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 
+from butters.ai.audio_models import OPENAI_REALTIME_TTS_MODEL
 from butters.ai.capabilities import (
     TRUNCATION_MODES,
     VERBOSITY_LEVELS,
@@ -255,6 +256,25 @@ def validate_speech(
     return SpeechSettings(provider.id, model.id, voice_id, speed, instructions, audio_format)
 
 
+def migrate_realtime_provider(
+    registry: CapabilityRegistry, payload: dict[str, object]
+) -> SpeechSettings | None:
+    """Move only the pre-release overloaded Realtime profile to its new ID.
+
+    This is a schema migration, not a model migration: model, voice,
+    instructions and API implementation remain Realtime. Traditional OpenAI
+    Speech API profiles never match and are never rewritten.
+    """
+
+    if payload.get("provider") != "openai":
+        return None
+    if payload.get("model") != OPENAI_REALTIME_TTS_MODEL:
+        return None
+    candidate = dict(payload)
+    candidate["provider"] = "openai_realtime"
+    return validate_speech(registry, candidate)
+
+
 def default_chat(registry: CapabilityRegistry, settings_model: str) -> ChatSettings:
     """The reviewed starting point: today's hardcoded Chat model and effort."""
 
@@ -273,7 +293,7 @@ def default_speech(registry: CapabilityRegistry, provider_id: str) -> SpeechSett
         provider.id,
         model.id,
         model.voice_ids()[0],
-        1.0,
+        1.0 if model.supports_speed else None,
         None,
         None,
     )

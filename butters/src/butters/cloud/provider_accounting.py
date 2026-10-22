@@ -13,12 +13,12 @@ exists for billing visibility and reconciliation. It is observational and can
 never admit or refuse anything. If OpenAI's billing API is down, delayed or
 malformed, Chat and speech keep working and this surface says it is stale.
 
-The two numbers legitimately differ. Butters records `gpt-4o-mini-tts` as an
-`estimated_upper_bound` because `POST /v1/audio/speech` returns audio bytes
-and no usage object, so neither the text input tokens nor the audio output
-tokens are observable at request time. The ceiling is well above the real
-figure on purpose. Their difference is a *reconciliation difference*, not a
-saving, and this module never calls it one.
+The two numbers legitimately differ. Before a Realtime speech call Butters
+reserves an `estimated_upper_bound`; a successful terminal event supplies the
+text-input and audio-output token counts used for the final local record.
+Provider aggregates can still differ by reporting window and billing grain.
+That difference is a *reconciliation difference*, not a saving, and this
+module never calls it one.
 
 Endpoints, from the official OpenAPI specification
 (https://github.com/openai/openai-openapi, `openapi.yaml`, read 2026-09-21):
@@ -28,9 +28,8 @@ Endpoints, from the official OpenAPI specification
   carrying ``amount.value``/``amount.currency`` and, when grouped,
   ``line_item``/``project_id``.
 * ``GET /v1/organization/usage/completions`` — token quantities and
-  ``num_model_requests``. Carries no cost. Observed 2026-09-21: this is
-  where ``gpt-4o-mini-tts`` appears, because it is billed on text input and
-  audio output *tokens*. It is not in the audio-speeches feed at all.
+  ``num_model_requests``. Carries no cost. This is the feed used to reconcile
+  token-billed inference.
 * ``GET /v1/organization/usage/audio_speeches`` — ``characters`` and
   ``num_model_requests``. Carries no cost and no tokens. Observed
   2026-09-21: only the character-billed legacy models (``tts-1``) appear

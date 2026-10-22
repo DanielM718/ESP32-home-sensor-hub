@@ -212,8 +212,7 @@ def test_the_migration_is_additive_and_idempotent(tmp_path) -> None:
 @pytest.mark.parametrize(
     ("model", "basis", "characters"),
     [
-        ("tts-1", CostBasis.INPUT_MEASURED, 20),
-        ("gpt-4o-mini-tts", CostBasis.ESTIMATED_UPPER_BOUND, 19),
+        ("gpt-realtime-2.1-mini", CostBasis.ESTIMATED_UPPER_BOUND, 19),
     ],
 )
 def test_a_speech_row_persists_the_exact_character_count(
@@ -250,7 +249,7 @@ def test_a_reasoning_row_leaves_the_character_count_null(tmp_path) -> None:
 def test_the_reservation_factor_is_untouched() -> None:
     from butters.pricing import SPEECH_PRICING
 
-    speech = SPEECH_PRICING["gpt-4o-mini-tts"]
+    speech = SPEECH_PRICING["gpt-realtime-2.1-mini"]
     assert speech.worst_case_audio_tokens_per_character == 8.0
     assert speech.worst_case_input_tokens_per_character == 0.5
 
@@ -264,9 +263,9 @@ def test_a_calibration_can_now_read_characters_without_inverting_cost(tmp_path) 
 
     led = ledger(tmp_path)
     for characters in (19, 53, 120):
-        priced = led.speech_cost("gpt-4o-mini-tts", characters=characters)
+        priced = led.speech_cost("gpt-realtime-2.1-mini", characters=characters)
         led.record_external(
-            provider="openai", operation_category="tts", model="gpt-4o-mini-tts",
+            provider="openai", operation_category="tts", model="gpt-realtime-2.1-mini",
             estimated_cost_usd=priced.amount_usd, wall_seconds=1.0, success=True,
             cost_basis=str(priced.basis), input_characters=characters,
         )
@@ -286,9 +285,9 @@ def test_a_calibration_can_now_read_characters_without_inverting_cost(tmp_path) 
 def test_the_ledger_stores_counts_and_never_content(tmp_path) -> None:
     led = ledger(tmp_path)
     secret = "please read my private diary entry aloud"
-    priced = led.speech_cost("gpt-4o-mini-tts", characters=len(secret))
+    priced = led.speech_cost("gpt-realtime-2.1-mini", characters=len(secret))
     led.record_external(
-        provider="openai", operation_category="tts", model="gpt-4o-mini-tts",
+        provider="openai", operation_category="tts", model="gpt-realtime-2.1-mini",
         estimated_cost_usd=priced.amount_usd, wall_seconds=1.0, success=True,
         cost_basis=str(priced.basis), input_characters=len(secret),
     )

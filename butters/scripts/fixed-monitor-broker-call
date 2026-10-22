@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Call only the two fixed desktop-monitor broker operations.
+
+This local recovery helper does not contain Home Assistant credentials and does
+not bypass the broker capability gate. The broker socket still requires the
+dedicated ``butters`` operating-system identity.
+"""
+
+from __future__ import annotations
+
+import json
+import secrets
+import socket
+import sys
+
+
+SOCKET_PATH = "/run/butters-action-broker/broker.sock"
+OPERATIONS = {
+    "off": "desktop.monitors_off",
+    "on": "desktop.monitors_on",
+}
+MAX_RESPONSE_BYTES = 64 * 1024
+
+
+def main() -> int:
+    if len(sys.argv) != 2 or sys.argv[1] not in OPERATIONS:
+        print("usage: fixed-monitor-broker-call on|off", file=sys.stderr)
+        return 64
+
+    request_id = "local-monitor-recovery-" + secrets.token_hex(8)
+    request = {
+        "version": 1,
+        "request_id": request_id,
+        "operation": OPERATIONS[sys.argv[1]],
+    }
+    encoded = json.dumps(request, separators=(",", ":")).encode() + b"\n"
+
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
+        connection.settimeout(75)
+        connection.connect(SOCKET_PATH)
+        connection.sendall(encoded)
+        response = bytearray()
+        while b"\n" not in response:
+            chunk = connection.recv(4096)
+            if not chunk:
+                raise RuntimeError("broker closed before sending a response")
+            response.extend(chunk)
+            if len(response) > MAX_RESPONSE_BYTES:
+                raise RuntimeError("broker response exceeded the fixed limit")
+
+    value = json.loads(bytes(response).split(b"\n", 1)[0])
+    if not isinstance(value, dict) or set(value) != {
+        "version",
+        "request_id",
+        "ok",
+        "status",
+        "error_code",
+    }:
+        raise RuntimeError("broker response schema is invalid")
+    if value["version"] != 1 or value["request_id"] != request_id:
+        raise RuntimeError("broker response binding is invalid")
+    print(json.dumps(value, separators=(",", ":")))
+    return 0 if value["ok"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

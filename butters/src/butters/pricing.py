@@ -1,24 +1,18 @@
 """Reviewed, per-model pricing with the billing dimension each model actually uses.
 
-Butters previously held one pricing shape - input/cached/output tokens per
-million - and a single free-floating
-`providers.cloud_tts_price_per_million_characters_usd`. Both were wrong for
-speech. `tts-1` and `tts-1-hd` are billed per input *character*;
-`gpt-4o-mini-tts` is billed per text input *token* plus per audio output
-*token*. Forcing all three through one character rate would have required
-inventing a character equivalent for a model OpenAI does not price that way.
+Speech models use different billing dimensions. The traditional TTS-1 models
+are billed by submitted character; GPT-4o mini TTS and Realtime are billed by
+text-input and audio-output tokens. The Speech endpoint does not return usage,
+while Realtime does.
 
 So a model declares its own billing dimensions, and the ledger asks the model
 how to cost a usage record rather than assuming.
 
-Just as important is what Butters can actually observe. `POST /v1/audio/speech`
-returns audio bytes and no usage object, so for `gpt-4o-mini-tts` neither the
-text input tokens nor the audio output tokens are reported back. Butters
-therefore cannot state that model's cost precisely, and it says so
-(`CostBasis.ESTIMATED_UPPER_BOUND`) rather than presenting a fabricated figure.
-Audio tokens are never derived from encoded audio size: OpenAI defines no such
-conversion, and inventing one would be a guess wearing the costume of a
-measurement.
+Realtime's final response reports usage, allowing the completed request to be
+costed from provider-reported text-input and audio-output tokens. Admission is
+still fail-closed: before the call, Butters reserves a conservative upper bound
+from the submitted text. Audio tokens are never derived from encoded audio
+size.
 """
 
 from __future__ import annotations
@@ -30,7 +24,7 @@ from enum import StrEnum
 # Updating a rate means updating this constant in the same change, so a stale
 # table cannot masquerade as a current one.
 PRICING_SOURCE = "https://developers.openai.com/api/docs/pricing"
-PRICING_DATE = "2026-09-19"
+PRICING_DATE = "2026-10-22"
 
 
 class CostBasis(StrEnum):
@@ -85,7 +79,7 @@ class TokenPricing:
 
 @dataclass(frozen=True, slots=True)
 class CharacterPricing:
-    """A speech model billed per million input characters (tts-1 family).
+    """Legacy support for speech models billed per million input characters.
 
     Butters sends the text, so the billable quantity is known exactly before
     and after the request. Cost for these models is measured, not estimated.
@@ -101,10 +95,9 @@ class CharacterPricing:
 class SpeechTokenPricing:
     """A speech model billed on text input tokens and audio output tokens.
 
-    `/v1/audio/speech` returns audio, not usage, so neither dimension comes
-    back from the provider. `upper_bound` exists to keep budget admission
-    fail-closed; it is a ceiling for refusing requests, never a billing
-    figure, and every cost it produces is labelled
+    `upper_bound` keeps budget admission fail-closed before a Realtime response
+    reports its actual token usage. It is a ceiling for refusing requests,
+    never a billing figure, and every preflight cost it produces is labelled
     `CostBasis.ESTIMATED_UPPER_BOUND`.
     """
 
@@ -145,13 +138,13 @@ CHAT_PRICING: dict[str, TokenPricing] = {
     "gpt-5.6-sol": TokenPricing(4.00, 0.40, 20.00),
 }
 
-# Reviewed speech pricing, one entry per supported model, each carrying the
-# dimension OpenAI actually bills. Server-authoritative: no Admin form writes
-# here, and a model absent from this mapping cannot be used for paid speech.
+# Reviewed speech pricing, one entry per supported model and API path.
 SPEECH_PRICING: dict[str, SpeechPricing] = {
     "tts-1": CharacterPricing(15.00),
     "tts-1-hd": CharacterPricing(30.00),
     "gpt-4o-mini-tts": SpeechTokenPricing(0.60, 12.00),
+    "gpt-4o-mini-tts-2025-12-15": SpeechTokenPricing(0.60, 12.00),
+    "gpt-realtime-2.1-mini": SpeechTokenPricing(0.60, 20.00),
 }
 
 
@@ -204,9 +197,7 @@ def speech_cost(
             f"${pricing.input_per_million_characters_usd:.2f}/1M characters",
         )
     if reported_text_input_tokens is not None and reported_audio_output_tokens is not None:
-        # Reserved for a future speech response that reports usage. Nothing in
-        # the current client populates these, so this branch is unreachable in
-        # production today - deliberately, rather than by being omitted.
+        # Realtime's terminal response supplies both billable dimensions.
         return SpeechCost(
             pricing.cost_from_reported_usage(
                 text_input_tokens=reported_text_input_tokens,
@@ -219,6 +210,7 @@ def speech_cost(
     return SpeechCost(
         pricing.upper_bound(characters=characters),
         CostBasis.ESTIMATED_UPPER_BOUND,
-        "the speech endpoint reports no usage, so this is a conservative "
-        "ceiling from the submitted text, not a measured charge",
+        "provider usage is unavailable before the request completes (and is not "
+        "returned by the Speech endpoint), so this is a conservative preflight "
+        "ceiling from the submitted text",
     )

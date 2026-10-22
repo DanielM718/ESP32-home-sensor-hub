@@ -226,6 +226,7 @@ async function refreshDesktop() {
       ["Power / network", observed.power_network],
       ["SSH", observed.ssh],
       ["Parsec", observed.parsec],
+      ["Sunshine", observed.sunshine],
       ["Desktop Agent", observed.agent],
       ["Windows session", observed.windows_session],
       ["Agent heartbeat", observed.agent_heartbeat_age_seconds===null?"unknown":"yes", observed.agent_heartbeat_age_seconds===null?undefined:`${Math.round(observed.agent_heartbeat_age_seconds)}s ago`],
@@ -717,6 +718,11 @@ function renderTtsForm() {
   renderTtsModels(saved);
 }
 
+function savedTtsProfile(providerId) {
+  const profiles = aiState && aiState.profiles && aiState.profiles.speech;
+  return profiles && profiles[providerId] ? profiles[providerId] : null;
+}
+
 function renderTtsModels(saved) {
   const provider = providerById(aiCatalog.speech_providers, document.querySelector("#tts-provider").value);
   const modelSelect = document.querySelector("#tts-model");
@@ -875,7 +881,9 @@ document.querySelector("#chat-save").addEventListener("click", async () => {
   } catch(error) { status.textContent = `Save failed: ${error.message||"unknown error"}`; }
 });
 
-document.querySelector("#tts-provider").addEventListener("change", () => renderTtsModels(aiState.saved.speech));
+document.querySelector("#tts-provider").addEventListener("change", event => {
+  renderTtsModels(savedTtsProfile(event.target.value));
+});
 document.querySelector("#tts-model").addEventListener("change", () => renderTtsCapabilities(
   aiState.saved.speech.model === document.querySelector("#tts-model").value ? aiState.saved.speech : null));
 document.querySelector("#tts-speed").addEventListener("input", event => {
@@ -1736,13 +1744,12 @@ async function refreshUsage() {
  *
  * Two numbers that are allowed to differ, shown side by side with the reason.
  *
- * Butters' own figure is what the admission controller reserved *before* each
- * paid call. Where a billable dimension is not observable — `POST
- * /v1/audio/speech` returns audio and no usage object — that reservation is a
- * deliberate ceiling. OpenAI's figure is what was actually billed, read after
- * the fact. Their difference is a reconciliation difference. This file never
- * calls it a saving, and never lets provider reporting overwrite the local
- * total, because the local total is the evidence of what was reserved.
+ * Before each paid call, Butters reserves a conservative ceiling. Successful
+ * Realtime speech calls replace that ceiling with the token cost reported in
+ * `response.done`; failures retain the preflight ceiling. OpenAI's aggregate
+ * figure is what was actually billed, read after the fact. Their difference
+ * is a reconciliation difference. This file never calls it a saving, and
+ * never lets provider reporting overwrite the local audit trail.
  */
 
 const RECONCILIATION_WINDOWS = [

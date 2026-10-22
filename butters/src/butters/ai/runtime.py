@@ -35,7 +35,7 @@ from butters.ai.model import (
     validate_chat,
     validate_speech,
 )
-from butters.ai.store import AISettingsStore
+from butters.ai.store import CHAT, SPEECH, AISettingsStore
 from butters.assistant_config import AssistantSettings
 
 
@@ -118,6 +118,10 @@ class AIRuntimeController:
         return {
             "credential": self.credentials.state().as_dict(),
             "saved": {"chat": saved_chat.as_dict(), "speech": saved_speech.as_dict()},
+            "profiles": {
+                "chat": self.store.profiles(CHAT),
+                "speech": self.store.profiles(SPEECH),
+            },
             "effective": self._effective.as_dict(),
             "in_sync": {
                 "chat": saved_chat == self._effective.chat,

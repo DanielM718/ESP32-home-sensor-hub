@@ -333,7 +333,7 @@ async def _the_catalog_endpoint_drives_the_admin_dropdowns(tmp_path, monkeypatch
     speech = {item["id"] for item in catalog["speech_providers"]}
 
     assert providers == {"openai"}
-    assert speech == {"openai", "local"}
+    assert speech == {"openai", "openai_realtime", "local"}
     assert [item["id"] for item in openai["chat_models"]] == [
         "gpt-5.6-luna",
         "gpt-5.6-terra",

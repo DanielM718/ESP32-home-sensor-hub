@@ -8,7 +8,6 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-
 from butters.actions.broker import (
     BrokerError,
     BrokerOperation,
@@ -42,6 +41,19 @@ PARSEC_HEALTHY = {
     "host_process_present": True,
     "system_host_process_present": True,
     "user_host_process_present": True,
+    "authentication_error": False,
+    "plausibly_ready": True,
+}
+
+SUNSHINE_HEALTHY = {
+    "installed": True,
+    "service_present": True,
+    "service_running": True,
+    "service_startup": "auto",
+    "host_process_present": True,
+    "web_listener_present": True,
+    "stream_listeners_present": True,
+    "capture_ready": True,
     "plausibly_ready": True,
 }
 
@@ -126,8 +138,20 @@ def test_parsec_ensure_already_healthy_and_recovery_results_are_structured(
     tmp_path: Path,
 ) -> None:
     outputs = [
-        {**PARSEC_HEALTHY, "accepted": True, "error_code": None, "elapsed_ms": 4, "already_running": True},
-        {**PARSEC_HEALTHY, "accepted": True, "error_code": None, "elapsed_ms": 540, "already_running": False},
+        {
+            **PARSEC_HEALTHY,
+            "accepted": True,
+            "error_code": None,
+            "elapsed_ms": 4,
+            "already_running": True,
+        },
+        {
+            **PARSEC_HEALTHY,
+            "accepted": True,
+            "error_code": None,
+            "elapsed_ms": 540,
+            "already_running": False,
+        },
     ]
     operations = _fixed_operations(
         tmp_path,
@@ -183,11 +207,14 @@ def test_parsec_restart_success_and_subprocess_timeout_are_bounded(
         "error_code": None,
         "elapsed_ms": 591,
     }
-    assert _fixed_operations(
-        tmp_path,
-        lambda _argv, **_kwargs: RunnerResult(success),
-        {BrokerOperation.DESKTOP_PARSEC_RESTART},
-    ).desktop_parsec_restart()["plausibly_ready"] is True
+    assert (
+        _fixed_operations(
+            tmp_path,
+            lambda _argv, **_kwargs: RunnerResult(success),
+            {BrokerOperation.DESKTOP_PARSEC_RESTART},
+        ).desktop_parsec_restart()["plausibly_ready"]
+        is True
+    )
 
     def timed_out(_argv, **_kwargs):
         raise subprocess.TimeoutExpired("ssh", 25)
@@ -199,6 +226,53 @@ def test_parsec_restart_success_and_subprocess_timeout_are_bounded(
             {BrokerOperation.DESKTOP_PARSEC_RESTART},
         ).desktop_parsec_restart()
     assert timeout.value.code == "operation_failed"
+
+
+def test_sunshine_status_and_ensure_use_a_bounded_truthful_schema(
+    tmp_path: Path,
+) -> None:
+    outputs = [
+        SUNSHINE_HEALTHY,
+        {
+            **SUNSHINE_HEALTHY,
+            "accepted": True,
+            "error_code": None,
+            "elapsed_ms": 7,
+            "already_running": True,
+        },
+    ]
+    operations = _fixed_operations(
+        tmp_path,
+        lambda _argv, **_kwargs: RunnerResult(outputs.pop(0)),
+        {
+            BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+            BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
+        },
+    )
+
+    assert operations.desktop_sunshine_status()["capture_ready"] is True
+    assert operations.desktop_sunshine_ensure()["plausibly_ready"] is True
+
+
+def test_sunshine_capture_failure_is_not_accepted(tmp_path: Path) -> None:
+    payload = {
+        **SUNSHINE_HEALTHY,
+        "capture_ready": False,
+        "plausibly_ready": False,
+        "accepted": False,
+        "error_code": "sunshine_capture_unavailable",
+        "elapsed_ms": 20000,
+        "already_running": False,
+    }
+    operations = _fixed_operations(
+        tmp_path,
+        lambda _argv, **_kwargs: RunnerResult(payload),
+        {BrokerOperation.DESKTOP_SUNSHINE_ENSURE},
+    )
+
+    with pytest.raises(BrokerError) as failure:
+        operations.desktop_sunshine_ensure()
+    assert failure.value.code == "sunshine_capture_unavailable"
 
 
 def test_wake_and_simple_parsec_start_are_separate_fixed_operations() -> None:
@@ -235,6 +309,15 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
                 payload.update(accepted=True, error_code=None, elapsed_ms=1)
                 if name == "ParsecEnsure":
                     payload["already_running"] = True
+        elif name.startswith("Sunshine"):
+            payload = dict(SUNSHINE_HEALTHY)
+            if name == "SunshineEnsure":
+                payload.update(
+                    accepted=True,
+                    error_code=None,
+                    elapsed_ms=1,
+                    already_running=True,
+                )
         else:
             payload = {
                 "accepted": True,
@@ -247,6 +330,8 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
         BrokerOperation.DESKTOP_PARSEC_STATUS,
         BrokerOperation.DESKTOP_PARSEC_ENSURE,
         BrokerOperation.DESKTOP_PARSEC_RESTART,
+        BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
         BrokerOperation.DESKTOP_LOCK,
         BrokerOperation.DESKTOP_SLEEP,
         BrokerOperation.DESKTOP_RESTART,
@@ -261,13 +346,15 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
         assert argv[-2] == "Daniel@192.168.1.209"
         assert argv[-1].startswith(
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
-            "-ExecutionPolicy Bypass -File C:\\ProgramData\\Butters\\desktop-control.ps1 -Operation "
+            "-ExecutionPolicy Bypass -File C:/ProgramData/Butters/desktop-control.ps1 -Operation "
         )
         assert not any(token in argv for token in ("shell", "service", "path", "host"))
         assert argv[-1].rsplit(" ", 1)[-1] in {
             "ParsecStatus",
             "ParsecEnsure",
             "ParsecRestart",
+            "SunshineStatus",
+            "SunshineEnsure",
             "Lock",
             "Sleep",
             "Restart",
@@ -486,10 +573,10 @@ def test_parsec_action_cancellation_stops_before_the_fixed_adapter(
         desktop=replace(settings.desktop, parsec_ensure_enabled=True),
     )
     state = ActionStateStore(tmp_path / "actions.sqlite3", settings.actions)
-    assistant = create_assistant(
-        settings, DomainVocabulary((), ()), action_state=state
-    )
-    implementation = assistant.skills.get("ensure_parsec_running").implementation.__self__
+    assistant = create_assistant(settings, DomainVocabulary((), ()), action_state=state)
+    implementation = assistant.skills.get(
+        "ensure_parsec_running"
+    ).implementation.__self__
     calls: list[BrokerOperation] = []
 
     class CancelledActions:
@@ -537,6 +624,12 @@ def test_windows_helper_uses_s3_not_hibernate_and_fixed_tasks_only() -> None:
     assert "shutdown.exe /h" not in helper
     assert "\\Butters\\LockDesktop" in helper
     assert "\\Butters\\SleepDesktop" in helper
+    assert "\\Butters\\SunshineCaptureProbe" in helper
+    assert "-Operation SunshineProbeInteractive" in installer
+    assert "-LogonType Interactive" in installer
+    assert "$taskFolderPath = '\\Butters'" in installer
+    assert "GetFolder($taskFolderPath)" in installer
+    assert "AttachedToDesktop\\s*:\\s*yes" in helper
     assert "ValidateSet('ParsecStatus'" in helper
     assert "Set-Service -Name 'Parsec' -StartupType Manual" in installer
     assert "StartupType Automatic" not in installer
@@ -546,9 +639,7 @@ def test_windows_helper_uses_s3_not_hibernate_and_fixed_tasks_only() -> None:
 
 def test_human_git_bash_launcher_cannot_change_automation_shell_semantics() -> None:
     root = Path(__file__).resolve().parents[1]
-    launcher = (root / "windows" / "human-ssh-launcher.ps1").read_text(
-        encoding="utf-8"
-    )
+    launcher = (root / "windows" / "human-ssh-launcher.ps1").read_text(encoding="utf-8")
     powershell_files = "\n".join(
         path.read_text(encoding="utf-8") for path in (root / "windows").glob("*.ps1")
     )
@@ -666,6 +757,7 @@ def test_disabling_parsec_observation_does_not_touch_session_verification() -> N
         machine="desktop",
         host="192.0.2.1",
         parsec_status_enabled=False,
+        parsec_ensure_enabled=True,
     )
 
     result = DesktopWorkflow(settings, operations).start_remote_session("desktop")

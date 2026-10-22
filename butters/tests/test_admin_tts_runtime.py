@@ -9,9 +9,8 @@ that left the process. It does this for two distinct voices.
 from __future__ import annotations
 
 import asyncio
-import io
+import base64
 import json
-import wave
 from dataclasses import replace
 from pathlib import Path
 
@@ -60,19 +59,25 @@ class Health:
         return ServerHealthSnapshot(1, 0, 0, 0, 1, 0, 1, 1, 40, "0x0", ())
 
 
-def _wav() -> bytes:
-    output = io.BytesIO()
-    with wave.open(output, "wb") as target:
-        target.setnchannels(1)
-        target.setsampwidth(2)
-        target.setframerate(16000)
-        target.writeframes(b"\0\0" * 1600)
-    return output.getvalue()
+class SynthesisRecorder:
+    """Captures each Realtime synthesis exchange that would leave the process."""
+
+    def __init__(self) -> None:
+        self.requests: list[dict[str, object]] = []
+
+    def __call__(self, url, **kwargs):
+        return _RealtimeConnection(self, url, kwargs)
+
+    @property
+    def last(self) -> dict[str, object]:
+        return self.requests[-1]
 
 
-class _Response:
-    def __init__(self, body: bytes) -> None:
-        self.body = body
+class _RealtimeConnection:
+    def __init__(self, recorder: SynthesisRecorder, url: str, kwargs) -> None:
+        self.recorder = recorder
+        self.current: dict[str, object] = {"url": url, "headers": kwargs["additional_headers"]}
+        self.events = [json.dumps({"type": "session.created"})]
 
     def __enter__(self):
         return self
@@ -80,23 +85,46 @@ class _Response:
     def __exit__(self, *_args):
         return None
 
-    def read(self, maximum: int) -> bytes:
-        return self.body[:maximum]
+    def recv(self, *, timeout: float) -> str:
+        assert timeout > 0
+        return self.events.pop(0)
 
-
-class SynthesisRecorder:
-    """Captures every request body that would leave the process for OpenAI."""
-
-    def __init__(self) -> None:
-        self.requests: list[dict[str, object]] = []
-
-    def __call__(self, request, **_kwargs):
-        self.requests.append(json.loads(request.data))
-        return _Response(_wav())
-
-    @property
-    def last(self) -> dict[str, object]:
-        return self.requests[-1]
+    def send(self, message: str) -> None:
+        event = json.loads(message)
+        if event["type"] == "session.update":
+            session = event["session"]
+            self.current.update(
+                model=session["model"],
+                voice=session["audio"]["output"]["voice"],
+                instructions=session["instructions"],
+            )
+            self.events.append(json.dumps({"type": "session.updated"}))
+        elif event["type"] == "conversation.item.create":
+            self.current["input"] = event["item"]["content"][0]["text"]
+        elif event["type"] == "response.create":
+            self.recorder.requests.append(dict(self.current))
+            self.events.extend(
+                [
+                    json.dumps(
+                        {
+                            "type": "response.output_audio.delta",
+                            "delta": base64.b64encode(b"\0\0" * 2400).decode(),
+                        }
+                    ),
+                    json.dumps(
+                        {
+                            "type": "response.done",
+                            "response": {
+                                "status": "completed",
+                                "usage": {
+                                    "input_token_details": {"text_tokens": 12},
+                                    "output_token_details": {"audio_tokens": 20},
+                                },
+                            },
+                        }
+                    ),
+                ]
+            )
 
 
 def _application(tmp_path: Path, monkeypatch, *, paid_tts: bool = True):
@@ -133,9 +161,9 @@ def _application(tmp_path: Path, monkeypatch, *, paid_tts: bool = True):
     service.ai.credentials = OpenAICredentialStore(tmp_path, environment={})
     service.ai.credentials.store(SENTINEL, validation=None)
     # Rebuild the cloud speech provider through the same factory the runtime
-    # uses, so the recorder sits exactly where the real HTTP call would.
+    # uses, so the recorder sits exactly where the real Realtime call would.
     service.ai._speech_factory = lambda key: OpenAITTSProvider(
-        settings, api_key=key or "", registry=service.ai_registry, opener=recorder
+        settings, api_key=key or "", registry=service.ai_registry, connector=recorder
     )
     service.ai._activate(force=True)
     app = create_app(settings, vocabulary, service, stt_engine_factory=Engine)
@@ -158,7 +186,11 @@ async def _mutation_headers(http, identity: str = "admin@example.com"):
 
 
 async def _set_voice(http, headers, **payload):
-    body = {"provider": "openai", "model": "gpt-4o-mini-tts", **payload}
+    body = {
+        "provider": "openai_realtime",
+        "model": "gpt-realtime-2.1-mini",
+        **payload,
+    }
     return await http.post("/api/admin/ai/tts", headers=headers, json=body)
 
 
@@ -198,36 +230,34 @@ async def _changing_the_admin_voice_changes_real_chat_synthesis(tmp_path, monkey
     assert len(recorder.requests) == 2
     assert first["voice"] == "cedar"
     assert second["voice"] == "marin"
-    assert first["model"] == second["model"] == "gpt-4o-mini-tts"
+    assert first["model"] == second["model"] == "gpt-realtime-2.1-mini"
 
 
 def test_changing_the_admin_voice_changes_real_chat_synthesis(tmp_path, monkeypatch) -> None:
     asyncio.run(_changing_the_admin_voice_changes_real_chat_synthesis(tmp_path, monkeypatch))
 
 
-async def _speed_and_style_reach_the_synthesis_request(tmp_path, monkeypatch):
+async def _style_reaches_the_synthesis_request(tmp_path, monkeypatch):
     app, _service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
-        await _set_voice(
-            http, headers, voice="sage", speed=0.85, instructions="Brisk and dry."
-        )
+        await _set_voice(http, headers, voice="sage", instructions="Brisk and dry.")
         await _spoken_chat_answer(http, headers)
 
     assert recorder.last["voice"] == "sage"
-    assert recorder.last["speed"] == 0.85
-    assert recorder.last["instructions"] == "Brisk and dry."
+    assert "Speaking style: Brisk and dry." in recorder.last["instructions"]
+    assert "speed" not in recorder.last
 
 
-def test_speed_and_style_reach_the_synthesis_request(tmp_path, monkeypatch) -> None:
-    asyncio.run(_speed_and_style_reach_the_synthesis_request(tmp_path, monkeypatch))
+def test_style_reaches_the_synthesis_request(tmp_path, monkeypatch) -> None:
+    asyncio.run(_style_reaches_the_synthesis_request(tmp_path, monkeypatch))
 
 
-async def _a_model_without_instructions_never_receives_them(tmp_path, monkeypatch):
+async def _classic_model_rejects_unsupported_style_without_changing_effective_tts(tmp_path, monkeypatch):
     app, _service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
-        # Saving a style against tts-1 is refused outright...
+        await _set_voice(http, headers, voice="sage")
         rejected = await http.post(
             "/api/admin/ai/tts",
             headers=headers,
@@ -238,23 +268,22 @@ async def _a_model_without_instructions_never_receives_them(tmp_path, monkeypatc
                 "instructions": "Brisk and dry.",
             },
         )
-        # ...and the supported combination sends no instructions field at all.
-        accepted = await http.post(
-            "/api/admin/ai/tts",
-            headers=headers,
-            json={"provider": "openai", "model": "tts-1", "voice": "alloy"},
-        )
         await _spoken_chat_answer(http, headers)
 
     assert rejected.status_code == 400
     assert rejected.json()["error"] == "unsupported_parameter"
-    assert accepted.status_code == 200
-    assert recorder.last["model"] == "tts-1"
-    assert "instructions" not in recorder.last
+    assert recorder.last["model"] == "gpt-realtime-2.1-mini"
+    assert recorder.last["voice"] == "sage"
 
 
-def test_a_model_without_instructions_never_receives_them(tmp_path, monkeypatch) -> None:
-    asyncio.run(_a_model_without_instructions_never_receives_them(tmp_path, monkeypatch))
+def test_classic_model_rejects_unsupported_style_without_changing_effective_tts(
+    tmp_path, monkeypatch
+) -> None:
+    asyncio.run(
+        _classic_model_rejects_unsupported_style_without_changing_effective_tts(
+            tmp_path, monkeypatch
+        )
+    )
 
 
 async def _a_voice_outside_the_model_catalog_is_refused(tmp_path, monkeypatch):
@@ -267,7 +296,7 @@ async def _a_voice_outside_the_model_catalog_is_refused(tmp_path, monkeypatch):
         await _spoken_chat_answer(http, headers)
 
     assert wrong_model.status_code == 400
-    assert wrong_model.json()["error"] == "invalid_voice"
+    assert wrong_model.json()["error"] == "model_denied"
     assert unknown.json()["error"] == "invalid_voice"
     # A refused change never becomes effective, and synthesis keeps the old one.
     assert service.ai.effective.speech.voice == "cedar"
@@ -294,7 +323,7 @@ async def _speed_outside_the_model_range_is_refused(tmp_path, monkeypatch):
             },
         )
 
-    assert too_fast.json()["error"] == "invalid_speed"
+    assert too_fast.json()["error"] == "unsupported_parameter"
     assert local_too_fast.json()["error"] == "invalid_speed"
 
 
@@ -309,16 +338,16 @@ async def _preview_uses_the_same_backend_as_chat(tmp_path, monkeypatch):
     app, _service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
-        await _set_voice(http, headers, voice="ballad", speed=1.15)
+        await _set_voice(http, headers, voice="ballad")
         preview = await http.post(
             "/api/admin/voice/preview",
             headers=headers,
             json={
                 "name": "preview",
-                "provider": "openai",
-                "model": "gpt-4o-mini-tts",
+                "provider": "openai_realtime",
+                "model": "gpt-realtime-2.1-mini",
                 "voice": "ballad",
-                "speed": 1.15,
+                "speed": 1.0,
                 "phrase": "Hello. This is Butters.",
             },
         )
@@ -328,11 +357,11 @@ async def _preview_uses_the_same_backend_as_chat(tmp_path, monkeypatch):
 
     assert preview.status_code == 200
     assert preview.headers["content-type"] == "audio/wav"
-    assert preview.headers["X-Butters-TTS-Provider"] == "openai"
+    assert preview.headers["X-Butters-TTS-Provider"] == "openai_realtime"
     # One synthesis stack: the preview and the chat answer differ only in text.
     assert previewed["model"] == spoken["model"]
     assert previewed["voice"] == spoken["voice"] == "ballad"
-    assert previewed["speed"] == spoken["speed"] == 1.15
+    assert "speed" not in previewed and "speed" not in spoken
     assert previewed["input"] == "Hello. This is Butters."
 
 
@@ -344,8 +373,8 @@ async def _preview_is_bounded_authorized_and_rate_limited(tmp_path, monkeypatch)
     app, _service, _recorder = _application(tmp_path, monkeypatch)
     body = {
         "name": "preview",
-        "provider": "openai",
-        "model": "gpt-4o-mini-tts",
+        "provider": "openai_realtime",
+        "model": "gpt-realtime-2.1-mini",
         "voice": "cedar",
         "speed": 1.0,
         "phrase": "Hello.",
@@ -400,8 +429,8 @@ async def _preview_never_returns_credential_material(tmp_path, monkeypatch):
             headers=headers,
             json={
                 "name": "preview",
-                "provider": "openai",
-                "model": "gpt-4o-mini-tts",
+                "provider": "openai_realtime",
+                "model": "gpt-realtime-2.1-mini",
                 "voice": "cedar",
                 "speed": 1.0,
                 "phrase": "Hello.",
@@ -467,7 +496,7 @@ async def _settings_persist_across_a_service_restart(tmp_path, monkeypatch):
     app, service, _recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
-        await _set_voice(http, headers, voice="onyx", speed=1.25)
+        await _set_voice(http, headers, voice="marin")
         await http.post(
             "/api/admin/ai/chat",
             headers=headers,
@@ -486,8 +515,8 @@ async def _settings_persist_across_a_service_restart(tmp_path, monkeypatch):
         state_dir=service.state_dir,
     )
 
-    assert restarted.ai.effective.speech.voice == "onyx"
-    assert restarted.ai.effective.speech.speed == 1.25
+    assert restarted.ai.effective.speech.voice == "marin"
+    assert restarted.ai.effective.speech.speed is None
     assert restarted.ai.effective.chat.model == "gpt-5.6-sol"
     assert restarted.ai.effective.chat.reasoning_effort == "xhigh"
     assert restarted.ai.effective.chat.verbosity == "low"
@@ -528,7 +557,9 @@ async def _switching_provider_excludes_stale_incompatible_parameters(tmp_path, m
     # Switching back restores the OpenAI profile exactly.
     assert back["effective"]["speech"]["voice"] == "cedar"
     assert back["effective"]["speech"]["instructions"] == "Brisk."
-    assert service.ai.effective.speech.provider == "openai"
+    assert back["profiles"]["speech"]["local"]["voice"] == "kathleen"
+    assert back["profiles"]["speech"]["openai_realtime"]["voice"] == "cedar"
+    assert service.ai.effective.speech.provider == "openai_realtime"
 
 
 def test_switching_provider_excludes_stale_incompatible_parameters(tmp_path, monkeypatch) -> None:
@@ -560,7 +591,9 @@ async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monk
         headers = await _mutation_headers(http)
         catalog = (await http.get("/api/admin/ai/catalog", headers=headers)).json()
         openai = next(
-            item for item in catalog["speech_providers"] if item["id"] == "openai"
+            item
+            for item in catalog["speech_providers"]
+            if item["id"] == "openai_realtime"
         )
         observed: dict[str, list[str]] = {}
         for model in openai["speech_models"]:
@@ -570,7 +603,7 @@ async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monk
                 applied = service.apply_speech_settings(
                     session,
                     {
-                        "provider": "openai",
+                        "provider": "openai_realtime",
                         "model": model["id"],
                         "voice": voice["id"],
                     },
@@ -583,32 +616,19 @@ async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monk
                 assert recorder.last["model"] == model["id"]
                 observed[model["id"]].append(str(recorder.last["voice"]))
 
-    assert observed["gpt-4o-mini-tts"] == [
+    assert observed["gpt-realtime-2.1-mini"] == [
         "alloy",
         "ash",
         "ballad",
         "cedar",
         "coral",
         "echo",
-        "fable",
         "marin",
-        "nova",
-        "onyx",
         "sage",
         "shimmer",
         "verse",
     ]
-    assert observed["tts-1"] == observed["tts-1-hd"] == [
-        "alloy",
-        "ash",
-        "coral",
-        "echo",
-        "fable",
-        "nova",
-        "onyx",
-        "sage",
-        "shimmer",
-    ]
+    assert set(observed) == {"gpt-realtime-2.1-mini"}
 
 
 def test_every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkeypatch) -> None:
@@ -617,31 +637,27 @@ def test_every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkey
     )
 
 
-async def _an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch):
+async def _all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch):
     app, service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
-        # A voice that tts-1 genuinely lacks, not merely one Butters omitted.
-        await http.post(
-            "/api/admin/ai/tts",
-            headers=headers,
-            json={"provider": "openai", "model": "tts-1", "voice": "sage"},
-        )
-        for voice in ("ballad", "verse", "cedar", "marin"):
-            rejected = await http.post(
+        await _set_voice(http, headers, voice="sage")
+        for model in ("tts-1", "tts-1-hd", "gpt-4o-mini-tts"):
+            accepted = await http.post(
                 "/api/admin/ai/tts",
                 headers=headers,
-                json={"provider": "openai", "model": "tts-1", "voice": voice},
+                json={"provider": "openai", "model": model, "voice": "alloy"},
             )
-            assert rejected.status_code == 400, voice
-            assert rejected.json()["error"] == "invalid_voice", voice
+            assert accepted.status_code == 200, model
+            assert accepted.json()["effective"]["speech"]["model"] == model
+        await _set_voice(http, headers, voice="sage")
         await _spoken_chat_answer(http, headers)
 
-    # The last accepted voice is still the effective one.
+    # Refused changes never replace the last accepted effective profile.
     assert service.ai.effective.speech.voice == "sage"
     assert recorder.last["voice"] == "sage"
-    assert recorder.last["model"] == "tts-1"
+    assert recorder.last["model"] == "gpt-realtime-2.1-mini"
 
 
-def test_an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch) -> None:
-    asyncio.run(_an_expressive_only_voice_is_refused_on_tts1_over_http(tmp_path, monkeypatch))
+def test_all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch) -> None:
+    asyncio.run(_all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch))

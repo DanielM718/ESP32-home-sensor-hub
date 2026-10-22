@@ -70,6 +70,8 @@ GATE_KEYS: tuple[str, ...] = (
     "desktop.parsec_status_enabled",
     "desktop.parsec_ensure_enabled",
     "desktop.parsec_restart_enabled",
+    "desktop.sunshine_status_enabled",
+    "desktop.sunshine_ensure_enabled",
     "desktop.lock_enabled",
     "desktop.sleep_enabled",
     "desktop.restart_enabled",
@@ -168,15 +170,11 @@ def validated_overlay(data: dict[str, Any], *, source: str) -> dict[str, Any]:
                 "approvals may be overridden"
             )
         if not isinstance(value, bool):
-            raise LocalConfigError(
-                f"{source} value for {dotted} must be true or false"
-            )
+            raise LocalConfigError(f"{source} value for {dotted} must be true or false")
     return data
 
 
-def merge_overlay(
-    shipped: dict[str, Any], overlay: dict[str, Any]
-) -> dict[str, Any]:
+def merge_overlay(shipped: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     """Deep-merge the overlay over the shipped tables, overlay winning."""
 
     merged = dict(shipped)
@@ -198,8 +196,7 @@ def gate_values(data: dict[str, Any]) -> dict[str, bool | None]:
 
     flat = dict(_flatten(data))
     return {
-        key: flat[key] if isinstance(flat.get(key), bool) else None
-        for key in GATE_KEYS
+        key: flat[key] if isinstance(flat.get(key), bool) else None for key in GATE_KEYS
     }
 
 
@@ -228,7 +225,9 @@ def local_differences(
 def render_overlay(overlay: dict[str, Any], *, header: str) -> str:
     """Emit a deterministic, reviewable TOML document."""
 
-    lines = [line if line.startswith("#") else f"# {line}" for line in header.splitlines()]
+    lines = [
+        line if line.startswith("#") else f"# {line}" for line in header.splitlines()
+    ]
     lines.append("")
     for section in sorted(overlay):
         body = overlay[section]
