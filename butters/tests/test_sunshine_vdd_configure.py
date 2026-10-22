@@ -8,6 +8,13 @@ def _source() -> str:
     )
 
 
+def _invoker_source() -> str:
+    root = Path(__file__).resolve().parents[1]
+    return (root / "windows" / "invoke-sunshine-vdd-interactive.ps1").read_text(
+        encoding="utf-8"
+    )
+
+
 def test_sunshine_vdd_configuration_is_fixed_and_preserves_physical_displays() -> None:
     source = _source()
 
@@ -47,3 +54,18 @@ def test_sunshine_vdd_configuration_does_not_restart_or_remove_driver() -> None:
     assert "trustedpublisher" not in source
     assert "shutdown.exe" not in source
     assert "restart-computer" not in source
+
+
+def test_interactive_invoker_is_a_fixed_bounded_one_shot_task() -> None:
+    source = _invoker_source()
+
+    assert "[ValidateSet('Audit', 'Apply')]" in source
+    assert "$taskName = 'SunshineVddConfigure'" in source
+    assert "$scriptPath = 'C:\\ProgramData\\Butters\\configure-sunshine-vdd.ps1'" in source
+    assert "-ExecutionTimeLimit (New-TimeSpan -Minutes 2)" in source
+    assert ".AddSeconds(45)" in source
+    assert "-LogonType Interactive -RunLevel Highest" in source
+    assert "Unregister-ScheduledTask" in source
+    assert "-Confirm:$false" in source
+    assert "Invoke-Expression" not in source
+    assert "Start-Process" not in source

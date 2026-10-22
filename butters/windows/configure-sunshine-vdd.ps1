@@ -13,6 +13,7 @@ $displayName = '\\.\DISPLAY94'
 $displayDeviceId = '{5eb52002-659f-5729-bdd8-9cdc4efd1bf5}'
 $sunshineConfig = 'C:\Program Files\Sunshine\config\sunshine.conf'
 $backupRoot = Join-Path 'C:\ProgramData\Butters\backups' ((Get-Date -Format 'yyyyMMddTHHmmss') + '-sunshine-vdd-config')
+$resultPath = 'C:\ProgramData\Butters\sunshine-vdd-config-result.json'
 $targetWidth = 2560
 $targetHeight = 1440
 $targetRefresh = 60
@@ -116,37 +117,52 @@ function Get-CurrentMode {
 }
 
 $desiredMode = $null
+$availableModes = @()
 $modeNumber = 0
 do {
     $candidate = New-DevMode
     $found = [Butters.NativeDisplayMode]::EnumDisplaySettings($displayName, $modeNumber, [ref]$candidate)
+    if ($found) {
+        $availableModes += [pscustomobject]@{
+            width = $candidate.dmPelsWidth
+            height = $candidate.dmPelsHeight
+            refresh = $candidate.dmDisplayFrequency
+        }
+    }
     if ($found -and $candidate.dmPelsWidth -eq $targetWidth -and $candidate.dmPelsHeight -eq $targetHeight -and $candidate.dmDisplayFrequency -eq $targetRefresh) {
         $desiredMode = $candidate
         break
     }
     $modeNumber += 1
 } while ($found)
-if (-not $desiredMode) { throw "The VDD does not advertise ${targetWidth}x${targetHeight} at ${targetRefresh} Hz" }
-
-$beforeMode = Get-CurrentMode
+$beforeMode = $null
+try { $beforeMode = Get-CurrentMode } catch {
+    if (-not $AuditOnly) { throw }
+}
 $audit = [ordered]@{
+    timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
     vdd_root_healthy = $true
     vdd_child_healthy = $true
     virtual_monitor_active = $true
     display_name = $displayName
     display_device_id = $displayDeviceId
-    current_width = $beforeMode.dmPelsWidth
-    current_height = $beforeMode.dmPelsHeight
-    current_refresh = $beforeMode.dmDisplayFrequency
-    desired_mode_advertised = $true
+    current_width = if ($beforeMode) { $beforeMode.dmPelsWidth } else { $null }
+    current_height = if ($beforeMode) { $beforeMode.dmPelsHeight } else { $null }
+    current_refresh = if ($beforeMode) { $beforeMode.dmDisplayFrequency } else { $null }
+    mode_enumeration_available = $availableModes.Count -gt 0
+    desired_mode_advertised = [bool]$desiredMode
     desired_width = $targetWidth
     desired_height = $targetHeight
     desired_refresh = $targetRefresh
+    available_modes = @($availableModes | Sort-Object width,height,refresh -Unique)
 }
 if ($AuditOnly) {
-    [pscustomobject]$audit | ConvertTo-Json -Compress
+    $auditResult = [pscustomobject]$audit
+    $auditResult | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+    $auditResult | ConvertTo-Json -Depth 6 -Compress
     exit 0
 }
+if (-not $desiredMode) { throw "The VDD does not advertise ${targetWidth}x${targetHeight} at ${targetRefresh} Hz" }
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -202,7 +218,8 @@ $temporary = $sunshineConfig + '.vdd-config.tmp'
 $lines | Set-Content -LiteralPath $temporary -Encoding UTF8
 Move-Item -LiteralPath $temporary -Destination $sunshineConfig -Force
 
-[pscustomobject][ordered]@{
+$result = [pscustomobject][ordered]@{
+    timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
     configured = $true
     backup_directory = $backupRoot
     display_name = $displayName
@@ -213,4 +230,6 @@ Move-Item -LiteralPath $temporary -Destination $sunshineConfig -Force
     hdr_expected = 'Disabled (VDD capability and Sunshine management)'
     sunshine_service_restarted = $false
     physical_displays_modified = $false
-} | ConvertTo-Json -Compress
+}
+$result | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+$result | ConvertTo-Json -Depth 6 -Compress
