@@ -232,7 +232,7 @@ tts_default = "local"
 allow_paid_stt = false
 allow_paid_tts = false
 cloud_stt_model = "gpt-transcribe"
-cloud_tts_model = "gpt-realtime-2.1-mini"
+cloud_tts_model = "gpt-4o-mini-tts"
 cloud_tts_voice = "cedar"
 # The Realtime replacement has no numeric speed parameter. This neutral value
 # remains only for compatibility with the legacy voice-preset table.

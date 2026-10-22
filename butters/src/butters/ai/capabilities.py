@@ -22,7 +22,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from butters.ai.audio_models import (
-    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_REALTIME_TTS_MODEL,
     OPENAI_REALTIME_VOICES,
     OPENAI_TTS_MODEL,
     OPENAI_TTS_SHUTDOWN_DATE,
@@ -182,12 +182,6 @@ class Provider:
         for item in self.speech_models:
             if item.id == model_id:
                 return item
-        if self.id == "openai" and model_id in DEPRECATED_OPENAI_TTS_MODELS:
-            raise CapabilityError(
-                "model_retired",
-                f"{model_id} is deprecated and shuts down on "
-                f"{OPENAI_TTS_SHUTDOWN_DATE}; use {OPENAI_TTS_MODEL}",
-            )
         raise CapabilityError(
             "model_denied", f"{model_id} is not a speech model for {self.id}"
         )
@@ -223,12 +217,68 @@ _REALTIME_VOICES = _voices(
     *((identifier, _REALTIME_VOICE_LABELS[identifier]) for identifier in OPENAI_REALTIME_VOICES)
 )
 
+_EXPRESSIVE_VOICES = _voices(
+    ("alloy", "Alloy"),
+    ("ash", "Ash"),
+    ("ballad", "Ballad"),
+    ("cedar", "Cedar"),
+    ("coral", "Coral"),
+    ("echo", "Echo"),
+    ("fable", "Fable"),
+    ("marin", "Marin"),
+    ("nova", "Nova"),
+    ("onyx", "Onyx"),
+    ("sage", "Sage"),
+    ("shimmer", "Shimmer"),
+    ("verse", "Verse"),
+)
+_CLASSIC_VOICES = _voices(
+    ("alloy", "Alloy"),
+    ("ash", "Ash"),
+    ("coral", "Coral"),
+    ("echo", "Echo"),
+    ("fable", "Fable"),
+    ("nova", "Nova"),
+    ("onyx", "Onyx"),
+    ("sage", "Sage"),
+    ("shimmer", "Shimmer"),
+)
+
 OPENAI_SPEECH_MODELS: tuple[SpeechModel, ...] = (
     SpeechModel(
         OPENAI_TTS_MODEL,
+        "GPT-4o mini TTS",
+        _EXPRESSIVE_VOICES,
+        note=f"Speech API model. Deprecated; available until {OPENAI_TTS_SHUTDOWN_DATE}.",
+        supports_instructions=True,
+    ),
+    SpeechModel(
+        "gpt-4o-mini-tts-2025-12-15",
+        "GPT-4o mini TTS (2025-12-15)",
+        _EXPRESSIVE_VOICES,
+        note=f"Pinned Speech API snapshot. Deprecated; available until {OPENAI_TTS_SHUTDOWN_DATE}.",
+        supports_instructions=True,
+    ),
+    SpeechModel(
+        "tts-1",
+        "TTS-1",
+        _CLASSIC_VOICES,
+        note=f"Low-latency Speech API model. Deprecated; available until {OPENAI_TTS_SHUTDOWN_DATE}.",
+    ),
+    SpeechModel(
+        "tts-1-hd",
+        "TTS-1 HD",
+        _CLASSIC_VOICES,
+        note=f"Higher-fidelity Speech API model. Deprecated; available until {OPENAI_TTS_SHUTDOWN_DATE}.",
+    ),
+)
+
+OPENAI_REALTIME_SPEECH_MODELS: tuple[SpeechModel, ...] = (
+    SpeechModel(
+        OPENAI_REALTIME_TTS_MODEL,
         "GPT Realtime 2.1 Mini",
         _REALTIME_VOICES,
-        note="Current Realtime speech model. Accepts speaking instructions.",
+        note="Realtime WebSocket speech model. Accepts speaking instructions.",
         supports_instructions=True,
         supports_speed=False,
         speed_range=(1.0, 1.0),
@@ -267,11 +317,19 @@ def build_registry(settings: AssistantSettings) -> CapabilityRegistry:
     )
     openai = Provider(
         "openai",
-        "OpenAI",
+        "OpenAI Speech API",
         True,
         chat_models=chat_models,
         speech_models=OPENAI_SPEECH_MODELS,
         note="Requires an OpenAI API credential stored in Butters.",
+    )
+    openai_realtime = Provider(
+        "openai_realtime",
+        "OpenAI Realtime TTS",
+        True,
+        chat_models=(),
+        speech_models=OPENAI_REALTIME_SPEECH_MODELS,
+        note="Uses the same stored OpenAI credential through a separate Realtime API path.",
     )
     local = Provider(
         "local",
@@ -281,7 +339,10 @@ def build_registry(settings: AssistantSettings) -> CapabilityRegistry:
         speech_models=(LOCAL_SPEECH_MODEL,),
         note="Runs on this host. No credential and no per-character cost.",
     )
-    return CapabilityRegistry((openai, local), max_output_tokens=settings.cloud.max_output_tokens)
+    return CapabilityRegistry(
+        (openai, openai_realtime, local),
+        max_output_tokens=settings.cloud.max_output_tokens,
+    )
 
 
 @dataclass(frozen=True, slots=True)

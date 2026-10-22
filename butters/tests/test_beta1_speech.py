@@ -48,7 +48,7 @@ def test_voice_presets_persist_only_non_secret_configuration(tmp_path: Path) -> 
     saved = store.save(
         VoicePreset(
             "calm",
-            "openai",
+            "openai_realtime",
             "gpt-realtime-2.1-mini",
             "cedar",
             1.0,
@@ -146,7 +146,7 @@ def test_openai_tts_uses_realtime_events_and_never_returns_key() -> None:
     result = OpenAITTSProvider(settings, api_key="fake-key", connector=connector).synthesize(
         "Hello Butters",
         VoicePreset(
-            "test", "openai", "gpt-realtime-2.1-mini", "cedar", 1.0, "Warm."
+            "test", "openai_realtime", "gpt-realtime-2.1-mini", "cedar", 1.0, "Warm."
         ),
     )
 
@@ -166,9 +166,45 @@ def test_openai_tts_uses_realtime_events_and_never_returns_key() -> None:
         "type": "response.create",
         "response": {"output_modalities": ["audio"]},
     }
-    assert result.provider == "openai" and result.estimated_cost_usd
+    assert result.provider == "openai_realtime" and result.estimated_cost_usd
     assert result.cost is not None and str(result.cost.basis) == "provider_reported"
     assert "fake-key" not in repr(result)
+
+
+def test_openai_tts_preserves_traditional_speech_api_request() -> None:
+    base = load_assistant_settings()
+    settings = replace(
+        base,
+        providers=replace(base.providers, allow_paid_tts=True),
+    )
+    observed = {}
+
+    def opener(request, **kwargs):
+        observed["url"] = request.full_url
+        observed["body"] = json.loads(request.data)
+        observed["timeout"] = kwargs["timeout"]
+        return Response(_wav())
+
+    result = OpenAITTSProvider(settings, api_key="fake-key", opener=opener).synthesize(
+        "Hello Butters",
+        VoicePreset(
+            "legacy", "openai", "gpt-4o-mini-tts", "cedar", 1.2, "Warm."
+        ),
+    )
+
+    assert observed["url"].endswith("/v1/audio/speech")
+    assert observed["body"] == {
+        "model": "gpt-4o-mini-tts",
+        "input": "Hello Butters",
+        "voice": "cedar",
+        "response_format": "wav",
+        "instructions": "Warm.",
+        "speed": 1.2,
+    }
+    assert result.provider == "openai"
+    assert result.model == "gpt-4o-mini-tts"
+    assert result.cost is not None
+    assert str(result.cost.basis) == "estimated_upper_bound"
 
 
 def test_openai_stt_is_bounded_multipart_and_reports_actual_usage() -> None:

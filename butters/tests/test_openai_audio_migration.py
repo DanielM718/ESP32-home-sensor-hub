@@ -31,8 +31,8 @@ def _paid_settings():
     )
 
 
-def test_legacy_static_provider_configuration_migrates_to_supported_models() -> None:
-    migrated = SpeechProviderSettings(
+def test_legacy_static_provider_configuration_preserves_traditional_tts() -> None:
+    validated = SpeechProviderSettings(
         cloud_stt_model="gpt-4o-mini-transcribe",
         cloud_tts_model="gpt-4o-mini-tts",
         cloud_tts_voice="cedar",
@@ -40,14 +40,14 @@ def test_legacy_static_provider_configuration_migrates_to_supported_models() -> 
         cloud_stt_price_per_minute_usd=0.003,
     ).validated()
 
-    assert migrated.cloud_stt_model == "gpt-transcribe"
-    assert migrated.cloud_stt_price_per_minute_usd == 0.0045
-    assert migrated.cloud_tts_model == "gpt-realtime-2.1-mini"
-    assert migrated.cloud_tts_voice == "cedar"
-    assert migrated.cloud_tts_speed == 1.0
+    assert validated.cloud_stt_model == "gpt-transcribe"
+    assert validated.cloud_stt_price_per_minute_usd == 0.0045
+    assert validated.cloud_tts_model == "gpt-4o-mini-tts"
+    assert validated.cloud_tts_voice == "cedar"
+    assert validated.cloud_tts_speed == 1.25
 
 
-def test_saved_admin_profile_is_migrated_durably(tmp_path: Path) -> None:
+def test_saved_admin_profile_keeps_legacy_api_and_values(tmp_path: Path) -> None:
     registry = build_registry(load_assistant_settings())
     store = AISettingsStore(tmp_path / "state.sqlite3")
     store._write(
@@ -63,41 +63,91 @@ def test_saved_admin_profile_is_migrated_durably(tmp_path: Path) -> None:
         },
     )
 
+    loaded = store.speech(registry, "local")
+
+    assert loaded.provider == "openai"
+    assert loaded.model == "gpt-4o-mini-tts"
+    assert loaded.voice == "cedar"
+    assert loaded.speed == 1.2
+    assert loaded.instructions == "Warm and concise."
+    assert store.profiles("speech")["openai"] == loaded.as_dict()
+
+
+def test_pre_release_realtime_profile_moves_to_distinct_provider(tmp_path: Path) -> None:
+    registry = build_registry(load_assistant_settings())
+    store = AISettingsStore(tmp_path / "state.sqlite3")
+    store._write(
+        "speech",
+        "openai",
+        {
+            "provider": "openai",
+            "model": "gpt-realtime-2.1-mini",
+            "voice": "cedar",
+            "speed": None,
+            "instructions": "Warm and concise.",
+            "audio_format": "wav",
+        },
+    )
+
     migrated = store.speech(registry, "local")
 
+    assert migrated.provider == "openai_realtime"
     assert migrated.model == "gpt-realtime-2.1-mini"
     assert migrated.voice == "cedar"
-    assert migrated.speed is None
     assert migrated.instructions == "Warm and concise."
-    assert store.profiles("speech")["openai"] == migrated.as_dict()
+    assert store.profiles("speech")["openai_realtime"] == migrated.as_dict()
+    assert "openai" not in store.profiles("speech")
 
 
-def test_legacy_preset_migrates_and_falls_back_from_removed_voice(tmp_path: Path) -> None:
+def test_legacy_preset_is_not_rewritten_to_realtime(tmp_path: Path) -> None:
     store = VoicePresetStore(tmp_path / "state.sqlite3")
     store.save(
         VoicePreset("legacy", "openai", "gpt-4o-mini-tts", "onyx", 1.2, "Calm."),
         make_default=True,
     )
 
-    migrated = store.list()[0]
+    loaded = store.list()[0]
     restarted = VoicePresetStore(tmp_path / "state.sqlite3").list()[0]
 
-    assert migrated == restarted
+    assert loaded == restarted
+    assert loaded.provider == "openai"
+    assert loaded.model == "gpt-4o-mini-tts"
+    assert loaded.voice == "onyx"
+    assert loaded.speed == 1.2
+    assert loaded.instructions == "Calm."
+
+
+def test_pre_release_realtime_preset_moves_provider_without_model_change(
+    tmp_path: Path,
+) -> None:
+    store = VoicePresetStore(tmp_path / "state.sqlite3")
+    store.save(
+        VoicePreset(
+            "realtime",
+            "openai",
+            "gpt-realtime-2.1-mini",
+            "cedar",
+            1.0,
+            "Calm.",
+        ),
+        make_default=True,
+    )
+
+    migrated = store.list()[0]
+
+    assert migrated.provider == "openai_realtime"
     assert migrated.model == "gpt-realtime-2.1-mini"
-    assert migrated.voice == "alloy"
-    assert migrated.speed == 1.0
-    assert migrated.instructions == "Calm."
+    assert migrated.voice == "cedar"
+    assert VoicePresetStore(tmp_path / "state.sqlite3").list()[0] == migrated
 
 
 @pytest.mark.parametrize("model", ("tts-1", "tts-1-hd", "gpt-4o-mini-tts"))
-def test_retired_tts_models_are_distinguished_from_unknown_models(model: str) -> None:
+def test_deprecated_but_supported_tts_models_remain_selectable(model: str) -> None:
     registry = build_registry(load_assistant_settings())
-    with pytest.raises(CapabilityError) as retired:
-        registry.speech_model("openai", model)
+    assert registry.speech_model("openai", model).id == model
     with pytest.raises(CapabilityError) as unknown:
         registry.speech_model("openai", "made-up-speech")
 
-    assert retired.value.code == "model_retired"
     assert unknown.value.code == "model_denied"
 
 
@@ -148,7 +198,7 @@ def test_realtime_tts_timeout_has_a_specific_code() -> None:
             "hello",
             VoicePreset(
                 "test",
-                "openai",
+                "openai_realtime",
                 "gpt-realtime-2.1-mini",
                 "cedar",
                 1.0,
@@ -187,7 +237,7 @@ def test_realtime_error_event_maps_authentication_without_leaking_detail() -> No
             "hello",
             VoicePreset(
                 "test",
-                "openai",
+                    "openai_realtime",
                 "gpt-realtime-2.1-mini",
                 "cedar",
                 1.0,
@@ -233,7 +283,7 @@ def test_realtime_completed_response_without_audio_is_rejected() -> None:
             "hello",
             VoicePreset(
                 "test",
-                "openai",
+                    "openai_realtime",
                 "gpt-realtime-2.1-mini",
                 "cedar",
                 1.0,

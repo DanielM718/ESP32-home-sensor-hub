@@ -186,7 +186,11 @@ async def _mutation_headers(http, identity: str = "admin@example.com"):
 
 
 async def _set_voice(http, headers, **payload):
-    body = {"provider": "openai", "model": "gpt-realtime-2.1-mini", **payload}
+    body = {
+        "provider": "openai_realtime",
+        "model": "gpt-realtime-2.1-mini",
+        **payload,
+    }
     return await http.post("/api/admin/ai/tts", headers=headers, json=body)
 
 
@@ -249,7 +253,7 @@ def test_style_reaches_the_synthesis_request(tmp_path, monkeypatch) -> None:
     asyncio.run(_style_reaches_the_synthesis_request(tmp_path, monkeypatch))
 
 
-async def _a_retired_model_is_rejected_without_changing_effective_tts(tmp_path, monkeypatch):
+async def _classic_model_rejects_unsupported_style_without_changing_effective_tts(tmp_path, monkeypatch):
     app, _service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
@@ -267,16 +271,16 @@ async def _a_retired_model_is_rejected_without_changing_effective_tts(tmp_path, 
         await _spoken_chat_answer(http, headers)
 
     assert rejected.status_code == 400
-    assert rejected.json()["error"] == "model_retired"
+    assert rejected.json()["error"] == "unsupported_parameter"
     assert recorder.last["model"] == "gpt-realtime-2.1-mini"
     assert recorder.last["voice"] == "sage"
 
 
-def test_a_retired_model_is_rejected_without_changing_effective_tts(
+def test_classic_model_rejects_unsupported_style_without_changing_effective_tts(
     tmp_path, monkeypatch
 ) -> None:
     asyncio.run(
-        _a_retired_model_is_rejected_without_changing_effective_tts(
+        _classic_model_rejects_unsupported_style_without_changing_effective_tts(
             tmp_path, monkeypatch
         )
     )
@@ -292,7 +296,7 @@ async def _a_voice_outside_the_model_catalog_is_refused(tmp_path, monkeypatch):
         await _spoken_chat_answer(http, headers)
 
     assert wrong_model.status_code == 400
-    assert wrong_model.json()["error"] == "model_retired"
+    assert wrong_model.json()["error"] == "model_denied"
     assert unknown.json()["error"] == "invalid_voice"
     # A refused change never becomes effective, and synthesis keeps the old one.
     assert service.ai.effective.speech.voice == "cedar"
@@ -340,7 +344,7 @@ async def _preview_uses_the_same_backend_as_chat(tmp_path, monkeypatch):
             headers=headers,
             json={
                 "name": "preview",
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "ballad",
                 "speed": 1.0,
@@ -353,7 +357,7 @@ async def _preview_uses_the_same_backend_as_chat(tmp_path, monkeypatch):
 
     assert preview.status_code == 200
     assert preview.headers["content-type"] == "audio/wav"
-    assert preview.headers["X-Butters-TTS-Provider"] == "openai"
+    assert preview.headers["X-Butters-TTS-Provider"] == "openai_realtime"
     # One synthesis stack: the preview and the chat answer differ only in text.
     assert previewed["model"] == spoken["model"]
     assert previewed["voice"] == spoken["voice"] == "ballad"
@@ -369,7 +373,7 @@ async def _preview_is_bounded_authorized_and_rate_limited(tmp_path, monkeypatch)
     app, _service, _recorder = _application(tmp_path, monkeypatch)
     body = {
         "name": "preview",
-        "provider": "openai",
+        "provider": "openai_realtime",
         "model": "gpt-realtime-2.1-mini",
         "voice": "cedar",
         "speed": 1.0,
@@ -425,7 +429,7 @@ async def _preview_never_returns_credential_material(tmp_path, monkeypatch):
             headers=headers,
             json={
                 "name": "preview",
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "cedar",
                 "speed": 1.0,
@@ -553,7 +557,9 @@ async def _switching_provider_excludes_stale_incompatible_parameters(tmp_path, m
     # Switching back restores the OpenAI profile exactly.
     assert back["effective"]["speech"]["voice"] == "cedar"
     assert back["effective"]["speech"]["instructions"] == "Brisk."
-    assert service.ai.effective.speech.provider == "openai"
+    assert back["profiles"]["speech"]["local"]["voice"] == "kathleen"
+    assert back["profiles"]["speech"]["openai_realtime"]["voice"] == "cedar"
+    assert service.ai.effective.speech.provider == "openai_realtime"
 
 
 def test_switching_provider_excludes_stale_incompatible_parameters(tmp_path, monkeypatch) -> None:
@@ -585,7 +591,9 @@ async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monk
         headers = await _mutation_headers(http)
         catalog = (await http.get("/api/admin/ai/catalog", headers=headers)).json()
         openai = next(
-            item for item in catalog["speech_providers"] if item["id"] == "openai"
+            item
+            for item in catalog["speech_providers"]
+            if item["id"] == "openai_realtime"
         )
         observed: dict[str, list[str]] = {}
         for model in openai["speech_models"]:
@@ -595,7 +603,7 @@ async def _every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monk
                 applied = service.apply_speech_settings(
                     session,
                     {
-                        "provider": "openai",
+                        "provider": "openai_realtime",
                         "model": model["id"],
                         "voice": voice["id"],
                     },
@@ -629,19 +637,20 @@ def test_every_catalogued_voice_reaches_synthesis_for_its_model(tmp_path, monkey
     )
 
 
-async def _all_retired_tts_models_are_refused_over_http(tmp_path, monkeypatch):
+async def _all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch):
     app, service, recorder = _application(tmp_path, monkeypatch)
     async with _client(app) as http:
         headers = await _mutation_headers(http)
         await _set_voice(http, headers, voice="sage")
         for model in ("tts-1", "tts-1-hd", "gpt-4o-mini-tts"):
-            rejected = await http.post(
+            accepted = await http.post(
                 "/api/admin/ai/tts",
                 headers=headers,
                 json={"provider": "openai", "model": model, "voice": "alloy"},
             )
-            assert rejected.status_code == 400, model
-            assert rejected.json()["error"] == "model_retired", model
+            assert accepted.status_code == 200, model
+            assert accepted.json()["effective"]["speech"]["model"] == model
+        await _set_voice(http, headers, voice="sage")
         await _spoken_chat_answer(http, headers)
 
     # Refused changes never replace the last accepted effective profile.
@@ -650,5 +659,5 @@ async def _all_retired_tts_models_are_refused_over_http(tmp_path, monkeypatch):
     assert recorder.last["model"] == "gpt-realtime-2.1-mini"
 
 
-def test_all_retired_tts_models_are_refused_over_http(tmp_path, monkeypatch) -> None:
-    asyncio.run(_all_retired_tts_models_are_refused_over_http(tmp_path, monkeypatch))
+def test_all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch) -> None:
+    asyncio.run(_all_traditional_tts_models_are_selectable_over_http(tmp_path, monkeypatch))

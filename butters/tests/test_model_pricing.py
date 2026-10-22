@@ -327,7 +327,12 @@ def test_a_typed_pricing_entry_exists_for_every_catalogued_speech_model(settings
     from butters.ai.capabilities import build_registry
 
     registry = build_registry(settings)
-    catalogued = {item.id for item in registry.provider("openai").speech_models}
+    catalogued = {
+        model.id
+        for provider in registry.speech_providers()
+        for model in provider.speech_models
+        if provider.requires_credential
+    }
 
     assert catalogued == set(SPEECH_PRICING)
     for model in catalogued:

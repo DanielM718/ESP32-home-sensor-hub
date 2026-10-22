@@ -179,12 +179,16 @@ async def _disclosure_follows_the_effective_provider(tmp_path, monkeypatch):
     assert local["text"] == "Voice responses are AI-generated using an on-device model."
 
     service.ai.apply_speech(
-        {"provider": "openai", "model": "gpt-realtime-2.1-mini", "voice": "cedar"}
+        {
+            "provider": "openai_realtime",
+            "model": "gpt-realtime-2.1-mini",
+            "voice": "cedar",
+        }
     )
     payload = await _session_payload(app)
     cloud = payload["voice_disclosure"]
-    assert cloud["provider"] == "openai"
-    assert cloud["text"] == "Voice responses are AI-generated using OpenAI TTS."
+    assert cloud["provider"] == "openai_realtime"
+    assert cloud["text"] == "Voice responses are AI-generated using OpenAI Realtime TTS."
 
 
 def test_disclosure_follows_the_effective_provider(tmp_path, monkeypatch) -> None:
@@ -195,7 +199,8 @@ async def _every_provider_discloses_something_truthful(tmp_path, monkeypatch):
     app, service = _service(tmp_path, monkeypatch)
     for provider, model, voice in (
         ("local", "local-piper", "kathleen"),
-        ("openai", "gpt-realtime-2.1-mini", "cedar"),
+        ("openai", "gpt-4o-mini-tts", "cedar"),
+        ("openai_realtime", "gpt-realtime-2.1-mini", "cedar"),
     ):
         payload = {"provider": provider, "model": model, "voice": voice}
         if provider == "local":
@@ -216,7 +221,11 @@ def test_the_disclosure_carries_no_configuration_detail(tmp_path, monkeypatch) -
 
     _app, service = _service(tmp_path, monkeypatch)
     service.ai.apply_speech(
-        {"provider": "openai", "model": "gpt-realtime-2.1-mini", "voice": "cedar"}
+        {
+            "provider": "openai_realtime",
+            "model": "gpt-realtime-2.1-mini",
+            "voice": "cedar",
+        }
     )
     disclosure = json.dumps(service.voice_disclosure())
 

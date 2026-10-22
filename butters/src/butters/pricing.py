@@ -1,10 +1,9 @@
 """Reviewed, per-model pricing with the billing dimension each model actually uses.
 
-Butters previously held one pricing shape - input/cached/output tokens per
-million - and a single free-floating
-`providers.cloud_tts_price_per_million_characters_usd`. Both were wrong for
-speech. The supported Realtime replacement is billed per text input token plus
-per audio output token.
+Speech models use different billing dimensions. The traditional TTS-1 models
+are billed by submitted character; GPT-4o mini TTS and Realtime are billed by
+text-input and audio-output tokens. The Speech endpoint does not return usage,
+while Realtime does.
 
 So a model declares its own billing dimensions, and the ledger asks the model
 how to cost a usage record rather than assuming.
@@ -139,10 +138,12 @@ CHAT_PRICING: dict[str, TokenPricing] = {
     "gpt-5.6-sol": TokenPricing(4.00, 0.40, 20.00),
 }
 
-# Reviewed speech pricing, one entry per supported model, each carrying the
-# dimension OpenAI actually bills. Server-authoritative: no Admin form writes
-# here, and a model absent from this mapping cannot be used for paid speech.
+# Reviewed speech pricing, one entry per supported model and API path.
 SPEECH_PRICING: dict[str, SpeechPricing] = {
+    "tts-1": CharacterPricing(15.00),
+    "tts-1-hd": CharacterPricing(30.00),
+    "gpt-4o-mini-tts": SpeechTokenPricing(0.60, 12.00),
+    "gpt-4o-mini-tts-2025-12-15": SpeechTokenPricing(0.60, 12.00),
     "gpt-realtime-2.1-mini": SpeechTokenPricing(0.60, 20.00),
 }
 
@@ -209,6 +210,7 @@ def speech_cost(
     return SpeechCost(
         pricing.upper_bound(characters=characters),
         CostBasis.ESTIMATED_UPPER_BOUND,
-        "provider usage is not available until the Realtime response completes, "
-        "so this is a conservative preflight ceiling from the submitted text",
+        "provider usage is unavailable before the request completes (and is not "
+        "returned by the Speech endpoint), so this is a conservative preflight "
+        "ceiling from the submitted text",
     )

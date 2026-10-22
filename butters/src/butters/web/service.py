@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, is_dataclass, replace
 from datetime import datetime, timedelta, timezone
 from enum import Enum
 from pathlib import Path
+from typing import ClassVar
 
 from butters.actions.agent import AgentHub
 from butters.actions.coordinator import ActionCoordinator, ActionCoordinatorError
@@ -1895,8 +1896,9 @@ class BetaAssistantService:
     # engine cannot leave the UI claiming OpenAI, and enabling OpenAI cannot
     # leave it silent. It is shown once in the interface, not spoken before
     # every answer.
-    _VOICE_DISCLOSURE = {
+    _VOICE_DISCLOSURE: ClassVar[dict[str, str]] = {
         "openai": "Voice responses are AI-generated using OpenAI TTS.",
+        "openai_realtime": "Voice responses are AI-generated using OpenAI Realtime TTS.",
         "local": "Voice responses are AI-generated using an on-device model.",
     }
 
@@ -2362,11 +2364,11 @@ class BetaAssistantService:
         validate_preset(preset, registry=self.ai_registry)
         if preset.provider == "local":
             return self.local_tts.synthesize(text, preset)
-        if preset.provider != "openai":
+        if preset.provider not in {"openai", "openai_realtime"}:
             raise SpeechProviderError("provider_denied", "TTS provider is not allowed")
-        # Realtime reports final text-input and audio-output token usage, but
-        # budget admission has to happen first. Reserve a deliberate worst-case
-        # ceiling, then record the provider-reported cost after success. An
+        # Budget admission has to happen before either paid API path. Realtime
+        # later reports token usage; the traditional Speech endpoint does not,
+        # so its token-priced models retain the labelled upper-bound basis. An
         # unpriced model yields infinity and is refused.
         preflight = self.ledger.speech_cost(preset.model, characters=len(text))
         estimate = preflight.amount_usd
@@ -2379,7 +2381,7 @@ class BetaAssistantService:
                 result = self.cloud_tts.synthesize(text, preset)
             except SpeechProviderError as exc:
                 self.ledger.record_external(
-                    provider="openai",
+                    provider=preset.provider,
                     operation_category="tts",
                     model=preset.model,
                     estimated_cost_usd=estimate,

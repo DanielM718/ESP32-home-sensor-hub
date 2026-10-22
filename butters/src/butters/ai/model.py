@@ -15,11 +15,7 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 
-from butters.ai.audio_models import (
-    DEPRECATED_OPENAI_TTS_MODELS,
-    OPENAI_TTS_MODEL,
-    migrated_realtime_voice,
-)
+from butters.ai.audio_models import OPENAI_REALTIME_TTS_MODEL
 from butters.ai.capabilities import (
     TRUNCATION_MODES,
     VERBOSITY_LEVELS,
@@ -260,31 +256,22 @@ def validate_speech(
     return SpeechSettings(provider.id, model.id, voice_id, speed, instructions, audio_format)
 
 
-def migrate_legacy_speech(
+def migrate_realtime_provider(
     registry: CapabilityRegistry, payload: dict[str, object]
 ) -> SpeechSettings | None:
-    """Translate a saved retired OpenAI TTS profile into the Realtime model.
+    """Move only the pre-release overloaded Realtime profile to its new ID.
 
-    Compatible voices and style instructions survive. Numeric speed cannot:
-    Realtime doesn't expose the Speech endpoint's speed field, so retaining it
-    would make Admin claim a control the provider never receives.
+    This is a schema migration, not a model migration: model, voice,
+    instructions and API implementation remain Realtime. Traditional OpenAI
+    Speech API profiles never match and are never rewritten.
     """
 
     if payload.get("provider") != "openai":
         return None
-    if payload.get("model") not in DEPRECATED_OPENAI_TTS_MODELS:
+    if payload.get("model") != OPENAI_REALTIME_TTS_MODEL:
         return None
-    candidate: dict[str, object] = {
-        "provider": "openai",
-        "model": OPENAI_TTS_MODEL,
-        "voice": migrated_realtime_voice(payload.get("voice")),
-    }
-    instructions = payload.get("instructions")
-    if isinstance(instructions, str) and instructions.strip():
-        candidate["instructions"] = instructions
-    audio_format = payload.get("audio_format")
-    if isinstance(audio_format, str) and audio_format:
-        candidate["audio_format"] = audio_format
+    candidate = dict(payload)
+    candidate["provider"] = "openai_realtime"
     return validate_speech(registry, candidate)
 
 

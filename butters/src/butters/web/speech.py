@@ -20,12 +20,9 @@ from pathlib import Path
 
 from butters.ai.audio_models import (
     DEPRECATED_OPENAI_STT_MODELS,
-    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_REALTIME_TTS_MODEL,
     OPENAI_STT_MODEL,
     OPENAI_STT_SHUTDOWN_DATE,
-    OPENAI_TTS_MODEL,
-    OPENAI_TTS_SHUTDOWN_DATE,
-    migrated_realtime_voice,
 )
 from butters.ai.capabilities import CapabilityError, CapabilityRegistry, build_registry
 from butters.ai.model import SpeechSettings
@@ -107,19 +104,26 @@ class VoicePresetStore:
             presets: list[VoicePreset] = []
             for row in rows:
                 original = VoicePreset(*row[:6], bool(row[6]))
-                migrated = _migrate_voice_preset(original)
+                migrated = (
+                    VoicePreset(
+                        original.name,
+                        "openai_realtime",
+                        original.model,
+                        original.voice,
+                        original.speed,
+                        original.instructions,
+                        original.is_default,
+                    )
+                    if original.provider == "openai"
+                    and original.model == OPENAI_REALTIME_TTS_MODEL
+                    else original
+                )
                 presets.append(migrated)
                 if migrated != original:
                     connection.execute(
-                        """UPDATE voice_presets SET model=?, voice=?, speed=?,
-                        instructions=?, updated_at=CURRENT_TIMESTAMP WHERE name=?""",
-                        (
-                            migrated.model,
-                            migrated.voice,
-                            migrated.speed,
-                            migrated.instructions,
-                            migrated.name,
-                        ),
+                        """UPDATE voice_presets SET provider=?,
+                        updated_at=CURRENT_TIMESTAMP WHERE name=?""",
+                        (migrated.provider, migrated.name),
                     )
         return tuple(presets)
 
@@ -162,6 +166,16 @@ class VoicePresetStore:
         if selected is not None:
             return selected
         provider = settings.providers.tts_default
+        if provider == "openai_realtime":
+            return VoicePreset(
+                "configured-default",
+                provider,
+                OPENAI_REALTIME_TTS_MODEL,
+                "cedar",
+                1.0,
+                settings.providers.cloud_tts_instructions,
+                True,
+            )
         return VoicePreset(
             "configured-default",
             provider,
@@ -225,13 +239,12 @@ class LocalTTSProvider:
 
 
 class OpenAITTSProvider:
-    """Optional Realtime text-to-speech adapter.
+    """Bounded adapter for traditional Speech API and Realtime TTS.
 
-    OpenAI's supported replacement is not accepted by ``/v1/audio/speech``.
-    Each bounded synthesis therefore creates a short server-side WebSocket
-    session, supplies text as a user message, and collects streamed PCM deltas.
-    The rest of Butters still receives a normal WAV, keeping playback and the
-    local/provider boundary unchanged.
+    The Admin catalog exposes these as distinct providers. They share the
+    credential and budget boundary, but never share a request path: ``openai``
+    posts to ``/v1/audio/speech`` while ``openai_realtime`` uses a short-lived
+    WebSocket session.
     """
 
     def __init__(
@@ -239,11 +252,13 @@ class OpenAITTSProvider:
         settings: AssistantSettings,
         *,
         api_key: str | None = None,
+        opener: callable = urllib.request.urlopen,
         connector: callable | None = None,
         registry: CapabilityRegistry | None = None,
     ) -> None:
         self.settings = settings
         self._api_key = api_key if api_key is not None else os.getenv("OPENAI_API_KEY")
+        self._opener = opener
         self._connector = connector or _default_websocket_connect
         # The registry, not a template or a conditional here, decides which
         # voices exist and whether this model consumes speaking instructions.
@@ -265,8 +280,10 @@ class OpenAITTSProvider:
             raise SpeechProviderError(
                 "pricing_unknown", f"{preset.model} has no reviewed speech pricing"
             )
+        if preset.provider not in {"openai", "openai_realtime"}:
+            raise SpeechProviderError("provider_mismatch", "OpenAI TTS preset is required")
         try:
-            capability = self.registry.speech_model("openai", preset.model)
+            capability = self.registry.speech_model(preset.provider, preset.model)
         except CapabilityError as exc:
             raise SpeechProviderError(exc.code, str(exc)) from exc
         if preset.voice not in capability.voice_ids():
@@ -276,6 +293,66 @@ class OpenAITTSProvider:
         value = " ".join(text.split())
         if not value or len(value) > 2000:
             raise SpeechProviderError("invalid_text", "TTS text must be 1 to 2000 characters")
+        if preset.provider == "openai":
+            return self._synthesize_speech_api(value, preset, capability)
+        return self._synthesize_realtime_result(value, preset)
+
+    def _synthesize_speech_api(
+        self, value: str, preset: VoicePreset, capability
+    ) -> SpeechResult:
+        body: dict[str, object] = {
+            "model": preset.model,
+            "input": value,
+            "voice": preset.voice,
+            "response_format": "wav",
+        }
+        if capability.supports_instructions and preset.instructions:
+            body["instructions"] = preset.instructions[:1000]
+        if capability.supports_speed:
+            body["speed"] = preset.speed
+        request = urllib.request.Request(
+            f"{self.settings.cloud.base_url}/v1/audio/speech",
+            data=json.dumps(body, separators=(",", ":")).encode("utf-8"),
+            headers={
+                "Authorization": f"Bearer {self._api_key}",
+                "Content-Type": "application/json",
+                "User-Agent": "Butters-Beta1/1.0",
+            },
+            method="POST",
+        )
+        started = time.perf_counter()
+        try:
+            with self._opener(
+                request, timeout=self.settings.cloud.timeout_seconds
+            ) as response:
+                audio = response.read(8 * 1024 * 1024 + 1)
+        except urllib.error.HTTPError as exc:
+            raise _status_error("TTS", exc.code) from exc
+        except TimeoutError as exc:
+            raise SpeechProviderError("timeout", "OpenAI TTS timed out") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise SpeechProviderError("unavailable", "OpenAI TTS is unavailable") from exc
+        elapsed = time.perf_counter() - started
+        if not audio:
+            raise SpeechProviderError("malformed_audio", "OpenAI TTS returned no audio")
+        if len(audio) > 8 * 1024 * 1024:
+            raise SpeechProviderError("response_too_large", "TTS audio exceeded the byte limit")
+        duration = _wav_duration(audio)
+        cost = speech_cost(preset.model, characters=len(value))
+        return SpeechResult(
+            audio,
+            "openai",
+            preset.model,
+            preset.voice,
+            elapsed,
+            duration,
+            cost.amount_usd,
+            cost,
+        )
+
+    def _synthesize_realtime_result(
+        self, value: str, preset: VoicePreset
+    ) -> SpeechResult:
         body: dict[str, object] = {
             "type": "session.update",
             "session": {
@@ -323,7 +400,7 @@ class OpenAITTSProvider:
         )
         return SpeechResult(
             audio,
-            "openai",
+            "openai_realtime",
             preset.model,
             preset.voice,
             elapsed,
@@ -339,7 +416,7 @@ class OpenAITTSProvider:
         deadline = time.monotonic() + timeout
         url = (
             self.settings.cloud.base_url.replace("https://", "wss://", 1)
-            + f"/v1/realtime?model={OPENAI_TTS_MODEL}"
+            + f"/v1/realtime?model={OPENAI_REALTIME_TTS_MODEL}"
         )
         headers = {
             "Authorization": f"Bearer {self._api_key}",
@@ -515,20 +592,6 @@ LOCAL_SPEED_RANGE = (0.5, 2.0)
 CLOUD_SPEED_RANGE = (0.25, 4.0)
 
 
-def _migrate_voice_preset(preset: VoicePreset) -> VoicePreset:
-    if preset.provider != "openai" or preset.model not in DEPRECATED_OPENAI_TTS_MODELS:
-        return preset
-    return VoicePreset(
-        preset.name,
-        "openai",
-        OPENAI_TTS_MODEL,
-        migrated_realtime_voice(preset.voice),
-        1.0,
-        preset.instructions,
-        preset.is_default,
-    )
-
-
 def preset_from_speech_settings(
     speech: SpeechSettings, *, name: str = "effective"
 ) -> VoicePreset:
@@ -561,7 +624,7 @@ def validate_preset(
         character.isalnum() or character in " _-" for character in preset.name
     ):
         raise SpeechProviderError("invalid_preset", "preset name is invalid")
-    if preset.provider not in {"local", "openai"}:
+    if preset.provider not in {"local", "openai", "openai_realtime"}:
         raise SpeechProviderError("invalid_preset", "preset provider is invalid")
     if not preset.model or len(preset.model) > 128 or not preset.voice or len(preset.voice) > 128:
         raise SpeechProviderError("invalid_preset", "preset model or voice is invalid")
@@ -728,7 +791,7 @@ def _realtime_event_error(event: dict[str, object]) -> SpeechProviderError:
     if "deprecated" in normalized or "retired" in normalized:
         return SpeechProviderError(
             "model_retired",
-            f"the configured OpenAI TTS model is retired; use {OPENAI_TTS_MODEL}",
+            f"the configured OpenAI Realtime TTS model is retired; use {OPENAI_REALTIME_TTS_MODEL}",
         )
     if "model" in normalized and ("not_found" in normalized or "unavailable" in normalized):
         return SpeechProviderError(

@@ -718,6 +718,11 @@ function renderTtsForm() {
   renderTtsModels(saved);
 }
 
+function savedTtsProfile(providerId) {
+  const profiles = aiState && aiState.profiles && aiState.profiles.speech;
+  return profiles && profiles[providerId] ? profiles[providerId] : null;
+}
+
 function renderTtsModels(saved) {
   const provider = providerById(aiCatalog.speech_providers, document.querySelector("#tts-provider").value);
   const modelSelect = document.querySelector("#tts-model");
@@ -876,7 +881,9 @@ document.querySelector("#chat-save").addEventListener("click", async () => {
   } catch(error) { status.textContent = `Save failed: ${error.message||"unknown error"}`; }
 });
 
-document.querySelector("#tts-provider").addEventListener("change", () => renderTtsModels(aiState.saved.speech));
+document.querySelector("#tts-provider").addEventListener("change", event => {
+  renderTtsModels(savedTtsProfile(event.target.value));
+});
 document.querySelector("#tts-model").addEventListener("change", () => renderTtsCapabilities(
   aiState.saved.speech.model === document.querySelector("#tts-model").value ? aiState.saved.speech : null));
 document.querySelector("#tts-speed").addEventListener("input", event => {

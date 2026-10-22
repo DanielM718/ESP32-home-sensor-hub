@@ -14,11 +14,11 @@ import tomllib
 
 from butters.ai.audio_models import (
     DEPRECATED_OPENAI_STT_MODELS,
-    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_REALTIME_TTS_MODEL,
     OPENAI_REALTIME_VOICES,
+    OPENAI_SPEECH_TTS_MODELS,
     OPENAI_STT_MODEL,
     OPENAI_TTS_MODEL,
-    migrated_realtime_voice,
 )
 from butters.config import ConfigError, subsystem_root
 from butters.config_overlay import load_overlay, local_config_path, merge_overlay
@@ -551,9 +551,9 @@ class SpeechProviderSettings:
     cloud_tts_price_per_million_characters_usd: float | None = None
 
     def validated(self) -> SpeechProviderSettings:
-        # Exact legacy model IDs are migrated at the configuration boundary so
-        # an existing /etc/butters/assistant.toml keeps booting after upgrade.
-        # Unknown IDs still fail closed instead of being guessed into a model.
+        # STT has an intentional compatibility migration. TTS does not: the
+        # traditional Speech API and Realtime are distinct implementations,
+        # and changing a saved model would change billing and request semantics.
         migrated = self
         if self.cloud_stt_model in DEPRECATED_OPENAI_STT_MODELS:
             migrated = replace(
@@ -561,31 +561,30 @@ class SpeechProviderSettings:
                 cloud_stt_model=OPENAI_STT_MODEL,
                 cloud_stt_price_per_minute_usd=0.0045,
             )
-        if self.cloud_tts_model in DEPRECATED_OPENAI_TTS_MODELS:
-            migrated = replace(
-                migrated,
-                cloud_tts_model=OPENAI_TTS_MODEL,
-                cloud_tts_voice=migrated_realtime_voice(self.cloud_tts_voice),
-                # Realtime has no numeric speed field. One is retained here
-                # only for the legacy preset schema's neutral default.
-                cloud_tts_speed=1.0,
-            )
         if migrated.cloud_stt_model != OPENAI_STT_MODEL:
             raise ConfigError(
                 f"providers.cloud_stt_model must be {OPENAI_STT_MODEL}"
             )
-        if migrated.cloud_tts_model != OPENAI_TTS_MODEL:
+        allowed_tts_models = set(OPENAI_SPEECH_TTS_MODELS) | {
+            OPENAI_REALTIME_TTS_MODEL
+        }
+        if migrated.cloud_tts_model not in allowed_tts_models:
             raise ConfigError(
-                f"providers.cloud_tts_model must be {OPENAI_TTS_MODEL}"
+                "providers.cloud_tts_model is not a supported OpenAI speech model"
             )
-        if migrated.cloud_tts_voice not in OPENAI_REALTIME_VOICES:
+        if (
+            migrated.cloud_tts_model == OPENAI_REALTIME_TTS_MODEL
+            and migrated.cloud_tts_voice not in OPENAI_REALTIME_VOICES
+        ):
             raise ConfigError(
                 "providers.cloud_tts_voice is not supported by the Realtime model"
             )
         if migrated.stt_default not in {"local", "openai"}:
             raise ConfigError("providers.stt_default must be local or openai")
-        if migrated.tts_default not in {"local", "openai"}:
-            raise ConfigError("providers.tts_default must be local or openai")
+        if migrated.tts_default not in {"local", "openai", "openai_realtime"}:
+            raise ConfigError(
+                "providers.tts_default must be local, openai, or openai_realtime"
+            )
         if not migrated.cloud_stt_model.strip() or not migrated.cloud_tts_model.strip():
             raise ConfigError("providers cloud model names cannot be empty")
         if not 0.25 <= migrated.cloud_tts_speed <= 4.0:

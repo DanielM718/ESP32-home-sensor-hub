@@ -23,7 +23,7 @@ from butters.ai.model import (
     clear_unsupported,
     default_chat,
     default_speech,
-    migrate_legacy_speech,
+    migrate_realtime_provider,
     validate_chat,
     validate_speech,
 )
@@ -92,14 +92,16 @@ class AISettingsStore:
             return validate_speech(registry, stored)
         except CapabilityError:
             try:
-                migrated = migrate_legacy_speech(registry, stored)
+                migrated = migrate_realtime_provider(registry, stored)
             except CapabilityError:
                 return default
             if migrated is None:
+                # Invalid data is never rewritten into another API
+                # implementation. Traditional OpenAI Speech profiles retain
+                # their provider and model exactly.
                 return default
-            # Make the compatibility translation durable. A subsequent boot
-            # reads exactly what Admin shows and what synthesis will use.
             self.save_speech(migrated)
+            self._delete_profile(SPEECH, provider)
             return migrated
 
     def save_speech(self, settings: SpeechSettings) -> None:
@@ -159,6 +161,13 @@ class AISettingsStore:
                 """INSERT INTO ai_active_provider (kind, provider) VALUES (?,?)
                 ON CONFLICT(kind) DO UPDATE SET
                 provider=excluded.provider, updated_at=CURRENT_TIMESTAMP""",
+                (kind, provider),
+            )
+
+    def _delete_profile(self, kind: str, provider: str) -> None:
+        with self._lock, self._connect() as connection:
+            connection.execute(
+                "DELETE FROM ai_provider_profiles WHERE kind=? AND provider=?",
                 (kind, provider),
             )
 

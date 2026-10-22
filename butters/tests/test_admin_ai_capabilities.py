@@ -59,7 +59,15 @@ def test_chat_selector_excludes_speech_and_non_chat_endpoints(registry) -> None:
 
     assert not chat_models & speech_models
     assert not any("tts" in item or "embed" in item for item in chat_models)
-    assert speech_models == {"gpt-realtime-2.1-mini"}
+    assert speech_models == {
+        "gpt-4o-mini-tts",
+        "gpt-4o-mini-tts-2025-12-15",
+        "tts-1",
+        "tts-1-hd",
+    }
+    assert {item.id for item in registry.provider("openai_realtime").speech_models} == {
+        "gpt-realtime-2.1-mini"
+    }
 
 
 def test_local_provider_offers_exactly_the_one_voice_it_can_produce(registry) -> None:
@@ -92,7 +100,7 @@ REALTIME_VOICES = (
 
 
 def test_realtime_model_exposes_the_full_current_voice_set(registry) -> None:
-    model = registry.speech_model("openai", "gpt-realtime-2.1-mini")
+    model = registry.speech_model("openai_realtime", "gpt-realtime-2.1-mini")
 
     assert model.voice_ids() == REALTIME_VOICES
     assert len(model.voice_ids()) == 10
@@ -107,7 +115,7 @@ def test_every_catalogued_voice_validates_for_its_own_model(
         accepted = validate_speech(
             registry,
             {
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": voice,
             },
@@ -116,14 +124,13 @@ def test_every_catalogued_voice_validates_for_its_own_model(
 
 
 @pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd", "gpt-4o-mini-tts"))
-def test_retired_models_have_a_specific_validation_error(
+def test_deprecated_speech_api_models_remain_functional(
     registry, model_id: str
 ) -> None:
-    with pytest.raises(CapabilityError) as denied:
-        validate_speech(
-            registry, {"provider": "openai", "model": model_id, "voice": "alloy"}
-        )
-    assert denied.value.code == "model_retired"
+    accepted = validate_speech(
+        registry, {"provider": "openai", "model": model_id, "voice": "alloy"}
+    )
+    assert accepted.model == model_id
 
 
 def test_the_local_voice_is_refused_on_the_cloud_model(registry) -> None:
@@ -131,7 +138,7 @@ def test_the_local_voice_is_refused_on_the_cloud_model(registry) -> None:
         validate_speech(
             registry,
             {
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "kathleen",
             },
@@ -144,7 +151,7 @@ def test_the_catalog_the_browser_receives_carries_the_same_voice_lists(registry)
     speech = next(
         item
         for item in registry.as_dict()["speech_providers"]
-        if item["id"] == "openai"
+        if item["id"] == "openai_realtime"
     )
     listed = {
         model["id"]: tuple(voice["id"] for voice in model["voices"])
@@ -165,7 +172,7 @@ def test_serialized_catalog_carries_per_model_support_flags(registry) -> None:
         for item in next(
             provider
             for provider in catalog["speech_providers"]
-            if provider["id"] == "openai"
+            if provider["id"] == "openai_realtime"
         )["speech_models"]
         if item["id"] == "gpt-realtime-2.1-mini"
     )
@@ -264,7 +271,7 @@ def test_voice_must_belong_to_the_selected_speech_model(registry) -> None:
         validate_speech(
             registry,
             {
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "nova",
             },
@@ -274,7 +281,7 @@ def test_voice_must_belong_to_the_selected_speech_model(registry) -> None:
     accepted = validate_speech(
         registry,
         {
-            "provider": "openai",
+            "provider": "openai_realtime",
             "model": "gpt-realtime-2.1-mini",
             "voice": "cedar",
         },
@@ -289,7 +296,7 @@ def test_identifiers_are_canonical_and_case_sensitive(registry) -> None:
         validate_speech(
             registry,
             {
-                "provider": "OpenAI",
+                "provider": "OpenAI_Realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "cedar",
             },
@@ -298,7 +305,7 @@ def test_identifiers_are_canonical_and_case_sensitive(registry) -> None:
         validate_speech(
             registry,
             {
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "Cedar",
             },
@@ -324,7 +331,7 @@ def test_speed_range_is_taken_from_the_selected_model(registry) -> None:
         validate_speech(
             registry,
             {
-                "provider": "openai",
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "cedar",
                 "speed": 1.0,
@@ -337,7 +344,7 @@ def test_instructions_are_accepted_only_by_a_model_that_consumes_them(registry) 
     accepted = validate_speech(
         registry,
         {
-            "provider": "openai",
+            "provider": "openai_realtime",
             "model": "gpt-realtime-2.1-mini",
             "voice": "cedar",
             "instructions": "Warm and calm.",
@@ -381,13 +388,26 @@ def test_switching_provider_preserves_each_profile_separately(tmp_path: Path, re
             registry,
             {
                 "provider": "openai",
+                "model": "gpt-4o-mini-tts",
+                "voice": "onyx",
+                "speed": 1.2,
+                "instructions": "Measured.",
+            },
+        )
+    )
+    traditional_profile = store.speech(registry, "local")
+    store.save_speech(
+        validate_speech(
+            registry,
+            {
+                "provider": "openai_realtime",
                 "model": "gpt-realtime-2.1-mini",
                 "voice": "marin",
                 "instructions": "Brisk.",
             },
         )
     )
-    openai_profile = store.speech(registry, "local")
+    realtime_profile = store.speech(registry, "local")
 
     store.save_speech(
         validate_speech(
@@ -397,16 +417,20 @@ def test_switching_provider_preserves_each_profile_separately(tmp_path: Path, re
     )
     local_profile = store.speech(registry, "local")
 
-    store.save_speech(openai_profile)
-    restored = store.speech(registry, "local")
+    store.save_speech(traditional_profile)
+    restored_traditional = store.speech(registry, "local")
+    store.save_speech(realtime_profile)
+    restored_realtime = store.speech(registry, "local")
 
     assert local_profile.provider == "local" and local_profile.speed == 0.9
-    # Switching back restores the exact configuration, style included.
-    assert restored == openai_profile
-    assert restored.voice == "marin" and restored.instructions == "Brisk."
+    assert restored_traditional == traditional_profile
+    assert restored_traditional.model == "gpt-4o-mini-tts"
+    assert restored_realtime == realtime_profile
+    assert restored_realtime.voice == "marin"
+    assert restored_realtime.instructions == "Brisk."
 
 
-def test_a_retired_model_is_not_a_selectable_speech_capability(registry) -> None:
+def test_classic_model_rejects_realtime_only_instructions(registry) -> None:
     with pytest.raises(CapabilityError) as denied:
         validate_speech(
             registry,
@@ -417,7 +441,7 @@ def test_a_retired_model_is_not_a_selectable_speech_capability(registry) -> None
                 "instructions": "Brisk.",
             },
         )
-    assert denied.value.code == "model_retired"
+    assert denied.value.code == "unsupported_parameter"
 
 
 def test_store_refuses_anything_shaped_like_a_credential(tmp_path: Path) -> None:
@@ -460,3 +484,8 @@ def test_admin_javascript_hardcodes_no_model_or_voice_identifier() -> None:
         "local-piper",
     ):
         assert identifier not in section, identifier
+
+
+def test_admin_provider_switch_restores_the_saved_profile() -> None:
+    assert "function savedTtsProfile(providerId)" in ADMIN_JS
+    assert "renderTtsModels(savedTtsProfile(event.target.value));" in ADMIN_JS
