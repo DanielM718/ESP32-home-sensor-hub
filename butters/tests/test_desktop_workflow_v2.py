@@ -33,6 +33,7 @@ class Operations:
         self.wake_calls = 0
         self.ensure_calls = 0
         self.remote_calls = 0
+        self.restore_calls = 0
         self.calls: list[str] = []
 
     @staticmethod
@@ -82,6 +83,11 @@ class Operations:
         self.remote_calls += 1
         return self.remote
 
+    def restore_headed_mode(self, _timeout_seconds: float) -> bool:
+        self.calls.append("restore_headed")
+        self.restore_calls += 1
+        return True
+
 
 class Clock:
     def __init__(self, step: float = 0.01) -> None:
@@ -105,7 +111,12 @@ def _workflow(
         sunshine_status_enabled=sunshine,
         sunshine_ensure_enabled=sunshine,
     )
-    return DesktopWorkflow(settings, operations, clock=Clock(step))
+    return DesktopWorkflow(
+        settings,
+        operations,
+        clock=Clock(step),
+        post_headless_settle_seconds=0.05,
+    )
 
 
 def test_desktop_already_fully_ready_still_enters_headless_mode() -> None:
@@ -197,6 +208,23 @@ def test_sunshine_is_used_when_parsec_cannot_be_ensured() -> None:
     assert operations.calls.index("ensure_sunshine") < operations.calls.index(
         "headless"
     )
+
+
+def test_backend_loss_after_monitor_power_off_restores_monitors_and_fails() -> None:
+    operations = Operations(
+        network=[True],
+        ssh=[True],
+        parsec=[True, False],
+    )
+
+    result = _workflow(operations).start_remote_session("desktop")
+
+    assert result["verification_complete"] is False
+    assert result["headless_mode_requested"] is True
+    assert result["headless_backend_ready"] is False
+    assert result["headless_mode_restored"] is True
+    assert result["failed_stage"] == "headless_backend_ready"
+    assert operations.restore_calls == 1
 
 
 def test_unknown_parsec_state_is_not_reported_as_ready() -> None:

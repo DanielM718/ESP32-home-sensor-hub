@@ -36,6 +36,7 @@ STATUS_WORST_CASE_SECONDS = (
 # has to exceed it: a skill deadline shorter than one observation makes every
 # field `unknown` and hides the powered-off state the probes actually measured.
 STATUS_TIMEOUT_SECONDS = 10.0
+POST_HEADLESS_SETTLE_SECONDS = 5.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,6 +79,8 @@ class DesktopOperations(Protocol):
     def ensure_sunshine_running(self, timeout_seconds: float) -> bool: ...
 
     def request_headless_mode(self, timeout_seconds: float) -> bool: ...
+
+    def restore_headed_mode(self, timeout_seconds: float) -> bool: ...
 
 
 class BrokerDesktopOperations:
@@ -175,6 +178,9 @@ class BrokerDesktopOperations:
     def request_headless_mode(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_MONITORS_OFF, timeout_seconds)
 
+    def restore_headed_mode(self, timeout_seconds: float) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_MONITORS_ON, timeout_seconds)
+
     def _broker(self, operation: BrokerOperation, timeout_seconds: float) -> bool:
         try:
             result = self.broker.request(
@@ -195,6 +201,7 @@ class DesktopWorkflow:
         *,
         broker_settings: BrokerSettings | None = None,
         clock: Callable[[], float] = time.monotonic,
+        post_headless_settle_seconds: float = POST_HEADLESS_SETTLE_SECONDS,
     ) -> None:
         self.settings = settings
         self.broker_settings = broker_settings or BrokerSettings()
@@ -203,6 +210,7 @@ class DesktopWorkflow:
             broker=BrokerClient(self.broker_settings),
         )
         self.clock = clock
+        self.post_headless_settle_seconds = post_headless_settle_seconds
 
     def status(self, machine: str) -> DesktopState:
         """Reachability, plus Parsec readiness only when it is observable.
@@ -320,6 +328,8 @@ class DesktopWorkflow:
             "parsec_ensure_succeeded": False,
             "sunshine_ensure_succeeded": False,
             "headless_mode_requested": False,
+            "headless_mode_restored": False,
+            "headless_backend_ready": None,
             "parsec_ready": None,
             "sunshine_ready": None,
             "stream_backend": None,
@@ -406,6 +416,7 @@ class DesktopWorkflow:
         if not backends:
             return finish("stream_backend", "no streaming backend is enabled")
 
+        selected_observer: Callable[[float], bool | None] | None = None
         for index, (backend, ensure, observe) in enumerate(backends):
             if event.is_set():
                 return finish("cancelled", "workflow cancelled")
@@ -439,6 +450,7 @@ class DesktopWorkflow:
             result[f"{backend}_ready"] = True if ready else last_state
             if ready:
                 result["stream_backend"] = backend
+                selected_observer = observe
                 break
 
         if result["stream_backend"] is None:
@@ -456,6 +468,31 @@ class DesktopWorkflow:
                 "headless_mode_requested", "monitor power-off operation failed"
             )
         result["headless_mode_requested"] = True
+        settle_deadline = min(
+            deadline, self.clock() + self.post_headless_settle_seconds
+        )
+        while not event.is_set() and self.clock() < settle_deadline:
+            remaining = self._remaining(settle_deadline)
+            event.wait(min(self.settings.poll_interval_seconds, remaining))
+        if event.is_set():
+            return finish("cancelled", "workflow cancelled")
+        remaining = self._remaining(deadline)
+        post_headless_ready = (
+            selected_observer(remaining)
+            if selected_observer is not None and remaining > 0
+            else None
+        )
+        result["headless_backend_ready"] = post_headless_ready
+        if post_headless_ready is not True:
+            remaining = self._remaining(deadline)
+            if remaining > 0:
+                result["headless_mode_restored"] = self.operations.restore_headed_mode(
+                    remaining
+                )
+            return finish(
+                "headless_backend_ready",
+                "streaming backend lost readiness after monitor power-off",
+            )
         result["verification_complete"] = True
         return finish()
 
