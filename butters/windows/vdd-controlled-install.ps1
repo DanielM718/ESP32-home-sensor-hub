@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$PreflightOnly
+    [switch]$PreflightOnly,
+    [switch]$PolicySelfTest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,108 @@ $vddConfig = 'C:\VirtualDisplayDriver\vdd_settings.xml'
 $sunshineConfigDirectory = 'C:\Program Files\Sunshine\config'
 $classGuid = '{4D36E968-E325-11CE-BFC1-08002BE10318}'
 $resultPath = 'C:\ProgramData\Butters\vdd-controlled-result.json'
+
+function Get-InstallDisposition {
+    param(
+        [Parameter(Mandatory=$true)][ValidateSet('valid','invalid','unknown')][string]$ArtifactSignatureState,
+        [Parameter(Mandatory=$true)][bool]$PackagePublished,
+        [Parameter(Mandatory=$true)][int]$RootCount,
+        [Parameter(Mandatory=$true)][bool]$RootHealthy,
+        [Parameter(Mandatory=$true)][bool]$RootBoundToPublishedInf,
+        [Parameter(Mandatory=$true)][bool]$AccessRegression,
+        [string]$CimSignatureState = 'missing',
+        [bool]$RebootRequested = $false,
+        [bool]$ChildHealthy = $false,
+        [bool]$VirtualMonitorActive = $false,
+        [bool]$DisplayGuidDiscovered = $false,
+        [bool]$SunshineEnumerated = $false,
+        [bool]$SunshineCaptureReady = $false,
+        [bool]$OptionalValidationFailed = $false,
+        [bool]$VirtualModeConfigured = $false
+    )
+
+    # Only authoritative installation security/safety state can request
+    # rollback. Every parameter after AccessRegression is diagnostic-only.
+    if ($ArtifactSignatureState -eq 'invalid') {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'artifact_signature_invalid' }
+    }
+    if (-not $PackagePublished) {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'package_not_published' }
+    }
+    if ($RootCount -ne 1) {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'root_device_count_invalid' }
+    }
+    if (-not $RootHealthy) {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'root_device_unhealthy' }
+    }
+    if (-not $RootBoundToPublishedInf) {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'root_not_bound_to_published_inf' }
+    }
+    if ($AccessRegression) {
+        return [pscustomobject]@{ retain = $false; rollback = $true; reason = 'existing_access_regression' }
+    }
+    return [pscustomobject]@{ retain = $true; rollback = $false; reason = 'authoritative_installation_healthy' }
+}
+
+function Invoke-PolicyFailureInjectionTests {
+    $healthy = @{
+        ArtifactSignatureState = 'valid'
+        PackagePublished = $true
+        RootCount = 1
+        RootHealthy = $true
+        RootBoundToPublishedInf = $true
+        AccessRegression = $false
+        CimSignatureState = 'true'
+        RebootRequested = $false
+        ChildHealthy = $true
+        VirtualMonitorActive = $true
+        DisplayGuidDiscovered = $true
+        SunshineEnumerated = $true
+        SunshineCaptureReady = $true
+        OptionalValidationFailed = $false
+        VirtualModeConfigured = $true
+    }
+    $cases = @(
+        @{ name='cim_reports_false'; override=@{ CimSignatureState='false' }; expectedRollback=$false },
+        @{ name='cim_missing'; override=@{ CimSignatureState='missing' }; expectedRollback=$false },
+        @{ name='reboot_required'; override=@{ RebootRequested=$true }; expectedRollback=$false },
+        @{ name='display_guid_delayed'; override=@{ DisplayGuidDiscovered=$false }; expectedRollback=$false },
+        @{ name='sunshine_enumeration_failed'; override=@{ SunshineEnumerated=$false }; expectedRollback=$false },
+        @{ name='sunshine_capture_failed'; override=@{ SunshineCaptureReady=$false }; expectedRollback=$false },
+        @{ name='optional_tool_exception'; override=@{}; injectOptionalException=$true; expectedRollback=$false },
+        @{ name='virtual_mode_incomplete'; override=@{ VirtualModeConfigured=$false }; expectedRollback=$false },
+        @{ name='child_delayed'; override=@{ ChildHealthy=$false; VirtualMonitorActive=$false }; expectedRollback=$false },
+        @{ name='signature_metadata_unavailable'; override=@{ ArtifactSignatureState='unknown'; OptionalValidationFailed=$true }; expectedRollback=$false },
+        @{ name='signature_invalid'; override=@{ ArtifactSignatureState='invalid' }; expectedRollback=$true },
+        @{ name='package_missing'; override=@{ PackagePublished=$false }; expectedRollback=$true },
+        @{ name='root_missing'; override=@{ RootCount=0; RootHealthy=$false; RootBoundToPublishedInf=$false }; expectedRollback=$true },
+        @{ name='root_problem'; override=@{ RootHealthy=$false }; expectedRollback=$true },
+        @{ name='wrong_root_driver'; override=@{ RootBoundToPublishedInf=$false }; expectedRollback=$true },
+        @{ name='access_regression'; override=@{ AccessRegression=$true }; expectedRollback=$true }
+    )
+    $results = foreach ($case in $cases) {
+        $evidence = @{}
+        foreach ($key in $healthy.Keys) { $evidence[$key] = $healthy[$key] }
+        foreach ($key in $case.override.Keys) { $evidence[$key] = $case.override[$key] }
+        if ($case.injectOptionalException) {
+            try {
+                throw 'injected optional validator failure'
+            } catch {
+                $evidence.OptionalValidationFailed = $true
+            }
+        }
+        $decision = Get-InstallDisposition @evidence
+        $passed = [bool]($decision.rollback -eq $case.expectedRollback)
+        if (-not $passed) { throw "Retention policy test failed: $($case.name)" }
+        [pscustomobject]@{ name=$case.name; passed=$passed; rollback=[bool]$decision.rollback; reason=$decision.reason }
+    }
+    [pscustomobject]@{ policy_self_test_passed=$true; case_count=@($results).Count; cases=@($results) }
+}
+
+if ($PolicySelfTest) {
+    Invoke-PolicyFailureInjectionTests | ConvertTo-Json -Depth 6 -Compress
+    exit 0
+}
 
 function Get-HardwareIds([object]$Device) {
     try {
@@ -96,6 +199,21 @@ function Get-CurrentState {
     }
 }
 
+function Test-ExistingAccessRegression([object]$BeforeState) {
+    $currentServices = @(Get-Service SunshineService,Tailscale -ErrorAction Stop)
+    foreach ($beforeService in @($BeforeState.services)) {
+        if ([string]$beforeService.Status -ne 'Running') { continue }
+        $current = @($currentServices | Where-Object Name -eq $beforeService.Name)
+        if ($current.Count -ne 1 -or [string]$current[0].Status -ne 'Running') { return $true }
+    }
+    $beforeAgentRunning = @($BeforeState.desktop_agent_task | Where-Object { [string]$_.State -eq 'Running' }).Count -gt 0
+    if ($beforeAgentRunning) {
+        $currentAgent = Get-ScheduledTask -TaskPath '\Butters\' -TaskName 'DesktopAgent' -ErrorAction Stop
+        if ([string]$currentAgent.State -ne 'Running') { return $true }
+    }
+    return $false
+}
+
 function Write-Result([object]$Value) {
     $json = $Value | ConvertTo-Json -Depth 10
     $temporary = $resultPath + '.tmp'
@@ -153,15 +271,14 @@ $backupRoot = Join-Path 'C:\ProgramData\Butters\backups' ((Get-Date -Format 'yyy
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 $publisherWasPresent = [bool](Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object Thumbprint -eq $expectedThumbprint)
 $rootWasPresent = [bool](Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $expectedThumbprint)
-$mutationStarted = $false
+$preinstallChangesStarted = $false
+$driverInstallStarted = $false
 $publishedInf = $null
+$installExitCode = $null
+$installOutput = $null
+$installStarted = $null
 
-function Invoke-Rollback {
-    try { & $nefcon --remove-device-node --hardware-id 'ROOT\MttVDD' --class-guid $classGuid | Out-Null } catch {}
-    $installedInf = Find-MttPublishedInf
-    if ($installedInf) {
-        try { & pnputil.exe /delete-driver $installedInf /uninstall | Out-Null } catch {}
-    }
+function Restore-PreinstallChanges {
     if (-not $publisherWasPresent) {
         Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object Thumbprint -eq $expectedThumbprint | Remove-Item -Force -ErrorAction SilentlyContinue
     }
@@ -169,8 +286,18 @@ function Invoke-Rollback {
     if (Test-Path -LiteralPath $savedVdd) { Copy-Item -LiteralPath $savedVdd -Destination $vddConfig -Force }
 }
 
+function Invoke-ConfirmedUnsafeRollback {
+    try { & $nefcon --remove-device-node --hardware-id 'ROOT\MttVDD' --class-guid $classGuid | Out-Null } catch {}
+    $installedInf = Find-MttPublishedInf
+    if ($installedInf) {
+        try { & pnputil.exe /delete-driver $installedInf /uninstall | Out-Null } catch {}
+    }
+    Restore-PreinstallChanges
+}
+
 try {
-    Get-CurrentState | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $backupRoot 'state-before.json') -Encoding UTF8
+    $stateBefore = Get-CurrentState
+    $stateBefore | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $backupRoot 'state-before.json') -Encoding UTF8
     Copy-Item -LiteralPath $vddConfig -Destination (Join-Path $backupRoot 'vdd_settings.xml.before')
     if (Test-Path -LiteralPath $sunshineConfigDirectory) {
         Copy-Item -LiteralPath $sunshineConfigDirectory -Destination (Join-Path $backupRoot 'sunshine-config-before') -Recurse
@@ -196,6 +323,7 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
 "@
     $rollbackText | Set-Content -LiteralPath (Join-Path $backupRoot 'ROLLBACK.txt') -Encoding UTF8
 
+    $preinstallChangesStarted = $true
     [xml]$settings = Get-Content -LiteralPath $vddConfig -Raw
     $settings.vdd_settings.monitors.count = '1'
     $settings.vdd_settings.gpu.friendlyname = 'NVIDIA GeForce RTX 5080'
@@ -242,7 +370,7 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
     $setupLog = 'C:\Windows\INF\setupapi.dev.log'
     $setupLineCount = @(Get-Content -LiteralPath $setupLog -ErrorAction SilentlyContinue).Count
     $installStarted = Get-Date
-    $mutationStarted = $true
+    $driverInstallStarted = $true
     $installOutput = (& $nefcon install $inf 'Root\MttVDD' --no-duplicates 2>&1 | Out-String)
     $installExitCode = $LASTEXITCODE
 
@@ -271,38 +399,85 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
     )
     $rootInstanceIds = @($roots | Select-Object -ExpandProperty InstanceId)
     $rootInfPaths = @($roots | ForEach-Object { [string](Get-DevicePropertyValue $_ 'DEVPKEY_Device_DriverInfPath') })
-    $signedDriver = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction SilentlyContinue | Where-Object {
-        ($publishedInf -and [string]$_.InfName -ieq $publishedInf) -or
-        ($rootInstanceIds -contains [string]$_.DeviceID)
-    } | Select-Object DeviceName,DeviceID,DeviceClass,Manufacturer,DriverProviderName,DriverVersion,DriverDate,InfName,IsSigned,Signer)
-
-    $genuineFailure = $false
-    $failureReason = $null
-    if ($installExitCode -ne 0 -and -not $rebootRequested) {
-        $genuineFailure = $true; $failureReason = "nefcon exited $installExitCode without a reboot-required result"
-    } elseif (-not $publishedInf) {
-        $genuineFailure = $true; $failureReason = 'MttVDD package was not published'
-    } elseif ($roots.Count -ne 1) {
-        $genuineFailure = $true; $failureReason = "Expected one Root\\MttVDD device, found $($roots.Count)"
-    } elseif (-not $rootHealthy) {
-        $genuineFailure = $true; $failureReason = "Root\\MttVDD is not healthy: status=$($roots[0].Status), problem=$($roots[0].Problem)"
-    } elseif ($rootInfPaths.Count -lt 1 -or -not @($rootInfPaths | Where-Object { $_ -ieq $publishedInf }).Count) {
-        $genuineFailure = $true; $failureReason = "Root\\MttVDD is not bound to the published INF $publishedInf"
-    } elseif (-not $packageSignatureValidated) {
-        $genuineFailure = $true; $failureReason = 'SetupAPI did not record complete signed-catalog validation and package publication success'
-    } elseif ($children.Count -lt 1 -and -not $rebootRequested) {
-        $genuineFailure = $true; $failureReason = 'MTT1337 child monitor did not enumerate and Windows did not request a reboot'
-    } elseif ($children.Count -ge 1 -and -not $childHealthy -and -not $rebootRequested) {
-        $genuineFailure = $true; $failureReason = 'MTT1337 child monitor enumerated with a non-zero problem state'
+    $optionalValidationErrors = @()
+    $signedDriver = @()
+    try {
+        $signedDriver = @(Get-CimInstance Win32_PnPSignedDriver -ErrorAction Stop | Where-Object {
+            ($publishedInf -and [string]$_.InfName -ieq $publishedInf) -or
+            ($rootInstanceIds -contains [string]$_.DeviceID)
+        } | Select-Object DeviceName,DeviceID,DeviceClass,Manufacturer,DriverProviderName,DriverVersion,DriverDate,InfName,IsSigned,Signer)
+    } catch {
+        $optionalValidationErrors += "Win32_PnPSignedDriver: $($_.Exception.Message)"
+    }
+    $cimSignatureState = if ($signedDriver.Count -lt 1) {
+        'missing'
+    } elseif (@($signedDriver | Where-Object { $_.IsSigned -eq $true }).Count -ge 1) {
+        'true'
+    } else {
+        'false'
     }
 
-    if ($genuineFailure) {
-        Invoke-Rollback
+    $artifactSignatureState = 'valid'
+    $postArchiveHash = $null
+    $postCatalogHash = $null
+    $postSignature = $null
+    try {
+        $postArchiveHash = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash
+        $postCatalogHash = (Get-FileHash -LiteralPath $catalog -Algorithm SHA256).Hash
+        $postSignature = Get-AuthenticodeSignature -LiteralPath $catalog
+        $postSignerMatches = [bool](
+            $postSignature.SignerCertificate -and
+            $postSignature.SignerCertificate.Thumbprint -eq $expectedThumbprint
+        )
+        $postSignatureAcceptable = [bool]($postSignature.Status -in @('Valid', 'NotTrusted'))
+        $publisherPresentAfter = [bool](Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object Thumbprint -eq $expectedThumbprint)
+        $rootPresentAfter = [bool](Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $expectedThumbprint)
+        if (
+            $postArchiveHash -ne $expectedArchiveHash -or
+            $postCatalogHash -ne $expectedCatalogHash -or
+            -not $postSignerMatches -or
+            -not $postSignatureAcceptable -or
+            -not $publisherPresentAfter -or
+            $rootPresentAfter -ne $rootWasPresent
+        ) {
+            $artifactSignatureState = 'invalid'
+        }
+    } catch {
+        $artifactSignatureState = 'unknown'
+        $optionalValidationErrors += "Post-install artifact validation: $($_.Exception.Message)"
+    }
+
+    $rootBoundToPublishedInf = [bool](
+        $publishedInf -and
+        $rootInfPaths.Count -ge 1 -and
+        @($rootInfPaths | Where-Object { $_ -ieq $publishedInf }).Count -ge 1
+    )
+    $accessRegression = $false
+    try {
+        $accessRegression = Test-ExistingAccessRegression $stateBefore
+    } catch {
+        $optionalValidationErrors += "Access regression diagnostic: $($_.Exception.Message)"
+    }
+    $disposition = Get-InstallDisposition `
+        -ArtifactSignatureState $artifactSignatureState `
+        -PackagePublished ([bool]$publishedInf) `
+        -RootCount $roots.Count `
+        -RootHealthy $rootHealthy `
+        -RootBoundToPublishedInf $rootBoundToPublishedInf `
+        -AccessRegression $accessRegression `
+        -CimSignatureState $cimSignatureState `
+        -RebootRequested $rebootRequested `
+        -ChildHealthy $childHealthy `
+        -VirtualMonitorActive ($activeChildren.Count -ge 1) `
+        -OptionalValidationFailed ($optionalValidationErrors.Count -ge 1)
+
+    if ($disposition.rollback) {
+        Invoke-ConfirmedUnsafeRollback
         $failure = [pscustomobject][ordered]@{
             installed = $false
             rolled_back = $true
             genuine_failure = $true
-            error = $failureReason
+            error = $disposition.reason
             backup_directory = $backupRoot
             install_exit_code = $installExitCode
             reboot_requested = $rebootRequested
@@ -310,17 +485,37 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
             child_monitors = @($children | Select-Object FriendlyName,InstanceId,Status,Problem)
             virtual_monitor_active = $activeChildren.Count -ge 1
             active_virtual_monitors = $activeChildren
+            artifact_signature_state = $artifactSignatureState
+            package_signature_validated = $packageSignatureValidated
+            optional_validation_errors = $optionalValidationErrors
         }
         $failure | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupRoot 'install-result.json') -Encoding UTF8
         Write-Result $failure
         exit 2
     }
 
-    $outcome = if ($rootHealthy -and $childHealthy -and $activeChildren.Count -ge 1) { 'pnp_and_display_active' } else { 'pnp_healthy_reboot_or_activation_pending' }
+    $phase1Complete = [bool](
+        $artifactSignatureState -eq 'valid' -and
+        $packageSignatureValidated -and
+        $publishedInf -and
+        $rootHealthy -and
+        $rootBoundToPublishedInf -and
+        $childHealthy
+    )
+    $outcome = if ($phase1Complete -and $activeChildren.Count -ge 1) {
+        'phase1_complete_display_active'
+    } elseif ($phase1Complete) {
+        'phase1_complete_activation_pending'
+    } else {
+        'installation_retained_diagnostics_incomplete'
+    }
     $result = [pscustomobject][ordered]@{
         installed = $true
         rolled_back = $false
+        retained = $true
+        phase1_complete = $phase1Complete
         outcome = $outcome
+        retention_reason = $disposition.reason
         backup_directory = $backupRoot
         install_started_utc = $installStarted.ToUniversalTime().ToString('o')
         install_exit_code = $installExitCode
@@ -339,13 +534,18 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
         signed_driver = $signedDriver
         signed_driver_record_available = $signedDriver.Count -ge 1
         signed_driver_metadata_only = $true
+        cim_signature_state = $cimSignatureState
         package_signature_validated = $packageSignatureValidated
+        artifact_signature_state = $artifactSignatureState
         root_driver_inf_paths = $rootInfPaths
-        archive_sha256 = $archiveHash
-        catalog_sha256 = $catalogHash
-        signer_thumbprint = $signature.SignerCertificate.Thumbprint
+        root_bound_to_published_inf = $rootBoundToPublishedInf
+        archive_sha256 = $postArchiveHash
+        catalog_sha256 = $postCatalogHash
+        signer_thumbprint = if ($postSignature -and $postSignature.SignerCertificate) { $postSignature.SignerCertificate.Thumbprint } else { $null }
         trusted_publisher_present = [bool](Get-ChildItem Cert:\LocalMachine\TrustedPublisher | Where-Object Thumbprint -eq $expectedThumbprint)
         trusted_root_present = [bool](Get-ChildItem Cert:\LocalMachine\Root | Where-Object Thumbprint -eq $expectedThumbprint)
+        existing_access_regression = $accessRegression
+        optional_validation_errors = $optionalValidationErrors
         vdd_config_sha256 = (Get-FileHash -LiteralPath $vddConfig -Algorithm SHA256).Hash
     }
     Get-CurrentState | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath (Join-Path $backupRoot 'state-after-install.json') -Encoding UTF8
@@ -353,24 +553,61 @@ Run from elevated PowerShell. Do not import the graphics registry snapshots unle
     Write-Result $result
 } catch {
     $message = $_.Exception.Message
-    $retainInstalledDriver = $false
-    if ($mutationStarted) {
-        $catchPublishedInf = Find-MttPublishedInf
-        $catchRoots = @(Get-MttRootDevices)
-        $retainInstalledDriver = [bool](
-            $catchPublishedInf -and
-            $catchRoots.Count -eq 1 -and
-            [string]$catchRoots[0].Status -eq 'OK' -and
-            [int]$catchRoots[0].Problem -eq 0
-        )
-        if (-not $retainInstalledDriver) { Invoke-Rollback }
+    $retainInstalledDriver = $driverInstallStarted
+    $rolledBack = $false
+    $catchDisposition = $null
+    $catchPublishedInf = $null
+    $catchRoots = @()
+    if (-not $driverInstallStarted) {
+        if ($preinstallChangesStarted) { Restore-PreinstallChanges }
+        $retainInstalledDriver = $false
+    } else {
+        # A validation exception is inconclusive. Retain by default unless the
+        # narrow policy can positively establish an unsafe installation.
+        try {
+            $catchPublishedInf = Find-MttPublishedInf
+            $catchRoots = @(Get-MttRootDevices)
+            $catchRootHealthy = [bool](
+                $catchRoots.Count -eq 1 -and
+                [string]$catchRoots[0].Status -eq 'OK' -and
+                [int]$catchRoots[0].Problem -eq 0
+            )
+            $catchRootInfPaths = @($catchRoots | ForEach-Object { [string](Get-DevicePropertyValue $_ 'DEVPKEY_Device_DriverInfPath') })
+            $catchRootBound = [bool](
+                $catchPublishedInf -and
+                @($catchRootInfPaths | Where-Object { $_ -ieq $catchPublishedInf }).Count -ge 1
+            )
+            $catchAccessRegression = $false
+            try { $catchAccessRegression = Test-ExistingAccessRegression $stateBefore } catch {}
+            $catchDisposition = Get-InstallDisposition `
+                -ArtifactSignatureState 'unknown' `
+                -PackagePublished ([bool]$catchPublishedInf) `
+                -RootCount $catchRoots.Count `
+                -RootHealthy $catchRootHealthy `
+                -RootBoundToPublishedInf $catchRootBound `
+                -AccessRegression $catchAccessRegression `
+                -OptionalValidationFailed $true
+            if ($catchDisposition.rollback) {
+                Invoke-ConfirmedUnsafeRollback
+                $retainInstalledDriver = $false
+                $rolledBack = $true
+            }
+        } catch {
+            $message = "$message; retention audit was inconclusive: $($_.Exception.Message)"
+            $retainInstalledDriver = $true
+        }
     }
     $failure = [pscustomobject][ordered]@{
         installed = $retainInstalledDriver
-        rolled_back = [bool]($mutationStarted -and -not $retainInstalledDriver)
-        genuine_failure = [bool]($mutationStarted -and -not $retainInstalledDriver)
+        retained = $retainInstalledDriver
+        rolled_back = $rolledBack
+        genuine_failure = $rolledBack
+        outcome = if ($retainInstalledDriver) { 'validation_exception_installation_retained' } elseif ($rolledBack) { 'confirmed_unsafe_installation_rolled_back' } else { 'preinstall_failure_restored' }
+        retention_reason = if ($catchDisposition) { $catchDisposition.reason } else { 'validation_inconclusive_or_install_not_started' }
         error = $message
         backup_directory = $backupRoot
+        published_inf = $catchPublishedInf
+        root_devices = @($catchRoots | Select-Object FriendlyName,InstanceId,Status,Problem)
     }
     $failure | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $backupRoot 'install-result.json') -Encoding UTF8
     Write-Result $failure
