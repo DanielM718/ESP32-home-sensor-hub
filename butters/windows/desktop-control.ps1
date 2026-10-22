@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineStatus', 'SunshineEnsure', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
+    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineStatus', 'SunshineEnsure', 'SunshineProbeInteractive', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
     [string]$Operation
 )
 
@@ -15,10 +15,50 @@ $sunshineServiceName = 'SunshineService'
 $sunshineRoot = 'C:\Program Files\Sunshine'
 $sunshineExecutable = Join-Path $sunshineRoot 'sunshine.exe'
 $sunshineDxgiInfo = Join-Path $sunshineRoot 'tools\dxgi-info.exe'
+$sunshineProbeTask = '\Butters\SunshineCaptureProbe'
+$sunshineProbeResult = 'C:\ProgramData\Butters\sunshine-capture-probe.json'
 $lockTask = '\Butters\LockDesktop'
 $sleepTask = '\Butters\SleepDesktop'
 $parsecDeadlineSeconds = 20
 $sunshineDeadlineSeconds = 20
+
+function Invoke-SunshineCaptureProbe {
+    $started = (Get-Date).ToUniversalTime()
+    & schtasks.exe /Run /TN $sunshineProbeTask | Out-Null
+    if ($LASTEXITCODE -ne 0) { return $false }
+    $deadline = (Get-Date).AddSeconds(8)
+    do {
+        if (Test-Path -LiteralPath $sunshineProbeResult) {
+            try {
+                $probe = Get-Content -LiteralPath $sunshineProbeResult -Raw | ConvertFrom-Json
+                $captured = [datetime]::Parse(
+                    [string]$probe.timestamp_utc,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind
+                ).ToUniversalTime()
+                if ($captured -ge $started.AddSeconds(-1)) {
+                    return [bool]$probe.capture_ready
+                }
+            } catch {}
+        }
+        Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $deadline)
+    return $false
+}
+
+function Write-SunshineCaptureProbe {
+    $dxgiOutput = ''
+    try { $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String) } catch {}
+    $captureReady = [bool]($dxgiOutput -match '(?ms)Output Name\s*:\s*[^\r\n]+.*?AttachedToDesktop\s*:\s*yes')
+    $result = [pscustomobject][ordered]@{
+        timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
+        capture_ready = $captureReady
+    }
+    $temporary = $sunshineProbeResult + '.tmp'
+    $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $sunshineProbeResult -Force
+    $result | ConvertTo-Json -Compress
+}
 
 function Test-ParsecAuthenticationError([object[]]$HostProcesses) {
     if (-not (Test-Path $parsecLog) -or $HostProcesses.Count -eq 0) { return $false }
@@ -82,15 +122,10 @@ function Get-SunshineState {
         $_.ExecutablePath -eq $sunshineExecutable
     })
     $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)
-    $captureReady = $false
-    if (Test-Path $sunshineDxgiInfo) {
-        try {
-            $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String)
-            $captureReady = [bool]($dxgiOutput -match '(?m)^\s*Output Name\s*:')
-        } catch {
-            $captureReady = $false
-        }
-    }
+    # DXGI enumeration is session-scoped. The SSH process cannot see outputs
+    # that Sunshine captures in the logged-on console session, so execute this
+    # fixed diagnostic through an InteractiveToken scheduled task instead.
+    $captureReady = [bool]((Test-Path $sunshineDxgiInfo) -and (Invoke-SunshineCaptureProbe))
     $installed = [bool]((Test-Path $sunshineExecutable) -and $service)
     $serviceRunning = [bool]($service -and $service.State -eq 'Running')
     $webListener = $listeners -contains 47990
@@ -211,6 +246,9 @@ switch ($Operation) {
             already_running = [bool]$before.plausibly_ready
             elapsed_ms = [int]((Get-Date) - $started).TotalMilliseconds
         } + $after)
+    }
+    'SunshineProbeInteractive' {
+        Write-SunshineCaptureProbe
     }
     'Lock' {
         & schtasks.exe /Run /TN $lockTask | Out-Null

@@ -7,6 +7,7 @@ $installRoot = 'C:\ProgramData\Butters'
 $target = Join-Path $installRoot 'desktop-control.ps1'
 $backupRoot = Join-Path $installRoot ('backups\' + (Get-Date -Format 'yyyyMMddTHHmmss') + '-desktop-control')
 $taskPath = '\Butters\'
+$taskFolderPath = '\Butters'
 
 if (-not (Test-Path $source)) { throw 'desktop-control.ps1 is missing beside the installer' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -22,10 +23,10 @@ if (Test-Path $target) { Copy-Item $target (Join-Path $backupRoot 'desktop-contr
 $schedule = New-Object -ComObject 'Schedule.Service'
 $schedule.Connect()
 $rootFolder = $schedule.GetFolder('\')
-try { $null = $schedule.GetFolder($taskPath) }
+try { $null = $schedule.GetFolder($taskFolderPath) }
 catch { $null = $rootFolder.CreateFolder('Butters') }
 
-foreach ($taskName in @('LockDesktop', 'SleepDesktop')) {
+foreach ($taskName in @('LockDesktop', 'SleepDesktop', 'SunshineCaptureProbe')) {
     $existing = Get-ScheduledTask -TaskPath $taskPath -TaskName $taskName -ErrorAction SilentlyContinue
     if ($existing) {
         Export-ScheduledTask -TaskPath $taskPath -TaskName $taskName |
@@ -52,6 +53,11 @@ $sleepAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowe
 $sleepPrincipal = New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
 Register-ScheduledTask -TaskPath $taskPath -TaskName 'SleepDesktop' -Action $sleepAction -Principal $sleepPrincipal -Settings $settings -Force | Out-Null
 
+$probeArgs = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ProgramData\Butters\desktop-control.ps1 -Operation SunshineProbeInteractive'
+$probeAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Argument $probeArgs
+$probePrincipal = New-ScheduledTaskPrincipal -UserId 'DESKTOP-G4CFVL1\Daniel' -LogonType Interactive -RunLevel Highest
+Register-ScheduledTask -TaskPath $taskPath -TaskName 'SunshineCaptureProbe' -Action $probeAction -Principal $probePrincipal -Settings $settings -Force | Out-Null
+
 # Parsec is deliberately on demand. Installing the fixed helper must not make
 # the service a boot/login startup mechanism or start it as an installer side
 # effect. ParsecEnsure and ParsecRestart start this one fixed service without
@@ -63,6 +69,7 @@ Set-Service -Name 'Parsec' -StartupType Manual
     backup_directory = $backupRoot
     lock_task = $taskPath + 'LockDesktop'
     sleep_task = $taskPath + 'SleepDesktop'
+    sunshine_capture_probe_task = $taskPath + 'SunshineCaptureProbe'
     parsec_previous_start_mode = $parsec.StartMode
     parsec_final_start_mode = (Get-CimInstance Win32_Service -Filter "Name='Parsec'").StartMode
     script_sha256 = (Get-FileHash -Algorithm SHA256 $target).Hash

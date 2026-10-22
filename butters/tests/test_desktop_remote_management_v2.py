@@ -624,6 +624,12 @@ def test_windows_helper_uses_s3_not_hibernate_and_fixed_tasks_only() -> None:
     assert "shutdown.exe /h" not in helper
     assert "\\Butters\\LockDesktop" in helper
     assert "\\Butters\\SleepDesktop" in helper
+    assert "\\Butters\\SunshineCaptureProbe" in helper
+    assert "-Operation SunshineProbeInteractive" in installer
+    assert "-LogonType Interactive" in installer
+    assert "$taskFolderPath = '\\Butters'" in installer
+    assert "GetFolder($taskFolderPath)" in installer
+    assert "AttachedToDesktop\\s*:\\s*yes" in helper
     assert "ValidateSet('ParsecStatus'" in helper
     assert "Set-Service -Name 'Parsec' -StartupType Manual" in installer
     assert "StartupType Automatic" not in installer
