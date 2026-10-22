@@ -168,6 +168,45 @@ def test_action_requires_exact_direct_user_authorization() -> None:
     assert desktop.calls == 1
 
 
+def test_failed_stream_preparation_fails_the_skill_instead_of_completing() -> None:
+    assistant, desktop = _assistant()
+    desktop.start_remote_session = lambda _machine, cancel_event=None: {
+        "machine": "desktop",
+        "verification_complete": False,
+        "failed_stage": "stream_backend",
+        "error": "no streaming backend became ready",
+        "parsec_ready": False,
+        "sunshine_ready": False,
+    }
+    digest = "e" * 64
+
+    execution = assistant.skills.execute(
+        "start_remote_desktop_session",
+        {"machine": "desktop"},
+        action_authorization=ActionAuthorization(
+            frozenset({"start_remote_desktop_session"}),
+            "direct_user_request",
+            True,
+        ),
+        authentication_context=AuthenticationContext(
+            AuthenticationLevel.FRESH,
+            "session",
+            "identity",
+            time.time() + 60,
+            "webauthn",
+            digest,
+        ),
+        session_id="session",
+        identity="identity",
+        action_digest=digest,
+    )
+
+    assert not execution.ok
+    assert execution.failure is not None
+    assert execution.failure.code == "desktop_stream_prepare_failed"
+    assert "stream_backend" in execution.failure.message
+
+
 def test_cloud_text_cannot_inject_host_script_command_or_extra_fields() -> None:
     assistant, desktop = _assistant()
     registry = assistant.skills
