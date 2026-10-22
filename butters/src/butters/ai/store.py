@@ -23,6 +23,7 @@ from butters.ai.model import (
     clear_unsupported,
     default_chat,
     default_speech,
+    migrate_legacy_speech,
     validate_chat,
     validate_speech,
 )
@@ -90,7 +91,16 @@ class AISettingsStore:
         try:
             return validate_speech(registry, stored)
         except CapabilityError:
-            return default
+            try:
+                migrated = migrate_legacy_speech(registry, stored)
+            except CapabilityError:
+                return default
+            if migrated is None:
+                return default
+            # Make the compatibility translation durable. A subsequent boot
+            # reads exactly what Admin shows and what synthesis will use.
+            self.save_speech(migrated)
+            return migrated
 
     def save_speech(self, settings: SpeechSettings) -> None:
         self._write(SPEECH, settings.provider, settings.as_dict())

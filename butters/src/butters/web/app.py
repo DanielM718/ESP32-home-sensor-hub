@@ -43,7 +43,7 @@ from butters.web.portal import PortalError, PortalService
 from butters.web.security import AuthPolicy, RateLimiter, SecurityError
 from butters.web.service import BetaAssistantService, RouteOverride
 from butters.web.sessions import BrowserSession, SessionError
-from butters.web.speech import SpeechProviderError, VoicePreset
+from butters.web.speech import SpeechProviderError, VoicePreset, validate_preset
 from butters.web.stt_pool import STTEngineLease, STTEnginePool, STTEnginePoolError
 from butters.web.trace import TraceStage
 
@@ -1640,6 +1640,7 @@ def create_app(
                 float(payload.get("speed", 1.0)),
                 str(payload.get("instructions", "")),
             )
+            validate_preset(preset, registry=runtime.ai_registry)
             saved = runtime.voice_presets.save(
                 preset, make_default=payload.get("make_default") is True
             )
@@ -3150,7 +3151,22 @@ def _exception_response(
         # that does not exist, so an identifier cannot be probed by its code.
         return _error(exc.code, str(exc), exc.status_code)
     if isinstance(exc, SpeechProviderError):
-        return _error(exc.code, str(exc), 503 if "unavailable" in exc.code else 400)
+        status = (
+            429
+            if exc.code == "rate_limited"
+            else 503
+            if exc.code
+            in {
+                "timeout",
+                "unavailable",
+                "model_unavailable",
+                "upstream_error",
+                "upstream_status",
+                "upstream_response_failed",
+            }
+            else 400
+        )
+        return _error(exc.code, str(exc), status)
     if isinstance(exc, CapabilityError):
         # A rejected provider/model/parameter combination is a client error and
         # keeps its specific code, so the browser can point at the right field.

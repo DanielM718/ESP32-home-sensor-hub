@@ -53,25 +53,26 @@ that.
 
 | Provider | Chat models | Speech models |
 | --- | --- | --- |
-| `openai` | `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` | `gpt-4o-mini-tts`, `tts-1`, `tts-1-hd` |
+| `openai` | `gpt-5.6-luna`, `gpt-5.6-terra`, `gpt-5.6-sol` | `gpt-realtime-2.1-mini` |
 | `local` | *(none — the local LLM is a router, not a chat model)* | `local-piper` |
 
 ### Voices per speech model
 
 | Model | Voices | Style |
 | --- | --- | --- |
-| `gpt-4o-mini-tts` | alloy, ash, ballad, cedar, coral, echo, fable, marin, nova, onyx, sage, shimmer, verse (13) | yes |
-| `tts-1`, `tts-1-hd` | alloy, ash, coral, echo, fable, nova, onyx, sage, shimmer (9) | no |
+| `gpt-realtime-2.1-mini` | alloy, ash, ballad, cedar, coral, echo, marin, sage, shimmer, verse (10) | yes |
 | `local-piper` | kathleen (1) | no |
 
-The `tts-1` pair is the expressive set minus Ballad and Verse, minus the two
-newest voices, Cedar and Marin. These lists are the provider's, not Butters'
-preference: a voice omitted here is a capability the administrator loses,
-because the server then refuses it. `test_admin_ai_capabilities.py` pins both
-tuples exactly, and `test_admin_tts_runtime.py` walks the catalog the browser
-receives and asserts every listed voice in a real synthesis request.
+These lists are the provider's, not Butters' preference: a voice omitted here
+is a capability the administrator loses, because the server then refuses it.
+`test_admin_ai_capabilities.py` pins the OpenAI tuple exactly, and
+`test_admin_tts_runtime.py` walks the catalog the browser receives and asserts
+every listed voice in a real synthesis request.
 
-`gpt-4o-mini-tts` is the only speech model that consumes a speaking style.
+`gpt-realtime-2.1-mini` consumes a speaking style through session
+instructions. It does not accept the old numeric speed parameter, so Admin
+does not render a speed control for it. A neutral stored legacy value of `1.0`
+is retained for schema compatibility but is never sent upstream.
 `local-piper` declares exactly one voice, because the bundled Piper model
 directory has exactly one speaker: offering a list there would be a lie.
 
@@ -257,6 +258,13 @@ Butters Chat (`POST /api/speech`) and Preview (`POST /api/admin/voice/preview`)
 both enter at `synthesize_preview`. There is no second synthesis path, so a
 preview cannot honour a setting that a spoken chat answer would ignore. Preview
 is administrator-only, rate limited, and bounded to a short phrase.
+
+The OpenAI provider opens a bounded server-side Realtime WebSocket, configures
+audio-only 24 kHz PCM output, sends the text as one conversation item, and
+collects `response.output_audio.delta` events through `response.done`. It wraps
+the PCM in WAV before returning, so playback and HTTP callers retain their
+existing contract. Wake word, microphone capture, live local transcription,
+reasoning, and playback remain independent of this transport.
 
 `test_admin_tts_runtime.py` proves the wiring end to end: it sets the voice in
 Admin, asks Butters Chat a question, requests the spoken answer, and asserts

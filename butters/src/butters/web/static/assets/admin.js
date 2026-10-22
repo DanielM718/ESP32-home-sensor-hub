@@ -1736,13 +1736,12 @@ async function refreshUsage() {
  *
  * Two numbers that are allowed to differ, shown side by side with the reason.
  *
- * Butters' own figure is what the admission controller reserved *before* each
- * paid call. Where a billable dimension is not observable — `POST
- * /v1/audio/speech` returns audio and no usage object — that reservation is a
- * deliberate ceiling. OpenAI's figure is what was actually billed, read after
- * the fact. Their difference is a reconciliation difference. This file never
- * calls it a saving, and never lets provider reporting overwrite the local
- * total, because the local total is the evidence of what was reserved.
+ * Before each paid call, Butters reserves a conservative ceiling. Successful
+ * Realtime speech calls replace that ceiling with the token cost reported in
+ * `response.done`; failures retain the preflight ceiling. OpenAI's aggregate
+ * figure is what was actually billed, read after the fact. Their difference
+ * is a reconciliation difference. This file never calls it a saving, and
+ * never lets provider reporting overwrite the local audit trail.
  */
 
 const RECONCILIATION_WINDOWS = [

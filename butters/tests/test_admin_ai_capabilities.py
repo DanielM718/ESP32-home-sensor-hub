@@ -59,7 +59,7 @@ def test_chat_selector_excludes_speech_and_non_chat_endpoints(registry) -> None:
 
     assert not chat_models & speech_models
     assert not any("tts" in item or "embed" in item for item in chat_models)
-    assert speech_models == {"gpt-4o-mini-tts", "tts-1", "tts-1-hd"}
+    assert speech_models == {"gpt-realtime-2.1-mini"}
 
 
 def test_local_provider_offers_exactly_the_one_voice_it_can_produce(registry) -> None:
@@ -77,98 +77,65 @@ def test_local_provider_offers_exactly_the_one_voice_it_can_produce(registry) ->
 # harmless shortening: it removes a voice the administrator could otherwise
 # select, and the server would then reject it. A silent drift in either
 # direction fails these tests.
-EXPRESSIVE_VOICES = (
+REALTIME_VOICES = (
     "alloy",
     "ash",
     "ballad",
     "cedar",
     "coral",
     "echo",
-    "fable",
     "marin",
-    "nova",
-    "onyx",
     "sage",
     "shimmer",
     "verse",
 )
-CLASSIC_VOICES = (
-    "alloy",
-    "ash",
-    "coral",
-    "echo",
-    "fable",
-    "nova",
-    "onyx",
-    "sage",
-    "shimmer",
-)
 
 
-def test_expressive_model_exposes_the_full_current_voice_set(registry) -> None:
-    model = registry.speech_model("openai", "gpt-4o-mini-tts")
+def test_realtime_model_exposes_the_full_current_voice_set(registry) -> None:
+    model = registry.speech_model("openai", "gpt-realtime-2.1-mini")
 
-    assert model.voice_ids() == EXPRESSIVE_VOICES
-    assert len(model.voice_ids()) == 13
+    assert model.voice_ids() == REALTIME_VOICES
+    assert len(model.voice_ids()) == 10
     assert model.supports_instructions is True
+    assert model.supports_speed is False
 
 
-@pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd"))
-def test_tts1_pair_exposes_the_documented_nine_voices(registry, model_id: str) -> None:
-    model = registry.speech_model("openai", model_id)
-
-    assert model.voice_ids() == CLASSIC_VOICES
-    assert len(model.voice_ids()) == 9
-    assert model.supports_instructions is False
-
-
-def test_the_tts1_set_is_exactly_the_expressive_set_minus_four(registry) -> None:
-    """Ballad and Verse, plus the two newest voices, are expressive-only."""
-
-    expressive = set(registry.speech_model("openai", "gpt-4o-mini-tts").voice_ids())
-    classic = set(registry.speech_model("openai", "tts-1").voice_ids())
-
-    assert classic < expressive
-    assert expressive - classic == {"ballad", "verse", "cedar", "marin"}
-
-
-@pytest.mark.parametrize(
-    ("model_id", "voices"),
-    (
-        ("gpt-4o-mini-tts", EXPRESSIVE_VOICES),
-        ("tts-1", CLASSIC_VOICES),
-        ("tts-1-hd", CLASSIC_VOICES),
-    ),
-)
 def test_every_catalogued_voice_validates_for_its_own_model(
-    registry, model_id: str, voices: tuple[str, ...]
+    registry,
 ) -> None:
-    for voice in voices:
+    for voice in REALTIME_VOICES:
         accepted = validate_speech(
-            registry, {"provider": "openai", "model": model_id, "voice": voice}
+            registry,
+            {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": voice,
+            },
         )
         assert accepted.voice == voice
 
 
-@pytest.mark.parametrize("voice", ("ballad", "verse", "cedar", "marin"))
-@pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd"))
-def test_an_expressive_only_voice_is_refused_on_the_tts1_pair(
-    registry, model_id: str, voice: str
+@pytest.mark.parametrize("model_id", ("tts-1", "tts-1-hd", "gpt-4o-mini-tts"))
+def test_retired_models_have_a_specific_validation_error(
+    registry, model_id: str
 ) -> None:
     with pytest.raises(CapabilityError) as denied:
         validate_speech(
-            registry, {"provider": "openai", "model": model_id, "voice": voice}
+            registry, {"provider": "openai", "model": model_id, "voice": "alloy"}
         )
-    assert denied.value.code == "invalid_voice"
+    assert denied.value.code == "model_retired"
 
 
-def test_the_local_voice_is_refused_on_every_cloud_model(registry) -> None:
-    for model_id in ("gpt-4o-mini-tts", "tts-1", "tts-1-hd"):
-        with pytest.raises(CapabilityError):
-            validate_speech(
-                registry,
-                {"provider": "openai", "model": model_id, "voice": "kathleen"},
-            )
+def test_the_local_voice_is_refused_on_the_cloud_model(registry) -> None:
+    with pytest.raises(CapabilityError):
+        validate_speech(
+            registry,
+            {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": "kathleen",
+            },
+        )
 
 
 def test_the_catalog_the_browser_receives_carries_the_same_voice_lists(registry) -> None:
@@ -184,9 +151,7 @@ def test_the_catalog_the_browser_receives_carries_the_same_voice_lists(registry)
         for model in speech["speech_models"]
     }
 
-    assert listed["gpt-4o-mini-tts"] == EXPRESSIVE_VOICES
-    assert listed["tts-1"] == CLASSIC_VOICES
-    assert listed["tts-1-hd"] == CLASSIC_VOICES
+    assert listed == {"gpt-realtime-2.1-mini": REALTIME_VOICES}
     # Every voice carries a display label, so the page never renders a bare ID.
     for model in speech["speech_models"]:
         assert all(voice["label"] for voice in model["voices"])
@@ -195,31 +160,21 @@ def test_the_catalog_the_browser_receives_carries_the_same_voice_lists(registry)
 def test_serialized_catalog_carries_per_model_support_flags(registry) -> None:
     catalog = registry.as_dict()
     openai = next(item for item in catalog["chat_providers"] if item["id"] == "openai")
-    expressive = next(
+    realtime = next(
         item
         for item in next(
             provider
             for provider in catalog["speech_providers"]
             if provider["id"] == "openai"
         )["speech_models"]
-        if item["id"] == "gpt-4o-mini-tts"
-    )
-    classic = next(
-        item
-        for item in next(
-            provider
-            for provider in catalog["speech_providers"]
-            if provider["id"] == "openai"
-        )["speech_models"]
-        if item["id"] == "tts-1"
+        if item["id"] == "gpt-realtime-2.1-mini"
     )
 
     assert openai["chat_models"][0]["supports"]["reasoning_effort"] is True
     assert openai["chat_models"][0]["supports"]["temperature"] is False
-    assert expressive["supports"]["instructions"] is True
-    assert classic["supports"]["instructions"] is False
-    assert "cedar" in {voice["id"] for voice in expressive["voices"]}
-    assert "cedar" not in {voice["id"] for voice in classic["voices"]}
+    assert realtime["supports"]["instructions"] is True
+    assert realtime["supports"]["speed"] is False
+    assert "cedar" in {voice["id"] for voice in realtime["voices"]}
 
 
 # --------------------------- server-side refusal ----------------------------
@@ -308,13 +263,21 @@ def test_voice_must_belong_to_the_selected_speech_model(registry) -> None:
     with pytest.raises(CapabilityError) as denied:
         validate_speech(
             registry,
-            {"provider": "openai", "model": "tts-1", "voice": "cedar"},
+            {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": "nova",
+            },
         )
     assert denied.value.code == "invalid_voice"
 
     accepted = validate_speech(
         registry,
-        {"provider": "openai", "model": "gpt-4o-mini-tts", "voice": "cedar"},
+        {
+            "provider": "openai",
+            "model": "gpt-realtime-2.1-mini",
+            "voice": "cedar",
+        },
     )
     assert accepted.voice == "cedar"
 
@@ -325,12 +288,20 @@ def test_identifiers_are_canonical_and_case_sensitive(registry) -> None:
     with pytest.raises(CapabilityError):
         validate_speech(
             registry,
-            {"provider": "OpenAI", "model": "gpt-4o-mini-tts", "voice": "cedar"},
+            {
+                "provider": "OpenAI",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": "cedar",
+            },
         )
     with pytest.raises(CapabilityError) as denied:
         validate_speech(
             registry,
-            {"provider": "openai", "model": "gpt-4o-mini-tts", "voice": "Cedar"},
+            {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": "Cedar",
+            },
         )
     assert denied.value.code == "invalid_voice"
 
@@ -349,16 +320,17 @@ def test_speed_range_is_taken_from_the_selected_model(registry) -> None:
         )
     assert denied.value.code == "invalid_speed"
 
-    accepted = validate_speech(
-        registry,
-        {
-            "provider": "openai",
-            "model": "gpt-4o-mini-tts",
-            "voice": "cedar",
-            "speed": 3.0,
-        },
-    )
-    assert accepted.speed == 3.0
+    with pytest.raises(CapabilityError) as unsupported:
+        validate_speech(
+            registry,
+            {
+                "provider": "openai",
+                "model": "gpt-realtime-2.1-mini",
+                "voice": "cedar",
+                "speed": 1.0,
+            },
+        )
+    assert unsupported.value.code == "unsupported_parameter"
 
 
 def test_instructions_are_accepted_only_by_a_model_that_consumes_them(registry) -> None:
@@ -366,25 +338,24 @@ def test_instructions_are_accepted_only_by_a_model_that_consumes_them(registry) 
         registry,
         {
             "provider": "openai",
-            "model": "gpt-4o-mini-tts",
+            "model": "gpt-realtime-2.1-mini",
             "voice": "cedar",
             "instructions": "Warm and calm.",
         },
     )
     assert accepted.instructions == "Warm and calm."
 
-    for model, provider in (("tts-1", "openai"), ("local-piper", "local")):
-        with pytest.raises(CapabilityError) as denied:
-            validate_speech(
-                registry,
-                {
-                    "provider": provider,
-                    "model": model,
-                    "voice": "alloy" if provider == "openai" else "kathleen",
-                    "instructions": "Warm and calm.",
-                },
-            )
-        assert denied.value.code == "unsupported_parameter"
+    with pytest.raises(CapabilityError) as denied:
+        validate_speech(
+            registry,
+            {
+                "provider": "local",
+                "model": "local-piper",
+                "voice": "kathleen",
+                "instructions": "Warm and calm.",
+            },
+        )
+    assert denied.value.code == "unsupported_parameter"
 
 
 def test_blank_instructions_are_treated_as_unset_everywhere(registry) -> None:
@@ -410,9 +381,8 @@ def test_switching_provider_preserves_each_profile_separately(tmp_path: Path, re
             registry,
             {
                 "provider": "openai",
-                "model": "gpt-4o-mini-tts",
+                "model": "gpt-realtime-2.1-mini",
                 "voice": "marin",
-                "speed": 1.2,
                 "instructions": "Brisk.",
             },
         )
@@ -436,10 +406,8 @@ def test_switching_provider_preserves_each_profile_separately(tmp_path: Path, re
     assert restored.voice == "marin" and restored.instructions == "Brisk."
 
 
-def test_a_stale_style_cannot_survive_into_a_model_that_ignores_it(registry) -> None:
-    """A style saved for the expressive model is refused for tts-1."""
-
-    with pytest.raises(CapabilityError):
+def test_a_retired_model_is_not_a_selectable_speech_capability(registry) -> None:
+    with pytest.raises(CapabilityError) as denied:
         validate_speech(
             registry,
             {
@@ -449,6 +417,7 @@ def test_a_stale_style_cannot_survive_into_a_model_that_ignores_it(registry) -> 
                 "instructions": "Brisk.",
             },
         )
+    assert denied.value.code == "model_retired"
 
 
 def test_store_refuses_anything_shaped_like_a_credential(tmp_path: Path) -> None:
@@ -481,5 +450,13 @@ def test_admin_javascript_hardcodes_no_model_or_voice_identifier() -> None:
     """The page consumes the catalog; it does not carry a second copy of it."""
 
     section = ADMIN_JS[ADMIN_JS.index("let aiCatalog = null;"):]
-    for identifier in ("gpt-5.6-", "gpt-4o-mini-tts", "tts-1", "cedar", "kathleen", "local-piper"):
+    for identifier in (
+        "gpt-5.6-",
+        "gpt-realtime-2.1-mini",
+        "gpt-4o-mini-tts",
+        "tts-1",
+        "cedar",
+        "kathleen",
+        "local-piper",
+    ):
         assert identifier not in section, identifier

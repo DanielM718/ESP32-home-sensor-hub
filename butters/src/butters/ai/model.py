@@ -15,6 +15,11 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, replace
 
+from butters.ai.audio_models import (
+    DEPRECATED_OPENAI_TTS_MODELS,
+    OPENAI_TTS_MODEL,
+    migrated_realtime_voice,
+)
 from butters.ai.capabilities import (
     TRUNCATION_MODES,
     VERBOSITY_LEVELS,
@@ -255,6 +260,34 @@ def validate_speech(
     return SpeechSettings(provider.id, model.id, voice_id, speed, instructions, audio_format)
 
 
+def migrate_legacy_speech(
+    registry: CapabilityRegistry, payload: dict[str, object]
+) -> SpeechSettings | None:
+    """Translate a saved retired OpenAI TTS profile into the Realtime model.
+
+    Compatible voices and style instructions survive. Numeric speed cannot:
+    Realtime doesn't expose the Speech endpoint's speed field, so retaining it
+    would make Admin claim a control the provider never receives.
+    """
+
+    if payload.get("provider") != "openai":
+        return None
+    if payload.get("model") not in DEPRECATED_OPENAI_TTS_MODELS:
+        return None
+    candidate: dict[str, object] = {
+        "provider": "openai",
+        "model": OPENAI_TTS_MODEL,
+        "voice": migrated_realtime_voice(payload.get("voice")),
+    }
+    instructions = payload.get("instructions")
+    if isinstance(instructions, str) and instructions.strip():
+        candidate["instructions"] = instructions
+    audio_format = payload.get("audio_format")
+    if isinstance(audio_format, str) and audio_format:
+        candidate["audio_format"] = audio_format
+    return validate_speech(registry, candidate)
+
+
 def default_chat(registry: CapabilityRegistry, settings_model: str) -> ChatSettings:
     """The reviewed starting point: today's hardcoded Chat model and effort."""
 
@@ -273,7 +306,7 @@ def default_speech(registry: CapabilityRegistry, provider_id: str) -> SpeechSett
         provider.id,
         model.id,
         model.voice_ids()[0],
-        1.0,
+        1.0 if model.supports_speed else None,
         None,
         None,
     )

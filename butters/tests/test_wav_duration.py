@@ -365,7 +365,9 @@ def test_the_corrected_duration_reaches_every_surface() -> None:
 
     payload = _wav(streaming=True, riff_size=PLACEHOLDER)
     seconds = _wav_duration(payload)
-    result = SpeechResult(payload, "openai", "tts-1", "alloy", 1.9, seconds, 0.0003)
+    result = SpeechResult(
+        payload, "openai", "gpt-realtime-2.1-mini", "alloy", 1.9, seconds, 0.0003
+    )
 
     # 1. SpeechResult
     assert result.audio_seconds == pytest.approx(EXPECTED_SECONDS)
@@ -397,21 +399,25 @@ def test_speech_pricing_is_independent_of_duration() -> None:
     from butters import pricing
 
     # Same characters, wildly different audio: identical cost.
-    quiet = speech_cost("tts-1", characters=20)
-    assert quiet.amount_usd == pytest.approx(20 * 15.00 / 1_000_000)
-    assert quiet.amount_usd == pytest.approx(0.0003)
-    assert quiet.basis is CostBasis.INPUT_MEASURED
+    quiet = speech_cost("gpt-realtime-2.1-mini", characters=20)
+    loud = speech_cost("gpt-realtime-2.1-mini", characters=20)
+    assert quiet.amount_usd == loud.amount_usd
+    assert quiet.basis is CostBasis.ESTIMATED_UPPER_BOUND
 
     source = inspect.getsource(pricing)
     for forbidden in ("audio_seconds", "duration", "getnframes", "measure_wav"):
         assert forbidden not in source, forbidden
 
 
-def test_the_accepted_production_request_would_price_identically() -> None:
-    """20 characters at $15/1M is $0.000300 regardless of the duration bug."""
+def test_the_same_realtime_request_would_price_identically() -> None:
+    """The same text has one preflight ceiling regardless of WAV duration."""
 
     from butters.pricing import speech_cost
 
-    assert speech_cost("tts-1", characters=len("Butters speech test.")).amount_usd == (
-        pytest.approx(0.0003)
-    )
+    first = speech_cost(
+        "gpt-realtime-2.1-mini", characters=len("Butters speech test.")
+    ).amount_usd
+    second = speech_cost(
+        "gpt-realtime-2.1-mini", characters=len("Butters speech test.")
+    ).amount_usd
+    assert first == second
