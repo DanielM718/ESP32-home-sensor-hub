@@ -85,6 +85,8 @@ class DesktopSettings:
     parsec_status_enabled: bool = False
     parsec_ensure_enabled: bool = False
     parsec_restart_enabled: bool = False
+    sunshine_status_enabled: bool = False
+    sunshine_ensure_enabled: bool = False
     lock_enabled: bool = False
     sleep_enabled: bool = False
     restart_enabled: bool = False
@@ -192,8 +194,7 @@ class AgentIngressSettings:
             )
         if not self.heartbeat_stale_seconds < self.socket_idle_seconds:
             raise ConfigError(
-                "agent_ingress heartbeat stale timeout must precede "
-                "socket idle timeout"
+                "agent_ingress heartbeat stale timeout must precede socket idle timeout"
             )
         if not 1 <= self.request_timeout_seconds <= 30:
             raise ConfigError("agent_ingress.request_timeout_seconds must be 1 to 30")
@@ -224,11 +225,17 @@ class NasAgentIngressSettings:
         if not 15 <= self.socket_idle_seconds <= 120:
             raise ConfigError("nas_agent_ingress.socket_idle_seconds must be 15 to 120")
         if not 15 <= self.heartbeat_aging_seconds < self.heartbeat_stale_seconds:
-            raise ConfigError("nas_agent_ingress heartbeat aging must precede stale timeout")
+            raise ConfigError(
+                "nas_agent_ingress heartbeat aging must precede stale timeout"
+            )
         if not self.heartbeat_stale_seconds < self.socket_idle_seconds:
-            raise ConfigError("nas_agent_ingress stale timeout must precede socket idle timeout")
+            raise ConfigError(
+                "nas_agent_ingress stale timeout must precede socket idle timeout"
+            )
         if not 1 <= self.request_timeout_seconds <= 30:
-            raise ConfigError("nas_agent_ingress.request_timeout_seconds must be 1 to 30")
+            raise ConfigError(
+                "nas_agent_ingress.request_timeout_seconds must be 1 to 30"
+            )
         if self.max_pending_requests != 1:
             raise ConfigError("nas_agent_ingress.max_pending_requests must be 1")
         return self
@@ -877,9 +884,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
     ).validated()
 
     audio_table = _table(data, "browser_audio")
-    raw_rates = audio_table.get(
-        "allowed_sample_rates", [16000, 44100, 48000, 96000]
-    )
+    raw_rates = audio_table.get("allowed_sample_rates", [16000, 44100, 48000, 96000])
     if not isinstance(raw_rates, list) or not all(
         isinstance(item, int) for item in raw_rates
     ):
@@ -935,14 +940,14 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         wake_enabled=bool(desktop_table.get("wake_enabled", True)),
         headless_enabled=bool(desktop_table.get("headless_enabled", True)),
         monitors_enabled=bool(desktop_table.get("monitors_enabled", True)),
-        parsec_status_enabled=bool(
-            desktop_table.get("parsec_status_enabled", False)
+        parsec_status_enabled=bool(desktop_table.get("parsec_status_enabled", False)),
+        parsec_ensure_enabled=bool(desktop_table.get("parsec_ensure_enabled", False)),
+        parsec_restart_enabled=bool(desktop_table.get("parsec_restart_enabled", False)),
+        sunshine_status_enabled=bool(
+            desktop_table.get("sunshine_status_enabled", False)
         ),
-        parsec_ensure_enabled=bool(
-            desktop_table.get("parsec_ensure_enabled", False)
-        ),
-        parsec_restart_enabled=bool(
-            desktop_table.get("parsec_restart_enabled", False)
+        sunshine_ensure_enabled=bool(
+            desktop_table.get("sunshine_ensure_enabled", False)
         ),
         lock_enabled=bool(desktop_table.get("lock_enabled", False)),
         sleep_enabled=bool(desktop_table.get("sleep_enabled", False)),
@@ -1012,8 +1017,12 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         protocol_version=int(nas_agent_table.get("protocol_version", 1)),
         hello_timeout_seconds=float(nas_agent_table.get("hello_timeout_seconds", 5.0)),
         socket_idle_seconds=float(nas_agent_table.get("socket_idle_seconds", 60.0)),
-        heartbeat_aging_seconds=float(nas_agent_table.get("heartbeat_aging_seconds", 30.0)),
-        heartbeat_stale_seconds=float(nas_agent_table.get("heartbeat_stale_seconds", 45.0)),
+        heartbeat_aging_seconds=float(
+            nas_agent_table.get("heartbeat_aging_seconds", 30.0)
+        ),
+        heartbeat_stale_seconds=float(
+            nas_agent_table.get("heartbeat_stale_seconds", 45.0)
+        ),
         request_timeout_seconds=int(nas_agent_table.get("request_timeout_seconds", 30)),
         max_pending_requests=int(nas_agent_table.get("max_pending_requests", 1)),
     ).validated()

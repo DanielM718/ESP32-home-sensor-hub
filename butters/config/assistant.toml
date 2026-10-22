@@ -32,6 +32,10 @@ monitors_enabled = true
 parsec_status_enabled = true
 parsec_ensure_enabled = true
 parsec_restart_enabled = false
+# Sunshine is an independently verified fallback. Its fixed service/status
+# operations retain their own root-broker gates.
+sunshine_status_enabled = true
+sunshine_ensure_enabled = true
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false

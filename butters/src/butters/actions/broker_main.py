@@ -70,6 +70,8 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         BrokerOperation.DESKTOP_PARSEC_STATUS,
         BrokerOperation.DESKTOP_PARSEC_ENSURE,
         BrokerOperation.DESKTOP_PARSEC_RESTART,
+        BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
         BrokerOperation.DESKTOP_LOCK,
         BrokerOperation.DESKTOP_SLEEP,
         BrokerOperation.DESKTOP_RESTART,

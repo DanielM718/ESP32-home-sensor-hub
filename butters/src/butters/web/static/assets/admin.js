@@ -226,6 +226,7 @@ async function refreshDesktop() {
       ["Power / network", observed.power_network],
       ["SSH", observed.ssh],
       ["Parsec", observed.parsec],
+      ["Sunshine", observed.sunshine],
       ["Desktop Agent", observed.agent],
       ["Windows session", observed.windows_session],
       ["Agent heartbeat", observed.agent_heartbeat_age_seconds===null?"unknown":"yes", observed.agent_heartbeat_age_seconds===null?undefined:`${Math.round(observed.agent_heartbeat_age_seconds)}s ago`],

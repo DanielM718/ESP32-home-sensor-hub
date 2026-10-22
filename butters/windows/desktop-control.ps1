@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
+    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineStatus', 'SunshineEnsure', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
     [string]$Operation
 )
 
@@ -10,9 +10,32 @@ $parsecServiceName = 'Parsec'
 $parsecRoot = 'C:\Program Files\Parsec'
 $parsecServiceExecutable = Join-Path $parsecRoot 'pservice.exe'
 $parsecHostExecutable = Join-Path $parsecRoot 'parsecd.exe'
+$parsecLog = 'C:\ProgramData\Parsec\log.txt'
+$sunshineServiceName = 'SunshineService'
+$sunshineRoot = 'C:\Program Files\Sunshine'
+$sunshineExecutable = Join-Path $sunshineRoot 'sunshine.exe'
+$sunshineDxgiInfo = Join-Path $sunshineRoot 'tools\dxgi-info.exe'
 $lockTask = '\Butters\LockDesktop'
 $sleepTask = '\Butters\SleepDesktop'
 $parsecDeadlineSeconds = 20
+$sunshineDeadlineSeconds = 20
+
+function Test-ParsecAuthenticationError([object[]]$HostProcesses) {
+    if (-not (Test-Path $parsecLog) -or $HostProcesses.Count -eq 0) { return $false }
+    $starts = @($HostProcesses | ForEach-Object {
+        try { (Get-Process -Id $_.ProcessId -ErrorAction Stop).StartTime } catch { $null }
+    } | Where-Object { $_ })
+    if ($starts.Count -eq 0) { return $false }
+    $earliestStart = ($starts | Sort-Object | Select-Object -First 1).AddSeconds(-2)
+    foreach ($line in @(Get-Content -Path $parsecLog -Tail 500 -ErrorAction SilentlyContinue)) {
+        if ($line -notmatch '^\[[A-Z] (?<stamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})\].*Hosting stopped due to error in authentication') { continue }
+        $stamp = [datetime]::MinValue
+        if ([datetime]::TryParseExact($Matches.stamp, 'yyyy-MM-dd HH:mm:ss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeLocal, [ref]$stamp) -and $stamp -ge $earliestStart) {
+            return $true
+        }
+    }
+    return $false
+}
 
 function Get-ParsecState {
     $service = Get-CimInstance Win32_Service -Filter "Name='Parsec'" -ErrorAction SilentlyContinue
@@ -37,6 +60,7 @@ function Get-ParsecState {
         $service
     )
     $serviceRunning = [bool]($service -and $service.State -eq 'Running')
+    $authenticationError = Test-ParsecAuthenticationError $hostProcesses
     [ordered]@{
         installed = $installed
         installation_type = if ($installed) { 'machine' } else { 'absent' }
@@ -47,7 +71,40 @@ function Get-ParsecState {
         host_process_present = $hostProcesses.Count -gt 0
         system_host_process_present = $systemProcessPresent
         user_host_process_present = $userProcessPresent
-        plausibly_ready = [bool]($installed -and $serviceRunning -and $serviceProcessPresent -and $hostProcesses.Count -gt 0)
+        authentication_error = $authenticationError
+        plausibly_ready = [bool]($installed -and $serviceRunning -and $serviceProcessPresent -and $hostProcesses.Count -gt 0 -and -not $authenticationError)
+    }
+}
+
+function Get-SunshineState {
+    $service = Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue
+    $processes = @(Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.ExecutablePath -eq $sunshineExecutable
+    })
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)
+    $captureReady = $false
+    if (Test-Path $sunshineDxgiInfo) {
+        try {
+            $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String)
+            $captureReady = [bool]($dxgiOutput -match '(?m)^\s*Output Name\s*:')
+        } catch {
+            $captureReady = $false
+        }
+    }
+    $installed = [bool]((Test-Path $sunshineExecutable) -and $service)
+    $serviceRunning = [bool]($service -and $service.State -eq 'Running')
+    $webListener = $listeners -contains 47990
+    $streamListeners = 47984, 47989, 48010 | Where-Object { $listeners -notcontains $_ }
+    [ordered]@{
+        installed = $installed
+        service_present = [bool]$service
+        service_running = $serviceRunning
+        service_startup = if ($service) { ([string]$service.StartMode).ToLowerInvariant() } else { 'absent' }
+        host_process_present = $processes.Count -gt 0
+        web_listener_present = $webListener
+        stream_listeners_present = @($streamListeners).Count -eq 0
+        capture_ready = $captureReady
+        plausibly_ready = [bool]($installed -and $serviceRunning -and $processes.Count -gt 0 -and $webListener -and @($streamListeners).Count -eq 0 -and $captureReady)
     }
 }
 
@@ -58,10 +115,25 @@ function Write-JsonResult([hashtable]$Value) {
 function Wait-ParsecReady([datetime]$Deadline) {
     do {
         $state = Get-ParsecState
-        if ($state.plausibly_ready) { return $state }
+        if ($state.plausibly_ready) {
+            # The host process appears before Parsec finishes its account check.
+            # Re-observe after a short stability window so an expired login is
+            # not briefly reported as ready.
+            Start-Sleep -Seconds 3
+            return Get-ParsecState
+        }
         Start-Sleep -Milliseconds 500
     } while ((Get-Date) -lt $Deadline)
     return Get-ParsecState
+}
+
+function Wait-SunshineReady([datetime]$Deadline) {
+    do {
+        $state = Get-SunshineState
+        if ($state.plausibly_ready) { return $state }
+        Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $Deadline)
+    return Get-SunshineState
 }
 
 switch ($Operation) {
@@ -85,7 +157,7 @@ switch ($Operation) {
         $after = Wait-ParsecReady ((Get-Date).AddSeconds($parsecDeadlineSeconds))
         Write-JsonResult ([ordered]@{
             accepted = [bool]$after.plausibly_ready
-            error_code = if ($after.plausibly_ready) { $null } else { 'parsec_start_timeout' }
+            error_code = if ($after.plausibly_ready) { $null } elseif ($after.authentication_error) { 'parsec_authentication_required' } else { 'parsec_start_timeout' }
             already_running = [bool]$before.plausibly_ready
             elapsed_ms = [int]((Get-Date) - $started).TotalMilliseconds
         } + $after)
@@ -110,6 +182,33 @@ switch ($Operation) {
         Write-JsonResult ([ordered]@{
             accepted = [bool]$after.plausibly_ready
             error_code = if ($after.plausibly_ready) { $null } else { 'parsec_restart_timeout' }
+            elapsed_ms = [int]((Get-Date) - $started).TotalMilliseconds
+        } + $after)
+    }
+    'SunshineStatus' {
+        Write-JsonResult (Get-SunshineState)
+    }
+    'SunshineEnsure' {
+        $started = Get-Date
+        $before = Get-SunshineState
+        if (-not $before.installed) {
+            Write-JsonResult ([ordered]@{
+                accepted = $false
+                error_code = 'sunshine_not_installed'
+                elapsed_ms = 0
+                already_running = $false
+            } + $before)
+            break
+        }
+        if (-not $before.service_running) {
+            Start-Service -Name $sunshineServiceName
+        }
+        $after = Wait-SunshineReady ((Get-Date).AddSeconds($sunshineDeadlineSeconds))
+        $errorCode = if ($after.plausibly_ready) { $null } elseif (-not $after.capture_ready) { 'sunshine_capture_unavailable' } else { 'sunshine_start_timeout' }
+        Write-JsonResult ([ordered]@{
+            accepted = [bool]$after.plausibly_ready
+            error_code = $errorCode
+            already_running = [bool]$before.plausibly_ready
             elapsed_ms = [int]((Get-Date) - $started).TotalMilliseconds
         } + $after)
     }

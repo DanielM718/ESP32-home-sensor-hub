@@ -144,7 +144,14 @@ class V2SkillImplementations:
         return StructuredSkillResult(
             "desktop_status",
             state.safe_dict(),
-            {"observed": ["network_reachable", "ssh_ready", "parsec_ready"]},
+            {
+                "observed": [
+                    "network_reachable",
+                    "ssh_ready",
+                    "parsec_ready",
+                    "sunshine_ready",
+                ]
+            },
         )
 
     def get_parsec_status(self, arguments: SkillArguments) -> SkillResult:
@@ -165,9 +172,7 @@ class V2SkillImplementations:
             },
         )
 
-    def wait_for_desktop_reachability(
-        self, arguments: SkillArguments
-    ) -> SkillResult:
+    def wait_for_desktop_reachability(self, arguments: SkillArguments) -> SkillResult:
         data = self.desktop.wait_for_reachability(
             cast(DesktopArgs, arguments).machine,
             cancel_event=current_cancel_event(),
@@ -188,13 +193,28 @@ class V2SkillImplementations:
             cast(DesktopArgs, arguments).machine,
             cancel_event=current_cancel_event(),
         )
+        if not data.get("verification_complete"):
+            stage = str(data.get("failed_stage") or "stream_backend")
+            message = str(data.get("error") or "desktop streaming preparation failed")
+            if stage == "cancelled":
+                raise SkillError("cancelled", message)
+            raise SkillError("desktop_stream_prepare_failed", f"{stage}: {message}")
         return StructuredSkillResult(
             "desktop_remote_session",
             data,
             {
-                "observed": ["network_reachable", "ssh_ready", "parsec_ready"],
+                "observed": [
+                    "network_reachable",
+                    "ssh_ready",
+                    "parsec_ready",
+                    "sunshine_ready",
+                ],
                 "calculated": ["elapsed_ms"],
-                "unknown": ["parsec_ready"] if data.get("parsec_ready") is None else [],
+                "unknown": [
+                    name
+                    for name in ("parsec_ready", "sunshine_ready")
+                    if data.get(name) is None
+                ],
             },
         )
 
@@ -662,14 +682,14 @@ def register_v2_skills(
     registry.register(
         spec(
             "start_remote_desktop_session",
-            "Run the fixed WOL, SSH, on-demand Parsec, readiness, and headless monitor-power workflow for the configured desktop.",
+            "Run the fixed WOL, SSH, streaming-backend readiness, and headless monitor-power workflow for the configured desktop.",
             ActionClass.ACTION,
             _parse_desktop,
             impl.authorize_desktop,
             impl.start_remote_desktop_session,
             _schema({"machine": _enum(["desktop"])}, ["machine"]),
             timeout=desktop.settings.total_timeout_seconds + 5,
-            side_effects="wake configured desktop, start its fixed Parsec service on demand, and turn off its two physical monitors through Home Assistant",
+            side_effects="wake configured desktop, start one fixed streaming service on demand, and turn off its two physical monitors through Home Assistant",
             explicit=True,
             authentication=AuthenticationLevel.FRESH,
             configured=desktop.settings.headless_enabled,

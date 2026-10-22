@@ -44,6 +44,7 @@ class DesktopState:
     network_reachable: bool
     ssh_ready: bool
     parsec_ready: bool | None
+    sunshine_ready: bool | None = None
     observed: bool = True
 
     def safe_dict(self) -> dict[str, object]:
@@ -52,6 +53,7 @@ class DesktopState:
             "network_reachable": self.network_reachable,
             "ssh_ready": self.ssh_ready,
             "parsec_ready": self.parsec_ready,
+            "sunshine_ready": self.sunshine_ready,
             "observed": self.observed,
         }
 
@@ -65,9 +67,15 @@ class DesktopOperations(Protocol):
 
     def parsec_status(self, timeout_seconds: float) -> dict[str, object] | None: ...
 
+    def sunshine_ready(self, timeout_seconds: float) -> bool | None: ...
+
+    def sunshine_status(self, timeout_seconds: float) -> dict[str, object] | None: ...
+
     def send_wake(self, timeout_seconds: float) -> bool: ...
 
     def ensure_parsec_running(self, timeout_seconds: float) -> bool: ...
+
+    def ensure_sunshine_running(self, timeout_seconds: float) -> bool: ...
 
     def request_headless_mode(self, timeout_seconds: float) -> bool: ...
 
@@ -139,11 +147,30 @@ class BrokerDesktopOperations:
             return None
         return dict(result.status) if result.ok else None
 
+    def sunshine_ready(self, timeout_seconds: float) -> bool | None:
+        status = self.sunshine_status(timeout_seconds)
+        ready = None if status is None else status.get("plausibly_ready")
+        return ready if isinstance(ready, bool) else None
+
+    def sunshine_status(self, timeout_seconds: float) -> dict[str, object] | None:
+        try:
+            result = self.broker.request(
+                BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+                request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
+            )
+        except BrokerError:
+            return None
+        return dict(result.status) if result.ok else None
+
     def send_wake(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_WAKE, timeout_seconds)
 
     def ensure_parsec_running(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_PARSEC_ENSURE, timeout_seconds)
+
+    def ensure_sunshine_running(self, timeout_seconds: float) -> bool:
+        return self._broker(BrokerOperation.DESKTOP_SUNSHINE_ENSURE, timeout_seconds)
 
     def request_headless_mode(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_MONITORS_OFF, timeout_seconds)
@@ -193,10 +220,17 @@ class DesktopWorkflow:
         ssh = self._ssh_ready(deadline)
         network = ssh or self._network_reachable(deadline)
         network = network or ssh
-        if not self.settings.parsec_status_enabled:
-            return DesktopState(machine, network, ssh, None)
-        parsec = self._parsec_ready(deadline) if ssh else False
-        return DesktopState(machine, network, ssh, parsec)
+        parsec = (
+            self._parsec_ready(deadline)
+            if ssh and self.settings.parsec_status_enabled
+            else (False if not ssh and self.settings.parsec_status_enabled else None)
+        )
+        sunshine = (
+            self._sunshine_ready(deadline)
+            if ssh and self.settings.sunshine_status_enabled
+            else (False if not ssh and self.settings.sunshine_status_enabled else None)
+        )
+        return DesktopState(machine, network, ssh, parsec, sunshine)
 
     def parsec_status(self, machine: str) -> dict[str, object]:
         """Return only bounded user-relevant state for the fixed Parsec host."""
@@ -224,6 +258,7 @@ class DesktopWorkflow:
             "host_process_present": None,
             "system_host_process_present": None,
             "user_host_process_present": None,
+            "authentication_error": None,
             "plausibly_ready": False,
             "observed": status is not None,
         }
@@ -283,8 +318,12 @@ class DesktopWorkflow:
             "network_reachable": False,
             "ssh_ready": False,
             "parsec_ensure_succeeded": False,
+            "sunshine_ensure_succeeded": False,
             "headless_mode_requested": False,
             "parsec_ready": None,
+            "sunshine_ready": None,
+            "stream_backend": None,
+            "attempted_backends": [],
             "verification_complete": False,
             "elapsed_ms": 0,
             "failed_stage": None,
@@ -345,30 +384,69 @@ class DesktopWorkflow:
                 return finish("total_timeout", "workflow deadline expired")
             return finish("ssh_ready", "desktop remote-management readiness timed out")
 
-        if event.is_set():
-            return finish("cancelled", "workflow cancelled")
-        remaining = self._remaining(deadline)
-        if remaining <= 0:
-            return finish("total_timeout", "workflow deadline expired")
-        if not self.operations.ensure_parsec_running(remaining):
-            return finish("parsec_ensure", "fixed on-demand Parsec operation failed")
-        result["parsec_ensure_succeeded"] = True
+        backends: list[
+            tuple[str, Callable[[float], bool], Callable[[float], bool | None]]
+        ] = []
+        if self.settings.parsec_ensure_enabled:
+            backends.append(
+                (
+                    "parsec",
+                    self.operations.ensure_parsec_running,
+                    self.operations.parsec_ready,
+                )
+            )
+        if self.settings.sunshine_ensure_enabled:
+            backends.append(
+                (
+                    "sunshine",
+                    self.operations.ensure_sunshine_running,
+                    self.operations.sunshine_ready,
+                )
+            )
+        if not backends:
+            return finish("stream_backend", "no streaming backend is enabled")
 
-        last_parsec_state: bool | None = None
+        for index, (backend, ensure, observe) in enumerate(backends):
+            if event.is_set():
+                return finish("cancelled", "workflow cancelled")
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                return finish("total_timeout", "workflow deadline expired")
+            result["attempted_backends"].append(backend)
+            ensured = ensure(remaining)
+            result[f"{backend}_ensure_succeeded"] = ensured
+            if not ensured:
+                continue
 
-        def parsec_ready(_remaining: float) -> bool:
-            nonlocal last_parsec_state
-            last_parsec_state = self._parsec_ready(deadline)
-            return last_parsec_state is True
+            # Reserve time for every remaining fallback instead of allowing one
+            # unhealthy backend to consume the whole workflow deadline.
+            attempts_left = len(backends) - index
+            backend_deadline = min(
+                deadline, self.clock() + self._remaining(deadline) / attempts_left
+            )
+            last_state: bool | None = None
 
-        ready = self._wait_for(parsec_ready, deadline, event)
-        result["parsec_ready"] = True if ready else last_parsec_state
-        if not ready:
+            def backend_ready(
+                _remaining: float,
+                observe_backend: Callable[[float], bool | None] = observe,
+                check_deadline: float = backend_deadline,
+            ) -> bool:
+                nonlocal last_state
+                last_state = observe_backend(self._remaining(check_deadline))
+                return last_state is True
+
+            ready = self._wait_for(backend_ready, backend_deadline, event)
+            result[f"{backend}_ready"] = True if ready else last_state
+            if ready:
+                result["stream_backend"] = backend
+                break
+
+        if result["stream_backend"] is None:
             if event.is_set():
                 return finish("cancelled", "workflow cancelled")
             if self.clock() >= deadline:
                 return finish("total_timeout", "workflow deadline expired")
-            return finish("parsec_ready", "Parsec readiness verification failed")
+            return finish("stream_backend", "no streaming backend became ready")
 
         remaining = self._remaining(deadline)
         if remaining <= 0:
@@ -414,6 +492,12 @@ class DesktopWorkflow:
         if remaining <= 0:
             return None
         return self.operations.parsec_ready(remaining)
+
+    def _sunshine_ready(self, deadline: float) -> bool | None:
+        remaining = self._remaining(deadline)
+        if remaining <= 0:
+            return None
+        return self.operations.sunshine_ready(remaining)
 
     def _remaining(self, deadline: float) -> float:
         return max(0.0, deadline - self.clock())
