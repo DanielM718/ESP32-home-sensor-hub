@@ -1367,6 +1367,7 @@ class BetaAssistantService:
             "power_network": _reach_value(reachability, "network_reachable"),
             "ssh": _reach_value(reachability, "ssh_ready"),
             "parsec": _reach_value(reachability, "parsec_ready"),
+            "sunshine": _reach_value(reachability, "sunshine_ready"),
             "agent": agent["state"],
             "agent_connected": agent["agent_connected"],
             "agent_heartbeat_age_seconds": agent[
@@ -1381,7 +1382,10 @@ class BetaAssistantService:
                 "agent": agent["configured"],
                 "wake": self.settings.desktop.wake_enabled,
                 "shutdown": self.settings.desktop.shutdown_enabled,
-                "streaming": self.settings.desktop.parsec_ensure_enabled,
+                "streaming": (
+                    self.settings.desktop.parsec_ensure_enabled
+                    or self.settings.desktop.sunshine_ensure_enabled
+                ),
             },
             "observed": observed,
             "agent_detail": agent,
@@ -2624,7 +2628,9 @@ class BetaAssistantService:
 
         found = self.chat_history.conversation(conversation_id, session.peer_key)
         if found is None:
-            raise ChatHistoryError("conversation_not_found", "conversation was not found")
+            raise ChatHistoryError(
+                "conversation_not_found", "conversation was not found"
+            )
         return found
 
     def open_conversation(
@@ -2653,7 +2659,11 @@ class BetaAssistantService:
             self.sessions.replace_messages(
                 session,
                 tuple(
-                    (str(item["role"]), str(item["text"]), _optional_text(item.get("trace_id")))
+                    (
+                        str(item["role"]),
+                        str(item["text"]),
+                        _optional_text(item.get("trace_id")),
+                    )
                     for item in messages
                 ),
             )
@@ -2700,7 +2710,9 @@ class BetaAssistantService:
             self.traces.drop_sessions((session.session_id,))
             return removed
 
-    def rebind_conversation(self, session: BrowserSession, conversation_id: object) -> bool:
+    def rebind_conversation(
+        self, session: BrowserSession, conversation_id: object
+    ) -> bool:
         """Re-attach a session to a conversation named by the browser pointer.
 
         Used only when a session is re-created - after an expiry or a service
@@ -2998,10 +3010,13 @@ class BetaAssistantService:
                 session_ttl_seconds=engine.session_ttl_seconds,
                 max_evidence_bytes=engine.max_evidence_bytes,
             )
-        with self._paid_operation_gate, self.ledger.request_context(
-            request_id=trace.request_id,
-            session_id=trace.session_id,
-            route_category="diagnostic_cloud",
+        with (
+            self._paid_operation_gate,
+            self.ledger.request_context(
+                request_id=trace.request_id,
+                session_id=trace.session_id,
+                route_category="diagnostic_cloud",
+            ),
         ):
             answer = selected_engine.diagnose(request)
         trace.emit(
@@ -3917,7 +3932,7 @@ def _direct_desktop_action(text: str) -> bool:
 def _action_summary(skill: str, arguments: dict[str, object]) -> str:
     labels = {
         "wake_desktop": "Wake the configured desktop",
-        "start_remote_desktop_session": "Wake the configured desktop and prepare its remote session",
+        "start_remote_desktop_session": "Wake the configured desktop and prepare an available streaming backend",
         "monitors_off": "Turn off the configured desktop monitors through Home Assistant",
         "monitors_on": "Turn on the configured desktop monitors through Home Assistant",
         "ensure_parsec_running": "Make the configured desktop's fixed Parsec service ready",

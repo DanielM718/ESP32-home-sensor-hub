@@ -73,7 +73,6 @@ NAS_API_DEADLINE_SECONDS = 10.0
 NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
 
 
-
 class _NoRedirect(HTTPRedirectHandler):
     """Refuse every redirect on the Home Assistant client.
 
@@ -107,6 +106,8 @@ class BrokerOperation(str, Enum):
     DESKTOP_PARSEC_STATUS = "desktop.parsec_status"
     DESKTOP_PARSEC_ENSURE = "desktop.parsec_ensure"
     DESKTOP_PARSEC_RESTART = "desktop.parsec_restart"
+    DESKTOP_SUNSHINE_STATUS = "desktop.sunshine_status"
+    DESKTOP_SUNSHINE_ENSURE = "desktop.sunshine_ensure"
     DESKTOP_LOCK = "desktop.lock"
     DESKTOP_SLEEP = "desktop.sleep"
     DESKTOP_RESTART = "desktop.restart"
@@ -128,6 +129,8 @@ class _DesktopControlOperation(str, Enum):
     PARSEC_STATUS = "ParsecStatus"
     PARSEC_ENSURE = "ParsecEnsure"
     PARSEC_RESTART = "ParsecRestart"
+    SUNSHINE_STATUS = "SunshineStatus"
+    SUNSHINE_ENSURE = "SunshineEnsure"
     LOCK = "Lock"
     SLEEP = "Sleep"
     RESTART = "Restart"
@@ -177,9 +180,7 @@ class BrokerClient:
         if timeout_seconds is not None and timeout_seconds <= 0:
             raise BrokerError("request_timeout", "broker request timed out")
         deadline = (
-            None
-            if timeout_seconds is None
-            else self.monotonic() + timeout_seconds
+            None if timeout_seconds is None else self.monotonic() + timeout_seconds
         )
         request = {
             "version": self.settings.protocol_version,
@@ -192,15 +193,11 @@ class BrokerClient:
         connection = self.connector(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
             connection.settimeout(
-                self._remaining_timeout(
-                    self.settings.connect_timeout_seconds, deadline
-                )
+                self._remaining_timeout(self.settings.connect_timeout_seconds, deadline)
             )
             connection.connect(str(self.settings.socket_path))
             connection.settimeout(
-                self._remaining_timeout(
-                    self.settings.request_timeout_seconds, deadline
-                )
+                self._remaining_timeout(self.settings.request_timeout_seconds, deadline)
             )
             connection.sendall(encoded)
             raw = _read_line(
@@ -337,7 +334,9 @@ class BrokerServer:
                 request_id,
                 bool(response["ok"]),
                 {},
-                response["error_code"] if response["ok"] is False else "result_too_large",
+                response["error_code"]
+                if response["ok"] is False
+                else "result_too_large",
             )
             encoded = _render(response)
         self._audit(
@@ -467,6 +466,8 @@ class FixedBrokerOperations:
             BrokerOperation.DESKTOP_PARSEC_STATUS: self.desktop_parsec_status,
             BrokerOperation.DESKTOP_PARSEC_ENSURE: self.desktop_parsec_ensure,
             BrokerOperation.DESKTOP_PARSEC_RESTART: self.desktop_parsec_restart,
+            BrokerOperation.DESKTOP_SUNSHINE_STATUS: self.desktop_sunshine_status,
+            BrokerOperation.DESKTOP_SUNSHINE_ENSURE: self.desktop_sunshine_ensure,
             BrokerOperation.DESKTOP_LOCK: self.desktop_lock,
             BrokerOperation.DESKTOP_SLEEP: self.desktop_sleep,
             BrokerOperation.DESKTOP_RESTART: self.desktop_restart,
@@ -514,6 +515,12 @@ class FixedBrokerOperations:
 
     def desktop_parsec_restart(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.PARSEC_RESTART)
+
+    def desktop_sunshine_status(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SUNSHINE_STATUS)
+
+    def desktop_sunshine_ensure(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SUNSHINE_ENSURE)
 
     def desktop_lock(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.LOCK)
@@ -670,9 +677,7 @@ class FixedBrokerOperations:
                 "home_assistant_failed", "Home Assistant returned malformed JSON"
             ) from None
 
-    def _bounded_exchange(
-        self, exchange: Callable[[], bytes], budget: float
-    ) -> bytes:
+    def _bounded_exchange(self, exchange: Callable[[], bytes], budget: float) -> bytes:
         """Give the whole Home Assistant exchange one real wall-clock bound.
 
         urlopen's ``timeout`` is per socket operation, not a deadline. A peer
@@ -817,7 +822,10 @@ class FixedBrokerOperations:
         command = (
             "powershell.exe -NoLogo -NoProfile -NonInteractive "
             "-ExecutionPolicy Bypass "
-            "-File C:\\ProgramData\\Butters\\desktop-control.ps1 "
+            # The Windows OpenSSH account uses Git Bash as its default shell.
+            # Forward slashes keep Git Bash from consuming the backslashes
+            # before PowerShell receives this fixed Windows path.
+            "-File C:/ProgramData/Butters/desktop-control.ps1 "
             f"-Operation {operation.value}"
         )
         argv = [
@@ -874,6 +882,10 @@ class FixedBrokerOperations:
                 "parsec_not_installed",
                 "parsec_start_timeout",
                 "parsec_restart_timeout",
+                "parsec_authentication_required",
+                "sunshine_not_installed",
+                "sunshine_start_timeout",
+                "sunshine_capture_unavailable",
             }
             raise BrokerError(
                 str(code) if code in allowed else "operation_failed",
@@ -909,6 +921,21 @@ _PARSEC_STATE_KEYS = frozenset(
         "host_process_present",
         "system_host_process_present",
         "user_host_process_present",
+        "authentication_error",
+        "plausibly_ready",
+    }
+)
+
+_SUNSHINE_STATE_KEYS = frozenset(
+    {
+        "installed",
+        "service_present",
+        "service_running",
+        "service_startup",
+        "host_process_present",
+        "web_listener_present",
+        "stream_listeners_present",
+        "capture_ready",
         "plausibly_ready",
     }
 )
@@ -972,6 +999,45 @@ def _desktop_control_result(
             raise BrokerError("malformed_result", "fixed operation result is invalid")
         return dict(payload)
 
+    if operation in {
+        _DesktopControlOperation.SUNSHINE_STATUS,
+        _DesktopControlOperation.SUNSHINE_ENSURE,
+    }:
+        extras = (
+            frozenset()
+            if operation is _DesktopControlOperation.SUNSHINE_STATUS
+            else frozenset({"accepted", "error_code", "elapsed_ms", "already_running"})
+        )
+        if set(payload) != _SUNSHINE_STATE_KEYS | extras:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        for key in _SUNSHINE_STATE_KEYS - {"service_startup"}:
+            if not isinstance(payload[key], bool):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+        if payload["service_startup"] not in {
+            "auto",
+            "manual",
+            "disabled",
+            "absent",
+        }:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if extras:
+            if (
+                not isinstance(payload["accepted"], bool)
+                or not isinstance(payload["already_running"], bool)
+                or not isinstance(payload["elapsed_ms"], int)
+            ):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+            error = payload["error_code"]
+            if error is not None and not isinstance(error, str):
+                raise BrokerError(
+                    "malformed_result", "fixed operation result is invalid"
+                )
+        return dict(payload)
+
     expected_transition = {
         _DesktopControlOperation.LOCK: "lock",
         _DesktopControlOperation.SLEEP: "sleep",
@@ -987,9 +1053,7 @@ def _desktop_control_result(
     return dict(payload)
 
 
-def _read_bounded(
-    response: Any, deadline: float, clock: Callable[[], float]
-) -> bytes:
+def _read_bounded(response: Any, deadline: float, clock: Callable[[], float]) -> bytes:
     """Read a bounded body under a wall-clock deadline.
 
     Each chunk is still covered by the socket timeout; the deadline is what

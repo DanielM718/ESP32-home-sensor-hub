@@ -10,7 +10,11 @@ Run `install-desktop-control.ps1` from an elevated Windows PowerShell with
 
 - backs up any previous helper, task definitions, and the Parsec service mode;
 - installs `C:\ProgramData\Butters\desktop-control.ps1`;
-- creates only `\Butters\LockDesktop` and `\Butters\SleepDesktop`;
+- creates only `\Butters\LockDesktop`, `\Butters\SleepDesktop`, and
+  `\Butters\SunshineCaptureProbe`;
+- runs Sunshine's bundled `dxgi-info.exe` through the logged-on user's fixed
+  interactive task so capture readiness is measured in Sunshine's desktop
+  session rather than the isolated OpenSSH session;
 - explicitly leaves the fixed `Parsec` service in Manual startup mode and does
   not start it as an installer side effect.
 
@@ -23,7 +27,7 @@ To roll back, use the timestamped directory printed by the installer:
 1. Restore `desktop-control.ps1.previous` if it exists; otherwise remove the
    installed helper.
 2. Restore task XML files with `Register-ScheduledTask -Xml`, or unregister the
-   two tasks if no prior XML exists.
+   three tasks if no prior XML exists.
 3. Restore the Parsec mode recorded in `parsec-service-before.json`; for the
    reviewed Manual baseline use `Set-Service Parsec -StartupType Manual`.
 
