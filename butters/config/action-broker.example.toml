@@ -42,6 +42,7 @@ api_key = ""
 "desktop.parsec_ensure" = false
 "desktop.parsec_restart" = false
 "desktop.sunshine_status" = false
+"desktop.sunshine_service_status" = false
 "desktop.sunshine_ensure" = false
 "desktop.lock" = false
 "desktop.sleep" = false

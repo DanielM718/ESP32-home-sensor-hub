@@ -16,7 +16,7 @@ CONTROL_START = re.compile(
 CONTROL_TOGGLE = re.compile(r"\bturn\b.+\b(?:on|off)\b")
 NEGATED_DESKTOP_ACTION = re.compile(
     r"\b(?:do not|don't|dont|don t|never)\s+(?:\w+\s+){0,5}"
-    r"(?:wake|turn|start|put|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
+    r"(?:wake|turn|switch|set|use|start|put|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
 )
 
 
@@ -64,6 +64,14 @@ class IntentRouter:
             return self._clarification(
                 normalized,
                 "Please choose one exact desktop or Parsec action.",
+            )
+        desktop_mode = self._desktop_access_mode_action(normalized)
+        if desktop_mode is not None:
+            return self._matched(
+                normalized,
+                "set_desktop_access_mode",
+                {"machine": "desktop", "mode": desktop_mode},
+                1.0,
             )
         environment_action = self._environment_action(normalized)
         if self._desktop_remote_action(normalized) and environment_action is not None:
@@ -1121,6 +1129,31 @@ class IntentRouter:
             )
         )
         return wake and any(word in text for word in ("parsec", "remote"))
+
+    @staticmethod
+    def _desktop_access_mode_action(text: str) -> str | None:
+        if NEGATED_DESKTOP_ACTION.search(text):
+            return None
+        matches = [
+            mode for mode in ("gaming", "engineering", "local") if f"{mode} mode" in text
+        ]
+        if len(matches) != 1:
+            return None
+        if text != f"{matches[0]} mode" and not any(
+            word in text
+            for word in (
+                "set",
+                "switch",
+                "enter",
+                "prepare",
+                "use",
+                "start",
+                "restore",
+                "return",
+            )
+        ):
+            return None
+        return matches[0]
 
     @staticmethod
     def _ambiguous_desktop_mutation(text: str) -> bool:

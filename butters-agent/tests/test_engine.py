@@ -66,6 +66,23 @@ images = ['C:\\Program Files\\App\\app.exe']
     assert listed["apps"][0]["reason"] == "invalid_registry_entry"
 
 
+def test_catalog_uses_one_bounded_platform_snapshot(engine):
+    calls = 0
+    original = engine.platform.app_statuses
+
+    def observed(entries):
+        nonlocal calls
+        calls += 1
+        return original(entries)
+
+    engine.platform.app_statuses = observed
+    listed = engine.invoke("desktop.app.list", {})
+
+    assert listed["success"] is True
+    assert calls == 1
+    assert {item["app"] for item in listed["apps"]} == {"git_bash", "parsec"}
+
+
 def test_invalid_registry_name_fails_closed(tmp_path):
     registry = tmp_path / "apps.toml"
     write_registry(

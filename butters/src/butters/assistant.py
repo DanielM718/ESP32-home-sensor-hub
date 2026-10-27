@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from queue import Full, Queue
 from threading import Thread
@@ -199,7 +199,8 @@ class DeterministicAssistant:
         if (
             spec is not None
             and spec.action_class is ActionClass.ACTION
-            and route.skill == "start_remote_desktop_session"
+            and route.skill
+            in {"start_remote_desktop_session", "set_desktop_access_mode"}
             and _direct_desktop_action(normalized_text)
         ):
             authorization = ActionAuthorization(
@@ -428,6 +429,7 @@ def create_assistant(
     printer_adapter: PrinterSnapshotProvider | None = None,
     language_model: LanguageModel | None = None,
     action_state: ActionStateStore | None = None,
+    desktop_agent_status: Callable[[], Mapping[str, object]] | None = None,
 ) -> DeterministicAssistant:
     entities = EntityRegistry(settings.entities)
     metrics = MetricRegistry()
@@ -453,7 +455,11 @@ def create_assistant(
         metrics,
         DashboardHistoryAdapter(settings.integration, entities, metrics),
         printer_provider,
-        DesktopWorkflow(settings.desktop, broker_settings=settings.broker),
+        DesktopWorkflow(
+            settings.desktop,
+            broker_settings=settings.broker,
+            agent_status=desktop_agent_status,
+        ),
     )
     environment_actions = None
     nas_adapter = None
@@ -531,6 +537,29 @@ def create_assistant(
 
 def _direct_desktop_action(text: str) -> bool:
     text = text.casefold()
+    if any(
+        phrase in text
+        for phrase in (
+            "gaming mode",
+            "engineering mode",
+            "local mode",
+            "set gaming mode",
+            "switch to gaming mode",
+            "enter gaming mode",
+            "prepare gaming mode",
+            "set engineering mode",
+            "switch to engineering mode",
+            "enter engineering mode",
+            "prepare engineering mode",
+            "set local mode",
+            "switch to local mode",
+            "enter local mode",
+            "prepare local mode",
+            "restore local mode",
+            "return to local mode",
+        )
+    ):
+        return True
     remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
     wake = any(
         phrase in text

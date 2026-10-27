@@ -282,7 +282,11 @@ class SkillRegistry:
                 skill_name,
                 spec.action_class,
                 time.perf_counter() - started,
-                failure=SkillFailure(exc.code, str(exc)),
+                failure=SkillFailure(
+                    exc.code,
+                    str(exc),
+                    getattr(exc, "details", None),
+                ),
                 arguments=dict(arguments),
             )
         # A skill implementation is a trust boundary. Convert unexpected adapter

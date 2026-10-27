@@ -7,8 +7,9 @@ import socket
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Protocol
 
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
@@ -47,6 +48,13 @@ class DesktopState:
     parsec_ready: bool | None
     sunshine_ready: bool | None = None
     observed: bool = True
+    online: bool | None = None
+    machine_state: str = "unknown"
+    online_evidence: tuple[str, ...] = ()
+    agent_connected: bool = False
+    agent_heartbeat_age_seconds: float | None = None
+    sunshine_service_ready: bool | None = None
+    sunshine_observed_at: float | None = None
 
     def safe_dict(self) -> dict[str, object]:
         return {
@@ -56,7 +64,20 @@ class DesktopState:
             "parsec_ready": self.parsec_ready,
             "sunshine_ready": self.sunshine_ready,
             "observed": self.observed,
+            "online": self.online,
+            "machine_state": self.machine_state,
+            "online_evidence": list(self.online_evidence),
+            "agent_connected": self.agent_connected,
+            "agent_heartbeat_age_seconds": self.agent_heartbeat_age_seconds,
+            "sunshine_service_ready": self.sunshine_service_ready,
+            "sunshine_observed_at": self.sunshine_observed_at,
         }
+
+
+class DesktopAccessMode(str, Enum):
+    GAMING = "gaming"
+    ENGINEERING = "engineering"
+    LOCAL = "local"
 
 
 class DesktopOperations(Protocol):
@@ -72,6 +93,10 @@ class DesktopOperations(Protocol):
 
     def sunshine_status(self, timeout_seconds: float) -> dict[str, object] | None: ...
 
+    def sunshine_service_status(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
+
     def send_wake(self, timeout_seconds: float) -> bool: ...
 
     def ensure_parsec_running(self, timeout_seconds: float) -> bool: ...
@@ -81,6 +106,10 @@ class DesktopOperations(Protocol):
     def request_headless_mode(self, timeout_seconds: float) -> bool: ...
 
     def restore_headed_mode(self, timeout_seconds: float) -> bool: ...
+
+    def set_monitor_power(
+        self, desired_state: str, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
 
 
 class BrokerDesktopOperations:
@@ -166,6 +195,19 @@ class BrokerDesktopOperations:
             return None
         return dict(result.status) if result.ok else None
 
+    def sunshine_service_status(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        try:
+            result = self.broker.request(
+                BrokerOperation.DESKTOP_SUNSHINE_SERVICE_STATUS,
+                request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
+            )
+        except BrokerError:
+            return None
+        return dict(result.status) if result.ok else None
+
     def send_wake(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_WAKE, timeout_seconds)
 
@@ -181,6 +223,26 @@ class BrokerDesktopOperations:
     def restore_headed_mode(self, timeout_seconds: float) -> bool:
         return self._broker(BrokerOperation.DESKTOP_MONITORS_ON, timeout_seconds)
 
+    def set_monitor_power(
+        self, desired_state: str, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        operation = (
+            BrokerOperation.DESKTOP_MONITORS_OFF
+            if desired_state == "off"
+            else BrokerOperation.DESKTOP_MONITORS_ON
+        )
+        try:
+            result = self.broker.request(
+                operation,
+                request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
+            )
+        except BrokerError:
+            return None
+        status = dict(result.status)
+        status["broker_ok"] = result.ok
+        return status
+
     def _broker(self, operation: BrokerOperation, timeout_seconds: float) -> bool:
         try:
             result = self.broker.request(
@@ -190,6 +252,13 @@ class BrokerDesktopOperations:
             )
         except BrokerError:
             return False
+        if operation in {
+            BrokerOperation.DESKTOP_MONITORS_OFF,
+            BrokerOperation.DESKTOP_MONITORS_ON,
+        }:
+            # The broker envelope can succeed even when one or both outlets
+            # fail to converge. Only confirmed HA state is monitor success.
+            return result.ok and result.status.get("accepted") is True
         return result.ok
 
 
@@ -201,6 +270,8 @@ class DesktopWorkflow:
         *,
         broker_settings: BrokerSettings | None = None,
         clock: Callable[[], float] = time.monotonic,
+        wall_clock: Callable[[], float] = time.time,
+        agent_status: Callable[[], Mapping[str, object]] | None = None,
         post_headless_settle_seconds: float = POST_HEADLESS_SETTLE_SECONDS,
     ) -> None:
         self.settings = settings
@@ -210,10 +281,15 @@ class DesktopWorkflow:
             broker=BrokerClient(self.broker_settings),
         )
         self.clock = clock
+        self.wall_clock = wall_clock
+        self.agent_status = agent_status
         self.post_headless_settle_seconds = post_headless_settle_seconds
+        self._sunshine_service_cache: (
+            tuple[float, float, dict[str, object] | None] | None
+        ) = None
 
     def status(self, machine: str) -> DesktopState:
-        """Reachability, plus Parsec readiness only when it is observable.
+        """Cheap online, management, and service observations for an overview.
 
         parsec_status_enabled gates get_parsec_status, so a deployment that
         leaves it false has asked not to observe Parsec. This overview reached
@@ -225,20 +301,49 @@ class DesktopWorkflow:
 
         self._require_machine(machine)
         deadline = self.clock() + self.settings.total_timeout_seconds
+        agent_connected, heartbeat_age = self._agent_observation()
         ssh = self._ssh_ready(deadline)
-        network = ssh or self._network_reachable(deadline)
-        network = network or ssh
+        icmp = False if ssh or agent_connected else self._network_reachable(deadline)
+        network = ssh or icmp or agent_connected
+        evidence = tuple(
+            name
+            for name, present in (
+                ("desktop_agent", agent_connected),
+                ("ssh", ssh),
+                ("icmp", icmp),
+            )
+            if present
+        )
         parsec = (
             self._parsec_ready(deadline)
             if ssh and self.settings.parsec_status_enabled
             else (False if not ssh and self.settings.parsec_status_enabled else None)
         )
-        sunshine = (
-            self._sunshine_ready(deadline)
+        sunshine_service = (
+            self._sunshine_service_ready(deadline)
             if ssh and self.settings.sunshine_status_enabled
-            else (False if not ssh and self.settings.sunshine_status_enabled else None)
+            else None
         )
-        return DesktopState(machine, network, ssh, parsec, sunshine)
+        observed_at = (
+            self._sunshine_service_cache[1]
+            if sunshine_service is not None and self._sunshine_service_cache is not None
+            else None
+        )
+        return DesktopState(
+            machine=machine,
+            network_reachable=network,
+            ssh_ready=ssh,
+            parsec_ready=parsec,
+            sunshine_ready=None,
+            observed=True,
+            online=network,
+            machine_state="online" if network else "unreachable",
+            online_evidence=evidence,
+            agent_connected=agent_connected,
+            agent_heartbeat_age_seconds=heartbeat_age,
+            sunshine_service_ready=sunshine_service,
+            sunshine_observed_at=observed_at,
+        )
 
     def parsec_status(self, machine: str) -> dict[str, object]:
         """Return only bounded user-relevant state for the fixed Parsec host."""
@@ -291,14 +396,20 @@ class DesktopWorkflow:
             started + self.settings.network_timeout_seconds,
             started + self.settings.total_timeout_seconds,
         )
-        observed = {"network": False, "ssh": False}
+        observed = {"network": False, "ssh": False, "agent": False}
 
         def reachable(_remaining: float) -> bool:
+            agent, _age = self._agent_observation()
+            if agent:
+                observed["network"] = True
+                observed["agent"] = True
+                return True
             ssh = self._ssh_ready(deadline)
             network = ssh or self._network_reachable(deadline)
-            observed["network"] = network
+            observed["network"] = network or agent
             observed["ssh"] = ssh
-            return network
+            observed["agent"] = agent
+            return network or agent
 
         ready = self._wait_for(reachable, deadline, event)
         cancelled = event.is_set()
@@ -307,6 +418,7 @@ class DesktopWorkflow:
             "machine": machine,
             "network_reachable": bool(ready and observed["network"]),
             "ssh_ready": bool(ready and observed["ssh"]),
+            "agent_connected": bool(ready and observed["agent"]),
             "parsec_ready": parsec,
             "timed_out": not ready and not cancelled,
             "cancelled": cancelled,
@@ -316,185 +428,340 @@ class DesktopWorkflow:
     def start_remote_session(
         self, machine: str, *, cancel_event: threading.Event | None = None
     ) -> dict[str, object]:
+        """Compatibility alias for the explicit Gaming mode."""
+
+        return self.prepare_access_mode(
+            machine, DesktopAccessMode.GAMING, cancel_event=cancel_event
+        )
+
+    def prepare_access_mode(
+        self,
+        machine: str,
+        mode: DesktopAccessMode | str,
+        *,
+        cancel_event: threading.Event | None = None,
+    ) -> dict[str, object]:
+        """Converge one explicit mode without changing sessions or displays.
+
+        Agent, SSH and ICMP are independent evidence.  Only Sunshine readiness
+        is allowed to claim capture readiness, and monitor success requires the
+        broker's verified per-outlet acknowledgement.  A failure after a
+        successful monitor transition is never automatically reversed because
+        doing so could disrupt an active user session.
+        """
+
         self._require_machine(machine)
+        selected_mode = (
+            mode if isinstance(mode, DesktopAccessMode) else DesktopAccessMode(mode)
+        )
         event = cancel_event or threading.Event()
         started = self.clock()
         deadline = started + self.settings.total_timeout_seconds
+        selected_backend = (
+            None
+            if selected_mode is DesktopAccessMode.LOCAL
+            else self.settings.engineering_backend
+            if selected_mode is DesktopAccessMode.ENGINEERING
+            else "sunshine"
+        )
         result: dict[str, object] = {
             "machine": machine,
+            "mode": selected_mode.value,
+            "status": "pending",
+            "machine_state": "unknown",
+            "online": False,
+            "online_evidence": [],
+            "agent_connected": False,
+            "agent_heartbeat_age_seconds": None,
             "wake_sent": False,
             "network_reachable": False,
+            "icmp_reachable": False,
             "ssh_ready": False,
-            "parsec_ensure_succeeded": False,
+            "management_path": None,
             "sunshine_ensure_succeeded": False,
-            "headless_mode_requested": False,
-            "headless_mode_restored": False,
-            "headless_backend_ready": None,
-            "parsec_ready": None,
+            "sunshine_reused": False,
+            "sunshine_service_ready": None,
+            "sunshine_capture_ready": None,
+            "virtual_display_ready": None,
             "sunshine_ready": None,
-            "stream_backend": None,
-            "attempted_backends": [],
+            "stream_backend": selected_backend,
+            "client_profile": (
+                "engineering_low_bandwidth"
+                if selected_mode is DesktopAccessMode.ENGINEERING
+                else "gaming"
+                if selected_mode is DesktopAccessMode.GAMING
+                else None
+            ),
+            "monitor_desired_state": (
+                "on" if selected_mode is DesktopAccessMode.LOCAL else "off"
+            ),
+            "monitor_transition": None,
             "verification_complete": False,
             "elapsed_ms": 0,
             "failed_stage": None,
+            "failure_code": None,
+            "failed_dependency": None,
             "error": None,
+            "safe_recovery": None,
         }
 
         def finish(
-            stage: str | None = None, error: str | None = None
+            code: str | None = None,
+            dependency: str | None = None,
+            error: str | None = None,
         ) -> dict[str, object]:
-            result["failed_stage"] = stage
+            result["failed_stage"] = dependency
+            result["failure_code"] = code
+            result["failed_dependency"] = dependency
             result["error"] = error
             result["elapsed_ms"] = round((self.clock() - started) * 1000)
+            if code is None:
+                result["status"] = "ready"
+            elif code == "cancelled":
+                result["status"] = "cancelled"
+            elif result.get("monitor_transition"):
+                result["status"] = "partial"
+            else:
+                result["status"] = "failed"
             return result
 
         if event.is_set():
-            return finish("cancelled", "workflow cancelled")
+            return finish("cancelled", "workflow", "workflow cancelled")
         if self.clock() >= deadline:
-            return finish("total_timeout", "workflow deadline expired")
+            return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
 
-        ssh = self._ssh_ready(deadline)
-        network = ssh or self._network_reachable(deadline)
-        result["network_reachable"] = network
-        if not network:
+        def observe_online(observation_deadline: float) -> bool:
+            agent, age = self._agent_observation()
+            ssh_now = self._ssh_ready(observation_deadline)
+            # A fresh authenticated heartbeat already proves Windows is online.
+            # Do not pay for (or depend on) mDNS + ICMP after stronger evidence.
+            icmp_now = (
+                False
+                if ssh_now or agent
+                else self._network_reachable(observation_deadline)
+            )
+            evidence = [
+                name
+                for name, present in (
+                    ("desktop_agent", agent),
+                    ("ssh", ssh_now),
+                    ("icmp", icmp_now),
+                )
+                if present
+            ]
+            result.update(
+                agent_connected=agent,
+                agent_heartbeat_age_seconds=age,
+                ssh_ready=ssh_now,
+                icmp_reachable=icmp_now,
+                network_reachable=bool(evidence),
+                online=bool(evidence),
+                online_evidence=evidence,
+                management_path="ssh" if ssh_now else "desktop_agent" if agent else None,
+            )
+            return bool(evidence)
+
+        online = observe_online(deadline)
+        if not online:
             remaining = self._remaining(deadline)
             if remaining <= 0:
-                return finish("total_timeout", "workflow deadline expired")
+                return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
             if not self.operations.send_wake(remaining):
-                return finish("wake_sent", "fixed wake operation failed")
+                return finish("desktop_wake_failed", "wake_on_lan", "fixed wake operation failed")
             result["wake_sent"] = True
-            network_deadline = min(
-                deadline, self.clock() + self.settings.network_timeout_seconds
+            result["machine_state"] = "starting"
+            wake_deadline = min(
+                deadline,
+                self.clock() + self.settings.wake_readiness_timeout_seconds,
             )
-            network = self._wait_for(
-                lambda _remaining: self._network_reachable(network_deadline),
-                network_deadline,
-                event,
+            online = self._wait_for(
+                lambda _remaining: observe_online(wake_deadline), wake_deadline, event
             )
-            result["network_reachable"] = network
-            if not network:
+            if not online:
                 if event.is_set():
-                    return finish("cancelled", "workflow cancelled")
+                    return finish("cancelled", "startup", "workflow cancelled")
                 if self.clock() >= deadline:
-                    return finish("total_timeout", "workflow deadline expired")
+                    return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
+                result["machine_state"] = "startup_timed_out"
                 return finish(
-                    "network_reachable", "desktop network readiness timed out"
+                    "desktop_startup_timed_out",
+                    "desktop_online_evidence",
+                    "no authenticated or network evidence arrived within the wake window",
                 )
+        result["machine_state"] = "online"
 
-        ssh_deadline = min(deadline, self.clock() + self.settings.ssh_timeout_seconds)
-        if not ssh:
-            ssh = self._wait_for(
-                lambda _remaining: self._ssh_ready(ssh_deadline), ssh_deadline, event
-            )
-        result["ssh_ready"] = ssh
-        if not ssh:
-            if event.is_set():
-                return finish("cancelled", "workflow cancelled")
-            if self.clock() >= deadline:
-                return finish("total_timeout", "workflow deadline expired")
-            return finish("ssh_ready", "desktop remote-management readiness timed out")
-
-        backends: list[
-            tuple[str, Callable[[float], bool], Callable[[float], bool | None]]
-        ] = []
-        if self.settings.parsec_ensure_enabled:
-            backends.append(
-                (
-                    "parsec",
-                    self.operations.ensure_parsec_running,
-                    self.operations.parsec_ready,
+        if selected_mode is not DesktopAccessMode.LOCAL:
+            backend_enabled = {
+                "sunshine": True,
+                "rdp": self.settings.rdp_backend_enabled,
+                "remote_app": self.settings.remote_app_backend_enabled,
+            }.get(str(selected_backend), False)
+            if selected_backend != "sunshine" or not backend_enabled:
+                return finish(
+                    "access_backend_unavailable",
+                    str(selected_backend or "stream_backend"),
+                    "the selected Engineering backend is not explicitly provisioned",
                 )
-            )
-        if self.settings.sunshine_ensure_enabled:
-            backends.append(
-                (
-                    "sunshine",
-                    self.operations.ensure_sunshine_running,
-                    self.operations.sunshine_ready,
+            # The currently deployed Sunshine control path is SSH.  A fresh
+            # agent heartbeat proves Windows is online, but does not claim this
+            # management capability or Sunshine capture readiness.
+            if not result["ssh_ready"]:
+                ssh_deadline = min(
+                    deadline, self.clock() + self.settings.ssh_timeout_seconds
                 )
-            )
-        if not backends:
-            return finish("stream_backend", "no streaming backend is enabled")
+                result["ssh_ready"] = self._wait_for(
+                    lambda _remaining: self._ssh_ready(ssh_deadline),
+                    ssh_deadline,
+                    event,
+                )
+            if not result["ssh_ready"]:
+                if event.is_set():
+                    return finish("cancelled", "sunshine_management", "workflow cancelled")
+                return finish(
+                    "sunshine_management_unavailable",
+                    "ssh",
+                    "Windows is online, but no provisioned Sunshine management path is available",
+                )
+            result["management_path"] = "ssh"
 
-        selected_observer: Callable[[float], bool | None] | None = None
-        for index, (backend, ensure, observe) in enumerate(backends):
-            if event.is_set():
-                return finish("cancelled", "workflow cancelled")
-            remaining = self._remaining(deadline)
-            if remaining <= 0:
-                return finish("total_timeout", "workflow deadline expired")
-            result["attempted_backends"].append(backend)
-            ensured = ensure(remaining)
-            result[f"{backend}_ensure_succeeded"] = ensured
-            if not ensured:
-                continue
-
-            # Reserve time for every remaining fallback instead of allowing one
-            # unhealthy backend to consume the whole workflow deadline.
-            attempts_left = len(backends) - index
-            backend_deadline = min(
-                deadline, self.clock() + self._remaining(deadline) / attempts_left
-            )
-            last_state: bool | None = None
-
-            def backend_ready(
-                _remaining: float,
-                observe_backend: Callable[[float], bool | None] = observe,
-                check_deadline: float = backend_deadline,
-            ) -> bool:
-                nonlocal last_state
-                last_state = observe_backend(self._remaining(check_deadline))
-                return last_state is True
-
-            ready = self._wait_for(backend_ready, backend_deadline, event)
-            result[f"{backend}_ready"] = True if ready else last_state
+            status = self.operations.sunshine_status(self._remaining(deadline))
+            self._record_sunshine_readiness(result, status)
+            ready = self._sunshine_mode_ready(status)
             if ready:
-                result["stream_backend"] = backend
-                selected_observer = observe
-                break
-
-        if result["stream_backend"] is None:
-            if event.is_set():
-                return finish("cancelled", "workflow cancelled")
-            if self.clock() >= deadline:
-                return finish("total_timeout", "workflow deadline expired")
-            return finish("stream_backend", "no streaming backend became ready")
+                result["sunshine_reused"] = True
+            else:
+                if not self.settings.sunshine_ensure_enabled:
+                    return finish(
+                        "sunshine_management_disabled",
+                        "sunshine_service",
+                        "Sunshine ensure is not enabled",
+                    )
+                ensured = self.operations.ensure_sunshine_running(
+                    self._remaining(deadline)
+                )
+                result["sunshine_ensure_succeeded"] = ensured
+                if not ensured:
+                    return finish(
+                        "sunshine_ensure_failed",
+                        "sunshine_service",
+                        "the fixed Sunshine ensure operation failed",
+                    )
+                status = self.operations.sunshine_status(self._remaining(deadline))
+                self._record_sunshine_readiness(result, status)
+                ready = self._sunshine_mode_ready(status)
+            if not ready:
+                if status is None:
+                    return finish(
+                        "sunshine_readiness_unobservable",
+                        "sunshine_capture_probe",
+                        "Sunshine readiness could not be observed",
+                    )
+                if status.get("capture_ready") is not True:
+                    return finish(
+                        "sunshine_capture_unavailable",
+                        "sunshine_capture",
+                        "Sunshine is not capture-ready",
+                    )
+                return finish(
+                    "virtual_display_unavailable",
+                    "virtual_display",
+                    "the configured virtual display is not attached and capture-ready",
+                )
 
         remaining = self._remaining(deadline)
         if remaining <= 0:
-            return finish("total_timeout", "workflow deadline expired")
-        if not self.operations.request_headless_mode(remaining):
+            return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
+        transition = self._set_monitor_power(
+            str(result["monitor_desired_state"]), remaining
+        )
+        result["monitor_transition"] = transition
+        if transition is None:
             return finish(
-                "headless_mode_requested", "monitor power-off operation failed"
+                "home_assistant_unavailable",
+                "home_assistant",
+                "monitor state could not be observed or changed",
             )
-        result["headless_mode_requested"] = True
-        settle_deadline = min(
-            deadline, self.clock() + self.post_headless_settle_seconds
-        )
-        while not event.is_set() and self.clock() < settle_deadline:
-            remaining = self._remaining(settle_deadline)
-            event.wait(min(self.settings.poll_interval_seconds, remaining))
-        if event.is_set():
-            return finish("cancelled", "workflow cancelled")
-        remaining = self._remaining(deadline)
-        post_headless_ready = (
-            selected_observer(remaining)
-            if selected_observer is not None and remaining > 0
-            else None
-        )
-        result["headless_backend_ready"] = post_headless_ready
-        if post_headless_ready is not True:
-            remaining = self._remaining(deadline)
-            if remaining > 0:
-                result["headless_mode_restored"] = self.operations.restore_headed_mode(
-                    remaining
+        if transition.get("accepted") is not True:
+            result["safe_recovery"] = (
+                "Retry the same explicit mode after Home Assistant recovers; "
+                "do not automatically reverse outlets that already converged."
+            )
+            return finish(
+                "monitor_transition_partial"
+                if transition.get("partial") is True
+                else "monitor_transition_failed",
+                "monitor_outlets",
+                "both monitor outlets did not verify the requested state",
+            )
+
+        if selected_mode is not DesktopAccessMode.LOCAL:
+            if event.is_set():
+                return finish("cancelled", "post_transition", "workflow cancelled")
+            post_status = self.operations.sunshine_status(self._remaining(deadline))
+            self._record_sunshine_readiness(result, post_status)
+            if not self._sunshine_mode_ready(post_status):
+                result["safe_recovery"] = (
+                    "Leave verified monitor state unchanged to protect any active session; "
+                    "re-run the same mode after inspecting Sunshine and the virtual display."
                 )
-            return finish(
-                "headless_backend_ready",
-                "streaming backend lost readiness after monitor power-off",
-            )
+                return finish(
+                    "sunshine_lost_after_monitor_transition",
+                    "sunshine_capture",
+                    "Sunshine readiness was lost after monitor power changed",
+                )
         result["verification_complete"] = True
         return finish()
+
+    def _set_monitor_power(
+        self, desired_state: str, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        method = getattr(self.operations, "set_monitor_power", None)
+        if callable(method):
+            return method(desired_state, timeout_seconds)
+        accepted = (
+            self.operations.restore_headed_mode(timeout_seconds)
+            if desired_state == "on"
+            else self.operations.request_headless_mode(timeout_seconds)
+        )
+        return {
+            "accepted": accepted,
+            "desired_state": desired_state,
+            "partial": False,
+            "entities": {},
+        }
+
+    @staticmethod
+    def _sunshine_mode_ready(status: Mapping[str, object] | None) -> bool:
+        return bool(
+            status
+            and status.get("plausibly_ready") is True
+            and status.get("capture_ready") is True
+            and status.get("virtual_display_ready") is True
+        )
+
+    @staticmethod
+    def _record_sunshine_readiness(
+        result: dict[str, object], status: Mapping[str, object] | None
+    ) -> None:
+        result["sunshine_service_ready"] = (
+            None
+            if status is None
+            else bool(
+                status.get("service_running")
+                and status.get("host_process_present")
+                and status.get("web_listener_present")
+                and status.get("stream_listeners_present")
+            )
+        )
+        result["sunshine_capture_ready"] = (
+            None if status is None else status.get("capture_ready")
+        )
+        result["virtual_display_ready"] = (
+            None if status is None else status.get("virtual_display_ready")
+        )
+        result["sunshine_ready"] = (
+            None if status is None else status.get("plausibly_ready")
+        )
 
     def _wait_for(
         self,
@@ -535,6 +802,33 @@ class DesktopWorkflow:
         if remaining <= 0:
             return None
         return self.operations.sunshine_ready(remaining)
+
+    def _sunshine_service_ready(self, deadline: float) -> bool | None:
+        now = self.clock()
+        if self._sunshine_service_cache is not None:
+            observed_monotonic, _observed_wall, status = self._sunshine_service_cache
+            if now - observed_monotonic <= self.settings.overview_cache_seconds:
+                return None if status is None else bool(status.get("service_ready"))
+        remaining = self._remaining(deadline)
+        method = getattr(self.operations, "sunshine_service_status", None)
+        if remaining <= 0 or not callable(method):
+            return None
+        status = method(remaining)
+        self._sunshine_service_cache = (now, self.wall_clock(), status)
+        return None if status is None else bool(status.get("service_ready"))
+
+    def _agent_observation(self) -> tuple[bool, float | None]:
+        if self.agent_status is None:
+            return False, None
+        try:
+            status = self.agent_status()
+        except Exception:  # a read provider cannot break the workflow
+            return False, None
+        connected = status.get("state") == "connected" and status.get(
+            "agent_connected"
+        ) is True
+        age = status.get("last_authenticated_activity_age_seconds")
+        return connected, float(age) if isinstance(age, (int, float)) else None
 
     def _remaining(self, deadline: float) -> float:
         return max(0.0, deadline - self.clock())

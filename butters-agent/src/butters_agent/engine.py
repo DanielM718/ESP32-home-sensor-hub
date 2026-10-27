@@ -98,7 +98,12 @@ class Engine:
             return {"success": True, "session": self.platform.session()}
         if action == "desktop.app.list":
             names = sorted(set(self.apps) | set(self.invalid))
-            return {"success": True, "apps": [self._status(name) for name in names]}
+            observed = self.platform.app_statuses(self.apps)
+            return {
+                "success": True,
+                "apps": [self._status(name, observed=observed) for name in names],
+                "observed_at": time.time(),
+            }
 
         name = values["app"]
         status = self._status(name)
@@ -148,7 +153,7 @@ class Engine:
         finally:
             self.lock.release()
 
-    def _status(self, name):
+    def _status(self, name, *, observed=None):
         if name in self.invalid:
             return {
                 "app": name,
@@ -158,4 +163,9 @@ class Engine:
             }
         if name not in self.apps:
             raise ProtocolError("unknown_app")
-        return {"app": name, **self.platform.app_status(self.apps[name])}
+        status = (
+            observed[name]
+            if observed is not None
+            else self.platform.app_status(self.apps[name])
+        )
+        return {"app": name, **status}

@@ -37,6 +37,9 @@ class Platform:
             "visible_window": visible_window,
         }
 
+    def app_statuses(self, entries):
+        return {name: self.app_status(entry) for name, entry in entries.items()}
+
     def launch(self, entry):
         if self.failure:
             raise OSError("test failure")

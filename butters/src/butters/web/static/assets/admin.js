@@ -226,7 +226,8 @@ async function refreshDesktop() {
       ["Power / network", observed.power_network],
       ["SSH", observed.ssh],
       ["Parsec", observed.parsec],
-      ["Sunshine", observed.sunshine],
+      ["Sunshine service", observed.sunshine_service],
+      ["Sunshine capture", observed.sunshine],
       ["Desktop Agent", observed.agent],
       ["Windows session", observed.windows_session],
       ["Agent heartbeat", observed.agent_heartbeat_age_seconds===null?"unknown":"yes", observed.agent_heartbeat_age_seconds===null?undefined:`${Math.round(observed.agent_heartbeat_age_seconds)}s ago`],
@@ -241,6 +242,8 @@ async function refreshDesktop() {
     document.querySelector("#desktop-vms").textContent=`${state.vm.headline}. ${state.vm.detail}`;
     document.querySelector("#desktop-shutdown").disabled=!state.configured.shutdown;
     document.querySelector("#desktop-streaming").disabled=!state.configured.streaming;
+    document.querySelector("#desktop-engineering").disabled=!state.configured.streaming;
+    document.querySelector("#desktop-local").disabled=!state.configured.wake;
     document.querySelector("#desktop-wake").disabled=!state.configured.wake;
   } catch(error) { summary.textContent=`Desktop status unavailable: ${error.message||"unknown error"}`; }
 }
@@ -474,7 +477,16 @@ document.querySelector("#desktop-ssh-test").addEventListener("click",async()=>{
   await refreshDesktop();
 });
 document.querySelector("#desktop-wake").addEventListener("click",()=>runDesktopAction("Wake Desktop",()=>api("/api/admin/tools/desktop/wake",{method:"POST",body:JSON.stringify({})})));
-document.querySelector("#desktop-streaming").addEventListener("click",()=>runDesktopAction("Prepare for Streaming",()=>api("/api/admin/tools/desktop/streaming",{method:"POST",body:JSON.stringify({})})));
+document.querySelector("#desktop-streaming").addEventListener("click",()=>
+  runDesktopAction("Prepare gaming mode",()=>api("/api/admin/tools/desktop/streaming",{
+    method:"POST",body:JSON.stringify({})
+  })));
+for (const mode of ["engineering","local"]) {
+  document.querySelector(`#desktop-${mode}`).addEventListener("click",()=>
+    runDesktopAction(`Prepare ${mode} mode`,()=>api("/api/admin/tools/desktop/mode",{
+      method:"POST",body:JSON.stringify({mode})
+    })));
+}
 document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#desktop-shutdown-confirm"),
     "This ends every interactive desktop session, including Parsec, and any running build.",
@@ -1063,7 +1075,7 @@ async function refreshOverview() {
   // each card is built from its own settled result.
   const [overview, desktop, nas, ai] = await Promise.allSettled([
     api("/api/admin/overview"),
-    api("/api/admin/tools/desktop"),
+    api("/api/admin/tools/desktop?summary=1"),
     // No refresh: the cached observation is enough for a summary, and it
     // keeps Overview from generating NAS Agent traffic on every visit.
     api("/api/admin/tools/nas"),

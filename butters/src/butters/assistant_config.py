@@ -84,9 +84,14 @@ class DesktopSettings:
     host: str = "192.168.1.209"
     ssh_port: int = 22
     network_timeout_seconds: float = 45.0
+    wake_readiness_timeout_seconds: float = 120.0
     ssh_timeout_seconds: float = 90.0
-    total_timeout_seconds: float = 150.0
+    total_timeout_seconds: float = 180.0
     poll_interval_seconds: float = 2.0
+    overview_cache_seconds: float = 30.0
+    engineering_backend: str = "sunshine"
+    rdp_backend_enabled: bool = False
+    remote_app_backend_enabled: bool = False
     wake_enabled: bool = True
     headless_enabled: bool = True
     monitors_enabled: bool = True
@@ -109,10 +114,18 @@ class DesktopSettings:
             raise ConfigError("desktop.poll_interval_seconds must be 1 to 10")
         if not 5 <= self.network_timeout_seconds <= 180:
             raise ConfigError("desktop.network_timeout_seconds must be 5 to 180")
+        if not 30 <= self.wake_readiness_timeout_seconds <= 180:
+            raise ConfigError("desktop.wake_readiness_timeout_seconds must be 30 to 180")
         if not 5 <= self.ssh_timeout_seconds <= 240:
             raise ConfigError("desktop.ssh_timeout_seconds must be 5 to 240")
         if not 10 <= self.total_timeout_seconds <= 300:
             raise ConfigError("desktop.total_timeout_seconds must be 10 to 300")
+        if not 0 <= self.overview_cache_seconds <= 300:
+            raise ConfigError("desktop.overview_cache_seconds must be 0 to 300")
+        if self.total_timeout_seconds < self.wake_readiness_timeout_seconds:
+            raise ConfigError("desktop.total_timeout_seconds must cover wake readiness")
+        if self.engineering_backend not in {"sunshine", "rdp", "remote_app"}:
+            raise ConfigError("desktop.engineering_backend is not supported")
         return self
 
 
@@ -975,9 +988,18 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         network_timeout_seconds=float(
             desktop_table.get("network_timeout_seconds", 45.0)
         ),
+        wake_readiness_timeout_seconds=float(
+            desktop_table.get("wake_readiness_timeout_seconds", 120.0)
+        ),
         ssh_timeout_seconds=float(desktop_table.get("ssh_timeout_seconds", 90.0)),
-        total_timeout_seconds=float(desktop_table.get("total_timeout_seconds", 150.0)),
+        total_timeout_seconds=float(desktop_table.get("total_timeout_seconds", 180.0)),
         poll_interval_seconds=float(desktop_table.get("poll_interval_seconds", 2.0)),
+        overview_cache_seconds=float(desktop_table.get("overview_cache_seconds", 30.0)),
+        engineering_backend=str(desktop_table.get("engineering_backend", "sunshine")),
+        rdp_backend_enabled=bool(desktop_table.get("rdp_backend_enabled", False)),
+        remote_app_backend_enabled=bool(
+            desktop_table.get("remote_app_backend_enabled", False)
+        ),
         wake_enabled=bool(desktop_table.get("wake_enabled", True)),
         headless_enabled=bool(desktop_table.get("headless_enabled", True)),
         monitors_enabled=bool(desktop_table.get("monitors_enabled", True)),

@@ -106,6 +106,7 @@ class BrokerOperation(str, Enum):
     DESKTOP_PARSEC_STATUS = "desktop.parsec_status"
     DESKTOP_PARSEC_ENSURE = "desktop.parsec_ensure"
     DESKTOP_PARSEC_RESTART = "desktop.parsec_restart"
+    DESKTOP_SUNSHINE_SERVICE_STATUS = "desktop.sunshine_service_status"
     DESKTOP_SUNSHINE_STATUS = "desktop.sunshine_status"
     DESKTOP_SUNSHINE_ENSURE = "desktop.sunshine_ensure"
     DESKTOP_LOCK = "desktop.lock"
@@ -129,6 +130,7 @@ class _DesktopControlOperation(str, Enum):
     PARSEC_STATUS = "ParsecStatus"
     PARSEC_ENSURE = "ParsecEnsure"
     PARSEC_RESTART = "ParsecRestart"
+    SUNSHINE_SERVICE_STATUS = "SunshineServiceStatus"
     SUNSHINE_STATUS = "SunshineStatus"
     SUNSHINE_ENSURE = "SunshineEnsure"
     LOCK = "Lock"
@@ -466,6 +468,7 @@ class FixedBrokerOperations:
             BrokerOperation.DESKTOP_PARSEC_STATUS: self.desktop_parsec_status,
             BrokerOperation.DESKTOP_PARSEC_ENSURE: self.desktop_parsec_ensure,
             BrokerOperation.DESKTOP_PARSEC_RESTART: self.desktop_parsec_restart,
+            BrokerOperation.DESKTOP_SUNSHINE_SERVICE_STATUS: self.desktop_sunshine_service_status,
             BrokerOperation.DESKTOP_SUNSHINE_STATUS: self.desktop_sunshine_status,
             BrokerOperation.DESKTOP_SUNSHINE_ENSURE: self.desktop_sunshine_ensure,
             BrokerOperation.DESKTOP_LOCK: self.desktop_lock,
@@ -518,6 +521,9 @@ class FixedBrokerOperations:
 
     def desktop_sunshine_status(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.SUNSHINE_STATUS)
+
+    def desktop_sunshine_service_status(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SUNSHINE_SERVICE_STATUS)
 
     def desktop_sunshine_ensure(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.SUNSHINE_ENSURE)
@@ -936,7 +942,21 @@ _SUNSHINE_STATE_KEYS = frozenset(
         "web_listener_present",
         "stream_listeners_present",
         "capture_ready",
+        "virtual_display_ready",
         "plausibly_ready",
+    }
+)
+
+_SUNSHINE_SERVICE_STATE_KEYS = frozenset(
+    {
+        "installed",
+        "service_present",
+        "service_running",
+        "service_startup",
+        "host_process_present",
+        "web_listener_present",
+        "stream_listeners_present",
+        "service_ready",
     }
 )
 
@@ -996,6 +1016,16 @@ def _desktop_control_result(
         if "already_running" in extras and not isinstance(
             payload["already_running"], bool
         ):
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        return dict(payload)
+
+    if operation is _DesktopControlOperation.SUNSHINE_SERVICE_STATUS:
+        if set(payload) != _SUNSHINE_SERVICE_STATE_KEYS:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        for key in _SUNSHINE_SERVICE_STATE_KEYS - {"service_startup"}:
+            if not isinstance(payload[key], bool):
+                raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if payload["service_startup"] not in {"auto", "manual", "disabled", "absent"}:
             raise BrokerError("malformed_result", "fixed operation result is invalid")
         return dict(payload)
 

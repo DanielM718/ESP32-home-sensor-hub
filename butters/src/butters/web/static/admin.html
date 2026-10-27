@@ -122,9 +122,13 @@
         <div id="desktop-apps" class="app-grid"></div>
         <p class="tool-note">Application launches require a connected Desktop Agent and an active unlocked Windows session. Butters holds no executable path: the agent resolves every name against its own local allowlist.</p>
 
-        <h3>Streaming</h3>
-        <div class="button-row"><button id="desktop-streaming" class="primary-button" type="button">Prepare for streaming</button></div>
-        <p class="tool-note">Runs the reviewed workflow: wake, wait for SSH, start the fixed Parsec service on demand, verify readiness, then turn the two physical monitors off. Requires a fresh passkey assertion bound to this exact action.</p>
+        <h3>Access mode</h3>
+        <div class="button-row">
+          <button id="desktop-streaming" class="primary-button" type="button">Gaming</button>
+          <button id="desktop-engineering" class="primary-button" type="button">Engineering</button>
+          <button id="desktop-local" class="secondary-button" type="button">Local</button>
+        </div>
+        <p class="tool-note">Each explicit mode requires a fresh passkey. Gaming and Engineering reuse a ready Sunshine instance and verify its configured virtual display before turning both monitor outlets off. Local only wakes Windows and verifies both outlets on; it does not touch streaming software or display topology.</p>
 
         <h3>Virtual machines</h3>
         <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>

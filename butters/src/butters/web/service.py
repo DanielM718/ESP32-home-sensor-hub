@@ -268,8 +268,12 @@ class BetaAssistantService:
             pending_seconds=settings.authentication.pending_action_seconds,
         )
         self.action_state.recover_interrupted_jobs(local_console=False)
+        self.desktop_agent = AgentHub(settings.agent_ingress)
         self.assistant = assistant or create_assistant(
-            settings, vocabulary, action_state=self.action_state
+            settings,
+            vocabulary,
+            action_state=self.action_state,
+            desktop_agent_status=self.desktop_agent.status,
         )
         if self.assistant.environment_adapter is not None:
             self.assistant.environment_adapter.recover_overrides()
@@ -277,7 +281,6 @@ class BetaAssistantService:
             self.state_dir / "security.sqlite3", settings.authentication
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
-        self.desktop_agent = AgentHub(settings.agent_ingress)
         register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
         self.nas_agent = NasAgentHub(settings.nas_agent_ingress)
         register_nas_agent_skills(
@@ -1351,12 +1354,15 @@ class BetaAssistantService:
 
     # ----- Desktop -----------------------------------------------------------
 
-    def desktop_admin_status(self, *, refresh: bool = False) -> dict[str, object]:
+    def desktop_admin_status(
+        self, *, refresh: bool = False, include_apps: bool = True
+    ) -> dict[str, object]:
         """CURRENT OBSERVED STATE for the desktop, plus LAST OPERATION beside it.
 
-        Every field under `observed` comes from a live read performed for this
-        call. Nothing here is derived from a past wake or shutdown request, so a
-        stale workflow can no longer contradict an authoritative agent report:
+        Every field under `observed` comes from a current bounded read or a
+        timestamped freshness cache. Nothing here is derived from a past wake
+        or shutdown request, so a stale workflow cannot contradict an
+        authoritative agent report:
         if the agent says connected with a recent heartbeat and an active
         session, that is what this returns, regardless of what was requested
         earlier.
@@ -1369,6 +1375,12 @@ class BetaAssistantService:
             "ssh": _reach_value(reachability, "ssh_ready"),
             "parsec": _reach_value(reachability, "parsec_ready"),
             "sunshine": _reach_value(reachability, "sunshine_ready"),
+            "sunshine_service": _reach_value(
+                reachability, "sunshine_service_ready"
+            ),
+            "sunshine_service_observed_at": (
+                reachability.get("sunshine_observed_at") if reachability else None
+            ),
             "agent": agent["state"],
             "agent_connected": agent["agent_connected"],
             "agent_heartbeat_age_seconds": agent[
@@ -1377,7 +1389,15 @@ class BetaAssistantService:
             "windows_session": agent["interactive_session"],
             "observed_at": time.time(),
         }
-        apps = self._desktop_apps(bool(agent["agent_connected"]))
+        apps = (
+            self._desktop_apps(
+                bool(agent["agent_connected"]),
+                refresh=refresh,
+                connection_marker=agent.get("connected_since"),
+            )
+            if include_apps
+            else {"observed": False, "reason": "not_requested", "apps": []}
+        )
         return {
             "configured": {
                 "agent": agent["configured"],
@@ -1396,7 +1416,13 @@ class BetaAssistantService:
             "last_operation": self.last_operation("desktop"),
         }
 
-    def _desktop_apps(self, connected: bool) -> dict[str, object]:
+    def _desktop_apps(
+        self,
+        connected: bool,
+        *,
+        refresh: bool = False,
+        connection_marker: object = None,
+    ) -> dict[str, object]:
         """Present the agent's own allowlist; Butters never invents app names."""
 
         if not connected:
@@ -1405,6 +1431,21 @@ class BetaAssistantService:
                 "reason": "agent_not_connected",
                 "apps": [],
             }
+        now = time.time()
+        cached = getattr(self, "_desktop_app_cache", None)
+        if (
+            not refresh
+            and isinstance(cached, tuple)
+            and now - cached[0] <= self.settings.desktop.overview_cache_seconds
+            and cached[1] == connection_marker
+        ):
+            value = dict(cached[2])
+            value.update(
+                cached=True,
+                observed_at=cached[0],
+                age_seconds=max(0.0, now - cached[0]),
+            )
+            return value
         execution = self.assistant.skills.execute(
             "desktop.app.list", {}, administrator=True
         )
@@ -1416,11 +1457,16 @@ class BetaAssistantService:
             }
         data = getattr(execution.result, "data", {})
         raw = data.get("apps") if isinstance(data, dict) else None
-        return {
+        value = {
             "observed": True,
             "reason": None,
             "apps": list(raw) if isinstance(raw, list) else [],
+            "cached": False,
+            "observed_at": now,
+            "age_seconds": 0.0,
         }
+        self._desktop_app_cache = (now, connection_marker, dict(value))
+        return value
 
     def _desktop_vm_presentation(self) -> dict[str, object]:
         """Say plainly that VM state is not observed on this architecture.
@@ -1485,13 +1531,21 @@ class BetaAssistantService:
     def start_admin_desktop_streaming(
         self, session: BrowserSession
     ) -> dict[str, object]:
-        """Run the reviewed wake / SSH / Parsec / headless readiness workflow."""
+        """Compatibility endpoint for Gaming mode."""
+
+        return self.start_admin_desktop_mode(session, "gaming")
+
+    def start_admin_desktop_mode(
+        self, session: BrowserSession, mode: str
+    ) -> dict[str, object]:
+        if mode not in {"gaming", "engineering", "local"}:
+            raise ValueError("mode is not allow-listed")
 
         return self._start_admin_action(
             session,
-            skill="start_remote_desktop_session",
-            arguments={"machine": "desktop"},
-            summary="Prepare the configured desktop for streaming",
+            skill="set_desktop_access_mode",
+            arguments={"machine": "desktop", "mode": mode},
+            summary=f"Prepare the configured desktop for {mode} mode",
             subject="desktop",
         )
 
@@ -2793,7 +2847,8 @@ class BetaAssistantService:
         if (
             spec is not None
             and spec.action_class is ActionClass.ACTION
-            and route.skill == "start_remote_desktop_session"
+            and route.skill
+            in {"start_remote_desktop_session", "set_desktop_access_mode"}
             and _direct_desktop_action(normalized)
         ):
             action_authorization = ActionAuthorization(
@@ -3916,6 +3971,29 @@ def _bounded_result(value: object) -> object:
 
 def _direct_desktop_action(text: str) -> bool:
     text = text.casefold()
+    if any(
+        phrase in text
+        for phrase in (
+            "gaming mode",
+            "engineering mode",
+            "local mode",
+            "set gaming mode",
+            "switch to gaming mode",
+            "enter gaming mode",
+            "prepare gaming mode",
+            "set engineering mode",
+            "switch to engineering mode",
+            "enter engineering mode",
+            "prepare engineering mode",
+            "set local mode",
+            "switch to local mode",
+            "enter local mode",
+            "prepare local mode",
+            "restore local mode",
+            "return to local mode",
+        )
+    ):
+        return True
     remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
     wake = any(
         phrase in text
@@ -3930,6 +4008,8 @@ def _direct_desktop_action(text: str) -> bool:
 
 
 def _action_summary(skill: str, arguments: dict[str, object]) -> str:
+    if skill == "set_desktop_access_mode":
+        return f"Prepare the configured desktop for {arguments.get('mode')} mode"
     labels = {
         "wake_desktop": "Wake the configured desktop",
         "start_remote_desktop_session": "Wake the configured desktop and prepare an available streaming backend",
@@ -3946,13 +4026,15 @@ def _action_summary(skill: str, arguments: dict[str, object]) -> str:
         "reboot_butters_host": "Reboot the Butters host",
         "shutdown_butters_host": "Shut down the Butters host",
     }
+    if skill in labels:
+        return labels[skill]
     if skill.startswith("set_"):
         device = skill.removeprefix("set_").replace("_", " ")
         state = arguments.get("state")
         duration = arguments.get("duration_minutes")
         suffix = f" for {duration} minutes" if duration is not None else ""
         return f"Turn {device} {state}{suffix}"
-    return labels.get(skill, "Perform the exact registered action")
+    return "Perform the exact registered action"
 
 
 def _plan_summary(

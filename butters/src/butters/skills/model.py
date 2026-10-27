@@ -75,9 +75,12 @@ class SkillAudience(str, Enum):
 
 
 class SkillError(RuntimeError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, details: dict[str, object] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.details = details
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,6 +158,12 @@ class ProjectStatusArgs:
 @dataclass(frozen=True, slots=True)
 class DesktopArgs:
     machine: str
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopModeArgs:
+    machine: str
+    mode: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -258,6 +267,7 @@ SkillArguments: TypeAlias = (
     | SensorHistorySummaryArgs
     | ProjectStatusArgs
     | DesktopArgs
+    | DesktopModeArgs
     | DesktopAppArgs
     | EnvironmentActionArgs
     | NoArguments
@@ -464,6 +474,7 @@ class ActionAuthorization:
 class SkillFailure:
     code: str
     message: str
+    details: dict[str, object] | None = None
 
 
 @dataclass(frozen=True, slots=True)

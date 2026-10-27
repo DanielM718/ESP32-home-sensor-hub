@@ -16,9 +16,15 @@ machine = "desktop"
 host = "DESKTOP-G4CFVL1.local"
 ssh_port = 22
 network_timeout_seconds = 45.0
+wake_readiness_timeout_seconds = 120.0
 ssh_timeout_seconds = 90.0
-total_timeout_seconds = 150.0
+total_timeout_seconds = 180.0
 poll_interval_seconds = 2.0
+overview_cache_seconds = 30.0
+engineering_backend = "sunshine"
+# Extension gates only. No RDP or RemoteApp adapter is provisioned by this branch.
+rdp_backend_enabled = false
+remote_app_backend_enabled = false
 wake_enabled = true
 # Wake-only policy: wake_desktop needs nothing but a fixed Wake-on-LAN packet.
 # Headless/local mode controls only the two fixed Home Assistant monitor
