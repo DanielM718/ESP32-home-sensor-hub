@@ -18,10 +18,16 @@ $sunshineDxgiInfo = Join-Path $sunshineRoot 'tools\dxgi-info.exe'
 $sunshineConfig = Join-Path $sunshineRoot 'config\sunshine.conf'
 $sunshineProbeTask = '\Butters\SunshineCaptureProbe'
 $sunshineProbeResult = 'C:\ProgramData\Butters\sunshine-capture-probe.json'
+$displayTopologyHelper = 'C:\ProgramData\Butters\display-topology.ps1'
 $lockTask = '\Butters\LockDesktop'
 $sleepTask = '\Butters\SleepDesktop'
 $parsecDeadlineSeconds = 20
 $sunshineDeadlineSeconds = 20
+
+if (-not (Test-Path -LiteralPath $displayTopologyHelper -PathType Leaf)) {
+    throw 'The fixed display-topology helper is missing'
+}
+. $displayTopologyHelper
 
 function Invoke-SunshineCaptureProbe {
     $started = (Get-Date).ToUniversalTime()
@@ -57,9 +63,19 @@ function Write-SunshineCaptureProbe {
             Where-Object { $_ -match '^\s*output_name\s*=' } | Select-Object -First 1
         if ($line) { $configuredOutput = (($line -split '=', 2)[1]).Trim() }
     }
+    $stableVirtual = $null
+    try { $stableVirtual = Get-ButtersVirtualDisplay } catch {}
+    # Sunshine's Windows output_name is the stable device_id from its logs,
+    # while dxgi-info reports the current volatile \\.\DISPLAYn source name.
+    # Bind the two only after QueryDisplayConfig revalidates the MTT instance.
     $virtualDisplayReady = [bool](
-        $configuredOutput -and
-        $dxgiOutput -match ('(?ms)Output Name\s*:\s*' + [regex]::Escape($configuredOutput) + '.*?AttachedToDesktop\s*:\s*yes')
+        $stableVirtual -and
+        $configuredOutput -ieq $script:ButtersDisplayIdentity.VirtualSunshineId -and
+        $dxgiOutput -match (
+            '(?ms)Output Name\s*:\s*' +
+            [regex]::Escape([string]$stableVirtual.source_name) +
+            '.*?AttachedToDesktop\s*:\s*yes'
+        )
     )
     $result = [pscustomobject][ordered]@{
         timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')

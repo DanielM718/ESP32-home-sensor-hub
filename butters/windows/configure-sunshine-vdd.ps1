@@ -9,14 +9,19 @@ if ($AuditOnly -eq $Apply) {
     throw 'Specify exactly one of -AuditOnly or -Apply'
 }
 
-$displayName = '\\.\DISPLAY94'
 $displayDeviceId = '{5eb52002-659f-5729-bdd8-9cdc4efd1bf5}'
+$displayTopologyHelper = 'C:\ProgramData\Butters\display-topology.ps1'
 $sunshineConfig = 'C:\Program Files\Sunshine\config\sunshine.conf'
 $backupRoot = Join-Path 'C:\ProgramData\Butters\backups' ((Get-Date -Format 'yyyyMMddTHHmmss') + '-sunshine-vdd-config')
 $resultPath = 'C:\ProgramData\Butters\sunshine-vdd-config-result.json'
 $targetWidth = 2560
 $targetHeight = 1440
 $targetRefresh = 60
+
+if (-not (Test-Path -LiteralPath $displayTopologyHelper -PathType Leaf)) {
+    throw 'The fixed display-topology helper is missing'
+}
+. $displayTopologyHelper
 
 $root = @(Get-PnpDevice -Class Display -ErrorAction Stop | Where-Object {
     @((Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_HardwareIds -ErrorAction SilentlyContinue).Data) -contains 'Root\MttVDD'
@@ -35,6 +40,8 @@ if ($child.Count -ne 1 -or [string]$child[0].Status -ne 'OK' -or [int]$child[0].
 }
 if ($active.Count -ne 1) { throw 'The MTT1337 virtual monitor is not uniquely active' }
 if (-not (Test-Path -LiteralPath $sunshineConfig -PathType Leaf)) { throw 'Sunshine config is missing' }
+$validatedInventory = Get-ButtersValidatedDisplayInventory
+$displayName = [string]$validatedInventory.virtual.source_name
 
 if (-not ('Butters.NativeDisplayMode' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -174,8 +181,15 @@ New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 Copy-Item -LiteralPath $sunshineConfig -Destination (Join-Path $backupRoot 'sunshine.conf.before')
 $audit | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupRoot 'display-mode-before.json') -Encoding UTF8
 
+# Revalidate immediately before the only topology-affecting call. A changed,
+# missing, or ambiguous identity aborts without touching any display, even if
+# Windows reassigned all DISPLAYn aliases meanwhile.
+$currentVirtual = Get-ButtersVirtualDisplay
+if ([string]$currentVirtual.source_name -cne $displayName) {
+    throw 'The virtual display enumeration changed during validation'
+}
 $changeResult = [Butters.NativeDisplayMode]::ChangeDisplaySettingsEx(
-    $displayName,
+    [string]$currentVirtual.source_name,
     [ref]$desiredMode,
     [IntPtr]::Zero,
     1,
@@ -190,12 +204,17 @@ if ($afterMode.dmPelsWidth -ne $targetWidth -or $afterMode.dmPelsHeight -ne $tar
 
 $values = [ordered]@{
     output_name = $displayDeviceId
-    dd_configuration_option = 'ensure_active'
-    dd_resolution_option = 'manual'
+    # Sunshine may verify the stable target, but must not own a topology
+    # snapshot that it can replay after a Moonlight disconnect.
+    dd_configuration_option = 'verify_only'
+    dd_resolution_option = 'disabled'
     dd_manual_resolution = '2560x1440'
-    dd_refresh_rate_option = 'manual'
+    dd_refresh_rate_option = 'disabled'
     dd_manual_refresh_rate = '60'
     dd_hdr_option = 'disabled'
+    # In the installed build this changes *when* reversion is attempted, not
+    # whether it exists. verify_only above ensures there is no applied topology
+    # snapshot for that attempt to restore.
     dd_config_revert_on_disconnect = 'false'
 }
 $lines = [Collections.Generic.List[string]]::new()

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import secrets
 import socket
 import subprocess
@@ -18,20 +19,16 @@ from butters.integrations.model import IntegrationError
 
 NETWORK_ATTEMPT_TIMEOUT_SECONDS = 2.0
 SSH_ATTEMPT_TIMEOUT_SECONDS = 1.0
-# Failing name resolution is not covered by either probe's own timeout. The
-# configured desktop is named by mDNS, and resolving a `.local` name for a host
-# that is powered off blocks in getaddrinfo before create_connection's timeout
-# can begin to apply; the ping helper has to resolve the same name and is capped
-# only by its subprocess timeout. Measured against the real host while it was
-# off: getaddrinfo 5.02s then gaierror, create_connection(timeout=1.0) 5.02s
-# then gaierror, and ping -c1 -W1 exceeding its 2.0s cap -- about 7.0s for one
-# status observation.
-NAME_RESOLUTION_STALL_SECONDS = 5.0
-# What DesktopWorkflow.status() can cost when the desktop is actually off: one
-# stalled SSH resolution plus the separately-capped ping. Parsec is only probed
-# when SSH succeeded, so it adds nothing to this path.
+RESOLUTION_ATTEMPT_TIMEOUT_SECONDS = 1.0
+# Resolve the fixed mDNS name in a killable helper process. socket's connect
+# timeout begins only after getaddrinfo returns, so passing a timeout to
+# create_connection does not otherwise enforce the workflow's wall-clock
+# deadline. The ping subprocess is independently capped.
+SSH_OBSERVATION_WORST_CASE_SECONDS = (
+    RESOLUTION_ATTEMPT_TIMEOUT_SECONDS + SSH_ATTEMPT_TIMEOUT_SECONDS
+)
 STATUS_WORST_CASE_SECONDS = (
-    NAME_RESOLUTION_STALL_SECONDS + NETWORK_ATTEMPT_TIMEOUT_SECONDS
+    SSH_OBSERVATION_WORST_CASE_SECONDS + NETWORK_ATTEMPT_TIMEOUT_SECONDS
 )
 # Registered ceiling for the read skill, with headroom over that worst case. It
 # has to exceed it: a skill deadline shorter than one observation makes every
@@ -121,12 +118,16 @@ class BrokerDesktopOperations:
         *,
         broker: BrokerClient,
         ping: Callable[..., Any] = subprocess.run,
+        resolver: Callable[..., Any] = subprocess.run,
         connector: Callable[..., Any] = socket.create_connection,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self.settings = settings
         self.broker = broker
         self.ping = ping
+        self.resolver = resolver
         self.connector = connector
+        self.clock = clock
 
     def network_reachable(self, timeout_seconds: float) -> bool:
         attempt_timeout = min(NETWORK_ATTEMPT_TIMEOUT_SECONDS, timeout_seconds)
@@ -146,12 +147,17 @@ class BrokerDesktopOperations:
         return int(getattr(result, "returncode", 1)) == 0
 
     def ssh_ready(self, timeout_seconds: float) -> bool:
-        attempt_timeout = min(SSH_ATTEMPT_TIMEOUT_SECONDS, timeout_seconds)
+        started = self.clock()
+        host = self._resolved_host(timeout_seconds)
+        remaining = timeout_seconds - (self.clock() - started)
+        attempt_timeout = min(SSH_ATTEMPT_TIMEOUT_SECONDS, remaining)
         if attempt_timeout <= 0:
+            return False
+        if host is None:
             return False
         try:
             connection = self.connector(
-                (self.settings.host, self.settings.ssh_port), timeout=attempt_timeout
+                (host, self.settings.ssh_port), timeout=attempt_timeout
             )
         except (OSError, TimeoutError):
             return False
@@ -162,6 +168,39 @@ class BrokerDesktopOperations:
         except OSError:
             pass
         return True
+
+    def _resolved_host(self, timeout_seconds: float) -> str | None:
+        try:
+            return str(ipaddress.ip_address(self.settings.host))
+        except ValueError:
+            pass
+        attempt_timeout = min(RESOLUTION_ATTEMPT_TIMEOUT_SECONDS, timeout_seconds)
+        if attempt_timeout <= 0:
+            return None
+        try:
+            result = self.resolver(
+                ["/usr/bin/getent", "ahostsv4", self.settings.host],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=attempt_timeout,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if int(getattr(result, "returncode", 1)) != 0:
+            return None
+        for line in str(getattr(result, "stdout", "")).splitlines():
+            fields = line.split(maxsplit=1)
+            candidate = fields[0] if fields else ""
+            try:
+                address = ipaddress.ip_address(candidate)
+            except ValueError:
+                continue
+            if address.version == 4:
+                return str(address)
+        return None
 
     def parsec_ready(self, timeout_seconds: float) -> bool | None:
         status = self.parsec_status(timeout_seconds)
@@ -287,6 +326,9 @@ class DesktopWorkflow:
         self._sunshine_service_cache: (
             tuple[float, float, dict[str, object] | None] | None
         ) = None
+        self._mode_state_lock = threading.Lock()
+        self._mode_execution_lock = threading.Lock()
+        self._mode_generation = 0
 
     def status(self, machine: str) -> DesktopState:
         """Cheap online, management, and service observations for an overview.
@@ -441,6 +483,54 @@ class DesktopWorkflow:
         *,
         cancel_event: threading.Event | None = None,
     ) -> dict[str, object]:
+        """Serialize mode transitions and make newer explicit intent win."""
+
+        self._require_machine(machine)
+        selected_mode = (
+            mode if isinstance(mode, DesktopAccessMode) else DesktopAccessMode(mode)
+        )
+        with self._mode_state_lock:
+            self._mode_generation += 1
+            generation = self._mode_generation
+        event = cancel_event or threading.Event()
+        started = self.clock()
+        deadline = started + self.settings.total_timeout_seconds
+        while True:
+            with self._mode_state_lock:
+                current = generation == self._mode_generation
+            remaining = deadline - self.clock()
+            if not current or event.is_set() or remaining <= 0:
+                # The internal implementation returns the same structured
+                # cancelled/superseded/timeout result without taking a side
+                # effect when any of these conditions is already true.
+                return self._prepare_access_mode(
+                    machine,
+                    selected_mode,
+                    cancel_event=event,
+                    transition_generation=generation,
+                    request_started=started,
+                )
+            if self._mode_execution_lock.acquire(timeout=min(0.1, remaining)):
+                try:
+                    return self._prepare_access_mode(
+                        machine,
+                        selected_mode,
+                        cancel_event=event,
+                        transition_generation=generation,
+                        request_started=started,
+                    )
+                finally:
+                    self._mode_execution_lock.release()
+
+    def _prepare_access_mode(
+        self,
+        machine: str,
+        mode: DesktopAccessMode,
+        *,
+        cancel_event: threading.Event | None,
+        transition_generation: int,
+        request_started: float,
+    ) -> dict[str, object]:
         """Converge one explicit mode without changing sessions or displays.
 
         Agent, SSH and ICMP are independent evidence.  Only Sunshine readiness
@@ -450,12 +540,9 @@ class DesktopWorkflow:
         doing so could disrupt an active user session.
         """
 
-        self._require_machine(machine)
-        selected_mode = (
-            mode if isinstance(mode, DesktopAccessMode) else DesktopAccessMode(mode)
-        )
+        selected_mode = mode
         event = cancel_event or threading.Event()
-        started = self.clock()
+        started = request_started
         deadline = started + self.settings.total_timeout_seconds
         selected_backend = (
             None
@@ -525,16 +612,46 @@ class DesktopWorkflow:
                 result["status"] = "failed"
             return result
 
+        def superseded(stage: str) -> dict[str, object] | None:
+            with self._mode_state_lock:
+                current = transition_generation == self._mode_generation
+            if current:
+                return None
+            return finish(
+                "mode_transition_superseded",
+                stage,
+                "a newer explicit desktop mode transition took precedence",
+            )
+
+        stale = superseded("workflow")
+        if stale is not None:
+            return stale
         if event.is_set():
             return finish("cancelled", "workflow", "workflow cancelled")
         if self.clock() >= deadline:
             return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
+        if not self.settings.monitors_enabled:
+            return finish(
+                "monitor_management_disabled",
+                "monitor_outlets",
+                "monitor management is not enabled",
+            )
+        if (
+            selected_mode is not DesktopAccessMode.LOCAL
+            and not self.settings.headless_enabled
+        ):
+            return finish(
+                "headless_management_disabled",
+                "monitor_outlets",
+                "headless monitor management is not enabled",
+            )
 
         def observe_online(observation_deadline: float) -> bool:
             agent, age = self._agent_observation()
-            ssh_now = self._ssh_ready(observation_deadline)
             # A fresh authenticated heartbeat already proves Windows is online.
-            # Do not pay for (or depend on) mDNS + ICMP after stronger evidence.
+            # Do not pay for (or depend on) mDNS, SSH, or ICMP after stronger
+            # evidence. Remote modes separately obtain their management path.
+            ssh_now = False if agent else self._ssh_ready(observation_deadline)
             icmp_now = (
                 False
                 if ssh_now or agent
@@ -562,10 +679,22 @@ class DesktopWorkflow:
             return bool(evidence)
 
         online = observe_online(deadline)
+        stale = superseded("desktop_online_evidence")
+        if stale is not None:
+            return stale
         if not online:
             remaining = self._remaining(deadline)
             if remaining <= 0:
                 return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
+            if not self.settings.wake_enabled:
+                return finish(
+                    "desktop_wake_disabled",
+                    "wake_on_lan",
+                    "the fixed wake operation is not enabled",
+                )
+            stale = superseded("wake_on_lan")
+            if stale is not None:
+                return stale
             if not self.operations.send_wake(remaining):
                 return finish("desktop_wake_failed", "wake_on_lan", "fixed wake operation failed")
             result["wake_sent"] = True
@@ -588,6 +717,9 @@ class DesktopWorkflow:
                     "desktop_online_evidence",
                     "no authenticated or network evidence arrived within the wake window",
                 )
+            stale = superseded("desktop_online_evidence")
+            if stale is not None:
+                return stale
         result["machine_state"] = "online"
 
         if selected_mode is not DesktopAccessMode.LOCAL:
@@ -614,6 +746,9 @@ class DesktopWorkflow:
                     ssh_deadline,
                     event,
                 )
+            stale = superseded("sunshine_management")
+            if stale is not None:
+                return stale
             if not result["ssh_ready"]:
                 if event.is_set():
                     return finish("cancelled", "sunshine_management", "workflow cancelled")
@@ -624,6 +759,18 @@ class DesktopWorkflow:
                 )
             result["management_path"] = "ssh"
 
+            if not (
+                self.settings.sunshine_status_enabled
+                or self.settings.sunshine_ensure_enabled
+            ):
+                return finish(
+                    "sunshine_status_disabled",
+                    "sunshine_capture_probe",
+                    "Sunshine readiness observation is not enabled",
+                )
+            stale = superseded("sunshine_capture_probe")
+            if stale is not None:
+                return stale
             status = self.operations.sunshine_status(self._remaining(deadline))
             self._record_sunshine_readiness(result, status)
             ready = self._sunshine_mode_ready(status)
@@ -636,6 +783,9 @@ class DesktopWorkflow:
                         "sunshine_service",
                         "Sunshine ensure is not enabled",
                     )
+                stale = superseded("sunshine_service")
+                if stale is not None:
+                    return stale
                 ensured = self.operations.ensure_sunshine_running(
                     self._remaining(deadline)
                 )
@@ -668,6 +818,9 @@ class DesktopWorkflow:
                     "the configured virtual display is not attached and capture-ready",
                 )
 
+        stale = superseded("monitor_outlets")
+        if stale is not None:
+            return stale
         remaining = self._remaining(deadline)
         if remaining <= 0:
             return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
@@ -675,13 +828,23 @@ class DesktopWorkflow:
             str(result["monitor_desired_state"]), remaining
         )
         result["monitor_transition"] = transition
+        stale = superseded("monitor_outlets")
+        if stale is not None:
+            result["safe_recovery"] = (
+                "A newer explicit mode is converging next; do not reverse the "
+                "verified outlet result from this superseded request."
+            )
+            return stale
         if transition is None:
             return finish(
                 "home_assistant_unavailable",
                 "home_assistant",
                 "monitor state could not be observed or changed",
             )
-        if transition.get("accepted") is not True:
+        if (
+            transition.get("broker_ok") is False
+            or transition.get("accepted") is not True
+        ):
             result["safe_recovery"] = (
                 "Retry the same explicit mode after Home Assistant recovers; "
                 "do not automatically reverse outlets that already converged."

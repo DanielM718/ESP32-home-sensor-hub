@@ -3,13 +3,16 @@ param()
 
 $ErrorActionPreference = 'Stop'
 $source = Join-Path $PSScriptRoot 'desktop-control.ps1'
+$topologySource = Join-Path $PSScriptRoot 'display-topology.ps1'
 $installRoot = 'C:\ProgramData\Butters'
 $target = Join-Path $installRoot 'desktop-control.ps1'
+$topologyTarget = Join-Path $installRoot 'display-topology.ps1'
 $backupRoot = Join-Path $installRoot ('backups\' + (Get-Date -Format 'yyyyMMddTHHmmss') + '-desktop-control')
 $taskPath = '\Butters\'
 $taskFolderPath = '\Butters'
 
 if (-not (Test-Path $source)) { throw 'desktop-control.ps1 is missing beside the installer' }
+if (-not (Test-Path $topologySource)) { throw 'display-topology.ps1 is missing beside the installer' }
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
 if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -19,6 +22,7 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 New-Item -ItemType Directory -Path $installRoot -Force | Out-Null
 New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 if (Test-Path $target) { Copy-Item $target (Join-Path $backupRoot 'desktop-control.ps1.previous') }
+if (Test-Path $topologyTarget) { Copy-Item $topologyTarget (Join-Path $backupRoot 'display-topology.ps1.previous') }
 
 $schedule = New-Object -ComObject 'Schedule.Service'
 $schedule.Connect()
@@ -42,6 +46,7 @@ $parsec = Get-CimInstance Win32_Service -Filter "Name='Parsec'" -ErrorAction Sto
 } | ConvertTo-Json | Set-Content -Encoding UTF8 (Join-Path $backupRoot 'parsec-service-before.json')
 
 Copy-Item $source $target -Force
+Copy-Item $topologySource $topologyTarget -Force
 
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
 $lockAction = New-ScheduledTaskAction -Execute 'C:\Windows\System32\rundll32.exe' -Argument 'user32.dll,LockWorkStation'
@@ -66,6 +71,7 @@ Set-Service -Name 'Parsec' -StartupType Manual
 
 [pscustomobject]@{
     installed_script = $target
+    installed_topology_helper = $topologyTarget
     backup_directory = $backupRoot
     lock_task = $taskPath + 'LockDesktop'
     sleep_task = $taskPath + 'SleepDesktop'
@@ -73,4 +79,5 @@ Set-Service -Name 'Parsec' -StartupType Manual
     parsec_previous_start_mode = $parsec.StartMode
     parsec_final_start_mode = (Get-CimInstance Win32_Service -Filter "Name='Parsec'").StartMode
     script_sha256 = (Get-FileHash -Algorithm SHA256 $target).Hash
+    topology_helper_sha256 = (Get-FileHash -Algorithm SHA256 $topologyTarget).Hash
 } | ConvertTo-Json -Compress
