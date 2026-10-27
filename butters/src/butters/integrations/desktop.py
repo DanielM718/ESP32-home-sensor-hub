@@ -190,6 +190,13 @@ class BrokerDesktopOperations:
             )
         except BrokerError:
             return False
+        if operation in {
+            BrokerOperation.DESKTOP_MONITORS_OFF,
+            BrokerOperation.DESKTOP_MONITORS_ON,
+        }:
+            # The broker envelope can succeed even when one or both outlets
+            # fail to converge. Only confirmed HA state is monitor success.
+            return result.ok and result.status.get("accepted") is True
         return result.ok
 
 
@@ -366,11 +373,14 @@ class DesktopWorkflow:
             network_deadline = min(
                 deadline, self.clock() + self.settings.network_timeout_seconds
             )
-            network = self._wait_for(
-                lambda _remaining: self._network_reachable(network_deadline),
-                network_deadline,
-                event,
-            )
+            def reachable_after_wake(_remaining: float) -> bool:
+                nonlocal ssh
+                # Windows can answer SSH even when ICMP echo is blocked.
+                # Reuse the same SSH-or-ping rule as the initial probe.
+                ssh = self._ssh_ready(network_deadline)
+                return ssh or self._network_reachable(network_deadline)
+
+            network = self._wait_for(reachable_after_wake, network_deadline, event)
             result["network_reachable"] = network
             if not network:
                 if event.is_set():

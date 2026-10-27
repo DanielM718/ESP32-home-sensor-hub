@@ -4,8 +4,9 @@ import threading
 import time
 from dataclasses import replace
 
+from butters.actions.broker import BrokerOperation, BrokerResult
 from butters.assistant_config import load_assistant_settings
-from butters.integrations.desktop import DesktopWorkflow
+from butters.integrations.desktop import BrokerDesktopOperations, DesktopWorkflow
 from butters.integrations.model import IntegrationError
 
 
@@ -157,6 +158,40 @@ def test_offline_desktop_wakes_then_waits_for_network_and_ssh() -> None:
     assert result["parsec_ensure_succeeded"] is True
     assert result["headless_mode_requested"] is True
     assert operations.calls.index("wake") < operations.calls.index("ensure_parsec")
+
+
+def test_ssh_recovery_after_wake_does_not_require_icmp() -> None:
+    # Windows firewall may block ping even when SSH is ready.
+    operations = Operations(network=[False], ssh=[False, True], parsec=[True])
+    result = _workflow(operations).start_remote_session("desktop")
+    assert result["wake_sent"] is True
+    assert result["network_reachable"] is True
+    assert result["ssh_ready"] is True
+    assert result["verification_complete"] is True
+    assert operations.calls.index("wake") < operations.calls.index("headless")
+
+
+def test_monitor_broker_envelope_requires_verified_acceptance() -> None:
+    class Broker:
+        ok = True
+        accepted = False
+
+        def request(self, operation, **_kwargs):
+            return BrokerResult(operation, self.ok, {"accepted": self.accepted})
+
+    broker = Broker()
+    operations = BrokerDesktopOperations(
+        load_assistant_settings().desktop, broker=broker
+    )
+    # The broker may report its handler ran successfully, while HA verified
+    # neither outlet (or only one). That is not a successful headless change.
+    assert operations.request_headless_mode(1.0) is False
+    assert operations.restore_headed_mode(1.0) is False
+    broker.accepted = True
+    assert operations.request_headless_mode(1.0) is True
+    assert operations.restore_headed_mode(1.0) is True
+    broker.ok = False
+    assert operations.request_headless_mode(1.0) is False
 
 
 def test_wol_failure_stops_before_remote_script() -> None:
