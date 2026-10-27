@@ -24,9 +24,12 @@ LOGGER = logging.getLogger(__name__)
 
 
 class ActionCoordinatorError(PermissionError):
-    def __init__(self, code: str, message: str) -> None:
+    def __init__(
+        self, code: str, message: str, *, result: dict[str, object] | None = None
+    ) -> None:
         super().__init__(message)
         self.code = code
+        self.result = result
 
 
 class ActionCoordinator:
@@ -233,7 +236,9 @@ class ActionCoordinator:
                 if not execution.ok:
                     assert execution.failure is not None
                     raise ActionCoordinatorError(
-                        execution.failure.code, execution.failure.message
+                        execution.failure.code,
+                        execution.failure.message,
+                        result=execution.failure.details,
                     )
                 value = (
                     asdict(execution.result)
@@ -268,6 +273,7 @@ class ActionCoordinator:
                 stage=state,
                 failure_code=exc.code,
                 failure_reason=str(exc),
+                result=exc.result,
             )
             self.store.set_plan_state(plan.plan_id, state)
             for step in plan.steps:

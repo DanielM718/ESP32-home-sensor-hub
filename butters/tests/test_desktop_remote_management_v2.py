@@ -54,6 +54,7 @@ SUNSHINE_HEALTHY = {
     "web_listener_present": True,
     "stream_listeners_present": True,
     "capture_ready": True,
+    "virtual_display_ready": True,
     "plausibly_ready": True,
 }
 
@@ -309,6 +310,14 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
                 payload.update(accepted=True, error_code=None, elapsed_ms=1)
                 if name == "ParsecEnsure":
                     payload["already_running"] = True
+        elif name == "SunshineServiceStatus":
+            payload = {
+                key: value
+                for key, value in SUNSHINE_HEALTHY.items()
+                if key
+                not in {"capture_ready", "virtual_display_ready", "plausibly_ready"}
+            }
+            payload["service_ready"] = True
         elif name.startswith("Sunshine"):
             payload = dict(SUNSHINE_HEALTHY)
             if name == "SunshineEnsure":
@@ -331,6 +340,7 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
         BrokerOperation.DESKTOP_PARSEC_ENSURE,
         BrokerOperation.DESKTOP_PARSEC_RESTART,
         BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_SERVICE_STATUS,
         BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
         BrokerOperation.DESKTOP_LOCK,
         BrokerOperation.DESKTOP_SLEEP,
@@ -354,6 +364,7 @@ def test_every_desktop_control_operation_uses_one_fixed_script_and_no_dynamic_ar
             "ParsecEnsure",
             "ParsecRestart",
             "SunshineStatus",
+            "SunshineServiceStatus",
             "SunshineEnsure",
             "Lock",
             "Sleep",
@@ -711,12 +722,7 @@ def test_the_desktop_overview_does_not_observe_parsec_when_it_is_disabled() -> N
     assert enabled.parsec_calls == 1
 
 
-def test_disabling_parsec_observation_does_not_touch_session_verification() -> None:
-    """start_remote_session must still verify readiness after ensure.
-
-    That verification is the validated live acceptance behaviour; it is gated by
-    parsec_ensure_enabled at registration, not by the observation flag.
-    """
+def test_disabling_parsec_observation_does_not_change_sunshine_mode_backend() -> None:
 
     from butters.assistant_config import DesktopSettings
     from butters.integrations.desktop import DesktopWorkflow
@@ -725,6 +731,7 @@ def test_disabling_parsec_observation_does_not_touch_session_verification() -> N
         def __init__(self) -> None:
             self.ensured = False
             self.parsec_checks = 0
+            self.sunshine_checks = 0
             self.headless = False
 
         def network_reachable(self, _timeout: float) -> bool:
@@ -744,11 +751,20 @@ def test_disabling_parsec_observation_does_not_touch_session_verification() -> N
             return True
 
         def ensure_parsec_running(self, _timeout: float) -> bool:
-            self.ensured = True
-            return True
+            raise AssertionError("explicit access modes do not start Parsec")
+
+        def sunshine_status(self, _timeout: float) -> dict[str, object]:
+            self.sunshine_checks += 1
+            return dict(SUNSHINE_HEALTHY)
+
+        def ensure_sunshine_running(self, _timeout: float) -> bool:
+            raise AssertionError("a ready Sunshine instance must be reused")
 
         def request_headless_mode(self, _timeout: float) -> bool:
             self.headless = True
+            return True
+
+        def restore_headed_mode(self, _timeout: float) -> bool:
             return True
 
     operations = Operations()
@@ -758,11 +774,15 @@ def test_disabling_parsec_observation_does_not_touch_session_verification() -> N
         host="192.0.2.1",
         parsec_status_enabled=False,
         parsec_ensure_enabled=True,
+        sunshine_status_enabled=True,
+        sunshine_ensure_enabled=True,
     )
 
     result = DesktopWorkflow(settings, operations).start_remote_session("desktop")
 
     assert result["verification_complete"] is True
-    assert result["parsec_ready"] is True
-    assert operations.parsec_checks >= 1
+    assert result["sunshine_ready"] is True
+    assert result["sunshine_reused"] is True
+    assert operations.parsec_checks == 0
+    assert operations.sunshine_checks == 2
     assert operations.headless is True

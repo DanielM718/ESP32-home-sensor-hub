@@ -20,13 +20,13 @@ class Operations:
         sunshine: list[bool | None] | None = None,
         wake: bool = True,
         ensure: bool = True,
-        ensure_sunshine: bool = False,
+        ensure_sunshine: bool = True,
         remote: bool = True,
     ) -> None:
         self.network_values = network
         self.ssh_values = ssh
         self.parsec_values = parsec
-        self.sunshine_values = sunshine or [None]
+        self.sunshine_values = sunshine or [True]
         self.wake = wake
         self.ensure = ensure
         self.ensure_sunshine = ensure_sunshine
@@ -63,7 +63,19 @@ class Operations:
 
     def sunshine_status(self, timeout_seconds: float):
         ready = self.sunshine_ready(timeout_seconds)
-        return None if ready is None else {"plausibly_ready": ready}
+        return (
+            None
+            if ready is None
+            else {
+                "service_running": True,
+                "host_process_present": True,
+                "web_listener_present": True,
+                "stream_listeners_present": True,
+                "capture_ready": ready,
+                "virtual_display_ready": ready,
+                "plausibly_ready": ready,
+            }
+        )
 
     def send_wake(self, _timeout_seconds: float) -> bool:
         self.calls.append("wake")
@@ -107,10 +119,11 @@ def _workflow(
         load_assistant_settings().desktop,
         poll_interval_seconds=0.0,
         network_timeout_seconds=1.0,
+        wake_readiness_timeout_seconds=1.0,
         ssh_timeout_seconds=1.0,
         total_timeout_seconds=3.0,
         sunshine_status_enabled=sunshine,
-        sunshine_ensure_enabled=sunshine,
+        sunshine_ensure_enabled=True,
     )
     return DesktopWorkflow(
         settings,
@@ -125,22 +138,24 @@ def test_desktop_already_fully_ready_still_enters_headless_mode() -> None:
     result = _workflow(operations).start_remote_session("desktop")
     assert result["verification_complete"] is True
     assert result["wake_sent"] is False
-    assert result["parsec_ensure_succeeded"] is True
-    assert result["headless_mode_requested"] is True
+    assert result["sunshine_reused"] is True
+    assert result["monitor_transition"]["accepted"] is True
     assert operations.wake_calls == 0
-    assert operations.ensure_calls == 1
+    assert operations.ensure_calls == 0
     assert operations.remote_calls == 1
 
 
-def test_reachable_desktop_requests_headless_mode_when_parsec_not_ready() -> None:
-    operations = Operations(network=[True], ssh=[True], parsec=[False, True])
+def test_reachable_desktop_ensures_sunshine_when_not_ready() -> None:
+    operations = Operations(
+        network=[True], ssh=[True], parsec=[False], sunshine=[False, True]
+    )
     result = _workflow(operations).start_remote_session("desktop")
-    assert result["headless_mode_requested"] is True
-    assert result["parsec_ready"] is True
+    assert result["monitor_transition"]["accepted"] is True
+    assert result["sunshine_ready"] is True
     assert result["verification_complete"] is True
     assert (
-        operations.calls.index("ensure_parsec")
-        < operations.calls.index("parsec_status")
+        operations.calls.index("sunshine_status")
+        < operations.calls.index("ensure_sunshine")
         < operations.calls.index("headless")
     )
 
@@ -155,9 +170,9 @@ def test_offline_desktop_wakes_then_waits_for_network_and_ssh() -> None:
     assert result["wake_sent"] is True
     assert result["network_reachable"] is True
     assert result["ssh_ready"] is True
-    assert result["parsec_ensure_succeeded"] is True
-    assert result["headless_mode_requested"] is True
-    assert operations.calls.index("wake") < operations.calls.index("ensure_parsec")
+    assert result["sunshine_reused"] is True
+    assert result["monitor_transition"]["accepted"] is True
+    assert operations.calls.index("wake") < operations.calls.index("sunshine_status")
 
 
 def test_ssh_recovery_after_wake_does_not_require_icmp() -> None:
@@ -197,7 +212,8 @@ def test_monitor_broker_envelope_requires_verified_acceptance() -> None:
 def test_wol_failure_stops_before_remote_script() -> None:
     operations = Operations(network=[False], ssh=[False], parsec=[False], wake=False)
     result = _workflow(operations).start_remote_session("desktop")
-    assert result["failed_stage"] == "wake_sent"
+    assert result["failure_code"] == "desktop_wake_failed"
+    assert result["failed_stage"] == "wake_on_lan"
     assert operations.ensure_calls == 0
     assert operations.remote_calls == 0
 
@@ -209,27 +225,35 @@ def test_network_and_ssh_timeouts_are_distinct() -> None:
     ssh_timeout = _workflow(
         Operations(network=[True], ssh=[False], parsec=[False]), step=0.05
     ).start_remote_session("desktop")
-    assert network_timeout["failed_stage"] == "network_reachable"
-    assert ssh_timeout["failed_stage"] == "ssh_ready"
+    assert network_timeout["failure_code"] == "desktop_startup_timed_out"
+    assert network_timeout["failed_stage"] == "desktop_online_evidence"
+    assert ssh_timeout["failure_code"] == "sunshine_management_unavailable"
+    assert ssh_timeout["failed_stage"] == "ssh"
 
 
-def test_parsec_ensure_and_headless_failures_are_distinct() -> None:
+def test_sunshine_ensure_and_monitor_failures_are_distinct() -> None:
     ensure = _workflow(
-        Operations(network=[True], ssh=[True], parsec=[True], ensure=False)
+        Operations(
+            network=[True],
+            ssh=[True],
+            parsec=[True],
+            sunshine=[False],
+            ensure_sunshine=False,
+        )
     ).start_remote_session("desktop")
     headless = _workflow(
         Operations(network=[True], ssh=[True], parsec=[True], remote=False)
     ).start_remote_session("desktop")
-    assert ensure["failed_stage"] == "stream_backend"
-    assert headless["failed_stage"] == "headless_mode_requested"
+    assert ensure["failure_code"] == "sunshine_ensure_failed"
+    assert headless["failure_code"] == "monitor_transition_failed"
 
 
-def test_sunshine_is_used_when_parsec_cannot_be_ensured() -> None:
+def test_sunshine_is_the_explicit_mode_backend_even_if_parsec_cannot_be_ensured() -> None:
     operations = Operations(
         network=[True],
         ssh=[True],
         parsec=[False],
-        sunshine=[True],
+        sunshine=[False, True],
         ensure=False,
         ensure_sunshine=True,
     )
@@ -237,39 +261,37 @@ def test_sunshine_is_used_when_parsec_cannot_be_ensured() -> None:
 
     assert result["verification_complete"] is True
     assert result["stream_backend"] == "sunshine"
-    assert result["attempted_backends"] == ["parsec", "sunshine"]
-    assert result["parsec_ensure_succeeded"] is False
     assert result["sunshine_ensure_succeeded"] is True
     assert operations.calls.index("ensure_sunshine") < operations.calls.index(
         "headless"
     )
 
 
-def test_backend_loss_after_monitor_power_off_restores_monitors_and_fails() -> None:
+def test_backend_loss_after_monitor_power_off_does_not_auto_reverse() -> None:
     operations = Operations(
         network=[True],
         ssh=[True],
-        parsec=[True, False],
+        parsec=[True],
+        sunshine=[True, False],
     )
 
     result = _workflow(operations).start_remote_session("desktop")
 
     assert result["verification_complete"] is False
-    assert result["headless_mode_requested"] is True
-    assert result["headless_backend_ready"] is False
-    assert result["headless_mode_restored"] is True
-    assert result["failed_stage"] == "headless_backend_ready"
-    assert operations.restore_calls == 1
+    assert result["monitor_transition"]["accepted"] is True
+    assert result["sunshine_ready"] is False
+    assert result["failure_code"] == "sunshine_lost_after_monitor_transition"
+    assert operations.restore_calls == 0
 
 
-def test_unknown_parsec_state_is_not_reported_as_ready() -> None:
+def test_unknown_sunshine_state_is_not_reported_as_ready() -> None:
     result = _workflow(
-        Operations(network=[True], ssh=[True], parsec=[None, None])
+        Operations(network=[True], ssh=[True], parsec=[None], sunshine=[None])
     ).start_remote_session("desktop")
-    assert result["parsec_ready"] is None
+    assert result["sunshine_ready"] is None
     assert result["verification_complete"] is False
-    assert result["headless_mode_requested"] is False
-    assert result["failed_stage"] == "total_timeout"
+    assert result["monitor_transition"] is None
+    assert result["failure_code"] == "sunshine_readiness_unobservable"
 
 
 def test_workflow_cancellation_prevents_every_operation() -> None:
@@ -277,7 +299,7 @@ def test_workflow_cancellation_prevents_every_operation() -> None:
     event.set()
     operations = Operations(network=[True], ssh=[True], parsec=[True])
     result = _workflow(operations).start_remote_session("desktop", cancel_event=event)
-    assert result["failed_stage"] == "cancelled"
+    assert result["failure_code"] == "cancelled"
     assert (
         operations.wake_calls == operations.ensure_calls == operations.remote_calls == 0
     )
@@ -287,7 +309,7 @@ def test_total_timeout_is_bounded() -> None:
     result = _workflow(
         Operations(network=[False], ssh=[False], parsec=[False]), step=2.0
     ).start_remote_session("desktop")
-    assert result["failed_stage"] == "total_timeout"
+    assert result["failure_code"] == "desktop_mode_timeout"
     assert int(result["elapsed_ms"]) >= 0
 
 

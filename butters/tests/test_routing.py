@@ -324,8 +324,8 @@ def test_wake_desktop_routes_to_the_registered_bounded_action(
         ("headless mode", "monitors_off"),
         ("remote mode", "monitors_off"),
         ("turn on my monitors", "monitors_on"),
-        ("local mode", "monitors_on"),
-        ("restore local mode", "monitors_on"),
+        ("local mode", "set_desktop_access_mode"),
+        ("restore local mode", "set_desktop_access_mode"),
     ),
 )
 def test_desktop_monitor_compatibility_phrases_are_deterministic(
@@ -335,7 +335,10 @@ def test_desktop_monitor_compatibility_phrases_are_deterministic(
 
     assert route.matched
     assert route.skill == skill
-    assert route.arguments == {"machine": "desktop"}
+    assert route.arguments == {
+        "machine": "desktop",
+        **({"mode": "local"} if skill == "set_desktop_access_mode" else {}),
+    }
 
 
 def test_unknown_complex_request_remains_unresolved(router: IntentRouter) -> None:

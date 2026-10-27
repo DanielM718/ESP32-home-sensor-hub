@@ -7,7 +7,11 @@ from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from typing import cast
 
-from butters.integrations.desktop import STATUS_TIMEOUT_SECONDS, DesktopWorkflow
+from butters.integrations.desktop import (
+    STATUS_TIMEOUT_SECONDS,
+    DesktopAccessMode,
+    DesktopWorkflow,
+)
 from butters.integrations.history import DashboardHistoryAdapter, HistorySeries
 from butters.integrations.model import (
     IntegrationError,
@@ -27,6 +31,7 @@ from butters.skills.model import (
     CompareWindowsArgs,
     CorrelationArgs,
     DesktopArgs,
+    DesktopModeArgs,
     PrintDetailsArgs,
     PrintEnvironmentAnalysisArgs,
     RecentPrintsArgs,
@@ -79,8 +84,12 @@ class V2SkillImplementations:
         self.desktop = desktop
 
     def authorize_desktop(self, arguments: SkillArguments) -> None:
-        if cast(DesktopArgs, arguments).machine != "desktop":
+        if cast(DesktopArgs | DesktopModeArgs, arguments).machine != "desktop":
             raise SkillError("policy_denied", "machine is not allow-listed")
+        if isinstance(arguments, DesktopModeArgs) and arguments.mode not in {
+            item.value for item in DesktopAccessMode
+        }:
+            raise SkillError("policy_denied", "desktop mode is not allow-listed")
 
     def authorize_history(self, arguments: SkillArguments) -> None:
         args = cast(SensorHistoryArgs | SensorWindowArgs, arguments)
@@ -194,11 +203,10 @@ class V2SkillImplementations:
             cancel_event=current_cancel_event(),
         )
         if not data.get("verification_complete"):
-            stage = str(data.get("failed_stage") or "stream_backend")
+            stage = str(data.get("failed_dependency") or "stream_backend")
             message = str(data.get("error") or "desktop streaming preparation failed")
-            if stage == "cancelled":
-                raise SkillError("cancelled", message)
-            raise SkillError("desktop_stream_prepare_failed", f"{stage}: {message}")
+            code = str(data.get("failure_code") or "desktop_stream_prepare_failed")
+            raise SkillError(code, f"{stage}: {message}", details=data)
         return StructuredSkillResult(
             "desktop_remote_session",
             data,
@@ -215,6 +223,34 @@ class V2SkillImplementations:
                     for name in ("parsec_ready", "sunshine_ready")
                     if data.get(name) is None
                 ],
+            },
+        )
+
+    def set_desktop_access_mode(self, arguments: SkillArguments) -> SkillResult:
+        args = cast(DesktopModeArgs, arguments)
+        data = self.desktop.prepare_access_mode(
+            args.machine,
+            DesktopAccessMode(args.mode),
+            cancel_event=current_cancel_event(),
+        )
+        if not data.get("verification_complete"):
+            code = str(data.get("failure_code") or "desktop_mode_prepare_failed")
+            dependency = str(data.get("failed_dependency") or "workflow")
+            message = str(data.get("error") or "desktop mode preparation failed")
+            raise SkillError(code, f"{dependency}: {message}", details=data)
+        return StructuredSkillResult(
+            "desktop_access_mode",
+            data,
+            {
+                "observed": [
+                    "online_evidence",
+                    "agent_connected",
+                    "ssh_ready",
+                    "sunshine_capture_ready",
+                    "virtual_display_ready",
+                    "monitor_transition",
+                ],
+                "calculated": ["status", "elapsed_ms", "client_profile"],
             },
         )
 
@@ -682,7 +718,7 @@ def register_v2_skills(
     registry.register(
         spec(
             "start_remote_desktop_session",
-            "Run the fixed WOL, SSH, streaming-backend readiness, and headless monitor-power workflow for the configured desktop.",
+            "Compatibility alias for the explicit Gaming desktop access mode.",
             ActionClass.ACTION,
             _parse_desktop,
             impl.authorize_desktop,
@@ -699,6 +735,36 @@ def register_v2_skills(
             unavailable_reason=(
                 None
                 if desktop.settings.headless_enabled and desktop.broker_settings.enabled
+                else "privileged action broker is not provisioned"
+            ),
+        )
+    )
+    registry.register(
+        spec(
+            "set_desktop_access_mode",
+            "Prepare exactly one authenticated Gaming, Engineering, or Local desktop access mode.",
+            ActionClass.ACTION,
+            _parse_desktop_mode,
+            impl.authorize_desktop,
+            impl.set_desktop_access_mode,
+            _schema(
+                {
+                    "machine": _enum(["desktop"]),
+                    "mode": _enum([item.value for item in DesktopAccessMode]),
+                },
+                ["machine", "mode"],
+            ),
+            timeout=desktop.settings.total_timeout_seconds + 5,
+            side_effects="wake the configured desktop when needed and verify both physical monitor outlets in the explicit mode; Gaming and Engineering verify the existing Sunshine virtual-display path without restarting a ready instance",
+            explicit=True,
+            authentication=AuthenticationLevel.FRESH,
+            configured=desktop.settings.monitors_enabled,
+            available=(
+                desktop.settings.monitors_enabled and desktop.broker_settings.enabled
+            ),
+            unavailable_reason=(
+                None
+                if desktop.settings.monitors_enabled and desktop.broker_settings.enabled
                 else "privileged action broker is not provisioned"
             ),
         )
@@ -903,6 +969,13 @@ def register_v2_skills(
 def _parse_desktop(values: Mapping[str, object]) -> SkillArguments:
     strict_arguments(values, required=frozenset({"machine"}))
     return DesktopArgs(required_string(values, "machine"))
+
+
+def _parse_desktop_mode(values: Mapping[str, object]) -> SkillArguments:
+    strict_arguments(values, required=frozenset({"machine", "mode"}))
+    return DesktopModeArgs(
+        required_string(values, "machine"), required_string(values, "mode")
+    )
 
 
 def _parse_history(values: Mapping[str, object]) -> SkillArguments:

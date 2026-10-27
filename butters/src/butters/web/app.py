@@ -889,7 +889,12 @@ def create_app(
     async def desktop_tool_status(request: Request) -> Response:
         try:
             _admin(request, auth)
-            return JSONResponse(await run_blocking(runtime.desktop_admin_status))
+            include_apps = request.query_params.get("summary") != "1"
+            return JSONResponse(
+                await run_blocking(
+                    runtime.desktop_admin_status, include_apps=include_apps
+                )
+            )
         except (SecurityError, SessionError, ActionCoordinatorError) as exc:
             return _exception_response(exc)
 
@@ -914,6 +919,23 @@ def create_app(
         return await _admin_fixed_action(
             request, runtime.start_admin_desktop_streaming, "streaming preparation"
         )
+
+    async def desktop_tool_mode(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"mode"}:
+                raise ValueError("mode request accepts exactly one mode")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.start_admin_desktop_mode,
+                    session,
+                    _string_field(payload, "mode"),
+                )
+            )
+        except (SecurityError, SessionError, ActionCoordinatorError, ValueError) as exc:
+            return _exception_response(exc)
 
     async def desktop_tool_launch(request: Request) -> Response:
         """Launch one symbolic application through the registered Slice 3 action.
@@ -2592,6 +2614,11 @@ def create_app(
         Route(
             "/api/admin/tools/desktop/streaming",
             desktop_tool_streaming,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/tools/desktop/mode",
+            desktop_tool_mode,
             methods=["POST"],
         ),
         Route(

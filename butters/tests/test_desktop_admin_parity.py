@@ -52,11 +52,15 @@ def test_admin_tools_contains_every_production_desktop_control() -> None:
         'id="desktop-vms"',
         'id="desktop-compute-note"',
         'id="desktop-streaming"',
+        'id="desktop-engineering"',
+        'id="desktop-local"',
         'id="desktop-shutdown"',
         'id="desktop-shutdown-confirm"',
         'id="desktop-result"',
     ):
         assert element in ADMIN_HTML, element
+    assert "/api/admin/tools/desktop/mode" in ADMIN_JS
+    assert 'api("/api/admin/tools/desktop?summary=1")' in ADMIN_JS
 
 
 def test_every_production_desktop_control_is_present_or_deliberately_replaced() -> None:

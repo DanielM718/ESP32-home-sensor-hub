@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineStatus', 'SunshineEnsure', 'SunshineProbeInteractive', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
+    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineServiceStatus', 'SunshineStatus', 'SunshineEnsure', 'SunshineProbeInteractive', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
     [string]$Operation
 )
 
@@ -15,6 +15,7 @@ $sunshineServiceName = 'SunshineService'
 $sunshineRoot = 'C:\Program Files\Sunshine'
 $sunshineExecutable = Join-Path $sunshineRoot 'sunshine.exe'
 $sunshineDxgiInfo = Join-Path $sunshineRoot 'tools\dxgi-info.exe'
+$sunshineConfig = Join-Path $sunshineRoot 'config\sunshine.conf'
 $sunshineProbeTask = '\Butters\SunshineCaptureProbe'
 $sunshineProbeResult = 'C:\ProgramData\Butters\sunshine-capture-probe.json'
 $lockTask = '\Butters\LockDesktop'
@@ -37,22 +38,33 @@ function Invoke-SunshineCaptureProbe {
                     [Globalization.DateTimeStyles]::RoundtripKind
                 ).ToUniversalTime()
                 if ($captured -ge $started.AddSeconds(-1)) {
-                    return [bool]$probe.capture_ready
+                    return $probe
                 }
             } catch {}
         }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)
-    return $false
+    return [pscustomobject]@{ capture_ready = $false; virtual_display_ready = $false }
 }
 
 function Write-SunshineCaptureProbe {
     $dxgiOutput = ''
     try { $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String) } catch {}
     $captureReady = [bool]($dxgiOutput -match '(?ms)Output Name\s*:\s*[^\r\n]+.*?AttachedToDesktop\s*:\s*yes')
+    $configuredOutput = ''
+    if (Test-Path -LiteralPath $sunshineConfig) {
+        $line = Get-Content -LiteralPath $sunshineConfig -ErrorAction SilentlyContinue |
+            Where-Object { $_ -match '^\s*output_name\s*=' } | Select-Object -First 1
+        if ($line) { $configuredOutput = (($line -split '=', 2)[1]).Trim() }
+    }
+    $virtualDisplayReady = [bool](
+        $configuredOutput -and
+        $dxgiOutput -match ('(?ms)Output Name\s*:\s*' + [regex]::Escape($configuredOutput) + '.*?AttachedToDesktop\s*:\s*yes')
+    )
     $result = [pscustomobject][ordered]@{
         timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
         capture_ready = $captureReady
+        virtual_display_ready = $virtualDisplayReady
     }
     $temporary = $sunshineProbeResult + '.tmp'
     $result | ConvertTo-Json -Compress | Set-Content -LiteralPath $temporary -Encoding UTF8
@@ -116,16 +128,12 @@ function Get-ParsecState {
     }
 }
 
-function Get-SunshineState {
+function Get-SunshineServiceState {
     $service = Get-CimInstance Win32_Service -Filter "Name='SunshineService'" -ErrorAction SilentlyContinue
     $processes = @(Get-CimInstance Win32_Process -Filter "Name='sunshine.exe'" -ErrorAction SilentlyContinue | Where-Object {
         $_.ExecutablePath -eq $sunshineExecutable
     })
     $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Select-Object -ExpandProperty LocalPort)
-    # DXGI enumeration is session-scoped. The SSH process cannot see outputs
-    # that Sunshine captures in the logged-on console session, so execute this
-    # fixed diagnostic through an InteractiveToken scheduled task instead.
-    $captureReady = [bool]((Test-Path $sunshineDxgiInfo) -and (Invoke-SunshineCaptureProbe))
     $installed = [bool]((Test-Path $sunshineExecutable) -and $service)
     $serviceRunning = [bool]($service -and $service.State -eq 'Running')
     $webListener = $listeners -contains 47990
@@ -138,8 +146,26 @@ function Get-SunshineState {
         host_process_present = $processes.Count -gt 0
         web_listener_present = $webListener
         stream_listeners_present = @($streamListeners).Count -eq 0
-        capture_ready = $captureReady
-        plausibly_ready = [bool]($installed -and $serviceRunning -and $processes.Count -gt 0 -and $webListener -and @($streamListeners).Count -eq 0 -and $captureReady)
+        service_ready = [bool]($installed -and $serviceRunning -and $processes.Count -gt 0 -and $webListener -and @($streamListeners).Count -eq 0)
+    }
+}
+
+function Get-SunshineState {
+    $serviceState = Get-SunshineServiceState
+    # DXGI enumeration is session-scoped. Run only explicit readiness probes
+    # through the InteractiveToken task; overview reads use the cheap state.
+    $probe = if (Test-Path $sunshineDxgiInfo) { Invoke-SunshineCaptureProbe } else { $null }
+    [ordered]@{
+        installed = $serviceState.installed
+        service_present = $serviceState.service_present
+        service_running = $serviceState.service_running
+        service_startup = $serviceState.service_startup
+        host_process_present = $serviceState.host_process_present
+        web_listener_present = $serviceState.web_listener_present
+        stream_listeners_present = $serviceState.stream_listeners_present
+        capture_ready = [bool]($probe -and $probe.capture_ready)
+        virtual_display_ready = [bool]($probe -and $probe.virtual_display_ready)
+        plausibly_ready = [bool]($serviceState.service_ready -and $probe.capture_ready -and $probe.virtual_display_ready)
     }
 }
 
@@ -174,6 +200,9 @@ function Wait-SunshineReady([datetime]$Deadline) {
 switch ($Operation) {
     'ParsecStatus' {
         Write-JsonResult (Get-ParsecState)
+    }
+    'SunshineServiceStatus' {
+        Write-JsonResult (Get-SunshineServiceState)
     }
     'ParsecEnsure' {
         $started = Get-Date

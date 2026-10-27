@@ -164,7 +164,13 @@ class Platform:
             "observed_at": __import__("time").time(),
         }
 
-    def app_status(self, entry):
+    def app_statuses(self, entries):
+        """Observe the whole fixed catalog with one bounded process snapshot.
+
+        The previous catalog path launched this PowerShell/CIM query once per
+        application.  The query result and the top-level window inventory are
+        both coherent snapshots, so reuse them for every allow-listed entry.
+        """
         # WMI supplies owner as well as session; an unrelated user's process is not ours.
         processes = (
             powershell(r"""
@@ -183,14 +189,12 @@ ConvertTo-Json -InputObject $result -Compress
 """)
             or []
         )
-        images = {os.path.normcase(path) for path in entry["images"]}
-        matching = [
-            process
-            for process in processes
-            if os.path.normcase(process["path"]) in images
-            and process["session_id"] == self.session_id.value
-        ]
-        process_ids = {process["pid"] for process in matching}
+        by_image = {}
+        for process in processes:
+            if process["session_id"] == self.session_id.value:
+                by_image.setdefault(os.path.normcase(process["path"]), set()).add(
+                    process["pid"]
+                )
         windows = []
         callback_type = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
@@ -198,21 +202,30 @@ ConvertTo-Json -InputObject $result -Compress
         def visit(window, _):
             process_id = w.DWORD()
             self.user.GetWindowThreadProcessId(window, ctypes.byref(process_id))
-            if process_id.value in process_ids and self.user.IsWindowVisible(window):
+            if self.user.IsWindowVisible(window):
                 windows.append((process_id.value, self._window_class(window)))
             return True
 
         self.user.EnumWindows(visit, 0)
-        running, visible = resolve_application_state(
-            process_ids, windows, entry.get("window_classes", ())
-        )
-        return {
-            "installed": Path(entry["path"]).is_file(),
-            "running": running,
-            "pids": sorted(process_ids),
-            "session_id": self.session_id.value,
-            "visible_window": visible,
-        }
+        observed = {}
+        for name, entry in entries.items():
+            process_ids = set().union(
+                *(by_image.get(os.path.normcase(path), set()) for path in entry["images"])
+            )
+            running, visible = resolve_application_state(
+                process_ids, windows, entry.get("window_classes", ())
+            )
+            observed[name] = {
+                "installed": Path(entry["path"]).is_file(),
+                "running": running,
+                "pids": sorted(process_ids),
+                "session_id": self.session_id.value,
+                "visible_window": visible,
+            }
+        return observed
+
+    def app_status(self, entry):
+        return self.app_statuses({"app": entry})["app"]
 
     def _window_class(self, window):
         buffer = ctypes.create_unicode_buffer(256)
