@@ -5,10 +5,17 @@ import threading
 import time
 from dataclasses import replace
 
-from butters.actions.broker import BrokerOperation, BrokerResult
+from butters.actions.broker import (
+    BrokerOperation,
+    BrokerResult,
+    FixedBrokerOperations,
+)
 from butters.assistant_config import load_assistant_settings
 from butters.integrations.desktop import BrokerDesktopOperations, DesktopWorkflow
 from butters.integrations.model import IntegrationError
+
+
+MONITOR_ENTITIES = FixedBrokerOperations.MONITOR_ENTITIES
 
 
 class Operations:
@@ -23,6 +30,7 @@ class Operations:
         ensure: bool = True,
         ensure_sunshine: bool = True,
         remote: bool = True,
+        outlets: str = "on",
     ) -> None:
         self.network_values = network
         self.ssh_values = ssh
@@ -32,6 +40,7 @@ class Operations:
         self.ensure = ensure
         self.ensure_sunshine = ensure_sunshine
         self.remote = remote
+        self.outlets = outlets
         self.wake_calls = 0
         self.ensure_calls = 0
         self.remote_calls = 0
@@ -92,15 +101,39 @@ class Operations:
         self.calls.append("ensure_sunshine")
         return self.ensure_sunshine
 
+    def set_monitor_power(self, desired: str, _timeout_seconds: float):
+        # The structured broker result BrokerDesktopOperations returns: the
+        # envelope decision, per-outlet HA states, and metered power for "off".
+        target = "off" if desired == "off" else "on"
+        if target == "off":
+            self.calls.append("headless")
+            self.remote_calls += 1
+        else:
+            self.calls.append("restore_headed")
+            self.restore_calls += 1
+        already = self.outlets == target
+        if self.remote:
+            self.outlets = target
+        entities = dict.fromkeys(MONITOR_ENTITIES, self.outlets)
+        return {
+            "broker_ok": True,
+            "accepted": self.remote,
+            "desired_state": desired,
+            "already_in_state": already and self.remote,
+            "partial": False,
+            "entities": entities,
+            **(
+                {"power_w": dict.fromkeys(MONITOR_ENTITIES, 0.0)}
+                if target == "off"
+                else {}
+            ),
+        }
+
     def request_headless_mode(self, _timeout_seconds: float) -> bool:
-        self.calls.append("headless")
-        self.remote_calls += 1
-        return self.remote
+        raise AssertionError("structured monitor operation expected")
 
     def restore_headed_mode(self, _timeout_seconds: float) -> bool:
-        self.calls.append("restore_headed")
-        self.restore_calls += 1
-        return True
+        raise AssertionError("structured monitor operation expected")
 
 
 class Clock:
@@ -174,7 +207,13 @@ def test_offline_desktop_wakes_then_waits_for_network_and_ssh() -> None:
     assert result["ssh_ready"] is True
     assert result["sunshine_reused"] is True
     assert result["monitor_transition"]["accepted"] is True
-    assert operations.calls.index("wake") < operations.calls.index("sunshine_status")
+    # Both outlets are turned off, then confirmed off by a separate read,
+    # before the one wake packet; the final call only re-verifies them.
+    first_wake = operations.calls.index("wake")
+    assert operations.calls[:first_wake].count("headless") == 2
+    assert operations.calls.count("wake") == 1
+    assert first_wake < operations.calls.index("sunshine_status")
+    assert result["monitors_remained_off"] is True
 
 
 def test_ssh_recovery_after_wake_does_not_require_icmp() -> None:
@@ -185,7 +224,7 @@ def test_ssh_recovery_after_wake_does_not_require_icmp() -> None:
     assert result["network_reachable"] is True
     assert result["ssh_ready"] is True
     assert result["verification_complete"] is True
-    assert operations.calls.index("wake") < operations.calls.index("headless")
+    assert operations.calls.index("headless") < operations.calls.index("wake")
 
 
 def test_monitor_broker_envelope_requires_verified_acceptance() -> None:
@@ -269,7 +308,12 @@ def test_wol_failure_stops_before_remote_script() -> None:
     assert result["failure_code"] == "desktop_wake_failed"
     assert result["failed_stage"] == "wake_on_lan"
     assert operations.ensure_calls == 0
-    assert operations.remote_calls == 0
+    # The outlets were verified off before the failed wake and are left off.
+    assert operations.calls[-1] == "wake"
+    assert operations.remote_calls == 2
+    assert operations.restore_calls == 0
+    assert result["pre_wake_monitor_verification"]["reads"] == 2
+    assert "left off" in result["safe_recovery"]
 
 
 def test_network_and_ssh_timeouts_are_distinct() -> None:

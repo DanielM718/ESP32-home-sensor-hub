@@ -13,7 +13,13 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Protocol, cast
 
-from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
+from butters.actions.broker import (
+    MONITOR_OFF_POWER_CEILING_W,
+    BrokerClient,
+    BrokerError,
+    BrokerOperation,
+    FixedBrokerOperations,
+)
 from butters.assistant_config import BrokerSettings, DesktopSettings
 from butters.integrations.model import IntegrationError
 
@@ -42,6 +48,13 @@ PHYSICAL_DISPLAY_SETTLE_SECONDS = 30.0
 # closes the stream sockets when the last session reference drops.
 SESSION_END_VERIFY_SECONDS = 15.0
 SESSION_OBSERVATION_SECONDS = 30.0
+# Before any Wake-on-LAN, both outlets must be proven off by a read in the same
+# request. A P115 meter reports on its own poll, so a draw measured just before
+# the relay opened can linger for a few seconds; this bounds the wait for a
+# reading that agrees with "off". The broker re-checks immediately before the
+# packet, and a verification older than the age below is never relied on.
+PRE_WAKE_MONITOR_CONFIRM_SECONDS = 20.0
+PRE_WAKE_VERIFICATION_MAX_AGE_SECONDS = 10.0
 SUNSHINE_SESSION_STATES = frozenset(
     {"terminated", "resumable", "active", "ending", "unknown"}
 )
@@ -728,6 +741,9 @@ class DesktopWorkflow:
                 "primary" if selected_mode is DesktopAccessMode.LOCAL else "all"
             ),
             "monitor_transition": None,
+            # Set only when this request had to wake Windows.
+            "pre_wake_monitor_verification": None,
+            "monitors_remained_off": None,
             "preserved_monitor_unchanged": None,
             "physical_display_verified": None,
             "display_status": None,
@@ -832,12 +848,41 @@ class DesktopWorkflow:
                     "wake_on_lan",
                     "the fixed wake operation is not enabled",
                 )
-            stale = superseded("wake_on_lan")
-            if stale is not None:
-                return stale
-            if event.is_set():
-                return finish("cancelled", "wake_on_lan", "workflow cancelled")
-            if not self.operations.send_wake(remaining):
+            # Invariant: no wake packet before both outlets are verified off.
+            failure = self._verify_monitors_off_before_wake(transition)
+            if failure is not None:
+                return failure
+            pre_wake = cast(dict[str, object], result["pre_wake_monitor_verification"])
+            with self._mode_commit_lock:
+                stale = superseded("wake_on_lan")
+                if stale is not None:
+                    return stale
+                if event.is_set():
+                    return finish("cancelled", "wake_on_lan", "workflow cancelled")
+                if (
+                    self.clock() - cast(float, pre_wake["verified_at"])
+                    > PRE_WAKE_VERIFICATION_MAX_AGE_SECONDS
+                ):
+                    return finish(
+                        "monitor_off_verification_stale",
+                        "wake_on_lan",
+                        "the monitor-off verification is too old to rely on",
+                    )
+                timeout = transition.mutation_timeout()
+                if timeout is None:
+                    return finish(
+                        "desktop_mode_timeout",
+                        "wake_on_lan",
+                        "not enough time remains to send the wake safely",
+                    )
+                woke = self.operations.send_wake(timeout)
+                transition.committed("wake_on_lan")
+            if not woke:
+                result["safe_recovery"] = (
+                    "Both monitor outlets were verified off and were left off. The "
+                    "wake was refused or not confirmed; check the desktop.wake gate "
+                    "and Home Assistant before one explicit retry."
+                )
                 return finish("desktop_wake_failed", "wake_on_lan", "fixed wake operation failed")
             result["wake_sent"] = True
             result["machine_state"] = "starting"
@@ -1005,6 +1050,21 @@ class DesktopWorkflow:
         failure = self._commit_monitor_power(transition, "off")
         if failure is not None:
             return failure
+        if result["wake_sent"]:
+            # The outlets were verified off before the wake. This call found
+            # them still off, without changing them, unless something powered
+            # one during startup.
+            final = cast(Mapping[str, object], result["monitor_transition"])
+            remained = (
+                final.get("already_in_state") is True
+                and self._monitors_off_verdict(final) == "verified"
+            )
+            result["monitors_remained_off"] = remained
+            if not remained:
+                cast(list[str], result["warnings"]).append(
+                    "monitor_powered_during_startup: an outlet was not off after "
+                    "the wake and was turned off again"
+                )
 
         if event.is_set():
             return finish("cancelled", "post_transition", "workflow cancelled")
@@ -1141,6 +1201,133 @@ class DesktopWorkflow:
                 "both monitor outlets did not verify the requested state",
             )
         return None
+
+    def _verify_monitors_off_before_wake(
+        self, transition: _Transition
+    ) -> dict[str, object] | None:
+        """Prove, from reads made by this request, that both outlets are off.
+
+        Returns None only once a broker result that changed nothing found both
+        verified outlets "off" with no metered draw. The off command's own
+        acknowledgement does not count when it changed an outlet: a separate,
+        later read has to agree. Nothing observed before this request can
+        satisfy it. Every failure sends no wake, leaves the outlets as they
+        are, and is not retried here.
+        """
+
+        result = transition.result
+        finish = transition.finish
+        failure = self._commit_monitor_power(transition, "off")
+        if failure is not None:
+            return failure
+        confirm_deadline = min(
+            transition.deadline, self.clock() + PRE_WAKE_MONITOR_CONFIRM_SECONDS
+        )
+        reads = 1
+        while True:
+            evidence = cast(Mapping[str, object], result["monitor_transition"])
+            verdict = self._monitors_off_verdict(evidence)
+            unchanged = evidence.get("already_in_state") is True
+            if verdict == "contradicted":
+                result["safe_recovery"] = (
+                    "No wake was sent. Inspect both monitor outlets in Home "
+                    "Assistant; do not wake the desktop until both read off."
+                )
+                return finish(
+                    "monitor_off_unverified",
+                    "monitor_outlets",
+                    "both monitor outlets were not verified off before the wake",
+                )
+            if reads > 1 and not unchanged:
+                # A confirmation found an outlet on again and turned it off:
+                # something else is driving it, so no read can be trusted yet.
+                result["safe_recovery"] = (
+                    "No wake was sent. A monitor outlet turned back on while it "
+                    "was being verified; check Home Assistant automations first."
+                )
+                return finish(
+                    "monitor_off_unstable",
+                    "monitor_outlets",
+                    "a monitor outlet did not stay off while it was verified",
+                )
+            if verdict == "verified" and unchanged:
+                power = evidence.get("power_w")
+                metered = isinstance(power, Mapping) and all(
+                    isinstance(power.get(entity), (int, float))
+                    for entity in FixedBrokerOperations.MONITOR_ENTITIES
+                )
+                result["pre_wake_monitor_verification"] = {
+                    "verified_at": self.clock(),
+                    "reads": reads,
+                    "entities": dict(cast(Mapping[str, object], evidence["entities"])),
+                    "power_w": dict(power) if isinstance(power, Mapping) else None,
+                    "power_evidence": "metered" if metered else "unavailable",
+                }
+                if not metered:
+                    cast(list[str], result["warnings"]).append(
+                        "monitor_power_unmetered: outlet state alone verified off"
+                    )
+                return None
+            if self.clock() >= confirm_deadline:
+                result["safe_recovery"] = (
+                    "No wake was sent. Both outlets read off but a meter still "
+                    "reported a draw; inspect the plugs before retrying."
+                    if verdict == "unsettled"
+                    else "No wake was sent. The outlets changed but no later read "
+                    "confirmed them off in time."
+                )
+                return finish(
+                    "monitor_power_unsettled"
+                    if verdict == "unsettled"
+                    else "monitor_off_unconfirmed",
+                    "monitor_outlets",
+                    "both monitor outlets were not confirmed off before the wake",
+                )
+            if verdict == "unsettled":
+                # A meter reports on its own poll; give it one interval.
+                transition.event.wait(
+                    min(
+                        self.settings.poll_interval_seconds,
+                        max(0.0, confirm_deadline - self.clock()),
+                    )
+                )
+            failure = self._commit_monitor_power(transition, "off")
+            if failure is not None:
+                return failure
+            reads += 1
+
+    @staticmethod
+    def _monitors_off_verdict(monitor: Mapping[str, object]) -> str:
+        """Classify one monitor-off broker result as wake evidence.
+
+        "verified": the broker decided, exactly the two verified outlets read
+        "off", and no available meter disagrees. "unsettled": the outlets read
+        off but a meter still reports a draw. "contradicted": anything else,
+        including a missing, failed or partial acknowledgement and any outlet
+        that is missing, extra, or in another state such as "unavailable".
+        """
+
+        entities = monitor.get("entities")
+        if (
+            monitor.get("broker_ok") is not True
+            or monitor.get("accepted") is not True
+            or monitor.get("partial") is not False
+            or not isinstance(entities, Mapping)
+            or dict(entities)
+            != dict.fromkeys(FixedBrokerOperations.MONITOR_ENTITIES, "off")
+        ):
+            return "contradicted"
+        power = monitor.get("power_w")
+        if isinstance(power, Mapping) and any(
+            isinstance(watts, (int, float))
+            and not isinstance(watts, bool)
+            and watts > MONITOR_OFF_POWER_CEILING_W
+            for watts in (
+                power.get(entity) for entity in FixedBrokerOperations.MONITOR_ENTITIES
+            )
+        ):
+            return "unsettled"
+        return "verified"
 
     def _activate_virtual_display(
         self, transition: _Transition
@@ -1534,7 +1721,9 @@ class _Transition:
     def committed(self, side_effect: str) -> None:
         """Record a mutation that was sent, whether or not its result arrived."""
 
-        cast(list[str], self.result["committed_side_effects"]).append(side_effect)
+        committed = cast(list[str], self.result["committed_side_effects"])
+        if side_effect not in committed:
+            committed.append(side_effect)
 
     def mutation_timeout(self) -> float | None:
         """The full broker request budget, or None if it no longer fits.

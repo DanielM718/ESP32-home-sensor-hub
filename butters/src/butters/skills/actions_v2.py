@@ -13,6 +13,7 @@ from butters.integrations.actions import (
     Kr260Adapter,
     NasAdapter,
 )
+from butters.integrations.model import IntegrationError
 from butters.skills.model import (
     ActionClass,
     AuthenticationLevel,
@@ -104,6 +105,18 @@ class ActionSkillImplementations:
         return StructuredSkillResult("action_result", result)
 
     def wake_desktop(self, _arguments: SkillArguments) -> SkillResult:
+        # desktop.wake refuses unless both monitor outlets read off, so they
+        # are turned off and verified through the fixed operation first. An
+        # unverified result stops here; the broker re-checks before the packet.
+        monitors = self.actions.execute(
+            BrokerOperation.DESKTOP_MONITORS_OFF,
+            cancel_event=current_cancel_event(),
+        )
+        if monitors.get("accepted") is not True or monitors.get("partial") is not False:
+            raise IntegrationError(
+                "monitor_off_unverified",
+                "both monitor outlets must verify off before the desktop is woken",
+            )
         return self.broker_action(BrokerOperation.DESKTOP_WAKE)
 
     def monitors_off(self, _arguments: SkillArguments) -> SkillResult:

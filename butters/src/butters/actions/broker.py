@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import re
 import secrets
 import socket
@@ -19,7 +20,7 @@ from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -57,6 +58,19 @@ MONITOR_SETTLE_POLL_SECONDS = 0.5
 # Beyond that the caller gives up while this root process is still mutating,
 # which is the state that invites a retry of an operation already in flight.
 MONITOR_OPERATION_DEADLINE_SECONDS = 25.0
+
+# desktop.wake never transmits a packet unless a fresh read, taken by the wake
+# operation itself, finds both monitor outlets off. Windows enumerates whatever
+# physical display is powered while it boots, which defeats the virtual-display
+# capture every remote mode depends on, so the order is an invariant enforced
+# here, below every caller. The precondition only reads; turning the outlets
+# off stays the caller's explicit, separately audited desktop.monitors_off.
+WAKE_PRECONDITION_DEADLINE_SECONDS = 8.0
+# A P115 whose relay is open meters 0.0 W. A reading above this contradicts a
+# reported "off" -- typically the plug has not reported since the outlet
+# changed -- so it blocks a wake until a later reading agrees. A missing or
+# non-numeric reading is not evidence either way; the switch state decides.
+MONITOR_OFF_POWER_CEILING_W = 1.0
 
 # urlopen's timeout is per socket operation, not a wall-clock bound, so a peer
 # that sends one byte just inside every timeout window holds a single read open
@@ -515,6 +529,11 @@ class FixedBrokerOperations:
     # desktop.primary_monitor_on observes it but never changes it.
     PRIMARY_MONITOR_ENTITY = "switch.desktop_gigabyte"
     PRESERVED_MONITOR_ENTITY = "switch.desktop_oled"
+    # Each outlet's own P115 meter, read only as supporting evidence for "off".
+    MONITOR_POWER_SENSORS: ClassVar[dict[str, str]] = {
+        "switch.desktop_gigabyte": "sensor.desktop_gigabyte_current_consumption",
+        "switch.desktop_oled": "sensor.desktop_oled_current_consumption",
+    }
 
     def __init__(
         self,
@@ -587,7 +606,8 @@ class FixedBrokerOperations:
         }
 
     def desktop_wake(self) -> dict[str, object]:
-        return self._run(
+        evidence = self._require_monitors_off_for_wake()
+        status = self._run(
             [
                 "/usr/bin/wakeonlan",
                 "-i",
@@ -596,6 +616,40 @@ class FixedBrokerOperations:
             ],
             10,
         )
+        return {**status, **evidence}
+
+    def _require_monitors_off_for_wake(self) -> dict[str, object]:
+        """Refuse the wake unless both outlets read off right now.
+
+        Every failure raises before wakeonlan runs: no Home Assistant token, a
+        failed or malformed read, an outlet in any state but "off" (including
+        "unavailable"), or a meter that still reports a draw.
+        """
+
+        if not self.home_assistant_token:
+            raise BrokerError(
+                "home_assistant_unconfigured",
+                "Home Assistant authentication is not configured",
+            )
+        deadline = self.monotonic() + WAKE_PRECONDITION_DEADLINE_SECONDS
+        states = self._monitor_states(deadline)
+        if any(states.get(entity) != "off" for entity in self.MONITOR_ENTITIES):
+            raise BrokerError(
+                "monitors_not_off", "both monitor outlets must be off before a wake"
+            )
+        power = self._monitor_power(deadline)
+        if any(
+            watts is not None and watts > MONITOR_OFF_POWER_CEILING_W
+            for watts in power.values()
+        ):
+            raise BrokerError(
+                "monitor_power_present", "a monitor outlet still meters power"
+            )
+        return {
+            "monitors_verified_off": True,
+            "monitor_entities": states,
+            "monitor_power_w": power,
+        }
 
     def desktop_monitors_off(self) -> dict[str, object]:
         return self._set_desktop_monitors("off")
@@ -721,6 +775,7 @@ class FixedBrokerOperations:
                 "already_in_state": True,
                 "partial": False,
                 "entities": before,
+                **self._off_power_evidence(desired_state, deadline),
             }
 
         self._home_assistant_request(
@@ -736,7 +791,36 @@ class FixedBrokerOperations:
             "already_in_state": False,
             "partial": 0 < matching < len(self.MONITOR_ENTITIES),
             "entities": after,
+            **self._off_power_evidence(desired_state, deadline),
         }
+
+    def _off_power_evidence(
+        self, desired_state: str, deadline: float
+    ) -> dict[str, object]:
+        # Metering only corroborates "off"; turning on reports no power.
+        if desired_state != "off":
+            return {}
+        return {"power_w": self._monitor_power(deadline)}
+
+    def _monitor_power(self, deadline: float) -> dict[str, float | None]:
+        """Best-effort metered draw per outlet; None where it cannot be read.
+
+        Power is supporting evidence, so an unreadable meter never fails the
+        operation. Only the two fixed sensors beside the fixed outlets are read.
+        """
+
+        power: dict[str, float | None] = {}
+        for entity in self.MONITOR_ENTITIES:
+            try:
+                payload = self._home_assistant_request(
+                    f"/api/states/{self.MONITOR_POWER_SENSORS[entity]}",
+                    deadline=deadline,
+                )
+            except BrokerError:
+                power[entity] = None
+                continue
+            power[entity] = _metered_watts(payload)
+        return power
 
     def _await_monitor_convergence(
         self,
@@ -1164,6 +1248,21 @@ class FixedBrokerOperations:
         if int(getattr(result, "returncode", 1)) != 0:
             raise BrokerError("operation_failed", "fixed operation failed")
         return {"accepted": True}
+
+
+def _metered_watts(payload: object) -> float | None:
+    """A Home Assistant power state in watts, or None if it is not one."""
+
+    if not isinstance(payload, dict):
+        return None
+    attributes = payload.get("attributes")
+    if not isinstance(attributes, dict) or attributes.get("unit_of_measurement") != "W":
+        return None
+    try:
+        watts = float(str(payload.get("state")))
+    except ValueError:
+        return None
+    return watts if math.isfinite(watts) and watts >= 0 else None
 
 
 _PARSEC_STATE_KEYS = frozenset(

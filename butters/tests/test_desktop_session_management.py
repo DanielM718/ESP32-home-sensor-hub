@@ -122,9 +122,15 @@ class Operations:
         return {
             "accepted": self.monitor_ok,
             "desired_state": "on" if desired == "primary_on" else desired,
-            "already_in_state": False,
+            # An "off" request finds both outlets already off, as the broker
+            # reports them; the pre-wake gate needs exactly this evidence.
+            "already_in_state": desired == "off",
             "partial": False,
-            "entities": {},
+            "entities": (
+                {"switch.desktop_gigabyte": "off", "switch.desktop_oled": "off"}
+                if desired == "off"
+                else {}
+            ),
             "preserved_entity_unchanged": True,
             "broker_ok": True,
         }
@@ -608,7 +614,7 @@ def test_superseded_wake_wait_releases_the_execution_lock_promptly() -> None:
     assert time.monotonic() - started < 3.0
     assert results["gaming"]["failure_code"] == "mode_transition_superseded"
     assert results["local"]["status"] == "ready"
-    assert operations.calls == ["wake", "monitor:primary_on"]
+    assert operations.calls == ["monitor:off", "wake", "monitor:primary_on"]
 
 
 def test_mutation_is_not_sent_without_the_whole_broker_budget() -> None:
