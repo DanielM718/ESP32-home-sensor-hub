@@ -9,14 +9,19 @@ if ($AuditOnly -eq $Apply) {
     throw 'Specify exactly one of -AuditOnly or -Apply'
 }
 
-$displayName = '\\.\DISPLAY94'
 $displayDeviceId = '{5eb52002-659f-5729-bdd8-9cdc4efd1bf5}'
+$displayTopologyHelper = 'C:\ProgramData\Butters\display-topology.ps1'
 $sunshineConfig = 'C:\Program Files\Sunshine\config\sunshine.conf'
 $backupRoot = Join-Path 'C:\ProgramData\Butters\backups' ((Get-Date -Format 'yyyyMMddTHHmmss') + '-sunshine-vdd-config')
 $resultPath = 'C:\ProgramData\Butters\sunshine-vdd-config-result.json'
 $targetWidth = 2560
 $targetHeight = 1440
 $targetRefresh = 60
+
+if (-not (Test-Path -LiteralPath $displayTopologyHelper -PathType Leaf)) {
+    throw 'The fixed display-topology helper is missing'
+}
+. $displayTopologyHelper
 
 $root = @(Get-PnpDevice -Class Display -ErrorAction Stop | Where-Object {
     @((Get-PnpDeviceProperty -InstanceId $_.InstanceId -KeyName DEVPKEY_Device_HardwareIds -ErrorAction SilentlyContinue).Data) -contains 'Root\MttVDD'
@@ -35,6 +40,8 @@ if ($child.Count -ne 1 -or [string]$child[0].Status -ne 'OK' -or [int]$child[0].
 }
 if ($active.Count -ne 1) { throw 'The MTT1337 virtual monitor is not uniquely active' }
 if (-not (Test-Path -LiteralPath $sunshineConfig -PathType Leaf)) { throw 'Sunshine config is missing' }
+$validatedInventory = Get-ButtersValidatedDisplayInventory
+$displayName = [string]$validatedInventory.virtual.source_name
 
 if (-not ('Butters.NativeDisplayMode' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -89,14 +96,6 @@ namespace Butters {
             ref DEVMODE devMode
         );
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        public static extern int ChangeDisplaySettingsEx(
-            string deviceName,
-            ref DEVMODE devMode,
-            IntPtr hwnd,
-            uint flags,
-            IntPtr lParam
-        );
     }
 }
 '@
@@ -116,7 +115,6 @@ function Get-CurrentMode {
     return $mode
 }
 
-$desiredMode = $null
 $availableModes = @()
 $modeNumber = 0
 do {
@@ -128,10 +126,6 @@ do {
             height = $candidate.dmPelsHeight
             refresh = $candidate.dmDisplayFrequency
         }
-    }
-    if ($found -and $candidate.dmPelsWidth -eq $targetWidth -and $candidate.dmPelsHeight -eq $targetHeight -and $candidate.dmDisplayFrequency -eq $targetRefresh) {
-        $desiredMode = $candidate
-        break
     }
     $modeNumber += 1
 } while ($found)
@@ -150,11 +144,16 @@ $audit = [ordered]@{
     current_height = if ($beforeMode) { $beforeMode.dmPelsHeight } else { $null }
     current_refresh = if ($beforeMode) { $beforeMode.dmDisplayFrequency } else { $null }
     mode_enumeration_available = $availableModes.Count -gt 0
-    desired_mode_advertised = [bool]$desiredMode
+    desired_mode_advertised = [bool](@($availableModes | Where-Object {
+        $_.width -eq $targetWidth -and
+        $_.height -eq $targetHeight -and
+        $_.refresh -eq $targetRefresh
+    }).Count -gt 0)
     desired_width = $targetWidth
     desired_height = $targetHeight
     desired_refresh = $targetRefresh
     available_modes = @($availableModes | Sort-Object width,height,refresh -Unique)
+    displays = @($validatedInventory.displays)
 }
 if ($AuditOnly) {
     $auditResult = [pscustomobject]$audit
@@ -162,7 +161,14 @@ if ($AuditOnly) {
     $auditResult | ConvertTo-Json -Depth 6 -Compress
     exit 0
 }
-if (-not $desiredMode) { throw "The VDD does not advertise ${targetWidth}x${targetHeight} at ${targetRefresh} Hz" }
+if (-not $beforeMode) { throw "Could not read the current mode for $displayName" }
+if (
+    $beforeMode.dmPelsWidth -ne $targetWidth -or
+    $beforeMode.dmPelsHeight -ne $targetHeight -or
+    $beforeMode.dmDisplayFrequency -ne $targetRefresh
+) {
+    throw "The VDD must already be ${targetWidth}x${targetHeight} at ${targetRefresh} Hz; this helper will not mutate a volatile DISPLAYn alias"
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -174,15 +180,13 @@ New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 Copy-Item -LiteralPath $sunshineConfig -Destination (Join-Path $backupRoot 'sunshine.conf.before')
 $audit | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupRoot 'display-mode-before.json') -Encoding UTF8
 
-$changeResult = [Butters.NativeDisplayMode]::ChangeDisplaySettingsEx(
-    $displayName,
-    [ref]$desiredMode,
-    [IntPtr]::Zero,
-    1,
-    [IntPtr]::Zero
-)
-if ($changeResult -ne 0) { throw "ChangeDisplaySettingsEx failed with result $changeResult" }
-Start-Sleep -Milliseconds 500
+# Revalidate immediately before writing configuration. The source alias is an
+# observation only: no topology API below consumes it, so an alias reassignment
+# can never redirect a mutation to a physical monitor.
+$currentVirtual = Get-ButtersVirtualDisplay
+if ([string]$currentVirtual.source_name -cne $displayName) {
+    throw 'The virtual display enumeration changed during validation'
+}
 $afterMode = Get-CurrentMode
 if ($afterMode.dmPelsWidth -ne $targetWidth -or $afterMode.dmPelsHeight -ne $targetHeight -or $afterMode.dmDisplayFrequency -ne $targetRefresh) {
     throw "The VDD mode did not become ${targetWidth}x${targetHeight} at ${targetRefresh} Hz"
@@ -190,28 +194,36 @@ if ($afterMode.dmPelsWidth -ne $targetWidth -or $afterMode.dmPelsHeight -ne $tar
 
 $values = [ordered]@{
     output_name = $displayDeviceId
-    dd_configuration_option = 'ensure_active'
-    dd_resolution_option = 'manual'
+    # The installed Sunshine build persists the initial topology even for
+    # verify_only. disabled is the only mode that does not create a snapshot
+    # which a later disconnect/app-close/restart path can replay.
+    dd_configuration_option = 'disabled'
+    dd_resolution_option = 'disabled'
     dd_manual_resolution = '2560x1440'
-    dd_refresh_rate_option = 'manual'
+    dd_refresh_rate_option = 'disabled'
     dd_manual_refresh_rate = '60'
     dd_hdr_option = 'disabled'
+    # This changes when reversion is attempted, not whether persisted state
+    # exists. It is retained as defense in depth; disabled above is the control
+    # that prevents new display-device persistence.
     dd_config_revert_on_disconnect = 'false'
 }
 $lines = [Collections.Generic.List[string]]::new()
 foreach ($line in @(Get-Content -LiteralPath $sunshineConfig)) { $lines.Add([string]$line) }
 foreach ($entry in $values.GetEnumerator()) {
-    $matches = @()
+    # Not $matches: a successful -match replaces it with the automatic $Matches
+    # hashtable, and appending an index to that throws for any existing key.
+    $keyIndexes = [Collections.Generic.List[int]]::new()
     for ($index = 0; $index -lt $lines.Count; $index += 1) {
-        if ($lines[$index] -match ('^\s*' + [regex]::Escape($entry.Key) + '\s*=')) { $matches += $index }
+        if ($lines[$index] -match ('^\s*' + [regex]::Escape($entry.Key) + '\s*=')) { $keyIndexes.Add($index) }
     }
-    if ($matches.Count -eq 0) {
+    if ($keyIndexes.Count -eq 0) {
         $lines.Add("$($entry.Key) = $($entry.Value)")
         continue
     }
-    $lines[$matches[0]] = "$($entry.Key) = $($entry.Value)"
-    for ($matchIndex = $matches.Count - 1; $matchIndex -ge 1; $matchIndex -= 1) {
-        $lines.RemoveAt($matches[$matchIndex])
+    $lines[$keyIndexes[0]] = "$($entry.Key) = $($entry.Value)"
+    for ($keyIndex = $keyIndexes.Count - 1; $keyIndex -ge 1; $keyIndex -= 1) {
+        $lines.RemoveAt($keyIndexes[$keyIndex])
     }
 }
 $temporary = $sunshineConfig + '.vdd-config.tmp'

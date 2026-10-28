@@ -227,6 +227,172 @@ def test_partial_monitor_failure_is_preserved_without_automatic_reversal() -> No
     assert "do not automatically reverse" in result["safe_recovery"]
 
 
+def test_broker_envelope_failure_cannot_be_reported_as_monitor_success() -> None:
+    operations = Operations()
+    operations.monitor["broker_ok"] = False
+
+    result = workflow(operations).prepare_access_mode(
+        "desktop", DesktopAccessMode.LOCAL
+    )
+
+    assert result["verification_complete"] is False
+    assert result["failure_code"] == "monitor_transition_failed"
+    assert result["monitor_transition"]["accepted"] is True
+    assert result["monitor_transition"]["broker_ok"] is False
+
+
+def test_newer_local_transition_supersedes_remote_before_monitor_power_off() -> None:
+    operations = Operations()
+    capture_started = threading.Event()
+    release_capture = threading.Event()
+    original_status = operations.sunshine_status
+
+    def blocked_status(timeout: float):
+        capture_started.set()
+        assert release_capture.wait(min(timeout, 5.0))
+        return original_status(timeout)
+
+    operations.sunshine_status = blocked_status
+    desktop = workflow(operations, clock=time.monotonic)
+    results: dict[str, dict[str, object]] = {}
+
+    remote = threading.Thread(
+        target=lambda: results.setdefault(
+            "remote",
+            desktop.prepare_access_mode("desktop", DesktopAccessMode.GAMING),
+        )
+    )
+    remote.start()
+    assert capture_started.wait(2.0)
+    local = threading.Thread(
+        target=lambda: results.setdefault(
+            "local",
+            desktop.prepare_access_mode("desktop", DesktopAccessMode.LOCAL),
+        )
+    )
+    local.start()
+    deadline = time.monotonic() + 2.0
+    while desktop._mode_generation < 2 and time.monotonic() < deadline:
+        time.sleep(0.005)
+    release_capture.set()
+    remote.join(2.0)
+    local.join(2.0)
+
+    assert not remote.is_alive() and not local.is_alive()
+    assert results["remote"]["failure_code"] == "mode_transition_superseded"
+    assert results["local"]["verification_complete"] is True
+    assert operations.monitor_requests == ["on"]
+
+
+def test_local_generation_cannot_register_inside_inflight_monitor_commit() -> None:
+    operations = Operations()
+    monitor_started = threading.Event()
+    release_monitor = threading.Event()
+    original_monitor = operations.set_monitor_power
+
+    def blocked_monitor(desired: str, timeout: float):
+        monitor_started.set()
+        assert release_monitor.wait(min(timeout, 5.0))
+        return original_monitor(desired, timeout)
+
+    operations.set_monitor_power = blocked_monitor
+    desktop = workflow(operations, clock=time.monotonic)
+    results: dict[str, dict[str, object]] = {}
+    remote = threading.Thread(
+        target=lambda: results.setdefault(
+            "remote",
+            desktop.prepare_access_mode("desktop", DesktopAccessMode.GAMING),
+        )
+    )
+    remote.start()
+    assert monitor_started.wait(2.0)
+    local = threading.Thread(
+        target=lambda: results.setdefault(
+            "local",
+            desktop.prepare_access_mode("desktop", DesktopAccessMode.LOCAL),
+        )
+    )
+    local.start()
+    time.sleep(0.05)
+
+    # The older call already crossed the commit boundary. Local is not exposed
+    # as the current generation until that bounded broker operation returns.
+    assert desktop._mode_generation == 1
+    release_monitor.set()
+    remote.join(2.0)
+    local.join(2.0)
+
+    assert not remote.is_alive() and not local.is_alive()
+    assert results["remote"]["failure_code"] in {
+        None,
+        "mode_transition_superseded",
+    }
+    assert results["local"]["verification_complete"] is True
+    assert operations.monitor_requests == ["off", "on"]
+
+
+def test_cancellation_before_monitor_commit_has_no_monitor_side_effect() -> None:
+    operations = Operations()
+    capture_started = threading.Event()
+    release_capture = threading.Event()
+    cancelled = threading.Event()
+    original_status = operations.sunshine_status
+
+    def blocked_status(timeout: float):
+        capture_started.set()
+        assert release_capture.wait(min(timeout, 5.0))
+        return original_status(timeout)
+
+    operations.sunshine_status = blocked_status
+    desktop = workflow(operations, clock=time.monotonic)
+    results: dict[str, dict[str, object]] = {}
+    worker = threading.Thread(
+        target=lambda: results.setdefault(
+            "value",
+            desktop.prepare_access_mode(
+                "desktop", DesktopAccessMode.GAMING, cancel_event=cancelled
+            ),
+        )
+    )
+    worker.start()
+    assert capture_started.wait(2.0)
+    cancelled.set()
+    release_capture.set()
+    worker.join(2.0)
+
+    assert not worker.is_alive()
+    assert results["value"]["failure_code"] == "cancelled"
+    assert operations.monitor_requests == []
+
+
+def test_disabled_operations_fail_before_side_effects() -> None:
+    operations = Operations()
+    desktop = workflow(operations)
+    desktop.settings = replace(desktop.settings, headless_enabled=False)
+    remote = desktop.prepare_access_mode("desktop", DesktopAccessMode.GAMING)
+    assert remote["failure_code"] == "headless_management_disabled"
+    assert operations.monitor_requests == []
+
+    operations = Operations()
+    operations.ssh = operations.icmp = False
+    desktop = workflow(operations)
+    desktop.settings = replace(desktop.settings, wake_enabled=False)
+    local = desktop.prepare_access_mode("desktop", DesktopAccessMode.LOCAL)
+    assert local["failure_code"] == "desktop_wake_disabled"
+    assert operations.wakes == 0
+
+    operations = Operations()
+    desktop = workflow(operations)
+    desktop.settings = replace(
+        desktop.settings,
+        sunshine_status_enabled=False,
+        sunshine_ensure_enabled=False,
+    )
+    remote = desktop.prepare_access_mode("desktop", DesktopAccessMode.GAMING)
+    assert remote["failure_code"] == "sunshine_status_disabled"
+    assert operations.monitor_requests == []
+
+
 def test_backend_failures_identify_capture_and_virtual_display_separately() -> None:
     operations = Operations()
     operations.sunshine["capture_ready"] = False

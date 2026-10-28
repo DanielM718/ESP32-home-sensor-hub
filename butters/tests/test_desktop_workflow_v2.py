@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 import threading
 import time
 from dataclasses import replace
@@ -207,6 +208,58 @@ def test_monitor_broker_envelope_requires_verified_acceptance() -> None:
     assert operations.restore_headed_mode(1.0) is True
     broker.ok = False
     assert operations.request_headless_mode(1.0) is False
+
+
+def test_ssh_probe_binds_a_bounded_resolution_to_the_fixed_ip() -> None:
+    resolved: list[list[str]] = []
+    connected: list[tuple[tuple[str, int], float]] = []
+
+    class Resolution:
+        returncode = 0
+        stdout = "192.0.2.44 STREAM desktop.local\n"
+
+    class Connection:
+        def close(self) -> None:
+            return None
+
+    def resolver(argv, **kwargs):
+        resolved.append(argv)
+        assert kwargs["timeout"] <= 1.0
+        return Resolution()
+
+    def connector(address, *, timeout):
+        connected.append((address, timeout))
+        return Connection()
+
+    settings = replace(load_assistant_settings().desktop, host="desktop.local")
+    operations = BrokerDesktopOperations(
+        settings,
+        broker=object(),
+        resolver=resolver,
+        connector=connector,
+    )
+
+    assert operations.ssh_ready(2.0) is True
+    assert resolved == [["/usr/bin/getent", "ahostsv4", "desktop.local"]]
+    assert connected[0][0] == ("192.0.2.44", settings.ssh_port)
+
+
+def test_ssh_resolution_timeout_stops_before_connect() -> None:
+    def resolver(argv, **kwargs):
+        raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+
+    def connector(*_args, **_kwargs):
+        raise AssertionError("an unresolved host must never reach connect")
+
+    settings = replace(load_assistant_settings().desktop, host="desktop.local")
+    operations = BrokerDesktopOperations(
+        settings,
+        broker=object(),
+        resolver=resolver,
+        connector=connector,
+    )
+
+    assert operations.ssh_ready(2.0) is False
 
 
 def test_wol_failure_stops_before_remote_script() -> None:
@@ -436,23 +489,24 @@ def test_reachability_attempts_share_one_absolute_deadline() -> None:
 def test_registered_status_timeout_exceeds_the_workflow_budget() -> None:
     """A deadline shorter than one observation hides the state it measured.
 
-    `get_desktop_status` was registered at 5s while a single observation against
-    a powered-off host costs about 7s: the desktop is named by mDNS, and a
-    failing `.local` lookup stalls in getaddrinfo before either probe's own
-    timeout can apply. The skill then failed `timeout`, every field projected as
-    `unknown`, and Admin reported "Desktop state unknown" instead of the
-    powered-off summary the probes had already established.
+    The desktop is named by mDNS, so resolution must be part of the bounded
+    observation rather than an unbounded prelude to socket.connect. The skill's
+    own deadline still needs to exceed the resolver, connect, and ping budgets
+    or it can hide the powered-off state those probes measured.
     """
 
     from butters.integrations.desktop import (
-        NAME_RESOLUTION_STALL_SECONDS,
         NETWORK_ATTEMPT_TIMEOUT_SECONDS,
+        RESOLUTION_ATTEMPT_TIMEOUT_SECONDS,
+        SSH_ATTEMPT_TIMEOUT_SECONDS,
         STATUS_TIMEOUT_SECONDS,
         STATUS_WORST_CASE_SECONDS,
     )
 
     assert STATUS_WORST_CASE_SECONDS == (
-        NAME_RESOLUTION_STALL_SECONDS + NETWORK_ATTEMPT_TIMEOUT_SECONDS
+        RESOLUTION_ATTEMPT_TIMEOUT_SECONDS
+        + SSH_ATTEMPT_TIMEOUT_SECONDS
+        + NETWORK_ATTEMPT_TIMEOUT_SECONDS
     )
     assert STATUS_TIMEOUT_SECONDS > STATUS_WORST_CASE_SECONDS
     # Bounded, not merely generous: a read skill must still fail closed.

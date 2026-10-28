@@ -18,10 +18,16 @@ $sunshineDxgiInfo = Join-Path $sunshineRoot 'tools\dxgi-info.exe'
 $sunshineConfig = Join-Path $sunshineRoot 'config\sunshine.conf'
 $sunshineProbeTask = '\Butters\SunshineCaptureProbe'
 $sunshineProbeResult = 'C:\ProgramData\Butters\sunshine-capture-probe.json'
+$displayTopologyHelper = 'C:\ProgramData\Butters\display-topology.ps1'
 $lockTask = '\Butters\LockDesktop'
 $sleepTask = '\Butters\SleepDesktop'
 $parsecDeadlineSeconds = 20
 $sunshineDeadlineSeconds = 20
+
+if (-not (Test-Path -LiteralPath $displayTopologyHelper -PathType Leaf)) {
+    throw 'The fixed display-topology helper is missing'
+}
+. $displayTopologyHelper
 
 function Invoke-SunshineCaptureProbe {
     $started = (Get-Date).ToUniversalTime()
@@ -47,6 +53,19 @@ function Invoke-SunshineCaptureProbe {
     return [pscustomobject]@{ capture_ready = $false; virtual_display_ready = $false }
 }
 
+function Test-DxgiOutputAttached([string]$DxgiOutput, [string]$SourceName) {
+    # Judge only the block for exactly this source: a bare prefix regex would
+    # let \\.\DISPLAY2 match \\.\DISPLAY26, or borrow a later output's
+    # AttachedToDesktop line.
+    if (-not $SourceName) { return $false }
+    foreach ($block in ($DxgiOutput -split '(?m)^(?=[ \t]*Output Name[ \t]*:)')) {
+        if ($block -notmatch '(?m)\A[ \t]*Output Name[ \t]*:[ \t]*(?<name>[^\r\n]*?)[ \t]*\r?$') { continue }
+        if ($Matches.name -ine $SourceName) { continue }
+        return [bool]($block -match '(?m)^[ \t]*AttachedToDesktop[ \t]*:[ \t]*yes[ \t]*\r?$')
+    }
+    return $false
+}
+
 function Write-SunshineCaptureProbe {
     $dxgiOutput = ''
     try { $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String) } catch {}
@@ -57,9 +76,15 @@ function Write-SunshineCaptureProbe {
             Where-Object { $_ -match '^\s*output_name\s*=' } | Select-Object -First 1
         if ($line) { $configuredOutput = (($line -split '=', 2)[1]).Trim() }
     }
+    $stableVirtual = $null
+    try { $stableVirtual = Get-ButtersVirtualDisplay } catch {}
+    # Sunshine's Windows output_name is the stable device_id from its logs,
+    # while dxgi-info reports the current volatile \\.\DISPLAYn source name.
+    # Bind the two only after QueryDisplayConfig revalidates the MTT instance.
     $virtualDisplayReady = [bool](
-        $configuredOutput -and
-        $dxgiOutput -match ('(?ms)Output Name\s*:\s*' + [regex]::Escape($configuredOutput) + '.*?AttachedToDesktop\s*:\s*yes')
+        $stableVirtual -and
+        $configuredOutput -ieq $script:ButtersDisplayIdentity.VirtualSunshineId -and
+        (Test-DxgiOutputAttached $dxgiOutput ([string]$stableVirtual.source_name))
     )
     $result = [pscustomobject][ordered]@{
         timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
