@@ -5,7 +5,6 @@ import time
 from dataclasses import replace
 
 import pytest
-
 from butters.assistant import create_assistant
 from butters.assistant_config import DesktopSettings, load_assistant_settings
 from butters.integrations.desktop import DesktopAccessMode, DesktopWorkflow
@@ -15,7 +14,7 @@ from butters.skills.model import (
     AuthenticationLevel,
 )
 from butters.stt.normalization import DomainVocabulary
-
+from butters.web.service import BetaAssistantService
 
 READY = {
     "installed": True,
@@ -29,6 +28,22 @@ READY = {
     "virtual_display_ready": True,
     "plausibly_ready": True,
 }
+
+
+def test_prepare_for_streaming_is_the_strict_gaming_mode_not_legacy_parsec() -> None:
+    service = object.__new__(BetaAssistantService)
+    called = {}
+
+    def start_mode(session, mode):
+        called.update(session=session, mode=mode)
+        return {"status": "queued"}
+
+    service.start_admin_desktop_mode = start_mode
+    session = object()
+    result = BetaAssistantService.start_admin_desktop_streaming(service, session)
+
+    assert result == {"status": "queued"}
+    assert called == {"session": session, "mode": "gaming"}
 
 
 class Clock:

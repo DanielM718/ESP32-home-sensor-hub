@@ -61,6 +61,7 @@ GATE_KEYS: tuple[str, ...] = (
     # Separate-machine ingress gates.
     "agent_ingress.enabled",
     "nas_agent_ingress.enabled",
+    "kr260.enabled",
     # Desktop capability approvals. `desktop.shutdown_enabled` ships true, so
     # a local revocation here must outlive a deployment.
     "desktop.enabled",
@@ -85,7 +86,14 @@ GATE_KEYS: tuple[str, ...] = (
     # each one rather than collapsing them into a single "authorized".
     *(
         f"actions.{device}.{flag}"
-        for device in ("nas", "nas_shutdown", "heater", "dehumidifier", "ventilation")
+        for device in (
+            "nas",
+            "nas_shutdown",
+            "kr260_reboot",
+            "heater",
+            "dehumidifier",
+            "ventilation",
+        )
         for flag in ("enabled", "configured", "local_console_allowed")
     ),
     # Paid and cloud approvals. These ship false and must stay false unless a

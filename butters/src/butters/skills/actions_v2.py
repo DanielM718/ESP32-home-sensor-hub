@@ -10,6 +10,7 @@ from butters.integrations.actions import (
     EnvironmentControlAdapter,
     FixedActionAdapter,
     HostStatusAdapter,
+    Kr260Adapter,
     NasAdapter,
 )
 from butters.skills.model import (
@@ -39,11 +40,13 @@ class ActionSkillImplementations:
         actions: FixedActionAdapter,
         nas: NasAdapter,
         environment: EnvironmentControlAdapter,
+        kr260: Kr260Adapter | None = None,
     ) -> None:
         self.host = host
         self.actions = actions
         self.nas = nas
         self.environment = environment
+        self.kr260 = kr260
 
     @staticmethod
     def authorize_desktop(arguments: SkillArguments) -> None:
@@ -82,6 +85,18 @@ class ActionSkillImplementations:
     def get_environment_control_status(self, _arguments: SkillArguments) -> SkillResult:
         return StructuredSkillResult(
             "environment_control_status", self.environment.status()
+        )
+
+    def get_kr260_status(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        return StructuredSkillResult("kr260_status", self.kr260.status())
+
+    def reboot_kr260(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        return StructuredSkillResult(
+            "action_result", self.kr260.reboot(current_cancel_event())
         )
 
     def broker_action(self, operation: BrokerOperation) -> SkillResult:
@@ -164,8 +179,9 @@ def register_action_skills(
     action_adapter: FixedActionAdapter,
     nas: NasAdapter,
     environment: EnvironmentControlAdapter,
+    kr260: Kr260Adapter | None = None,
 ) -> None:
-    impl = ActionSkillImplementations(host, action_adapter, nas, environment)
+    impl = ActionSkillImplementations(host, action_adapter, nas, environment, kr260)
     empty_schema = {"type": "object", "properties": {}, "additionalProperties": False}
     desktop_schema = {
         "type": "object",
@@ -227,6 +243,11 @@ def register_action_skills(
         "get_environment_control_status",
         "Read configured heater, dehumidifier, ventilation, and override status.",
         impl.get_environment_control_status,
+    )
+    read(
+        "get_kr260_status",
+        "Read the identity-verified KR260's bounded hardware and Linux status.",
+        impl.get_kr260_status,
     )
 
     def action(
@@ -382,6 +403,18 @@ def register_action_skills(
         # Powering the NAS off is never a local-console convenience, and it is
         # deliberately absent from every conversational planner catalog: see
         # CONVERSATIONAL_PLANNER_ACTIONS in butters.web.service.
+        local_console=False,
+        schema=empty_schema,
+        parser=_parse_none,
+    )
+    action(
+        "reboot_kr260",
+        "Reboot only the identity-verified KR260 through its fixed SSH transport.",
+        impl.reboot_kr260,
+        authentication=AuthenticationLevel.FRESH,
+        available=(
+            actions.kr260_reboot.enabled and actions.kr260_reboot.configured
+        ),
         local_console=False,
         schema=empty_schema,
         parser=_parse_none,

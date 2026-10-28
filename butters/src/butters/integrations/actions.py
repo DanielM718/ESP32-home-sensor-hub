@@ -15,6 +15,7 @@ from typing import Any, ClassVar
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
+from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
 from butters.integrations.nas_status import NasStatusObserver
 
@@ -204,6 +205,49 @@ class NasAdapter:
             raise IntegrationError(
                 "capability_unavailable", "NAS wake is not configured"
             )
+
+
+class Kr260Adapter:
+    """One identity-verified KR260 with observation and normal reboot only."""
+
+    def __init__(
+        self,
+        observer: Kr260Observer,
+        actions: FixedActionAdapter,
+        reboot_settings: KnownDeviceSettings,
+    ) -> None:
+        self.observer = observer
+        self.actions = actions
+        self.reboot_settings = reboot_settings
+
+    def status(self, *, refresh: bool = False) -> dict[str, object]:
+        value = self.observer.observe(refresh=refresh)
+        value["capability"] = {
+            "monitoring": self.observer.settings.enabled,
+            "reboot": self.reboot_settings.enabled and self.reboot_settings.configured,
+            "shutdown": False,
+            "jtag_reset": False,
+        }
+        return value
+
+    def reboot(self, cancel_event: threading.Event | None = None) -> dict[str, object]:
+        if not self.reboot_settings.enabled or not self.reboot_settings.configured:
+            raise IntegrationError(
+                "capability_unavailable", "KR260 reboot is not configured"
+            )
+        before = self.observer.observe(refresh=True)
+        if not before.get("identity_verified"):
+            raise IntegrationError(
+                "identity_unverified", "KR260 identity could not be verified"
+            )
+        result = self.actions.execute(
+            BrokerOperation.KR260_REBOOT, cancel_event=cancel_event
+        )
+        return {
+            **result,
+            "outcome": "reboot_requested",
+            "previous_boot_id": before.get("boot_id"),
+        }
 
 
 class EnvironmentControlAdapter:

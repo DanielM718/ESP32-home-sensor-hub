@@ -27,12 +27,16 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     _require_root_private(path, "broker configuration")
     with path.open("rb") as source:
         raw = tomllib.load(source)
-    if set(raw) != {"broker", "desktop", "home_assistant", "nas", "operations"}:
+    required_sections = {"broker", "desktop", "home_assistant", "nas", "operations"}
+    if not required_sections <= set(raw) <= required_sections | {"kr260"}:
         raise ValueError("broker configuration sections are invalid")
     broker = raw["broker"]
     desktop = raw["desktop"]
     home_assistant = raw["home_assistant"]
     nas = raw["nas"]
+    kr260 = raw.get(
+        "kr260", {"host": "", "user": "ubuntu", "key": "/nonexistent", "expected_machine_id": ""}
+    )
     operations = raw["operations"]
     if set(broker) != {"service_user"}:
         raise ValueError("broker configuration fields are invalid")
@@ -52,6 +56,8 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         "api_key",
     }:
         raise ValueError("NAS broker fields are invalid")
+    if set(kr260) != {"host", "user", "key", "expected_machine_id"}:
+        raise ValueError("KR260 broker fields are invalid")
     expected_operations = {item.value for item in BrokerOperation}
     # Same reasoning, and it stays fail-closed: an operation the file does not
     # mention is disabled, never enabled. Only an unknown or non-boolean gate is
@@ -98,6 +104,20 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         nas_api_url and nas_api_key_path
     ):
         raise ValueError("enabled NAS shutdown operation requires a fixed transport")
+    kr260_key = Path(str(kr260["key"]))
+    kr260_machine_id = str(kr260["expected_machine_id"])
+    if enabled_operations & {
+        BrokerOperation.KR260_STATUS,
+        BrokerOperation.KR260_REBOOT,
+    }:
+        if not kr260_key.is_absolute():
+            raise ValueError("KR260 credential path must be absolute")
+        if len(kr260_machine_id) != 32 or any(
+            character not in "0123456789abcdef" for character in kr260_machine_id
+        ):
+            raise ValueError("KR260 expected_machine_id is invalid")
+        _require_root_private(kr260_key, "KR260 credential")
+        _require_root_private(kr260_key.parent / "known_hosts", "KR260 known_hosts")
     return uid, FixedBrokerConfig(
         desktop_host=str(desktop["host"]),
         desktop_user=str(desktop["user"]),
@@ -109,6 +129,10 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
         nas_api_url=nas_api_url,
         enabled_operations=enabled_operations,
         home_assistant_url=home_assistant_url,
+        kr260_host=str(kr260["host"]),
+        kr260_user=str(kr260["user"]),
+        kr260_key=kr260_key,
+        kr260_expected_machine_id=kr260_machine_id,
     )
 
 

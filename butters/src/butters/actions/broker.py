@@ -72,6 +72,36 @@ HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
 NAS_API_DEADLINE_SECONDS = 10.0
 NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
 
+# Fixed KR260 observation script. It has no caller-controlled interpolation and
+# returns only bounded OS/proc/sysfs data for parsing by the unprivileged tier.
+_KR260_TELEMETRY_COMMAND = r"""LC_ALL=C
+printf 'hostname='; hostname
+printf 'machine_id='; cat /etc/machine-id
+printf 'boot_id='; cat /proc/sys/kernel/random/boot_id
+printf 'kernel='; uname -sr
+printf 'uptime='; cut -d' ' -f1 /proc/uptime
+printf 'load='; cat /proc/loadavg
+printf 'cpu_start='; head -n1 /proc/stat
+sleep 0.1
+printf 'cpu_end='; head -n1 /proc/stat
+grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
+printf 'reboot_required='; if test -f /var/run/reboot-required; then echo true; else echo false; fi
+printf 'system_state='; systemctl is-system-running 2>/dev/null || true
+printf 'if_state='; cat /sys/class/net/eth1/operstate
+printf 'if_mac='; cat /sys/class/net/eth1/address
+printf 'if_rx='; cat /sys/class/net/eth1/statistics/rx_bytes
+printf 'if_tx='; cat /sys/class/net/eth1/statistics/tx_bytes
+printf 'ipv4='; ip -o -4 addr show dev eth1 scope global
+printf 'ipv6='; ip -o -6 addr show dev eth1 scope global
+printf 'default_route='; ip route show default | head -n1
+for hw in /sys/class/hwmon/hwmon*; do
+  test -r "$hw/name" || continue
+  test "$(cat "$hw/name")" = ams || continue
+  test -r "$hw/temp1_input" && { printf 'soc_temp_millic='; cat "$hw/temp1_input"; }
+  break
+done
+"""
+
 
 class _NoRedirect(HTTPRedirectHandler):
     """Refuse every redirect on the Home Assistant client.
@@ -124,6 +154,8 @@ class BrokerOperation(str, Enum):
     HOST_SHUTDOWN = "host.shutdown"
     NAS_WAKE = "nas.wake"
     NAS_SHUTDOWN = "nas.shutdown"
+    KR260_STATUS = "kr260.status"
+    KR260_REBOOT = "kr260.reboot"
     HEATER_ON = "environment.heater_on"
     HEATER_OFF = "environment.heater_off"
     DEHUMIDIFIER_ON = "environment.dehumidifier_on"
@@ -449,6 +481,10 @@ class FixedBrokerConfig:
     nas_api_url: str = ""
     enabled_operations: frozenset[BrokerOperation] = frozenset()
     home_assistant_url: str = "http://127.0.0.1:8123"
+    kr260_host: str = ""
+    kr260_user: str = "ubuntu"
+    kr260_key: Path = Path("/nonexistent")
+    kr260_expected_machine_id: str = ""
 
     @property
     def desktop_known_hosts(self) -> Path:
@@ -461,6 +497,10 @@ class FixedBrokerConfig:
         """
 
         return self.desktop_key.parent / "known_hosts"
+
+    @property
+    def kr260_known_hosts(self) -> Path:
+        return self.kr260_key.parent / "known_hosts"
 
 
 class FixedBrokerOperations:
@@ -537,6 +577,9 @@ class FixedBrokerOperations:
             candidates[BrokerOperation.NAS_WAKE] = self.nas_wake
         if self.config.nas_api_url and self.nas_api_key:
             candidates[BrokerOperation.NAS_SHUTDOWN] = self.nas_shutdown
+        if self.config.kr260_host and self.config.kr260_expected_machine_id:
+            candidates[BrokerOperation.KR260_STATUS] = self.kr260_status
+            candidates[BrokerOperation.KR260_REBOOT] = self.kr260_reboot
         return {
             operation: handler
             for operation, handler in candidates.items()
@@ -943,6 +986,75 @@ class FixedBrokerOperations:
             ],
             15,
         )
+
+    def kr260_reboot(self) -> dict[str, object]:
+        """Identity-check then request one normal Linux reboot over pinned SSH."""
+
+        identity = self._kr260_ssh("/usr/bin/cat /etc/machine-id", capture=True)
+        if identity.strip() != self.config.kr260_expected_machine_id:
+            raise BrokerError("identity_mismatch", "KR260 identity did not match")
+        self._kr260_ssh(
+            "/usr/bin/systemctl --no-wall --no-block reboot", capture=False
+        )
+        return {"accepted": True, "identity_verified": True}
+
+    def kr260_status(self) -> dict[str, object]:
+        telemetry = self._kr260_ssh(_KR260_TELEMETRY_COMMAND, capture=True)
+        if len(telemetry.encode("utf-8")) > 16384:
+            raise BrokerError("malformed_result", "KR260 telemetry exceeded its limit")
+        identities = [
+            line.partition("=")[2].strip()
+            for line in telemetry.splitlines()
+            if line.partition("=")[:2] == ("machine_id", "=")
+        ]
+        if identities != [self.config.kr260_expected_machine_id]:
+            raise BrokerError("identity_mismatch", "KR260 identity did not match")
+        return {
+            "accepted": True,
+            "identity_verified": True,
+            "telemetry": telemetry,
+        }
+
+    def _kr260_ssh(self, command: str, *, capture: bool) -> str:
+        # command is selected only from fixed literals in this module. No request or
+        # configuration value can become remote shell text.
+        argv = [
+            "/usr/bin/ssh",
+            "-T",
+            "-i",
+            str(self.config.kr260_key),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "UpdateHostKeys=no",
+            "-o",
+            f"UserKnownHostsFile={self.config.kr260_known_hosts}",
+            f"{self.config.kr260_user}@{self.config.kr260_host}",
+            command,
+        ]
+        try:
+            result = self.runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BrokerError("operation_failed", "fixed operation failed") from exc
+        if int(getattr(result, "returncode", 1)) != 0:
+            raise BrokerError("operation_failed", "fixed operation failed")
+        return str(getattr(result, "stdout", "")) if capture else ""
 
     def _desktop_control(
         self, operation: _DesktopControlOperation

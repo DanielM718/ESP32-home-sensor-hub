@@ -974,6 +974,40 @@ def create_app(
         ) as exc:
             return _exception_response(exc)
 
+    # ====================== Administrator Tools: KR260 ======================
+
+    async def kr260_tool_status(request: Request) -> Response:
+        try:
+            _admin(request, auth)
+            refresh = request.query_params.get("refresh") == "1"
+            return JSONResponse(
+                await run_blocking(runtime.kr260_admin_status, refresh=refresh)
+            )
+        except (SecurityError, SessionError, ActionCoordinatorError) as exc:
+            return _exception_response(exc)
+
+    async def kr260_tool_reboot(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"confirm"}:
+                raise ValueError("KR260 reboot accepts only an explicit confirmation")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.start_admin_kr260_reboot,
+                    session,
+                    confirmed=payload["confirm"] is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     # ======================= Administrator Tools: NAS =======================
 
     async def nas_tool_status(request: Request) -> Response:
@@ -2636,6 +2670,12 @@ def create_app(
         Route(
             "/api/admin/tools/desktop/launch-app",
             desktop_tool_launch,
+            methods=["POST"],
+        ),
+        Route("/api/admin/tools/kr260", kr260_tool_status),
+        Route(
+            "/api/admin/tools/kr260/reboot",
+            kr260_tool_reboot,
             methods=["POST"],
         ),
         Route("/api/admin/tools/nas", nas_tool_status),

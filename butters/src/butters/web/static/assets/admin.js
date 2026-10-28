@@ -7,7 +7,7 @@ let selectedJob = null;
 let traceSocket = null;
 let selectedTraceId = null;
 const traceCards = new Map();
-const titles = {overview:"Overview",appearance:"Appearance",system:"Butters service",desktop:"Desktop",nas:"NAS",chat:"Chat model",voice:"Speech",credentials:"Credentials",usage:"Usage",models:"Models & STT",routing:"Routing test",media:"Jellyfin & bandwidth",portalaccess:"Portal access",skills:"Skills",tools:"Diagnostic tools",actions:"Actions & broker",capabilities:"Capabilities",passkeys:"Authentication",security:"Security posture",trace:"Live trace",sessions:"Conversations",logs:"Logs",codex:"Codex jobs"};
+const titles = {overview:"Overview",appearance:"Appearance",system:"Butters service",desktop:"Desktop",kr260:"KR260",nas:"NAS",chat:"Chat model",voice:"Speech",credentials:"Credentials",usage:"Usage",models:"Models & STT",routing:"Routing test",media:"Jellyfin & bandwidth",portalaccess:"Portal access",skills:"Skills",tools:"Diagnostic tools",actions:"Actions & broker",capabilities:"Capabilities",passkeys:"Authentication",security:"Security posture",trace:"Live trace",sessions:"Conversations",logs:"Logs",codex:"Codex jobs"};
 
 async function api(path, options = {}) {
   const headers = new Headers(options.headers || {});
@@ -100,6 +100,7 @@ async function refresh(panel) {
     if(panel==="voice") await refreshVoice();
     if(panel==="skills") await refreshSkills();
     if(panel==="desktop") await refreshDesktop();
+    if(panel==="kr260") await refreshKr260();
     if(panel==="nas") await refreshNas();
     if(panel==="media") await refreshMedia();
     if(panel==="portalaccess") await refreshPortalIdentities();
@@ -370,6 +371,59 @@ async function shutdownNas() {
   finally { await refreshNas(); }
 }
 
+/* ---------- KR260 ---------- */
+
+async function refreshKr260() {
+  const summary=document.querySelector("#kr260-summary");
+  try {
+    const state=(await api("/api/admin/tools/kr260?refresh=1")).value;
+    const uptime=Number.isFinite(state.uptime_seconds)?state.uptime_seconds:null;
+    const cpu=Number.isFinite(state.cpu_utilization_percent)?state.cpu_utilization_percent:null;
+    const load=Number.isFinite(state.load_1m)&&Number.isFinite(state.load_5m)&&Number.isFinite(state.load_15m);
+    const memory=Number.isFinite(state.memory_utilization_percent)?state.memory_utilization_percent:null;
+    const temperature=Number.isFinite(state.soc_temperature_c)?state.soc_temperature_c:null;
+    summary.textContent=`${state.operational_state}${state.identity_verified?" · identity verified":""}`;
+    axis(document.querySelector("#kr260-status"), [
+      ["Online", state.online?"yes":"no"],
+      ["SSH", state.ssh_available?"yes":"no"],
+      ["Identity", state.identity_verified?"yes":"no"],
+      ["Uptime", uptime===null?"unknown":"yes", uptime===null?undefined:`${Math.round(uptime)}s`],
+      ["CPU", cpu===null?"unknown":"yes", cpu===null?undefined:`${cpu}%`],
+      ["Load", load?"yes":"unknown", load?`${state.load_1m} / ${state.load_5m} / ${state.load_15m}`:undefined],
+      ["Memory", memory===null?"unknown":"yes", memory===null?undefined:`${memory}% used`],
+      ["SoC temperature", temperature===null?"unknown":"yes", temperature===null?undefined:`${temperature} °C`],
+      ["Reboot required", state.reboot_required?"warning":"no"],
+      ["Linux", state.linux_state||"unknown"],
+    ]);
+    const network=state.network||{};
+    axis(document.querySelector("#kr260-network"), [
+      ["Interface", network.interface||"unknown"],
+      ["Link", network.state||"unknown"],
+      ["IPv4", network.ipv4||"unknown"],
+      ["Default route", network.default_route||"unknown"],
+    ]);
+    renderLastOperation(document.querySelector("#kr260-last-operation"), state.last_operation, "No KR260 operation has been requested from this console.");
+    document.querySelector("#kr260-reboot").disabled=!(state.capability&&state.capability.reboot);
+    if(!(state.capability&&state.capability.reboot)) document.querySelector("#kr260-action-status").textContent="Reboot remains disabled until its fixed authorization path passes a live test.";
+  } catch(error) { summary.textContent=`KR260 status unavailable: ${error.message||"unknown error"}`; }
+}
+
+async function rebootKr260() {
+  const status=document.querySelector("#kr260-action-status");
+  status.textContent="Submitting the fixed KR260 reboot action…";
+  try {
+    let result=(await api("/api/admin/tools/kr260/reboot",{method:"POST",body:JSON.stringify({confirm:true})})).value;
+    if(result.status==="authentication_required"){
+      status.textContent="Fresh passkey authentication is required…";
+      result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
+    }
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("KR260 reboot was not queued");
+    await waitForAdminAction(result.jobs[0].job_id);
+    status.textContent="Reboot requested. Refresh status to observe recovery.";
+  } catch(error) { status.textContent=`Reboot KR260 failed: ${error.message||"unknown error"}`; }
+  finally { await refreshKr260(); }
+}
+
 /* ---------- Portal enrollment ---------- */
 
 /* The two roles the server recognises. Listing them here only draws the editor;
@@ -496,6 +550,12 @@ document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#desktop-shutdown-confirm"),
     "This ends every interactive desktop session, including Parsec, and any running build.",
     ()=>runDesktopAction("Shut Down Desktop",()=>api("/api/admin/tools/desktop/shutdown",{method:"POST",body:JSON.stringify({})})));
+});
+document.querySelector("#kr260-refresh").addEventListener("click",refreshKr260);
+document.querySelector("#kr260-reboot").addEventListener("click",()=>{
+  confirmPanel(document.querySelector("#kr260-reboot-confirm"),
+    "This restarts Linux on the identity-verified KR260. Shutdown and JTAG recovery are not part of this action.",
+    rebootKr260);
 });
 document.querySelector("#nas-refresh").addEventListener("click",refreshNas);
 document.querySelector("#nas-wake").addEventListener("click",wakeNas);

@@ -306,6 +306,34 @@ class KnownDeviceSettings:
 
 
 @dataclass(frozen=True, slots=True)
+class Kr260Settings:
+    """One fixed KR260 observed only through the root action broker."""
+
+    enabled: bool = False
+    host: str = "192.168.1.125"
+    expected_hostname: str = "kria"
+    expected_machine_id: str = ""
+    interface: str = "eth1"
+    poll_interval_seconds: float = 45.0
+    command_timeout_seconds: float = 10.0
+
+    def validated(self) -> Kr260Settings:
+        if not self.host.strip():
+            raise ConfigError("kr260 host is invalid")
+        if self.expected_hostname != "kria":
+            raise ConfigError("kr260.expected_hostname must be kria")
+        if self.enabled and not re.fullmatch(r"[0-9a-f]{32}", self.expected_machine_id):
+            raise ConfigError("enabled kr260 requires a 32-hex expected_machine_id")
+        if self.interface != "eth1":
+            raise ConfigError("kr260.interface must be eth1")
+        if not 30 <= self.poll_interval_seconds <= 60:
+            raise ConfigError("kr260.poll_interval_seconds must be 30 to 60")
+        if not 3 <= self.command_timeout_seconds <= 30:
+            raise ConfigError("kr260.command_timeout_seconds must be 3 to 30")
+        return self
+
+
+@dataclass(frozen=True, slots=True)
 class NasEndpointSettings:
     """Server-owned NAS observation targets and Jellyfin destinations.
 
@@ -414,6 +442,7 @@ class ActionSettings:
     nas: KnownDeviceSettings = KnownDeviceSettings()
     # Powering the NAS off is gated independently of waking it.
     nas_shutdown: KnownDeviceSettings = KnownDeviceSettings()
+    kr260_reboot: KnownDeviceSettings = KnownDeviceSettings()
     heater: KnownDeviceSettings = KnownDeviceSettings()
     dehumidifier: KnownDeviceSettings = KnownDeviceSettings()
     ventilation: KnownDeviceSettings = KnownDeviceSettings()
@@ -425,6 +454,7 @@ class ActionSettings:
             raise ConfigError("actions.job_capacity must be 32 to 2048")
         self.nas.validated("actions.nas")
         self.nas_shutdown.validated("actions.nas_shutdown")
+        self.kr260_reboot.validated("actions.kr260_reboot")
         self.heater.validated("actions.heater")
         self.dehumidifier.validated("actions.dehumidifier")
         self.ventilation.validated("actions.ventilation")
@@ -866,6 +896,7 @@ class AssistantSettings:
     planner: PlannerSettings = PlannerSettings()
     nas_endpoints: NasEndpointSettings = NasEndpointSettings()
     portal: PortalSettings = PortalSettings()
+    kr260: Kr260Settings = Kr260Settings()
 
 
 def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
@@ -1152,9 +1183,21 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         host_shutdown_enabled=bool(actions_table.get("host_shutdown_enabled", False)),
         nas=device_settings("nas"),
         nas_shutdown=device_settings("nas_shutdown"),
+        kr260_reboot=device_settings("kr260_reboot"),
         heater=device_settings("heater"),
         dehumidifier=device_settings("dehumidifier"),
         ventilation=device_settings("ventilation"),
+    ).validated()
+
+    kr260_table = _table(data, "kr260")
+    kr260 = Kr260Settings(
+        enabled=bool(kr260_table.get("enabled", False)),
+        host=str(kr260_table.get("host", "192.168.1.125")).strip(),
+        expected_hostname=str(kr260_table.get("expected_hostname", "kria")).strip(),
+        expected_machine_id=str(kr260_table.get("expected_machine_id", "")).strip(),
+        interface=str(kr260_table.get("interface", "eth1")).strip(),
+        poll_interval_seconds=float(kr260_table.get("poll_interval_seconds", 45.0)),
+        command_timeout_seconds=float(kr260_table.get("command_timeout_seconds", 10.0)),
     ).validated()
 
     nas_endpoint_table = _table(data, "nas")
@@ -1349,6 +1392,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         planner=planner,
         nas_endpoints=nas_endpoints,
         portal=portal,
+        kr260=kr260,
     )
 
 
