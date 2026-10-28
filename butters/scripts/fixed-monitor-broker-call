@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Call only the two fixed desktop-monitor broker operations.
+"""Call only the fixed desktop-monitor broker operations.
+
+``primary-on`` turns on only the G27QC and leaves the intentionally-off OLED
+as it is; ``on`` powers both outlets and should be reserved for a recovery that
+really needs the OLED.
 
 This local recovery helper does not contain Home Assistant credentials and does
 not bypass the broker capability gate. The broker socket still requires the
@@ -18,13 +22,14 @@ SOCKET_PATH = "/run/butters-action-broker/broker.sock"
 OPERATIONS = {
     "off": "desktop.monitors_off",
     "on": "desktop.monitors_on",
+    "primary-on": "desktop.primary_monitor_on",
 }
 MAX_RESPONSE_BYTES = 64 * 1024
 
 
 def main() -> int:
     if len(sys.argv) != 2 or sys.argv[1] not in OPERATIONS:
-        print("usage: fixed-monitor-broker-call on|off", file=sys.stderr)
+        print("usage: fixed-monitor-broker-call primary-on|on|off", file=sys.stderr)
         return 64
 
     request_id = "local-monitor-recovery-" + secrets.token_hex(8)

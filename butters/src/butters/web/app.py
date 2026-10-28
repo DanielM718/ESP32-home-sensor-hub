@@ -937,6 +937,13 @@ def create_app(
         except (SecurityError, SessionError, ActionCoordinatorError, ValueError) as exc:
             return _exception_response(exc)
 
+    async def desktop_tool_end_remote_session(request: Request) -> Response:
+        return await _admin_fixed_action(
+            request,
+            runtime.start_admin_desktop_end_remote_session,
+            "remote session end",
+        )
+
     async def desktop_tool_launch(request: Request) -> Response:
         """Launch one symbolic application through the registered Slice 3 action.
 
@@ -2619,6 +2626,11 @@ def create_app(
         Route(
             "/api/admin/tools/desktop/mode",
             desktop_tool_mode,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/tools/desktop/end-remote-session",
+            desktop_tool_end_remote_session,
             methods=["POST"],
         ),
         Route(

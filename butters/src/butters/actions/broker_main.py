@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 import tomllib
 
 from butters.actions.broker import (
+    DESKTOP_SSH_OPERATIONS,
     BrokerOperation,
     BrokerServer,
     FixedBrokerConfig,
@@ -66,18 +67,7 @@ def _configuration(path: Path) -> tuple[int, FixedBrokerConfig]:
     key = Path(str(desktop["key"]))
     if not key.is_absolute():
         raise ValueError("desktop credential path must be absolute")
-    desktop_ssh_operations = {
-        BrokerOperation.DESKTOP_PARSEC_STATUS,
-        BrokerOperation.DESKTOP_PARSEC_ENSURE,
-        BrokerOperation.DESKTOP_PARSEC_RESTART,
-        BrokerOperation.DESKTOP_SUNSHINE_STATUS,
-        BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
-        BrokerOperation.DESKTOP_LOCK,
-        BrokerOperation.DESKTOP_SLEEP,
-        BrokerOperation.DESKTOP_RESTART,
-        BrokerOperation.DESKTOP_SHUTDOWN,
-    }
-    if enabled_operations & desktop_ssh_operations:
+    if enabled_operations & DESKTOP_SSH_OPERATIONS:
         _require_root_private(key, "desktop credential")
         # Fail closed rather than fall back to trust-on-first-use: the pinned
         # host key must already be provisioned beside the credential.

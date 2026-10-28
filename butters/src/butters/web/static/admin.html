@@ -127,8 +127,10 @@
           <button id="desktop-streaming" class="primary-button" type="button">Gaming</button>
           <button id="desktop-engineering" class="primary-button" type="button">Engineering</button>
           <button id="desktop-local" class="secondary-button" type="button">Local</button>
+          <button id="desktop-end-remote" class="secondary-button" type="button">End Remote Session → Local</button>
         </div>
-        <p class="tool-note">Each explicit mode requires a fresh passkey. Gaming and Engineering reuse a ready Sunshine instance and verify its configured virtual display before turning both monitor outlets off. Local only wakes Windows and verifies both outlets on; it does not touch streaming software or display topology.</p>
+        <div id="desktop-end-remote-confirm" class="confirm-panel" role="group" aria-label="Confirm ending the remote session" hidden></div>
+        <p class="tool-note">Each explicit mode requires a fresh passkey. Gaming and Engineering reuse a ready Sunshine instance and verify its virtual display before turning both monitor outlets off. Local turns on only the primary G27QC outlet and leaves the OLED as it is; it never ends a stream, and keeps the virtual display while Sunshine still has an application that could resume. End Remote Session is the only control that closes the Sunshine application, and it restores physical access first.</p>
 
         <h3>Virtual machines</h3>
         <p id="desktop-vms" class="tool-note">VM capability has not been checked.</p>

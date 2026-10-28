@@ -103,12 +103,18 @@ class BrokerOperation(str, Enum):
     DESKTOP_WAKE = "desktop.wake"
     DESKTOP_MONITORS_OFF = "desktop.monitors_off"
     DESKTOP_MONITORS_ON = "desktop.monitors_on"
+    DESKTOP_PRIMARY_MONITOR_ON = "desktop.primary_monitor_on"
     DESKTOP_PARSEC_STATUS = "desktop.parsec_status"
     DESKTOP_PARSEC_ENSURE = "desktop.parsec_ensure"
     DESKTOP_PARSEC_RESTART = "desktop.parsec_restart"
     DESKTOP_SUNSHINE_SERVICE_STATUS = "desktop.sunshine_service_status"
     DESKTOP_SUNSHINE_STATUS = "desktop.sunshine_status"
     DESKTOP_SUNSHINE_ENSURE = "desktop.sunshine_ensure"
+    DESKTOP_SUNSHINE_SESSION_STATUS = "desktop.sunshine_session_status"
+    DESKTOP_SUNSHINE_SESSION_END = "desktop.sunshine_session_end"
+    DESKTOP_DISPLAY_STATUS = "desktop.display_status"
+    DESKTOP_VIRTUAL_DISPLAY_ACTIVATE = "desktop.virtual_display_activate"
+    DESKTOP_VIRTUAL_DISPLAY_DEACTIVATE = "desktop.virtual_display_deactivate"
     DESKTOP_LOCK = "desktop.lock"
     DESKTOP_SLEEP = "desktop.sleep"
     DESKTOP_RESTART = "desktop.restart"
@@ -126,6 +132,30 @@ class BrokerOperation(str, Enum):
     VENTILATION_OFF = "environment.ventilation_off"
 
 
+# Every broker operation that runs the fixed Windows helper over SSH. broker_main
+# validates the root-owned credential and pinned known_hosts whenever any of
+# these is enabled, so a new SSH operation cannot be enabled without them.
+DESKTOP_SSH_OPERATIONS = frozenset(
+    {
+        BrokerOperation.DESKTOP_PARSEC_STATUS,
+        BrokerOperation.DESKTOP_PARSEC_ENSURE,
+        BrokerOperation.DESKTOP_PARSEC_RESTART,
+        BrokerOperation.DESKTOP_SUNSHINE_SERVICE_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_ENSURE,
+        BrokerOperation.DESKTOP_SUNSHINE_SESSION_STATUS,
+        BrokerOperation.DESKTOP_SUNSHINE_SESSION_END,
+        BrokerOperation.DESKTOP_DISPLAY_STATUS,
+        BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_ACTIVATE,
+        BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_DEACTIVATE,
+        BrokerOperation.DESKTOP_LOCK,
+        BrokerOperation.DESKTOP_SLEEP,
+        BrokerOperation.DESKTOP_RESTART,
+        BrokerOperation.DESKTOP_SHUTDOWN,
+    }
+)
+
+
 class _DesktopControlOperation(str, Enum):
     PARSEC_STATUS = "ParsecStatus"
     PARSEC_ENSURE = "ParsecEnsure"
@@ -133,6 +163,15 @@ class _DesktopControlOperation(str, Enum):
     SUNSHINE_SERVICE_STATUS = "SunshineServiceStatus"
     SUNSHINE_STATUS = "SunshineStatus"
     SUNSHINE_ENSURE = "SunshineEnsure"
+    SUNSHINE_SESSION_STATUS = "SunshineSessionStatus"
+    SUNSHINE_SESSION_END = "SunshineSessionEnd"
+    # Implemented by the Windows virtual-display activation helper (unpublished
+    # branch fix/mtt-virtual-display-activation). Until that helper is wired
+    # into desktop-control.ps1 its ValidateSet rejects these names, the SSH
+    # command exits non-zero, and every caller fails closed.
+    DISPLAY_STATUS = "DisplayStatus"
+    VIRTUAL_DISPLAY_ACTIVATE = "VirtualDisplayActivate"
+    VIRTUAL_DISPLAY_DEACTIVATE = "VirtualDisplayDeactivate"
     LOCK = "Lock"
     SLEEP = "Sleep"
     RESTART = "Restart"
@@ -431,6 +470,11 @@ class FixedBrokerOperations:
         "switch.desktop_gigabyte",
         "switch.desktop_oled",
     )
+    # Local use needs one usable physical display, and the G27QC is the primary
+    # one. The AORUS OLED is intentionally off during ordinary local use, so
+    # desktop.primary_monitor_on observes it but never changes it.
+    PRIMARY_MONITOR_ENTITY = "switch.desktop_gigabyte"
+    PRESERVED_MONITOR_ENTITY = "switch.desktop_oled"
 
     def __init__(
         self,
@@ -465,12 +509,18 @@ class FixedBrokerOperations:
             BrokerOperation.DESKTOP_WAKE: self.desktop_wake,
             BrokerOperation.DESKTOP_MONITORS_OFF: self.desktop_monitors_off,
             BrokerOperation.DESKTOP_MONITORS_ON: self.desktop_monitors_on,
+            BrokerOperation.DESKTOP_PRIMARY_MONITOR_ON: self.desktop_primary_monitor_on,
             BrokerOperation.DESKTOP_PARSEC_STATUS: self.desktop_parsec_status,
             BrokerOperation.DESKTOP_PARSEC_ENSURE: self.desktop_parsec_ensure,
             BrokerOperation.DESKTOP_PARSEC_RESTART: self.desktop_parsec_restart,
             BrokerOperation.DESKTOP_SUNSHINE_SERVICE_STATUS: self.desktop_sunshine_service_status,
             BrokerOperation.DESKTOP_SUNSHINE_STATUS: self.desktop_sunshine_status,
             BrokerOperation.DESKTOP_SUNSHINE_ENSURE: self.desktop_sunshine_ensure,
+            BrokerOperation.DESKTOP_SUNSHINE_SESSION_STATUS: self.desktop_sunshine_session_status,
+            BrokerOperation.DESKTOP_SUNSHINE_SESSION_END: self.desktop_sunshine_session_end,
+            BrokerOperation.DESKTOP_DISPLAY_STATUS: self.desktop_display_status,
+            BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_ACTIVATE: self.desktop_virtual_display_activate,
+            BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_DEACTIVATE: self.desktop_virtual_display_deactivate,
             BrokerOperation.DESKTOP_LOCK: self.desktop_lock,
             BrokerOperation.DESKTOP_SLEEP: self.desktop_sleep,
             BrokerOperation.DESKTOP_RESTART: self.desktop_restart,
@@ -510,6 +560,60 @@ class FixedBrokerOperations:
     def desktop_monitors_on(self) -> dict[str, object]:
         return self._set_desktop_monitors("on")
 
+    def desktop_primary_monitor_on(self) -> dict[str, object]:
+        """Turn on only the primary G27QC outlet; never change the OLED outlet."""
+
+        if not self.home_assistant_token:
+            raise BrokerError(
+                "home_assistant_unconfigured",
+                "Home Assistant authentication is not configured",
+            )
+        primary = self.PRIMARY_MONITOR_ENTITY
+        preserved = self.PRESERVED_MONITOR_ENTITY
+        deadline = self.monotonic() + MONITOR_OPERATION_DEADLINE_SECONDS
+        # The OLED is only observed. A failed read of it must not stop the
+        # primary display from being restored, so it is read separately.
+        before = self._monitor_states(deadline, entities=(primary,))
+        before.update(self._preserved_state(deadline))
+        already = before.get(primary) == "on"
+        if not already:
+            # The service call names exactly one entity. The OLED is read for
+            # the result but is never part of any request body.
+            self._home_assistant_request(
+                "/api/services/switch/turn_on",
+                method="POST",
+                body={"entity_id": [primary]},
+                deadline=deadline,
+            )
+            after, _matching = self._await_monitor_convergence(
+                "on", deadline, entities=(primary,)
+            )
+            # Report the OLED as it is now. The primary outcome is already
+            # decided, so a failed extra read cannot turn it into a failure.
+            after = {**after, **self._preserved_state(deadline)}
+        else:
+            after = before
+        observed = (before.get(preserved), after.get(preserved))
+        return {
+            "accepted": after.get(primary) == "on",
+            "desired_state": "on",
+            "already_in_state": already,
+            "partial": False,
+            "entities": after,
+            "scope": "primary",
+            # None when either read failed: unknown is not "changed".
+            "preserved_entity_unchanged": (
+                None if "unknown" in observed else observed[0] == observed[1]
+            ),
+        }
+
+    def _preserved_state(self, deadline: float) -> dict[str, str]:
+        preserved = self.PRESERVED_MONITOR_ENTITY
+        try:
+            return self._monitor_states(deadline, entities=(preserved,))
+        except BrokerError:
+            return {preserved: "unknown"}
+
     def desktop_parsec_status(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.PARSEC_STATUS)
 
@@ -527,6 +631,23 @@ class FixedBrokerOperations:
 
     def desktop_sunshine_ensure(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.SUNSHINE_ENSURE)
+
+    def desktop_sunshine_session_status(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SUNSHINE_SESSION_STATUS)
+
+    def desktop_sunshine_session_end(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.SUNSHINE_SESSION_END)
+
+    def desktop_display_status(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.DISPLAY_STATUS)
+
+    def desktop_virtual_display_activate(self) -> dict[str, object]:
+        return self._desktop_control(_DesktopControlOperation.VIRTUAL_DISPLAY_ACTIVATE)
+
+    def desktop_virtual_display_deactivate(self) -> dict[str, object]:
+        return self._desktop_control(
+            _DesktopControlOperation.VIRTUAL_DISPLAY_DEACTIVATE
+        )
 
     def desktop_lock(self) -> dict[str, object]:
         return self._desktop_control(_DesktopControlOperation.LOCK)
@@ -575,7 +696,11 @@ class FixedBrokerOperations:
         }
 
     def _await_monitor_convergence(
-        self, desired_state: str, operation_deadline: float
+        self,
+        desired_state: str,
+        operation_deadline: float,
+        *,
+        entities: tuple[str, ...] | None = None,
     ) -> tuple[dict[str, str], int]:
         """Poll the two fixed outlets until both settle, or the deadline expires.
 
@@ -589,15 +714,14 @@ class FixedBrokerOperations:
         as a bounded partial/failed result rather than blocking.
         """
 
+        watched = self.MONITOR_ENTITIES if entities is None else entities
         deadline = min(
             self.monotonic() + MONITOR_SETTLE_DEADLINE_SECONDS, operation_deadline
         )
         while True:
-            states = self._monitor_states(deadline)
-            matching = sum(
-                states.get(entity) == desired_state for entity in self.MONITOR_ENTITIES
-            )
-            if matching == len(self.MONITOR_ENTITIES):
+            states = self._monitor_states(deadline, entities=watched)
+            matching = sum(states.get(entity) == desired_state for entity in watched)
+            if matching == len(watched):
                 return states, matching
             remaining = deadline - self.monotonic()
             if remaining <= 0:
@@ -610,9 +734,14 @@ class FixedBrokerOperations:
                 # result into an unavailable error.
                 return states, matching
 
-    def _monitor_states(self, deadline: float | None = None) -> dict[str, str]:
+    def _monitor_states(
+        self,
+        deadline: float | None = None,
+        *,
+        entities: tuple[str, ...] | None = None,
+    ) -> dict[str, str]:
         states: dict[str, str] = {}
-        for entity in self.MONITOR_ENTITIES:
+        for entity in self.MONITOR_ENTITIES if entities is None else entities:
             payload = self._home_assistant_request(
                 f"/api/states/{entity}", deadline=deadline
             )
@@ -892,6 +1021,15 @@ class FixedBrokerOperations:
                 "sunshine_not_installed",
                 "sunshine_start_timeout",
                 "sunshine_capture_unavailable",
+                "sunshine_api_unconfigured",
+                "sunshine_api_unavailable",
+                "sunshine_api_auth_failed",
+                "sunshine_session_end_timeout",
+                "sunshine_session_present",
+                "virtual_display_unavailable",
+                "virtual_display_identity_mismatch",
+                "virtual_display_mode_unverified",
+                "physical_display_unavailable",
             }
             raise BrokerError(
                 str(code) if code in allowed else "operation_failed",
@@ -944,6 +1082,28 @@ _SUNSHINE_STATE_KEYS = frozenset(
         "capture_ready",
         "virtual_display_ready",
         "plausibly_ready",
+    }
+)
+
+_SUNSHINE_SESSION_STATES = frozenset(
+    {"terminated", "resumable", "active", "ending", "unknown"}
+)
+
+_SUNSHINE_SESSION_KEYS = frozenset(
+    {"api_reachable", "app_running", "stream_active", "session_state"}
+)
+
+# The removal result must carry the session state the helper re-checked
+# immediately before acting, so the broker can enforce that re-check.
+_DEACTIVATION_EVIDENCE_KEYS = frozenset({"session_state"})
+
+_DISPLAY_STATE_KEYS = frozenset(
+    {
+        "virtual_display_active",
+        "virtual_mode_verified",
+        "primary_physical_active",
+        "secondary_physical_active",
+        "physical_display_active",
     }
 )
 
@@ -1068,6 +1228,60 @@ def _desktop_control_result(
                 )
         return dict(payload)
 
+    if operation in {
+        _DesktopControlOperation.SUNSHINE_SESSION_STATUS,
+        _DesktopControlOperation.SUNSHINE_SESSION_END,
+    }:
+        extras = (
+            frozenset()
+            if operation is _DesktopControlOperation.SUNSHINE_SESSION_STATUS
+            else frozenset(
+                {"accepted", "error_code", "elapsed_ms", "already_terminated"}
+            )
+        )
+        if set(payload) != _SUNSHINE_SESSION_KEYS | extras:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        _require_session_consistency(payload)
+        if extras:
+            _require_mutation_fields(payload, "already_terminated")
+            terminated = payload["session_state"] == "terminated"
+            if (payload["accepted"] or payload["already_terminated"]) and not terminated:
+                raise BrokerError("malformed_result", "fixed operation result is invalid")
+        return dict(payload)
+
+    if operation in {
+        _DesktopControlOperation.DISPLAY_STATUS,
+        _DesktopControlOperation.VIRTUAL_DISPLAY_ACTIVATE,
+        _DesktopControlOperation.VIRTUAL_DISPLAY_DEACTIVATE,
+    }:
+        flag = {
+            _DesktopControlOperation.DISPLAY_STATUS: None,
+            _DesktopControlOperation.VIRTUAL_DISPLAY_ACTIVATE: "already_active",
+            _DesktopControlOperation.VIRTUAL_DISPLAY_DEACTIVATE: "already_inactive",
+        }[operation]
+        extras = (
+            frozenset()
+            if flag is None
+            else frozenset({"accepted", "error_code", "elapsed_ms", flag})
+        )
+        if operation is _DesktopControlOperation.VIRTUAL_DISPLAY_DEACTIVATE:
+            extras |= _DEACTIVATION_EVIDENCE_KEYS
+        if set(payload) != _DISPLAY_STATE_KEYS | extras:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if not all(isinstance(payload[key], bool) for key in _DISPLAY_STATE_KEYS):
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        physical = payload["primary_physical_active"] or payload[
+            "secondary_physical_active"
+        ]
+        if payload["physical_display_active"] is not physical or (
+            payload["virtual_mode_verified"] and not payload["virtual_display_active"]
+        ):
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        if flag is not None:
+            _require_mutation_fields(payload, flag)
+            _require_display_outcome(operation, payload, flag)
+        return dict(payload)
+
     expected_transition = {
         _DesktopControlOperation.LOCK: "lock",
         _DesktopControlOperation.SLEEP: "sleep",
@@ -1081,6 +1295,75 @@ def _desktop_control_result(
     ):
         raise BrokerError("malformed_result", "fixed operation result is invalid")
     return dict(payload)
+
+
+def _require_session_consistency(payload: dict[str, object]) -> None:
+    """Reject a Sunshine session report whose fields contradict its state.
+
+    ``terminated`` is the only state any caller treats as permission to remove
+    the virtual display, so it must be internally unambiguous: the API was
+    reached, no application is running, and no stream socket is bound.
+    """
+
+    state = payload["session_state"]
+    app_running = payload["app_running"]
+    stream_active = payload["stream_active"]
+    if (
+        state not in _SUNSHINE_SESSION_STATES
+        or not isinstance(payload["api_reachable"], bool)
+        or not (app_running is None or isinstance(app_running, bool))
+        or not (stream_active is None or isinstance(stream_active, bool))
+    ):
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+    expected = {
+        "terminated": (True, False, False),
+        "resumable": (True, True, False),
+        "active": (True, True, True),
+        "ending": (True, False, True),
+    }.get(str(state))
+    if expected is None:
+        # Unknown never carries an observation that could be mistaken for one.
+        if app_running is not None or stream_active is not None:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+        return
+    if (payload["api_reachable"], app_running, stream_active) != expected:
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+
+
+def _require_display_outcome(
+    operation: _DesktopControlOperation, payload: dict[str, object], flag: str
+) -> None:
+    """``accepted`` and the idempotence flag must agree with the observation."""
+
+    if operation is _DesktopControlOperation.VIRTUAL_DISPLAY_ACTIVATE:
+        achieved = (
+            payload["virtual_display_active"] is True
+            and payload["virtual_mode_verified"] is True
+        )
+    else:
+        achieved = (
+            payload["virtual_display_active"] is False
+            and payload["physical_display_active"] is True
+            and payload["session_state"] == "terminated"
+        )
+        if payload["session_state"] not in _SUNSHINE_SESSION_STATES:
+            raise BrokerError("malformed_result", "fixed operation result is invalid")
+    if (payload["accepted"] or payload[flag]) and not achieved:
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+
+
+def _require_mutation_fields(payload: dict[str, object], flag: str) -> None:
+    error = payload["error_code"]
+    if payload["accepted"] is True and error is not None:
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
+    if (
+        not isinstance(payload["accepted"], bool)
+        or not isinstance(payload[flag], bool)
+        or not isinstance(payload["elapsed_ms"], int)
+        or isinstance(payload["elapsed_ms"], bool)
+        or not (error is None or isinstance(error, str))
+    ):
+        raise BrokerError("malformed_result", "fixed operation result is invalid")
 
 
 def _read_bounded(response: Any, deadline: float, clock: Callable[[], float]) -> bytes:

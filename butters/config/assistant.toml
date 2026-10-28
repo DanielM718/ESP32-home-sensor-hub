@@ -18,7 +18,9 @@ ssh_port = 22
 network_timeout_seconds = 45.0
 wake_readiness_timeout_seconds = 120.0
 ssh_timeout_seconds = 90.0
-total_timeout_seconds = 180.0
+# 240s covers the observed 107s WOL-to-agent interval, MTT activation, the
+# Sunshine probes, and one reserved 30s broker budget per mutation.
+total_timeout_seconds = 240.0
 poll_interval_seconds = 2.0
 overview_cache_seconds = 30.0
 engineering_backend = "sunshine"
@@ -42,6 +44,20 @@ parsec_restart_enabled = false
 # operations retain their own root-broker gates.
 sunshine_status_enabled = true
 sunshine_ensure_enabled = true
+# Session-management capabilities. Each needs its own root-broker gate, and
+# the display ones need the Windows MTT activation helper. All stay false
+# until supervised Windows validation passes.
+#   display_status: Windows-observed physical/virtual display activity.
+#   virtual_display_activation: Gaming/Engineering activate MTT if absent.
+#   virtual_display_deactivation: Local may remove MTT once a physical display
+#     is verified and Sunshine reports no running application.
+#   sunshine_session_status / sunshine_session_end: observe or explicitly
+#     close the Sunshine application session (End Remote Session -> Local).
+display_status_enabled = false
+virtual_display_activation_enabled = false
+virtual_display_deactivation_enabled = false
+sunshine_session_status_enabled = false
+sunshine_session_end_enabled = false
 lock_enabled = false
 sleep_enabled = false
 restart_enabled = false

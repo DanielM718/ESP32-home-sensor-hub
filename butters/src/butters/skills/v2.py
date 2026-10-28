@@ -254,6 +254,32 @@ class V2SkillImplementations:
             },
         )
 
+    def end_remote_desktop_session(self, arguments: SkillArguments) -> SkillResult:
+        data = self.desktop.end_remote_session(
+            cast(DesktopArgs, arguments).machine,
+            cancel_event=current_cancel_event(),
+        )
+        if not data.get("verification_complete"):
+            code = str(data.get("failure_code") or "desktop_remote_session_end_failed")
+            dependency = str(data.get("failed_dependency") or "workflow")
+            message = str(data.get("error") or "ending the remote session failed")
+            raise SkillError(code, f"{dependency}: {message}", details=data)
+        return StructuredSkillResult(
+            "desktop_remote_session_end",
+            data,
+            {
+                "observed": [
+                    "online_evidence",
+                    "monitor_transition",
+                    "physical_display_verified",
+                    "sunshine_session",
+                    "remote_session_terminated",
+                    "virtual_display_action",
+                ],
+                "calculated": ["status", "elapsed_ms"],
+            },
+        )
+
     def get_sensor_history(self, arguments: SkillArguments) -> SkillResult:
         args = cast(SensorHistoryArgs, arguments)
         series = self._history(args)
@@ -755,7 +781,7 @@ def register_v2_skills(
                 ["machine", "mode"],
             ),
             timeout=desktop.settings.total_timeout_seconds + 5,
-            side_effects="wake the configured desktop when needed and verify both physical monitor outlets in the explicit mode; Gaming and Engineering verify the existing Sunshine virtual-display path without restarting a ready instance",
+            side_effects="wake the configured desktop when needed; Gaming and Engineering activate and verify the fixed virtual display when provisioned, reuse a ready Sunshine instance, and turn both monitor outlets off only after virtual capture is verified; Local turns on only the primary monitor outlet, never ends a stream, and removes the virtual display only after a physical display and a terminated Sunshine session are verified",
             explicit=True,
             authentication=AuthenticationLevel.FRESH,
             configured=desktop.settings.monitors_enabled,
@@ -766,6 +792,34 @@ def register_v2_skills(
                 None
                 if desktop.settings.monitors_enabled and desktop.broker_settings.enabled
                 else "privileged action broker is not provisioned"
+            ),
+        )
+    )
+    session_end_available = (
+        desktop.settings.monitors_enabled
+        and desktop.settings.sunshine_session_end_enabled
+        and desktop.settings.display_status_enabled
+        and desktop.broker_settings.enabled
+    )
+    registry.register(
+        spec(
+            "end_remote_desktop_session",
+            "Explicitly close the Sunshine application session and return the configured desktop to Local mode.",
+            ActionClass.ACTION,
+            _parse_desktop,
+            impl.authorize_desktop,
+            impl.end_remote_desktop_session,
+            _schema({"machine": _enum(["desktop"])}, ["machine"]),
+            timeout=desktop.settings.total_timeout_seconds + 5,
+            side_effects="turn on the primary monitor outlet and verify physical access, close the running Sunshine application through the fixed authenticated helper, verify termination, then remove the virtual display only if that is provisioned and safe",
+            explicit=True,
+            authentication=AuthenticationLevel.FRESH,
+            configured=desktop.settings.sunshine_session_end_enabled,
+            available=session_end_available,
+            unavailable_reason=(
+                None
+                if session_end_available
+                else "ending a Sunshine session is not provisioned"
             ),
         )
     )

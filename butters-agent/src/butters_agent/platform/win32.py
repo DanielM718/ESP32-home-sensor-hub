@@ -195,6 +195,15 @@ ConvertTo-Json -InputObject $result -Compress
                 by_image.setdefault(os.path.normcase(process["path"]), set()).add(
                     process["pid"]
                 )
+        # Only windows of allow-listed images can affect any answer, so skip
+        # the class lookup for every other window on the desktop.
+        candidates = set().union(
+            *(
+                by_image.get(os.path.normcase(path), set())
+                for entry in entries.values()
+                for path in entry["images"]
+            )
+        )
         windows = []
         callback_type = ctypes.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
@@ -202,7 +211,7 @@ ConvertTo-Json -InputObject $result -Compress
         def visit(window, _):
             process_id = w.DWORD()
             self.user.GetWindowThreadProcessId(window, ctypes.byref(process_id))
-            if self.user.IsWindowVisible(window):
+            if process_id.value in candidates and self.user.IsWindowVisible(window):
                 windows.append((process_id.value, self._window_class(window)))
             return True
 

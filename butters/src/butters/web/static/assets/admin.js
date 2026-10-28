@@ -487,6 +487,11 @@ for (const mode of ["engineering","local"]) {
       method:"POST",body:JSON.stringify({mode})
     })));
 }
+document.querySelector("#desktop-end-remote").addEventListener("click",()=>{
+  confirmPanel(document.querySelector("#desktop-end-remote-confirm"),
+    "This closes the running Sunshine application, which ends any Moonlight stream, after the primary monitor is back on.",
+    ()=>runDesktopAction("End Remote Session",()=>api("/api/admin/tools/desktop/end-remote-session",{method:"POST",body:JSON.stringify({})})));
+});
 document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#desktop-shutdown-confirm"),
     "This ends every interactive desktop session, including Parsec, and any running build.",

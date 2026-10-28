@@ -75,6 +75,7 @@ from butters.remediation.skill_builder import CodexSkillBuilder
 from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
 from butters.routing.model import RoutedIntent
+from butters.routing.router import END_REMOTE_SESSION
 from butters.skills.desktop_agent import register_desktop_agent_skills
 from butters.skills.model import (
     ActionAuthorization,
@@ -1549,6 +1550,19 @@ class BetaAssistantService:
             subject="desktop",
         )
 
+    def start_admin_desktop_end_remote_session(
+        self, session: BrowserSession
+    ) -> dict[str, object]:
+        """The explicit request that closes a Sunshine session; Local never does."""
+
+        return self._start_admin_action(
+            session,
+            skill="end_remote_desktop_session",
+            arguments={"machine": "desktop"},
+            summary="End the remote Sunshine session and return the desktop to Local mode",
+            subject="desktop",
+        )
+
     def start_admin_desktop_app_launch(
         self, session: BrowserSession, app: str
     ) -> dict[str, object]:
@@ -2848,7 +2862,11 @@ class BetaAssistantService:
             spec is not None
             and spec.action_class is ActionClass.ACTION
             and route.skill
-            in {"start_remote_desktop_session", "set_desktop_access_mode"}
+            in {
+                "start_remote_desktop_session",
+                "set_desktop_access_mode",
+                "end_remote_desktop_session",
+            }
             and _direct_desktop_action(normalized)
         ):
             action_authorization = ActionAuthorization(
@@ -3994,6 +4012,8 @@ def _direct_desktop_action(text: str) -> bool:
         )
     ):
         return True
+    if END_REMOTE_SESSION.search(text):
+        return True
     remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
     wake = any(
         phrase in text
@@ -4010,6 +4030,8 @@ def _direct_desktop_action(text: str) -> bool:
 def _action_summary(skill: str, arguments: dict[str, object]) -> str:
     if skill == "set_desktop_access_mode":
         return f"Prepare the configured desktop for {arguments.get('mode')} mode"
+    if skill == "end_remote_desktop_session":
+        return "End the remote Sunshine session and return the desktop to Local mode"
     labels = {
         "wake_desktop": "Wake the configured desktop",
         "start_remote_desktop_session": "Wake the configured desktop and prepare an available streaming backend",
