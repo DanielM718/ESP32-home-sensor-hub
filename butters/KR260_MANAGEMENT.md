@@ -160,15 +160,115 @@ supervised JTAG test below shows it is sufficient.
 
 ### Supervised validation order (owner present, each step separately approved)
 
-1. With `cpu-sleep-0` disabled and the COM5 and ping logging running:
-   `connect`, wait, then `jtag targets` and `targets`. All four A53s must read
-   `Running`, and ping and SSH must stay up. Disconnect, then stop the
-   `hw_server` that was started. If any core reads `Reset Catch` or
-   `Stopped`, disconnect and stop `hw_server` at once. Do not resume, halt or
-   reset a core without separate approval. If Linux does not recover, capture
-   COM5 and have the owner power-cycle the board.
-2. Only then: a supervised `rst -por` with Linux running. Verify that Linux
-   and `eth1` return.
+1. **Passed 2026-10-28 23:44:54–23:53:12Z** (boot `9b247aba`). Setup:
+   `cpu-sleep-0` `disable=1` and `WFI` `disable=0` on cpu0–3, with COM5, a
+   1 Hz ping and a 10 s SSH heartbeat running. The script
+   (`connect; jtag targets; targets ×19; disconnect`) used no stop, resume,
+   reset, register, memory or programming command.
+
+   | Check | Result |
+   |---|---|
+   | Attach | 180 s; 19 inspections, all four A53s `Running` every time |
+   | Linux CPU activity | per-CPU `arch_timer` counts rose every 10 s on cpu0–3 (≥397/interval); CPUs `0-3` online |
+   | Ping | 530/530 (before 30, during 188, after 311); max 0.80 ms during attach |
+   | SSH heartbeat | 51/51; boot ID unchanged |
+   | Kernel / console | no kernel messages; COM5 silent (no stall, oops or panic) |
+   | Detach | `disconnect`; `hw_server` stopped 23:48:06.8Z; no process left, port 3121 only `TimeWait` |
+   | 5 min after detach | clean |
+
+   This shows that, with `cpu-sleep-0` disabled, a read-only attach no longer
+   disturbs Linux. It does not show that deep idle was the sole cause of the
+   earlier hangs. No deep-idle-on control was run, by decision: it would
+   deliberately hang the board.
+2. JTAG reset: see below. Not yet run.
 3. Only then: intentionally halt Linux and test whether JTAG recovers it.
 
 Butters → Desktop Agent → JTAG stays unimplemented until all three pass.
+
+### JTAG reset (`rst -por`): plan, not yet run
+
+The installed XSDB (2026.1) `help rst` says:
+
+- `rst -por` "generate[s] a pulse on the POR pin on the JTAG cable". It works
+  only if the KR260 carrier wires that FT4232H line to the SOM's PS_POR_B.
+  That is unconfirmed: the first supervised attempt is also the test. If it is
+  wired, it is a cold reset. The whole PS, the PL configuration and the debug
+  logic reset, the boot-mode pins are resampled (UG1137), DDR contents are
+  lost, and nothing is synced to disk.
+- `rst -system` (the default) resets the system but, per UG1137, preserves
+  debug state, and by default the debugger resumes the cores. A reset catch
+  could therefore survive the reset and trap the cores at FSBL or at Linux
+  secondary-CPU bring-up. Do not use it for recovery.
+- `rst -processor`, `-cores` and `-cluster` reset cores only and leave them
+  suspended. They are debug operations, not recovery.
+
+After a reset the runtime deep-idle workaround is gone. `cpu-sleep-0` is
+active again as soon as Linux boots, so **`hw_server` must be gone before the
+board boots**. The reset script issues `rst -por`, then `disconnect`, and the
+wrapper kills the `hw_server` it started in the same step, within about a
+second. Never leave `hw_server` attached through a boot.
+
+Proposed reset script, read-only apart from the one reset:
+
+    connect
+    after 5000
+    targets -set -nocase -filter {name =~ "PSU"}
+    puts [targets]                          ;# pre-reset core states, for the record
+    if {[catch {rst -por} err]} { puts "RST ERROR: $err" } else { puts "RST ISSUED" }
+    disconnect
+
+Confirm the reset executed, and the return to Ubuntu, by four independent
+signals:
+
+- COM5 shows a new `Zynq MP First Stage Boot Loader` banner within about 2 s.
+- ICMP drops, then returns about 70 s later.
+- `/proc/sys/kernel/random/boot_id` changes and `uptime` is small.
+- `journalctl --list-boots` gains an entry, and the previous boot ends with no
+  shutdown sequence.
+
+U-Boot's `Reset reason` is not a usable signal: it read `SOFT` even after a
+12 V power cycle, probably because of Kria's image-selector soft reset.
+
+Success means all of these:
+
+- COM5 reaches `kria login:`.
+- SSH works with the pinned host key, with the expected hostname and machine
+  ID.
+- `systemctl is-system-running` reports `running`.
+- CPUs `0-3` are online and `eth1` is up at 1000.
+- Butters telemetry reports `online`.
+- No new kernel warnings beyond the known set (TPM self-test, `mtdoops`,
+  `OF: overlay`).
+
+Abort and recovery criteria (no automatic retry, ever):
+
+- `RST ERROR`, or no FSBL banner within 10 s: the reset did not execute. Check
+  that Linux is still up (ping, SSH, COM5). Do not retry; investigate cable POR
+  wiring.
+- FSBL but no `Starting kernel` within 60 s, no login prompt within 150 s, or
+  no SSH within 240 s: the boot is stuck. Preserve COM5, confirm no
+  `hw_server` is running, and have the owner power-cycle the 12 V supply.
+- Linux is up but degraded (`eth1` down, CPUs missing, failed units): collect
+  the journal, do not reset again, and report.
+
+After a successful boot, the owner re-runs
+`sudo bash kr260-deep-idle.sh apply` before any further JTAG attach.
+
+### Before unattended JTAG recovery
+
+- Persist the deep-idle workaround: a root systemd oneshot that runs
+  `kr260-deep-idle.sh apply` at boot. Even then it is absent for the first
+  ~20 s of every boot, so recovery tooling must never attach during a boot.
+- Attach only when the board is confirmed unresponsive (ping, SSH and COM5
+  all silent). Reset, detach and kill `hw_server` in one step. Allow one
+  attempt, followed by a human.
+- Validate the restricted Linux reboot (sudoers grant, broker `kr260.reboot`)
+  first. It is graceful and needs no JTAG. JTAG remains the path for a board
+  whose Linux is already dead.
+- Simpler independent options:
+  - a Home Assistant smart plug on the KR260's 12 V supply, for a true power
+    cycle;
+  - the Cadence watchdogs (`cdns-wdt`, currently unused:
+    `RuntimeWatchdogSec=0`), for self-reset. Check that a watchdog-driven
+    system reset does not preserve a debugger reset catch, as `rst -system`
+    would.
