@@ -8,6 +8,12 @@ $script:ButtersDisplayIdentity = [ordered]@{
     VirtualInstance = 'DISPLAY\MTT1337\1&15ECD195&4&UID256'
     GigabyteInstance = 'DISPLAY\GBT270B\5&19CEA493&0&UID4353'
     OledInstance = 'DISPLAY\GBT3214\5&19CEA493&0&UID4357'
+    VirtualEdidManufacturerId = 13972
+    VirtualEdidProductCodeId = 4919
+    GigabyteEdidManufacturerId = 7252
+    GigabyteEdidProductCodeId = 9995
+    OledEdidManufacturerId = 7252
+    OledEdidProductCodeId = 12820
 }
 
 if (-not ('Butters.DisplayConfig' -as [type])) {
@@ -136,16 +142,21 @@ namespace Butters {
                     source.header.size = (uint)Marshal.SizeOf(typeof(SOURCE_DEVICE_NAME));
                     source.header.adapterId = path.sourceInfo.adapterId;
                     source.header.id = path.sourceInfo.id;
+                    bool active = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0;
                     string sourceName = "";
-                    if (DisplayConfigGetDeviceInfo(ref source) == 0)
+                    if (active) {
+                        Check(DisplayConfigGetDeviceInfo(ref source),
+                            "DisplayConfigGetDeviceInfo(source)");
                         sourceName = source.viewGdiDeviceName ?? "";
+                    }
 
                     var target = new TARGET_DEVICE_NAME();
                     target.header.type = GET_TARGET_NAME;
                     target.header.size = (uint)Marshal.SizeOf(typeof(TARGET_DEVICE_NAME));
                     target.header.adapterId = path.targetInfo.adapterId;
                     target.header.id = path.targetInfo.id;
-                    if (DisplayConfigGetDeviceInfo(ref target) != 0) continue;
+                    Check(DisplayConfigGetDeviceInfo(ref target),
+                        "DisplayConfigGetDeviceInfo(target)");
                     values.Add(new DisplayTarget {
                         SourceName = sourceName,
                         FriendlyName = target.monitorFriendlyDeviceName ?? "",
@@ -153,7 +164,7 @@ namespace Butters {
                         EdidManufacturerId = target.edidManufactureId,
                         EdidProductCodeId = target.edidProductCodeId,
                         ConnectorInstance = target.connectorInstance,
-                        Active = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0,
+                        Active = active,
                         Available = path.targetInfo.targetAvailable
                     });
                 }
@@ -187,6 +198,9 @@ function Get-ButtersDisplayInventory {
             available = [bool]$_.Available
         }
     })
+    if (@($raw | Where-Object { -not $_.instance_path }).Count -gt 0) {
+        throw 'Windows returned a monitor device path that cannot be mapped to a PnP instance'
+    }
     # QDC_ALL_PATHS may describe the same target through several possible
     # source routes. Collapse those routes by stable target identity, but fail
     # if Windows claims two of them are active at once.
@@ -226,13 +240,29 @@ function Get-ButtersVirtualDisplay {
 function Get-ButtersValidatedDisplayInventory {
     $inventory = @(Get-ButtersDisplayInventory)
     foreach ($expected in @(
-        $script:ButtersDisplayIdentity.VirtualInstance,
-        $script:ButtersDisplayIdentity.GigabyteInstance,
-        $script:ButtersDisplayIdentity.OledInstance
+        [pscustomobject]@{
+            instance = $script:ButtersDisplayIdentity.VirtualInstance
+            manufacturer = $script:ButtersDisplayIdentity.VirtualEdidManufacturerId
+            product = $script:ButtersDisplayIdentity.VirtualEdidProductCodeId
+        },
+        [pscustomobject]@{
+            instance = $script:ButtersDisplayIdentity.GigabyteInstance
+            manufacturer = $script:ButtersDisplayIdentity.GigabyteEdidManufacturerId
+            product = $script:ButtersDisplayIdentity.GigabyteEdidProductCodeId
+        },
+        [pscustomobject]@{
+            instance = $script:ButtersDisplayIdentity.OledInstance
+            manufacturer = $script:ButtersDisplayIdentity.OledEdidManufacturerId
+            product = $script:ButtersDisplayIdentity.OledEdidProductCodeId
+        }
     )) {
-        $matches = @($inventory | Where-Object { $_.instance_path -ieq $expected })
+        $matches = @($inventory | Where-Object {
+            $_.instance_path -ieq $expected.instance -and
+            $_.edid_manufacturer_id -eq $expected.manufacturer -and
+            $_.edid_product_code_id -eq $expected.product
+        })
         if ($matches.Count -ne 1) {
-            throw "Display identity $expected is missing or ambiguous"
+            throw "Display identity $($expected.instance) has missing, ambiguous, or changed EDID data"
         }
     }
     $virtual = @($inventory | Where-Object {

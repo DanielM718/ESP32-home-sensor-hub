@@ -19,13 +19,18 @@ unavailable.
 
 ## Fixed identities
 
-The reviewed identity tuple contains all of the following:
+The production PowerShell identity tuple contains all of the following:
 
-- Sunshine device ID;
+- Sunshine device ID for the configured virtual capture target;
 - Windows monitor device-instance path from `QueryDisplayConfig` and
   `DisplayConfigGetDeviceInfo`;
-- EDID manufacturer, product, and serial observations;
+- EDID manufacturer and product observations exposed by
+  `DISPLAYCONFIG_TARGET_DEVICE_NAME`; and
 - whether the target is the MTT virtual display or a physical monitor.
+
+Sunshine's logged EDID serial is useful audit evidence, but the Windows
+`DisplayConfigGetDeviceInfo` target-name packet does not expose it. The helper
+therefore does not claim that serial is part of its production match.
 
 The current fixed inventory is:
 
@@ -42,20 +47,32 @@ before use. Missing, duplicate, or changed identity fails closed. The current
 ## Sunshine policy
 
 Sunshine is pinned to the MTT device ID with
-`dd_configuration_option = verify_only`. Resolution and refresh-rate topology
-management are disabled. This lets Sunshine reject an unavailable target but
-prevents it from owning and restoring a pre-stream topology snapshot.
+`dd_configuration_option = disabled`. Resolution, refresh-rate, HDR, and
+topology management are disabled. The installed `2026.516.143833` build accepts
+`verify_only`, but its bundled libdisplaydevice still persists the initial
+topology even when verification makes no change. `verify_only` therefore does
+not prevent stale restoration; `disabled` is required to prevent a new display
+snapshot from being created.
 
-Disconnect handling has one safe action: leave the current topology unchanged.
-A newer Local transition, newly active physical display, changed identity set,
-stale snapshot, or repeated disconnect notification never causes restoration.
-Physical Tapo outlet power remains a separately observed Home Assistant state.
+Before the first restart with this policy, use Sunshine's authenticated
+`/api/reset-display-device-persistence` operation in the approved maintenance
+window and verify that `display_device.state` is absent. Do not delete the file
+behind a running Sunshine process: the in-memory state can still be reverted on
+shutdown. The direct `sunshine.conf` edit is not live; all `dd_*` and
+`output_name` changes take effect only after a Sunshine restart.
 
-The desktop workflow serializes mode transitions and assigns each request a
-generation. A newer Local request supersedes an older remote request before any
-later monitor-off side effect; if the broker call was already in flight, Local
-converges the final state to on. Broker `ok` and operation `accepted` are both
-required. Fixed-host mDNS resolution runs in a killable, one-second helper so
+With display-device configuration disabled and persistence reset, disconnect
+handling has no saved topology to restore. Physical Tapo outlet power remains a
+separately observed Home Assistant state.
+
+The desktop workflow serializes mode transitions and assigns each accepted
+request a generation. Generation registration and the bounded monitor broker
+call share one commit lock: a newer Local generation either supersedes an older
+remote request before monitor-off is sent, or is accepted after an already
+in-flight call and converges the next state to on. Broker `ok` and operation
+`accepted` are both required. This ordering does not constitute local-use
+detection; no authoritative physical-presence signal exists in this branch.
+Fixed-host mDNS resolution runs in a killable, one-second helper so
 the 120-second post-WOL window and 180-second total deadline remain wall-clock
 bounds rather than best-effort socket timeouts.
 

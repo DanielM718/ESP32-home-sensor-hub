@@ -328,6 +328,11 @@ class DesktopWorkflow:
         ) = None
         self._mode_state_lock = threading.Lock()
         self._mode_execution_lock = threading.Lock()
+        # Linearization boundary for registering a new mode generation versus
+        # committing the monitor broker call. A Local generation can either win
+        # before monitor-off is sent, or be registered after that bounded call;
+        # it can never become current while an older request commits the call.
+        self._mode_commit_lock = threading.Lock()
         self._mode_generation = 0
 
     def status(self, machine: str) -> DesktopState:
@@ -489,12 +494,13 @@ class DesktopWorkflow:
         selected_mode = (
             mode if isinstance(mode, DesktopAccessMode) else DesktopAccessMode(mode)
         )
-        with self._mode_state_lock:
-            self._mode_generation += 1
-            generation = self._mode_generation
         event = cancel_event or threading.Event()
         started = self.clock()
         deadline = started + self.settings.total_timeout_seconds
+        with self._mode_commit_lock:
+            with self._mode_state_lock:
+                self._mode_generation += 1
+                generation = self._mode_generation
         while True:
             with self._mode_state_lock:
                 current = generation == self._mode_generation
@@ -695,6 +701,8 @@ class DesktopWorkflow:
             stale = superseded("wake_on_lan")
             if stale is not None:
                 return stale
+            if event.is_set():
+                return finish("cancelled", "wake_on_lan", "workflow cancelled")
             if not self.operations.send_wake(remaining):
                 return finish("desktop_wake_failed", "wake_on_lan", "fixed wake operation failed")
             result["wake_sent"] = True
@@ -786,6 +794,10 @@ class DesktopWorkflow:
                 stale = superseded("sunshine_service")
                 if stale is not None:
                     return stale
+                if event.is_set():
+                    return finish(
+                        "cancelled", "sunshine_service", "workflow cancelled"
+                    )
                 ensured = self.operations.ensure_sunshine_running(
                     self._remaining(deadline)
                 )
@@ -818,15 +830,20 @@ class DesktopWorkflow:
                     "the configured virtual display is not attached and capture-ready",
                 )
 
-        stale = superseded("monitor_outlets")
-        if stale is not None:
-            return stale
-        remaining = self._remaining(deadline)
-        if remaining <= 0:
-            return finish("desktop_mode_timeout", "workflow", "workflow deadline expired")
-        transition = self._set_monitor_power(
-            str(result["monitor_desired_state"]), remaining
-        )
+        with self._mode_commit_lock:
+            stale = superseded("monitor_outlets")
+            if stale is not None:
+                return stale
+            if event.is_set():
+                return finish("cancelled", "monitor_outlets", "workflow cancelled")
+            remaining = self._remaining(deadline)
+            if remaining <= 0:
+                return finish(
+                    "desktop_mode_timeout", "workflow", "workflow deadline expired"
+                )
+            transition = self._set_monitor_power(
+                str(result["monitor_desired_state"]), remaining
+            )
         result["monitor_transition"] = transition
         stale = superseded("monitor_outlets")
         if stale is not None:

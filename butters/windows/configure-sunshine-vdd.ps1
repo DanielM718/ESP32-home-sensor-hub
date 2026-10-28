@@ -96,14 +96,6 @@ namespace Butters {
             ref DEVMODE devMode
         );
 
-        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
-        public static extern int ChangeDisplaySettingsEx(
-            string deviceName,
-            ref DEVMODE devMode,
-            IntPtr hwnd,
-            uint flags,
-            IntPtr lParam
-        );
     }
 }
 '@
@@ -123,7 +115,6 @@ function Get-CurrentMode {
     return $mode
 }
 
-$desiredMode = $null
 $availableModes = @()
 $modeNumber = 0
 do {
@@ -135,10 +126,6 @@ do {
             height = $candidate.dmPelsHeight
             refresh = $candidate.dmDisplayFrequency
         }
-    }
-    if ($found -and $candidate.dmPelsWidth -eq $targetWidth -and $candidate.dmPelsHeight -eq $targetHeight -and $candidate.dmDisplayFrequency -eq $targetRefresh) {
-        $desiredMode = $candidate
-        break
     }
     $modeNumber += 1
 } while ($found)
@@ -157,7 +144,11 @@ $audit = [ordered]@{
     current_height = if ($beforeMode) { $beforeMode.dmPelsHeight } else { $null }
     current_refresh = if ($beforeMode) { $beforeMode.dmDisplayFrequency } else { $null }
     mode_enumeration_available = $availableModes.Count -gt 0
-    desired_mode_advertised = [bool]$desiredMode
+    desired_mode_advertised = [bool](@($availableModes | Where-Object {
+        $_.width -eq $targetWidth -and
+        $_.height -eq $targetHeight -and
+        $_.refresh -eq $targetRefresh
+    }).Count -gt 0)
     desired_width = $targetWidth
     desired_height = $targetHeight
     desired_refresh = $targetRefresh
@@ -169,7 +160,14 @@ if ($AuditOnly) {
     $auditResult | ConvertTo-Json -Depth 6 -Compress
     exit 0
 }
-if (-not $desiredMode) { throw "The VDD does not advertise ${targetWidth}x${targetHeight} at ${targetRefresh} Hz" }
+if (-not $beforeMode) { throw "Could not read the current mode for $displayName" }
+if (
+    $beforeMode.dmPelsWidth -ne $targetWidth -or
+    $beforeMode.dmPelsHeight -ne $targetHeight -or
+    $beforeMode.dmDisplayFrequency -ne $targetRefresh
+) {
+    throw "The VDD must already be ${targetWidth}x${targetHeight} at ${targetRefresh} Hz; this helper will not mutate a volatile DISPLAYn alias"
+}
 
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -181,22 +179,13 @@ New-Item -ItemType Directory -Path $backupRoot -Force | Out-Null
 Copy-Item -LiteralPath $sunshineConfig -Destination (Join-Path $backupRoot 'sunshine.conf.before')
 $audit | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupRoot 'display-mode-before.json') -Encoding UTF8
 
-# Revalidate immediately before the only topology-affecting call. A changed,
-# missing, or ambiguous identity aborts without touching any display, even if
-# Windows reassigned all DISPLAYn aliases meanwhile.
+# Revalidate immediately before writing configuration. The source alias is an
+# observation only: no topology API below consumes it, so an alias reassignment
+# can never redirect a mutation to a physical monitor.
 $currentVirtual = Get-ButtersVirtualDisplay
 if ([string]$currentVirtual.source_name -cne $displayName) {
     throw 'The virtual display enumeration changed during validation'
 }
-$changeResult = [Butters.NativeDisplayMode]::ChangeDisplaySettingsEx(
-    [string]$currentVirtual.source_name,
-    [ref]$desiredMode,
-    [IntPtr]::Zero,
-    1,
-    [IntPtr]::Zero
-)
-if ($changeResult -ne 0) { throw "ChangeDisplaySettingsEx failed with result $changeResult" }
-Start-Sleep -Milliseconds 500
 $afterMode = Get-CurrentMode
 if ($afterMode.dmPelsWidth -ne $targetWidth -or $afterMode.dmPelsHeight -ne $targetHeight -or $afterMode.dmDisplayFrequency -ne $targetRefresh) {
     throw "The VDD mode did not become ${targetWidth}x${targetHeight} at ${targetRefresh} Hz"
@@ -204,17 +193,18 @@ if ($afterMode.dmPelsWidth -ne $targetWidth -or $afterMode.dmPelsHeight -ne $tar
 
 $values = [ordered]@{
     output_name = $displayDeviceId
-    # Sunshine may verify the stable target, but must not own a topology
-    # snapshot that it can replay after a Moonlight disconnect.
-    dd_configuration_option = 'verify_only'
+    # The installed Sunshine build persists the initial topology even for
+    # verify_only. disabled is the only mode that does not create a snapshot
+    # which a later disconnect/app-close/restart path can replay.
+    dd_configuration_option = 'disabled'
     dd_resolution_option = 'disabled'
     dd_manual_resolution = '2560x1440'
     dd_refresh_rate_option = 'disabled'
     dd_manual_refresh_rate = '60'
     dd_hdr_option = 'disabled'
-    # In the installed build this changes *when* reversion is attempted, not
-    # whether it exists. verify_only above ensures there is no applied topology
-    # snapshot for that attempt to restore.
+    # This changes when reversion is attempted, not whether persisted state
+    # exists. It is retained as defense in depth; disabled above is the control
+    # that prevents new display-device persistence.
     dd_config_revert_on_disconnect = 'false'
 }
 $lines = [Collections.Generic.List[string]]::new()

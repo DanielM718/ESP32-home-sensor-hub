@@ -1,10 +1,10 @@
 """Fail-closed Windows display identity and disconnect-cleanup policy.
 
-Display numbers and primary-display state are observations, not identities.  The
+Display numbers and primary-display state are observations, not identities. The
 stable boundary is the Sunshine device ID plus the Windows monitor instance path
-and EDID tuple.  Sunshine is configured in verification-only mode, so this policy
-never restores a saved topology on disconnect; it records why leaving the live
-topology unchanged is required.
+and EDID tuple. This module is a pure policy model used by tests; production
+disconnect safety comes from disabling Sunshine display-device configuration and
+resetting its persisted state, not from this model.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ class SunshineDisconnectGuard:
     """Make disconnect notifications idempotent and topology preserving.
 
     There is deliberately no ``restore`` action.  With Sunshine in
-    verification-only mode Butters owns no pre-stream topology that is safe to
+    disabled mode Sunshine owns no pre-stream topology that is safe to
     replay.  A newer Local transition or any identity/activity change makes that
     especially explicit, but even an unchanged topology is left alone.
     """

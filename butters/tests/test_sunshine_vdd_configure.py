@@ -27,7 +27,7 @@ def test_sunshine_vdd_configuration_is_fixed_and_preserves_physical_displays() -
     assert "$displayDeviceId = '{5eb52002-659f-5729-bdd8-9cdc4efd1bf5}'" in source
     assert "'Root\\MttVDD'" in source
     assert "'DISPLAY\\MTT1337\\*'" in source
-    assert "ChangeDisplaySettingsEx(" in source
+    assert "ChangeDisplaySettingsEx(" not in source
     assert "Get-ButtersValidatedDisplayInventory" in source
     assert "Get-ButtersVirtualDisplay" in source
     assert "[string]$currentVirtual.source_name" in source
@@ -43,7 +43,7 @@ def test_sunshine_vdd_configuration_pins_capture_and_sdr_policy() -> None:
     source = _source()
 
     assert "output_name = $displayDeviceId" in source
-    assert "dd_configuration_option = 'verify_only'" in source
+    assert "dd_configuration_option = 'disabled'" in source
     assert "dd_resolution_option = 'disabled'" in source
     assert "dd_manual_resolution = '2560x1440'" in source
     assert "dd_refresh_rate_option = 'disabled'" in source
@@ -61,6 +61,11 @@ def test_display_identity_uses_query_display_config_not_display_numbers() -> Non
     assert "VirtualInstance = 'DISPLAY\\MTT1337\\1&15ECD195&4&UID256'" in source
     assert "GigabyteInstance = 'DISPLAY\\GBT270B\\5&19CEA493&0&UID4353'" in source
     assert "OledInstance = 'DISPLAY\\GBT3214\\5&19CEA493&0&UID4357'" in source
+    assert "GigabyteEdidManufacturerId = 7252" in source
+    assert "GigabyteEdidProductCodeId = 9995" in source
+    assert "OledEdidProductCodeId = 12820" in source
+    assert "DisplayConfigGetDeviceInfo(source)" in source
+    assert "DisplayConfigGetDeviceInfo(target)" in source
     assert "DISPLAY94" not in source
 
 
