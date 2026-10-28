@@ -86,7 +86,7 @@ class DesktopSettings:
     network_timeout_seconds: float = 45.0
     wake_readiness_timeout_seconds: float = 120.0
     ssh_timeout_seconds: float = 90.0
-    total_timeout_seconds: float = 180.0
+    total_timeout_seconds: float = 240.0
     poll_interval_seconds: float = 2.0
     overview_cache_seconds: float = 30.0
     engineering_backend: str = "sunshine"
@@ -100,6 +100,11 @@ class DesktopSettings:
     parsec_restart_enabled: bool = False
     sunshine_status_enabled: bool = False
     sunshine_ensure_enabled: bool = False
+    display_status_enabled: bool = False
+    virtual_display_activation_enabled: bool = False
+    virtual_display_deactivation_enabled: bool = False
+    sunshine_session_status_enabled: bool = False
+    sunshine_session_end_enabled: bool = False
     lock_enabled: bool = False
     sleep_enabled: bool = False
     restart_enabled: bool = False
@@ -126,6 +131,24 @@ class DesktopSettings:
             raise ConfigError("desktop.total_timeout_seconds must cover wake readiness")
         if self.engineering_backend not in {"sunshine", "rdp", "remote_app"}:
             raise ConfigError("desktop.engineering_backend is not supported")
+        # Removing the virtual display is only safe after two independent
+        # observations: a usable physical display and a terminated Sunshine
+        # application. Refuse a configuration that would enable it blind.
+        if self.virtual_display_deactivation_enabled and not (
+            self.display_status_enabled and self.sunshine_session_status_enabled
+        ):
+            raise ConfigError(
+                "desktop.virtual_display_deactivation_enabled requires "
+                "display_status_enabled and sunshine_session_status_enabled"
+            )
+        if self.sunshine_session_end_enabled and not (
+            self.sunshine_session_status_enabled and self.display_status_enabled
+        ):
+            raise ConfigError(
+                "desktop.sunshine_session_end_enabled requires "
+                "sunshine_session_status_enabled to verify termination and "
+                "display_status_enabled to verify physical access first"
+            )
         return self
 
 
@@ -992,7 +1015,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
             desktop_table.get("wake_readiness_timeout_seconds", 120.0)
         ),
         ssh_timeout_seconds=float(desktop_table.get("ssh_timeout_seconds", 90.0)),
-        total_timeout_seconds=float(desktop_table.get("total_timeout_seconds", 180.0)),
+        total_timeout_seconds=float(desktop_table.get("total_timeout_seconds", 240.0)),
         poll_interval_seconds=float(desktop_table.get("poll_interval_seconds", 2.0)),
         overview_cache_seconds=float(desktop_table.get("overview_cache_seconds", 30.0)),
         engineering_backend=str(desktop_table.get("engineering_backend", "sunshine")),
@@ -1011,6 +1034,21 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         ),
         sunshine_ensure_enabled=bool(
             desktop_table.get("sunshine_ensure_enabled", False)
+        ),
+        display_status_enabled=bool(
+            desktop_table.get("display_status_enabled", False)
+        ),
+        virtual_display_activation_enabled=bool(
+            desktop_table.get("virtual_display_activation_enabled", False)
+        ),
+        virtual_display_deactivation_enabled=bool(
+            desktop_table.get("virtual_display_deactivation_enabled", False)
+        ),
+        sunshine_session_status_enabled=bool(
+            desktop_table.get("sunshine_session_status_enabled", False)
+        ),
+        sunshine_session_end_enabled=bool(
+            desktop_table.get("sunshine_session_end_enabled", False)
         ),
         lock_enabled=bool(desktop_table.get("lock_enabled", False)),
         sleep_enabled=bool(desktop_table.get("sleep_enabled", False)),

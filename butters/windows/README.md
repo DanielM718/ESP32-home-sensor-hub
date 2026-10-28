@@ -9,7 +9,10 @@ Run `install-desktop-control.ps1` from an elevated Windows PowerShell with
 `desktop-control.ps1` beside it. The installer:
 
 - backs up any previous helper, task definitions, and the Parsec service mode;
-- installs `C:\ProgramData\Butters\desktop-control.ps1`;
+- installs `C:\ProgramData\Butters\desktop-control.ps1` and its fixed
+  dot-sourced helpers `display-topology.ps1` (loaded only by the interactive
+  capture probe) and `sunshine-session.ps1` (loaded only by
+  `SunshineSessionStatus` and `SunshineSessionEnd`);
 - creates only `\Butters\LockDesktop`, `\Butters\SleepDesktop`, and
   `\Butters\SunshineCaptureProbe`;
 - runs Sunshine's bundled `dxgi-info.exe` through the logged-on user's fixed
@@ -17,6 +20,12 @@ Run `install-desktop-control.ps1` from an elevated Windows PowerShell with
   session rather than the isolated OpenSSH session;
 - explicitly leaves the fixed `Parsec` service in Manual startup mode and does
   not start it as an installer side effect.
+
+`SunshineSessionEnd` reads a Sunshine Web UI credential from
+`C:\ProgramData\Butters\sunshine-api-credential.json`. The installer never
+creates it; provision it by hand with access limited to SYSTEM and
+Administrators (see `docs/DESKTOP_MODES_DEPLOYMENT_CHECKLIST.md`). Without it
+the operation reports `sunshine_api_unconfigured` and closes nothing.
 
 The helper accepts a `ValidateSet` of fixed operations. The Linux broker still
 selects each operation from its own enum and never accepts an operation argument

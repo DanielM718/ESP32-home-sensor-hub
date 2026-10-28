@@ -16,7 +16,13 @@ CONTROL_START = re.compile(
 CONTROL_TOGGLE = re.compile(r"\bturn\b.+\b(?:on|off)\b")
 NEGATED_DESKTOP_ACTION = re.compile(
     r"\b(?:do not|don't|dont|don t|never)\s+(?:\w+\s+){0,5}"
-    r"(?:wake|turn|switch|set|use|start|put|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return)\b"
+    r"(?:wake|turn|switch|set|use|start|put|lock|sleep|restart|shut|shutdown|prepare|enter|restore|exit|return|end|close|stop|terminate)\b"
+)
+# The one request that closes a Sunshine application. Ordinary Local mode never
+# does, so this has to be named explicitly: "end the remote session".
+END_REMOTE_SESSION = re.compile(
+    r"\b(?:end|close|terminate)\s+(?:the\s+|my\s+)?"
+    r"(?:remote|sunshine|moonlight|streaming)\s+(?:desktop\s+)?session\b"
 )
 
 
@@ -64,6 +70,21 @@ class IntentRouter:
             return self._clarification(
                 normalized,
                 "Please choose one exact desktop or Parsec action.",
+            )
+        if END_REMOTE_SESSION.search(normalized) and not NEGATED_DESKTOP_ACTION.search(
+            normalized
+        ):
+            if "gaming mode" in normalized or "engineering mode" in normalized:
+                return self._clarification(
+                    normalized,
+                    "Ending the remote session returns the desktop to Local. "
+                    "Please ask for one desktop action at a time.",
+                )
+            return self._matched(
+                normalized,
+                "end_remote_desktop_session",
+                {"machine": "desktop"},
+                1.0,
             )
         desktop_mode = self._desktop_access_mode_action(normalized)
         if desktop_mode is not None:

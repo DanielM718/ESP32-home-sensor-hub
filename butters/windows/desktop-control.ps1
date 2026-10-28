@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
-    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineServiceStatus', 'SunshineStatus', 'SunshineEnsure', 'SunshineProbeInteractive', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
+    [ValidateSet('ParsecStatus', 'ParsecEnsure', 'ParsecRestart', 'SunshineServiceStatus', 'SunshineStatus', 'SunshineEnsure', 'SunshineProbeInteractive', 'SunshineSessionStatus', 'SunshineSessionEnd', 'Lock', 'Sleep', 'Restart', 'Shutdown', 'SleepNow')]
     [string]$Operation
 )
 
@@ -19,15 +19,22 @@ $sunshineConfig = Join-Path $sunshineRoot 'config\sunshine.conf'
 $sunshineProbeTask = '\Butters\SunshineCaptureProbe'
 $sunshineProbeResult = 'C:\ProgramData\Butters\sunshine-capture-probe.json'
 $displayTopologyHelper = 'C:\ProgramData\Butters\display-topology.ps1'
+$sunshineSessionHelper = 'C:\ProgramData\Butters\sunshine-session.ps1'
 $lockTask = '\Butters\LockDesktop'
 $sleepTask = '\Butters\SleepDesktop'
 $parsecDeadlineSeconds = 20
 $sunshineDeadlineSeconds = 20
 
-if (-not (Test-Path -LiteralPath $displayTopologyHelper -PathType Leaf)) {
-    throw 'The fixed display-topology helper is missing'
+# Fixed helpers are dot-sourced at script scope by only the operations that
+# need them. display-topology.ps1 compiles its QueryDisplayConfig type with
+# Add-Type in every new process, and loading it unconditionally made every
+# Parsec, service-status, and power operation pay that cost -- or fail outright
+# when the helper was absent.
+function Assert-ButtersHelper([string]$Path) {
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "The fixed helper $Path is missing"
+    }
 }
-. $displayTopologyHelper
 
 function Invoke-SunshineCaptureProbe {
     $started = (Get-Date).ToUniversalTime()
@@ -302,7 +309,19 @@ switch ($Operation) {
         } + $after)
     }
     'SunshineProbeInteractive' {
+        Assert-ButtersHelper $displayTopologyHelper
+        . $displayTopologyHelper
         Write-SunshineCaptureProbe
+    }
+    'SunshineSessionStatus' {
+        Assert-ButtersHelper $sunshineSessionHelper
+        . $sunshineSessionHelper
+        Write-JsonResult (Get-ButtersSunshineSessionState)
+    }
+    'SunshineSessionEnd' {
+        Assert-ButtersHelper $sunshineSessionHelper
+        . $sunshineSessionHelper
+        Write-JsonResult (Invoke-ButtersSunshineSessionEnd)
     }
     'Lock' {
         & schtasks.exe /Run /TN $lockTask | Out-Null

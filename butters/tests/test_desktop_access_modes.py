@@ -193,7 +193,8 @@ def test_overview_uses_cached_service_status_not_capture_probe() -> None:
     (
         (DesktopAccessMode.GAMING, "off", "gaming"),
         (DesktopAccessMode.ENGINEERING, "off", "engineering_low_bandwidth"),
-        (DesktopAccessMode.LOCAL, "on", None),
+        # Local turns on only the primary G27QC outlet; the OLED is preserved.
+        (DesktopAccessMode.LOCAL, "primary_on", None),
     ),
 )
 def test_explicit_mode_transitions_are_idempotent(mode, desired, profile) -> None:
@@ -281,7 +282,7 @@ def test_newer_local_transition_supersedes_remote_before_monitor_power_off() -> 
     assert not remote.is_alive() and not local.is_alive()
     assert results["remote"]["failure_code"] == "mode_transition_superseded"
     assert results["local"]["verification_complete"] is True
-    assert operations.monitor_requests == ["on"]
+    assert operations.monitor_requests == ["primary_on"]
 
 
 def test_local_generation_cannot_register_inside_inflight_monitor_commit() -> None:
@@ -328,7 +329,7 @@ def test_local_generation_cannot_register_inside_inflight_monitor_commit() -> No
         "mode_transition_superseded",
     }
     assert results["local"]["verification_complete"] is True
-    assert operations.monitor_requests == ["off", "on"]
+    assert operations.monitor_requests == ["off", "primary_on"]
 
 
 def test_cancellation_before_monitor_commit_has_no_monitor_side_effect() -> None:

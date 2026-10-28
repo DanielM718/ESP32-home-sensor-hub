@@ -45,7 +45,7 @@ from butters.llm.model import (
 from butters.responses.formatter import ResponseFormatter
 from butters.routing.entities import EntityRegistry, MetricRegistry
 from butters.routing.model import RoutedIntent
-from butters.routing.router import IntentRouter
+from butters.routing.router import END_REMOTE_SESSION, IntentRouter
 from butters.skills.actions_v2 import register_action_skills
 from butters.skills.implementations import build_read_only_registry
 from butters.skills.model import ActionAuthorization, ActionClass, SkillExecution
@@ -200,7 +200,11 @@ class DeterministicAssistant:
             spec is not None
             and spec.action_class is ActionClass.ACTION
             and route.skill
-            in {"start_remote_desktop_session", "set_desktop_access_mode"}
+            in {
+                "start_remote_desktop_session",
+                "set_desktop_access_mode",
+                "end_remote_desktop_session",
+            }
             and _direct_desktop_action(normalized_text)
         ):
             authorization = ActionAuthorization(
@@ -559,6 +563,8 @@ def _direct_desktop_action(text: str) -> bool:
             "return to local mode",
         )
     ):
+        return True
+    if END_REMOTE_SESSION.search(text):
         return True
     remote_intent = any(word in text for word in ("parsec", "remote", "headless"))
     wake = any(

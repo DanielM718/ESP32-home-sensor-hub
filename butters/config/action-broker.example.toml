@@ -38,12 +38,23 @@ api_key = ""
 "desktop.wake" = false
 "desktop.monitors_off" = false
 "desktop.monitors_on" = false
+# Local mode: turn on only switch.desktop_gigabyte; the OLED is never changed.
+"desktop.primary_monitor_on" = false
 "desktop.parsec_status" = false
 "desktop.parsec_ensure" = false
 "desktop.parsec_restart" = false
 "desktop.sunshine_status" = false
 "desktop.sunshine_service_status" = false
 "desktop.sunshine_ensure" = false
+# Sunshine session state (nvhttp serverinfo + bound stream sockets) and the
+# authenticated /api/apps/close call. Both run desktop-control.ps1 over SSH.
+"desktop.sunshine_session_status" = false
+"desktop.sunshine_session_end" = false
+# Served by the Windows MTT activation helper. Keep false until that helper is
+# installed and wired into desktop-control.ps1.
+"desktop.display_status" = false
+"desktop.virtual_display_activate" = false
+"desktop.virtual_display_deactivate" = false
 "desktop.lock" = false
 "desktop.sleep" = false
 "desktop.restart" = false

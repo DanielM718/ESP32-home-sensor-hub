@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.assistant_config import BrokerSettings, DesktopSettings
@@ -35,6 +35,16 @@ STATUS_WORST_CASE_SECONDS = (
 # field `unknown` and hides the powered-off state the probes actually measured.
 STATUS_TIMEOUT_SECONDS = 10.0
 POST_HEADLESS_SETTLE_SECONDS = 5.0
+# A monitor needs ~15s to power on, and Windows then enumerates it. Bounded by
+# the workflow deadline as well.
+PHYSICAL_DISPLAY_SETTLE_SECONDS = 30.0
+# Sunshine stops a session within ~150ms of its application ending, then
+# closes the stream sockets when the last session reference drops.
+SESSION_END_VERIFY_SECONDS = 15.0
+SESSION_OBSERVATION_SECONDS = 30.0
+SUNSHINE_SESSION_STATES = frozenset(
+    {"terminated", "resumable", "active", "ending", "unknown"}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,6 +116,24 @@ class DesktopOperations(Protocol):
 
     def set_monitor_power(
         self, desired_state: str, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
+
+    def display_status(self, timeout_seconds: float) -> dict[str, object] | None: ...
+
+    def activate_virtual_display(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
+
+    def deactivate_virtual_display(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
+
+    def sunshine_session_status(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None: ...
+
+    def end_sunshine_session(
+        self, timeout_seconds: float
     ) -> dict[str, object] | None: ...
 
 
@@ -265,11 +293,69 @@ class BrokerDesktopOperations:
     def set_monitor_power(
         self, desired_state: str, timeout_seconds: float
     ) -> dict[str, object] | None:
-        operation = (
-            BrokerOperation.DESKTOP_MONITORS_OFF
-            if desired_state == "off"
-            else BrokerOperation.DESKTOP_MONITORS_ON
+        # An explicit table: an unknown value must never fall through to the
+        # operation that powers both outlets, including the intentionally-off
+        # OLED.
+        operation = {
+            "off": BrokerOperation.DESKTOP_MONITORS_OFF,
+            "on": BrokerOperation.DESKTOP_MONITORS_ON,
+            "primary_on": BrokerOperation.DESKTOP_PRIMARY_MONITOR_ON,
+        }.get(desired_state)
+        if operation is None:
+            raise ValueError("monitor state is not allow-listed")
+        return self._mutation(operation, timeout_seconds)
+
+    def display_status(self, timeout_seconds: float) -> dict[str, object] | None:
+        return self._observation(BrokerOperation.DESKTOP_DISPLAY_STATUS, timeout_seconds)
+
+    def activate_virtual_display(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        return self._mutation(
+            BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_ACTIVATE, timeout_seconds
         )
+
+    def deactivate_virtual_display(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        return self._mutation(
+            BrokerOperation.DESKTOP_VIRTUAL_DISPLAY_DEACTIVATE, timeout_seconds
+        )
+
+    def sunshine_session_status(
+        self, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        return self._observation(
+            BrokerOperation.DESKTOP_SUNSHINE_SESSION_STATUS, timeout_seconds
+        )
+
+    def end_sunshine_session(self, timeout_seconds: float) -> dict[str, object] | None:
+        return self._mutation(
+            BrokerOperation.DESKTOP_SUNSHINE_SESSION_END, timeout_seconds
+        )
+
+    def _observation(
+        self, operation: BrokerOperation, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        try:
+            result = self.broker.request(
+                operation,
+                request_id=secrets.token_urlsafe(18),
+                timeout_seconds=timeout_seconds,
+            )
+        except BrokerError:
+            return None
+        return dict(result.status) if result.ok else None
+
+    def _mutation(
+        self, operation: BrokerOperation, timeout_seconds: float
+    ) -> dict[str, object] | None:
+        """Return the broker's decided outcome, or None if none was received.
+
+        None means the outcome is unknown, not that nothing changed: callers
+        record the side effect as possibly committed.
+        """
+
         try:
             result = self.broker.request(
                 operation,
@@ -280,6 +366,8 @@ class BrokerDesktopOperations:
             return None
         status = dict(result.status)
         status["broker_ok"] = result.ok
+        if not result.ok:
+            status["broker_error_code"] = result.error_code
         return status
 
     def _broker(self, operation: BrokerOperation, timeout_seconds: float) -> bool:
@@ -312,6 +400,7 @@ class DesktopWorkflow:
         wall_clock: Callable[[], float] = time.time,
         agent_status: Callable[[], Mapping[str, object]] | None = None,
         post_headless_settle_seconds: float = POST_HEADLESS_SETTLE_SECONDS,
+        mutation_budget_seconds: float | None = None,
     ) -> None:
         self.settings = settings
         self.broker_settings = broker_settings or BrokerSettings()
@@ -323,6 +412,13 @@ class DesktopWorkflow:
         self.wall_clock = wall_clock
         self.agent_status = agent_status
         self.post_headless_settle_seconds = post_headless_settle_seconds
+        # Time that must remain before a broker mutation is sent: the client's
+        # whole request timeout by default. A test seam, like the settle time.
+        self.mutation_budget_seconds = (
+            self.broker_settings.request_timeout_seconds
+            if mutation_budget_seconds is None
+            else float(mutation_budget_seconds)
+        )
         self._sunshine_service_cache: (
             tuple[float, float, dict[str, object] | None] | None
         ) = None
@@ -494,6 +590,35 @@ class DesktopWorkflow:
         selected_mode = (
             mode if isinstance(mode, DesktopAccessMode) else DesktopAccessMode(mode)
         )
+        return self._serialized(
+            machine, selected_mode, cancel_event, end_remote_session=False
+        )
+
+    def end_remote_session(
+        self, machine: str, *, cancel_event: threading.Event | None = None
+    ) -> dict[str, object]:
+        """Explicitly close the Sunshine application session, then converge Local.
+
+        Ordinary Local mode never ends a stream. This separately requested
+        operation restores and verifies physical access first, closes the
+        Sunshine application through the fixed authenticated helper, verifies
+        termination, and only then considers removing the virtual display. It
+        shares the mode generation, so a newer explicit request supersedes it.
+        """
+
+        self._require_machine(machine)
+        return self._serialized(
+            machine, DesktopAccessMode.LOCAL, cancel_event, end_remote_session=True
+        )
+
+    def _serialized(
+        self,
+        machine: str,
+        mode: DesktopAccessMode,
+        cancel_event: threading.Event | None,
+        *,
+        end_remote_session: bool,
+    ) -> dict[str, object]:
         event = cancel_event or threading.Event()
         started = self.clock()
         deadline = started + self.settings.total_timeout_seconds
@@ -511,19 +636,21 @@ class DesktopWorkflow:
                 # effect when any of these conditions is already true.
                 return self._prepare_access_mode(
                     machine,
-                    selected_mode,
+                    mode,
                     cancel_event=event,
                     transition_generation=generation,
                     request_started=started,
+                    end_remote_session=end_remote_session,
                 )
             if self._mode_execution_lock.acquire(timeout=min(0.1, remaining)):
                 try:
                     return self._prepare_access_mode(
                         machine,
-                        selected_mode,
+                        mode,
                         cancel_event=event,
                         transition_generation=generation,
                         request_started=started,
+                        end_remote_session=end_remote_session,
                     )
                 finally:
                     self._mode_execution_lock.release()
@@ -536,14 +663,18 @@ class DesktopWorkflow:
         cancel_event: threading.Event | None,
         transition_generation: int,
         request_started: float,
+        end_remote_session: bool = False,
     ) -> dict[str, object]:
-        """Converge one explicit mode without changing sessions or displays.
+        """Converge one explicit mode without changing Windows topology itself.
 
         Agent, SSH and ICMP are independent evidence.  Only Sunshine readiness
         is allowed to claim capture readiness, and monitor success requires the
         broker's verified per-outlet acknowledgement.  A failure after a
         successful monitor transition is never automatically reversed because
-        doing so could disrupt an active user session.
+        doing so could disrupt an active user session.  The virtual display is
+        changed only by the fixed Windows helper: activated for a remote mode
+        before any outlet turns off, and removed in Local only after a physical
+        display and a terminated Sunshine application are both verified.
         """
 
         selected_mode = mode
@@ -560,6 +691,9 @@ class DesktopWorkflow:
         result: dict[str, object] = {
             "machine": machine,
             "mode": selected_mode.value,
+            "operation": (
+                "end_remote_session" if end_remote_session else "set_access_mode"
+            ),
             "status": "pending",
             "machine_state": "unknown",
             "online": False,
@@ -588,7 +722,24 @@ class DesktopWorkflow:
             "monitor_desired_state": (
                 "on" if selected_mode is DesktopAccessMode.LOCAL else "off"
             ),
+            # Local needs one usable physical display: only the primary G27QC
+            # outlet is turned on and the OLED outlet keeps its current state.
+            "monitor_scope": (
+                "primary" if selected_mode is DesktopAccessMode.LOCAL else "all"
+            ),
             "monitor_transition": None,
+            "preserved_monitor_unchanged": None,
+            "physical_display_verified": None,
+            "display_status": None,
+            "virtual_display_activation": None,
+            "virtual_display_deactivation": None,
+            "virtual_display_action": None,
+            "virtual_display_retained_reason": None,
+            "sunshine_session": None,
+            "sunshine_session_end": None,
+            "remote_session_terminated": None,
+            "committed_side_effects": [],
+            "warnings": [],
             "verification_complete": False,
             "elapsed_ms": 0,
             "failed_stage": None,
@@ -597,37 +748,11 @@ class DesktopWorkflow:
             "error": None,
             "safe_recovery": None,
         }
-
-        def finish(
-            code: str | None = None,
-            dependency: str | None = None,
-            error: str | None = None,
-        ) -> dict[str, object]:
-            result["failed_stage"] = dependency
-            result["failure_code"] = code
-            result["failed_dependency"] = dependency
-            result["error"] = error
-            result["elapsed_ms"] = round((self.clock() - started) * 1000)
-            if code is None:
-                result["status"] = "ready"
-            elif code == "cancelled":
-                result["status"] = "cancelled"
-            elif result.get("monitor_transition"):
-                result["status"] = "partial"
-            else:
-                result["status"] = "failed"
-            return result
-
-        def superseded(stage: str) -> dict[str, object] | None:
-            with self._mode_state_lock:
-                current = transition_generation == self._mode_generation
-            if current:
-                return None
-            return finish(
-                "mode_transition_superseded",
-                stage,
-                "a newer explicit desktop mode transition took precedence",
-            )
+        transition = _Transition(
+            self, result, event, deadline, transition_generation, started
+        )
+        finish = transition.finish
+        superseded = transition.superseded
 
         stale = superseded("workflow")
         if stale is not None:
@@ -650,6 +775,15 @@ class DesktopWorkflow:
                 "headless_management_disabled",
                 "monitor_outlets",
                 "headless monitor management is not enabled",
+            )
+        if end_remote_session and not (
+            self.settings.sunshine_session_status_enabled
+            and self.settings.sunshine_session_end_enabled
+        ):
+            return finish(
+                "remote_session_end_disabled",
+                "sunshine_session",
+                "ending a Sunshine session is not enabled",
             )
 
         def observe_online(observation_deadline: float) -> bool:
@@ -712,8 +846,14 @@ class DesktopWorkflow:
                 self.clock() + self.settings.wake_readiness_timeout_seconds,
             )
             online = self._wait_for(
-                lambda _remaining: observe_online(wake_deadline), wake_deadline, event
+                lambda _remaining: observe_online(wake_deadline),
+                wake_deadline,
+                event,
+                stop=transition.is_superseded,
             )
+            stale = superseded("desktop_online_evidence")
+            if stale is not None:
+                return stale
             if not online:
                 if event.is_set():
                     return finish("cancelled", "startup", "workflow cancelled")
@@ -725,172 +865,498 @@ class DesktopWorkflow:
                     "desktop_online_evidence",
                     "no authenticated or network evidence arrived within the wake window",
                 )
-            stale = superseded("desktop_online_evidence")
-            if stale is not None:
-                return stale
         result["machine_state"] = "online"
 
-        if selected_mode is not DesktopAccessMode.LOCAL:
-            backend_enabled = {
-                "sunshine": True,
-                "rdp": self.settings.rdp_backend_enabled,
-                "remote_app": self.settings.remote_app_backend_enabled,
-            }.get(str(selected_backend), False)
-            if selected_backend != "sunshine" or not backend_enabled:
-                return finish(
-                    "access_backend_unavailable",
-                    str(selected_backend or "stream_backend"),
-                    "the selected Engineering backend is not explicitly provisioned",
-                )
-            # The currently deployed Sunshine control path is SSH.  A fresh
-            # agent heartbeat proves Windows is online, but does not claim this
-            # management capability or Sunshine capture readiness.
-            if not result["ssh_ready"]:
-                ssh_deadline = min(
-                    deadline, self.clock() + self.settings.ssh_timeout_seconds
-                )
-                result["ssh_ready"] = self._wait_for(
-                    lambda _remaining: self._ssh_ready(ssh_deadline),
-                    ssh_deadline,
-                    event,
-                )
-            stale = superseded("sunshine_management")
-            if stale is not None:
-                return stale
-            if not result["ssh_ready"]:
-                if event.is_set():
-                    return finish("cancelled", "sunshine_management", "workflow cancelled")
-                return finish(
-                    "sunshine_management_unavailable",
-                    "ssh",
-                    "Windows is online, but no provisioned Sunshine management path is available",
-                )
-            result["management_path"] = "ssh"
+        if selected_mode is DesktopAccessMode.LOCAL:
+            return self._converge_local(transition, end_remote_session)
+        return self._converge_remote(transition, selected_backend)
 
-            if not (
-                self.settings.sunshine_status_enabled
-                or self.settings.sunshine_ensure_enabled
-            ):
-                return finish(
-                    "sunshine_status_disabled",
-                    "sunshine_capture_probe",
-                    "Sunshine readiness observation is not enabled",
-                )
-            stale = superseded("sunshine_capture_probe")
-            if stale is not None:
-                return stale
+    def _converge_remote(
+        self, transition: _Transition, selected_backend: str | None
+    ) -> dict[str, object]:
+        result = transition.result
+        event = transition.event
+        deadline = transition.deadline
+        finish = transition.finish
+        superseded = transition.superseded
+
+        backend_enabled = {
+            "sunshine": True,
+            "rdp": self.settings.rdp_backend_enabled,
+            "remote_app": self.settings.remote_app_backend_enabled,
+        }.get(str(selected_backend), False)
+        if selected_backend != "sunshine" or not backend_enabled:
+            return finish(
+                "access_backend_unavailable",
+                str(selected_backend or "stream_backend"),
+                "the selected Engineering backend is not explicitly provisioned",
+            )
+        # The currently deployed Sunshine control path is SSH.  A fresh
+        # agent heartbeat proves Windows is online, but does not claim this
+        # management capability or Sunshine capture readiness.
+        if not result["ssh_ready"]:
+            ssh_deadline = min(
+                deadline, self.clock() + self.settings.ssh_timeout_seconds
+            )
+            result["ssh_ready"] = self._wait_for(
+                lambda _remaining: self._ssh_ready(ssh_deadline),
+                ssh_deadline,
+                event,
+                stop=transition.is_superseded,
+            )
+        stale = superseded("sunshine_management")
+        if stale is not None:
+            return stale
+        if not result["ssh_ready"]:
+            if event.is_set():
+                return finish("cancelled", "sunshine_management", "workflow cancelled")
+            return finish(
+                "sunshine_management_unavailable",
+                "ssh",
+                "Windows is online, but no provisioned Sunshine management path is available",
+            )
+        result["management_path"] = "ssh"
+
+        if not (
+            self.settings.sunshine_status_enabled
+            or self.settings.sunshine_ensure_enabled
+        ):
+            return finish(
+                "sunshine_status_disabled",
+                "sunshine_capture_probe",
+                "Sunshine readiness observation is not enabled",
+            )
+        stale = superseded("sunshine_capture_probe")
+        if stale is not None:
+            return stale
+        status = self.operations.sunshine_status(self._remaining(deadline))
+        self._record_sunshine_readiness(result, status)
+        ready = self._sunshine_mode_ready(status)
+        if ready:
+            result["sunshine_reused"] = True
+            result["virtual_display_action"] = "already_active"
+        elif (
+            status is not None
+            and status.get("virtual_display_ready") is not True
+            and self.settings.virtual_display_activation_enabled
+        ):
+            # Activate and verify MTT before anything can claim readiness or
+            # turn an outlet off. A ready MTT is never re-activated, so an
+            # existing stream's capture target is left alone.
+            failure = self._activate_virtual_display(transition)
+            if failure is not None:
+                return failure
             status = self.operations.sunshine_status(self._remaining(deadline))
             self._record_sunshine_readiness(result, status)
             ready = self._sunshine_mode_ready(status)
-            if ready:
-                result["sunshine_reused"] = True
-            else:
-                if not self.settings.sunshine_ensure_enabled:
-                    return finish(
-                        "sunshine_management_disabled",
-                        "sunshine_service",
-                        "Sunshine ensure is not enabled",
-                    )
+        if not ready:
+            if not self.settings.sunshine_ensure_enabled:
+                return finish(
+                    "sunshine_management_disabled",
+                    "sunshine_service",
+                    "Sunshine ensure is not enabled",
+                )
+            # Ensure may start the service, so it is committed like every other
+            # mutation: under the generation lock, with the full broker budget.
+            with self._mode_commit_lock:
                 stale = superseded("sunshine_service")
                 if stale is not None:
                     return stale
                 if event.is_set():
+                    return finish("cancelled", "sunshine_service", "workflow cancelled")
+                timeout = transition.mutation_timeout()
+                if timeout is None:
                     return finish(
-                        "cancelled", "sunshine_service", "workflow cancelled"
-                    )
-                ensured = self.operations.ensure_sunshine_running(
-                    self._remaining(deadline)
-                )
-                result["sunshine_ensure_succeeded"] = ensured
-                if not ensured:
-                    return finish(
-                        "sunshine_ensure_failed",
+                        "desktop_mode_timeout",
                         "sunshine_service",
-                        "the fixed Sunshine ensure operation failed",
+                        "not enough time remains to ensure Sunshine safely",
                     )
-                status = self.operations.sunshine_status(self._remaining(deadline))
-                self._record_sunshine_readiness(result, status)
-                ready = self._sunshine_mode_ready(status)
-            if not ready:
-                if status is None:
-                    return finish(
-                        "sunshine_readiness_unobservable",
-                        "sunshine_capture_probe",
-                        "Sunshine readiness could not be observed",
-                    )
-                if status.get("capture_ready") is not True:
-                    return finish(
-                        "sunshine_capture_unavailable",
-                        "sunshine_capture",
-                        "Sunshine is not capture-ready",
-                    )
+                ensured = self.operations.ensure_sunshine_running(timeout)
+                transition.committed("sunshine_ensure")
+            result["sunshine_ensure_succeeded"] = ensured
+            if not ensured:
                 return finish(
-                    "virtual_display_unavailable",
-                    "virtual_display",
-                    "the configured virtual display is not attached and capture-ready",
+                    "sunshine_ensure_failed",
+                    "sunshine_service",
+                    "the fixed Sunshine ensure operation failed",
                 )
+            status = self.operations.sunshine_status(self._remaining(deadline))
+            self._record_sunshine_readiness(result, status)
+            ready = self._sunshine_mode_ready(status)
+        if not ready:
+            if status is None:
+                return finish(
+                    "sunshine_readiness_unobservable",
+                    "sunshine_capture_probe",
+                    "Sunshine readiness could not be observed",
+                )
+            if status.get("capture_ready") is not True:
+                return finish(
+                    "sunshine_capture_unavailable",
+                    "sunshine_capture",
+                    "Sunshine is not capture-ready",
+                )
+            return finish(
+                "virtual_display_unavailable",
+                "virtual_display",
+                "the configured virtual display is not attached and capture-ready",
+            )
 
-        with self._mode_commit_lock:
-            stale = superseded("monitor_outlets")
+        failure = self._commit_monitor_power(transition, "off")
+        if failure is not None:
+            return failure
+
+        if event.is_set():
+            return finish("cancelled", "post_transition", "workflow cancelled")
+        post_status = self.operations.sunshine_status(self._remaining(deadline))
+        self._record_sunshine_readiness(result, post_status)
+        if not self._sunshine_mode_ready(post_status):
+            result["safe_recovery"] = (
+                "Leave verified monitor state unchanged to protect any active session; "
+                "re-run the same mode after inspecting Sunshine and the virtual display."
+            )
+            return finish(
+                "sunshine_lost_after_monitor_transition",
+                "sunshine_capture",
+                "Sunshine readiness was lost after monitor power changed",
+            )
+        result["verification_complete"] = True
+        return finish()
+
+    def _converge_local(
+        self, transition: _Transition, end_remote_session: bool
+    ) -> dict[str, object]:
+        """Restore physical access first; the virtual display is considered last.
+
+        Local never queries, starts, stops, or restarts Sunshine, and it never
+        ends a stream. Only the explicit End Remote Session request closes the
+        Sunshine application, and only after physical access is verified.
+        """
+
+        result = transition.result
+        finish = transition.finish
+
+        failure = self._commit_monitor_power(transition, "primary_on")
+        if failure is not None:
+            return failure
+        monitor = result["monitor_transition"]
+        if isinstance(monitor, Mapping):
+            preserved = monitor.get("preserved_entity_unchanged")
+            result["preserved_monitor_unchanged"] = (
+                preserved if isinstance(preserved, bool) else None
+            )
+
+        if self.settings.display_status_enabled:
+            verified = self._await_physical_display(transition)
+            stale = transition.superseded("physical_display")
             if stale is not None:
                 return stale
-            if event.is_set():
-                return finish("cancelled", "monitor_outlets", "workflow cancelled")
-            remaining = self._remaining(deadline)
-            if remaining <= 0:
-                return finish(
-                    "desktop_mode_timeout", "workflow", "workflow deadline expired"
+            if transition.event.is_set():
+                return finish("cancelled", "physical_display", "workflow cancelled")
+            result["physical_display_verified"] = verified
+            if not verified:
+                result["safe_recovery"] = (
+                    "The primary outlet is on, but Windows did not report an active "
+                    "physical display. The virtual display and any Sunshine session "
+                    "were left in place; inspect the G27QC input and Windows display "
+                    "settings before retrying."
                 )
-            transition = self._set_monitor_power(
-                str(result["monitor_desired_state"]), remaining
+                return finish(
+                    "physical_display_unverified",
+                    "physical_display",
+                    "Windows did not report an active physical display",
+                )
+        else:
+            cast(list[str], result["warnings"]).append(
+                "physical_display_unobserved: only the primary outlet state was verified"
             )
-        result["monitor_transition"] = transition
-        stale = superseded("monitor_outlets")
+
+        if end_remote_session:
+            failure = self._end_sunshine_session(transition)
+            if failure is not None:
+                return failure
+
+        failure = self._consider_virtual_display_removal(transition)
+        if failure is not None:
+            return failure
+        result["verification_complete"] = True
+        return finish()
+
+    def _commit_monitor_power(
+        self, transition: _Transition, desired_state: str
+    ) -> dict[str, object] | None:
+        """Commit one bounded monitor broker call under the generation lock."""
+
+        result = transition.result
+        finish = transition.finish
+        with self._mode_commit_lock:
+            stale = transition.superseded("monitor_outlets")
+            if stale is not None:
+                return stale
+            if transition.event.is_set():
+                return finish("cancelled", "monitor_outlets", "workflow cancelled")
+            timeout = transition.mutation_timeout()
+            if timeout is None:
+                return finish(
+                    "desktop_mode_timeout",
+                    "monitor_outlets",
+                    "not enough time remains to change monitor power safely",
+                )
+            monitor = self._set_monitor_power(desired_state, timeout)
+            transition.committed("monitor_outlets")
+        result["monitor_transition"] = monitor
+        stale = transition.superseded("monitor_outlets")
         if stale is not None:
             result["safe_recovery"] = (
                 "A newer explicit mode is converging next; do not reverse the "
                 "verified outlet result from this superseded request."
             )
             return stale
-        if transition is None:
+        if monitor is None:
+            result["safe_recovery"] = (
+                "The broker outcome was not received. Observe the outlets in Home "
+                "Assistant before retrying; they may already have changed."
+            )
             return finish(
                 "home_assistant_unavailable",
                 "home_assistant",
                 "monitor state could not be observed or changed",
             )
-        if (
-            transition.get("broker_ok") is False
-            or transition.get("accepted") is not True
-        ):
+        if monitor.get("broker_ok") is False or monitor.get("accepted") is not True:
             result["safe_recovery"] = (
                 "Retry the same explicit mode after Home Assistant recovers; "
                 "do not automatically reverse outlets that already converged."
             )
+            if desired_state == "primary_on":
+                return finish(
+                    "monitor_transition_failed",
+                    "monitor_outlets",
+                    "the primary monitor outlet did not verify on",
+                )
             return finish(
                 "monitor_transition_partial"
-                if transition.get("partial") is True
+                if monitor.get("partial") is True
                 else "monitor_transition_failed",
                 "monitor_outlets",
                 "both monitor outlets did not verify the requested state",
             )
+        return None
 
-        if selected_mode is not DesktopAccessMode.LOCAL:
-            if event.is_set():
-                return finish("cancelled", "post_transition", "workflow cancelled")
-            post_status = self.operations.sunshine_status(self._remaining(deadline))
-            self._record_sunshine_readiness(result, post_status)
-            if not self._sunshine_mode_ready(post_status):
-                result["safe_recovery"] = (
-                    "Leave verified monitor state unchanged to protect any active session; "
-                    "re-run the same mode after inspecting Sunshine and the virtual display."
-                )
+    def _activate_virtual_display(
+        self, transition: _Transition
+    ) -> dict[str, object] | None:
+        result = transition.result
+        finish = transition.finish
+        with self._mode_commit_lock:
+            stale = transition.superseded("virtual_display")
+            if stale is not None:
+                return stale
+            if transition.event.is_set():
+                return finish("cancelled", "virtual_display", "workflow cancelled")
+            timeout = transition.mutation_timeout()
+            if timeout is None:
                 return finish(
-                    "sunshine_lost_after_monitor_transition",
-                    "sunshine_capture",
-                    "Sunshine readiness was lost after monitor power changed",
+                    "desktop_mode_timeout",
+                    "virtual_display",
+                    "not enough time remains to activate the virtual display safely",
                 )
-        result["verification_complete"] = True
-        return finish()
+            activation = self.operations.activate_virtual_display(timeout)
+            transition.committed("virtual_display_activate")
+        result["virtual_display_activation"] = activation
+        stale = transition.superseded("virtual_display")
+        if stale is not None:
+            return stale
+        if not (
+            activation is not None
+            and activation.get("broker_ok") is True
+            and activation.get("accepted") is True
+            and activation.get("virtual_display_active") is True
+            and activation.get("virtual_mode_verified") is True
+        ):
+            result["safe_recovery"] = (
+                "No outlet was changed. Inspect the MTT virtual display with the "
+                "read-only audit before retrying."
+            )
+            return finish(
+                "virtual_display_activation_failed",
+                "virtual_display",
+                "the MTT virtual display was not activated and verified at 2560x1440@60",
+            )
+        result["virtual_display_action"] = (
+            "already_active" if activation.get("already_active") is True else "activated"
+        )
+        return None
+
+    def _await_physical_display(self, transition: _Transition) -> bool:
+        result = transition.result
+        settle_deadline = min(
+            transition.deadline, self.clock() + PHYSICAL_DISPLAY_SETTLE_SECONDS
+        )
+
+        def active(remaining: float) -> bool:
+            status = self.operations.display_status(remaining)
+            result["display_status"] = status
+            return bool(status and status.get("physical_display_active") is True)
+
+        return self._wait_for(
+            active, settle_deadline, transition.event, stop=transition.is_superseded
+        )
+
+    def _session_state(
+        self, transition: _Transition, limit: float = SESSION_OBSERVATION_SECONDS
+    ) -> str:
+        status = self.operations.sunshine_session_status(
+            min(self._remaining(transition.deadline), limit)
+        )
+        transition.result["sunshine_session"] = status
+        state = status.get("session_state") if isinstance(status, Mapping) else None
+        return str(state) if state in SUNSHINE_SESSION_STATES else "unknown"
+
+    def _end_sunshine_session(
+        self, transition: _Transition
+    ) -> dict[str, object] | None:
+        result = transition.result
+        finish = transition.finish
+        if result["physical_display_verified"] is not True:
+            # An outlet that reports on is not a usable display. Closing the
+            # stream without one could leave no way to use the desktop at all.
+            result["safe_recovery"] = (
+                "The Sunshine session was left running. Enable and validate "
+                "Windows display observation before ending a remote session."
+            )
+            return finish(
+                "physical_display_unverified",
+                "physical_display",
+                "a usable physical display was not verified; nothing was closed",
+            )
+        state = self._session_state(transition)
+        if state == "unknown":
+            return finish(
+                "sunshine_session_unobservable",
+                "sunshine_session",
+                "Sunshine session state could not be established; nothing was closed",
+            )
+        if state != "terminated":
+            with self._mode_commit_lock:
+                stale = transition.superseded("sunshine_session")
+                if stale is not None:
+                    return stale
+                if transition.event.is_set():
+                    return finish("cancelled", "sunshine_session", "workflow cancelled")
+                timeout = transition.mutation_timeout()
+                if timeout is None:
+                    return finish(
+                        "desktop_mode_timeout",
+                        "sunshine_session",
+                        "not enough time remains to close the Sunshine session safely",
+                    )
+                result["sunshine_session_end"] = self.operations.end_sunshine_session(
+                    timeout
+                )
+                transition.committed("sunshine_session_end")
+            # The close response alone is never proof. Re-observe until the
+            # application is gone and no stream socket remains bound.
+            verify_deadline = min(
+                transition.deadline, self.clock() + SESSION_END_VERIFY_SECONDS
+            )
+            self._wait_for(
+                lambda remaining: self._session_state(transition, remaining)
+                == "terminated",
+                verify_deadline,
+                transition.event,
+                stop=transition.is_superseded,
+            )
+            stale = transition.superseded("sunshine_session")
+            if stale is not None:
+                return stale
+            if transition.event.is_set():
+                return finish("cancelled", "sunshine_session", "workflow cancelled")
+            state = str(
+                cast(Mapping[str, object], result["sunshine_session"] or {}).get(
+                    "session_state", "unknown"
+                )
+            )
+        result["remote_session_terminated"] = state == "terminated"
+        if state != "terminated":
+            result["virtual_display_action"] = "retained"
+            result["virtual_display_retained_reason"] = "sunshine_session_present"
+            result["safe_recovery"] = (
+                "Physical access is restored. Sunshine did not verify that its "
+                "application ended, so the virtual display was kept for it."
+            )
+            return finish(
+                "remote_session_not_terminated",
+                "sunshine_session",
+                "Sunshine did not verify that its application session ended",
+            )
+        return None
+
+    def _consider_virtual_display_removal(
+        self, transition: _Transition
+    ) -> dict[str, object] | None:
+        """Remove MTT only when nothing could still capture or resume onto it.
+
+        A Moonlight Resume runs no prep command, so the pre-stream guard cannot
+        protect it; Sunshine resumes whenever an application is still running.
+        "terminated" (no application and no bound stream socket) is therefore
+        the only state that permits removal. Every other or unknown state keeps
+        the virtual display, and the Windows helper re-checks the same state
+        immediately before it acts.
+        """
+
+        result = transition.result
+        finish = transition.finish
+        if not self.settings.virtual_display_deactivation_enabled:
+            result["virtual_display_action"] = "not_managed"
+            return None
+
+        def retain(reason: str) -> None:
+            result["virtual_display_action"] = "retained"
+            result["virtual_display_retained_reason"] = reason
+
+        if result["physical_display_verified"] is not True:
+            retain("physical_display_unverified")
+            return None
+        state = self._session_state(transition)
+        if state == "unknown":
+            retain("sunshine_session_unknown")
+            return None
+        if state != "terminated":
+            retain("sunshine_session_present")
+            return None
+        with self._mode_commit_lock:
+            stale = transition.superseded("virtual_display")
+            if stale is not None:
+                return stale
+            if transition.event.is_set():
+                return finish("cancelled", "virtual_display", "workflow cancelled")
+            timeout = transition.mutation_timeout()
+            if timeout is None:
+                retain("insufficient_time")
+                return None
+            removal = self.operations.deactivate_virtual_display(timeout)
+            transition.committed("virtual_display_deactivate")
+        result["virtual_display_deactivation"] = removal
+        if (
+            removal is not None
+            and removal.get("broker_ok") is True
+            and removal.get("accepted") is True
+            and removal.get("virtual_display_active") is False
+            and removal.get("physical_display_active") is True
+        ):
+            result["virtual_display_action"] = (
+                "already_inactive"
+                if removal.get("already_inactive") is True
+                else "deactivated"
+            )
+        else:
+            # Local access is already verified; a kept virtual display is the
+            # safe outcome, so this is reported rather than failing Local.
+            result["virtual_display_action"] = "deactivation_failed"
+            cast(list[str], result["warnings"]).append(
+                "virtual_display_deactivation_failed: the virtual display may still be active"
+            )
+        return None
 
     def _set_monitor_power(
         self, desired_state: str, timeout_seconds: float
@@ -898,6 +1364,10 @@ class DesktopWorkflow:
         method = getattr(self.operations, "set_monitor_power", None)
         if callable(method):
             return method(desired_state, timeout_seconds)
+        if desired_state == "primary_on":
+            # The legacy boolean operations only control both outlets together,
+            # which would power the intentionally-off OLED.
+            return None
         accepted = (
             self.operations.restore_headed_mode(timeout_seconds)
             if desired_state == "on"
@@ -948,8 +1418,14 @@ class DesktopWorkflow:
         predicate: Callable[[float], bool],
         deadline: float,
         event: threading.Event,
+        *,
+        stop: Callable[[], bool] | None = None,
     ) -> bool:
+        # `stop` lets a superseded request leave a long wake/SSH wait at once
+        # instead of holding the execution lock until its own window expires.
         while not self._cancelled(event, deadline):
+            if stop is not None and stop():
+                return False
             remaining = self._remaining(deadline)
             if remaining <= 0:
                 return False
@@ -1021,3 +1497,83 @@ class DesktopWorkflow:
             raise IntegrationError("unavailable", "desktop integration is disabled")
         if machine != self.settings.machine or machine != "desktop":
             raise IntegrationError("policy_denied", "machine is not allow-listed")
+
+
+class _Transition:
+    """One accepted request: its result record, deadline, and generation."""
+
+    def __init__(
+        self,
+        workflow: DesktopWorkflow,
+        result: dict[str, object],
+        event: threading.Event,
+        deadline: float,
+        generation: int,
+        started: float,
+    ) -> None:
+        self.workflow = workflow
+        self.result = result
+        self.event = event
+        self.deadline = deadline
+        self.generation = generation
+        self.started = started
+
+    def is_superseded(self) -> bool:
+        with self.workflow._mode_state_lock:
+            return self.generation != self.workflow._mode_generation
+
+    def superseded(self, stage: str) -> dict[str, object] | None:
+        if not self.is_superseded():
+            return None
+        return self.finish(
+            "mode_transition_superseded",
+            stage,
+            "a newer explicit desktop mode transition took precedence",
+        )
+
+    def committed(self, side_effect: str) -> None:
+        """Record a mutation that was sent, whether or not its result arrived."""
+
+        cast(list[str], self.result["committed_side_effects"]).append(side_effect)
+
+    def mutation_timeout(self) -> float | None:
+        """The full broker request budget, or None if it no longer fits.
+
+        A mutation is committed only while the whole client request timeout
+        remains. Otherwise the client could give up while the root broker is
+        still changing state, and a change that happened would be reported as
+        a failure that invites a retry.
+        """
+
+        budget = self.workflow.mutation_budget_seconds
+        remaining = self.workflow._remaining(self.deadline)
+        if remaining <= 0 or remaining < budget:
+            return None
+        return min(remaining, self.workflow.broker_settings.request_timeout_seconds)
+
+    def finish(
+        self,
+        code: str | None = None,
+        dependency: str | None = None,
+        error: str | None = None,
+    ) -> dict[str, object]:
+        result = self.result
+        result["failed_stage"] = dependency
+        result["failure_code"] = code
+        result["failed_dependency"] = dependency
+        result["error"] = error
+        result["elapsed_ms"] = round((self.workflow.clock() - self.started) * 1000)
+        committed = bool(
+            result.get("monitor_transition") or result.get("committed_side_effects")
+        )
+        if code is None:
+            result["status"] = "ready"
+        elif committed:
+            # Includes cancellation after a mutation was sent: the request did
+            # not finish, but state may already have changed.
+            result["status"] = "partial"
+        elif code == "cancelled":
+            result["status"] = "cancelled"
+        else:
+            result["status"] = "failed"
+        return result
