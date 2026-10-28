@@ -1,0 +1,14 @@
+# KR260 board-side authorization for the one Butters reboot operation.
+#
+# NOT INSTALLED. Install on the KR260 only after review, with the owner present
+# for the first supervised reboot, as root:root 0440:
+#
+#   sudo install -o root -g root -m 0440 butters-kr260-reboot.sudoers \
+#       /etc/sudoers.d/butters-kr260-reboot
+#   sudo visudo -cf /etc/sudoers.d/butters-kr260-reboot
+#
+# It removes the password prompt for exactly one argv -- the one the broker
+# sends as `sudo -n` -- and for nothing else: no wildcard, no shell, and no
+# poweroff, halt or shutdown. The account keeps every other sudo rule as is.
+# Remove the file to revoke it; the broker then reports reboot_unauthorized.
+ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl --no-wall --no-block reboot

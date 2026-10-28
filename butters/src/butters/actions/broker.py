@@ -86,6 +86,10 @@ HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
 NAS_API_DEADLINE_SECONDS = 10.0
 NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
 
+# Fixed KR260 reboot: exactly the argv the board's sudoers rule permits.
+_KR260_REBOOT_COMMAND = "/usr/bin/sudo -n /usr/bin/systemctl --no-wall --no-block reboot"
+KR260_CONNECT_TIMEOUT_SECONDS = 5
+
 # Fixed KR260 observation script. It has no caller-controlled interpolation and
 # returns only bounded OS/proc/sysfs data for parsing by the unprivileged tier.
 _KR260_TELEMETRY_COMMAND = r"""LC_ALL=C
@@ -1077,9 +1081,13 @@ class FixedBrokerOperations:
         identity = self._kr260_ssh("/usr/bin/cat /etc/machine-id", capture=True)
         if identity.strip() != self.config.kr260_expected_machine_id:
             raise BrokerError("identity_mismatch", "KR260 identity did not match")
-        self._kr260_ssh(
-            "/usr/bin/systemctl --no-wall --no-block reboot", capture=False
-        )
+        # Plain `systemctl reboot` from a non-interactive SSH session is denied
+        # by polkit ("Interactive authentication required"), which is how the
+        # first supervised attempt failed. The board instead grants this exact
+        # argv, and nothing else, through a NOPASSWD sudoers rule
+        # (config/kr260/butters-kr260-reboot.sudoers); -n makes an unprovisioned
+        # board fail at once as reboot_unauthorized rather than prompt.
+        self._kr260_ssh(_KR260_REBOOT_COMMAND, capture=False)
         return {"accepted": True, "identity_verified": True}
 
     def kr260_status(self) -> dict[str, object]:
@@ -1100,6 +1108,12 @@ class FixedBrokerOperations:
         }
 
     def _kr260_ssh(self, command: str, *, capture: bool) -> str:
+        """Run one fixed command; raise a fixed code that names the failure.
+
+        stderr is read only to choose among the fixed codes below. It is never
+        returned, logged, or compared beyond those literal markers.
+        """
+
         # command is selected only from fixed literals in this module. No request or
         # configuration value can become remote shell text.
         argv = [
@@ -1121,6 +1135,10 @@ class FixedBrokerOperations:
             "UpdateHostKeys=no",
             "-o",
             f"UserKnownHostsFile={self.config.kr260_known_hosts}",
+            # Fail an unreachable board inside the 10s bound, as a classified
+            # connect error instead of an anonymous subprocess timeout.
+            "-o",
+            f"ConnectTimeout={KR260_CONNECT_TIMEOUT_SECONDS}",
             f"{self.config.kr260_user}@{self.config.kr260_host}",
             command,
         ]
@@ -1129,15 +1147,21 @@ class FixedBrokerOperations:
                 argv,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
                 text=True,
                 timeout=10,
                 check=False,
             )
+        except subprocess.TimeoutExpired as exc:
+            raise BrokerError("operation_timeout", "fixed operation timed out") from exc
         except (OSError, subprocess.SubprocessError) as exc:
             raise BrokerError("operation_failed", "fixed operation failed") from exc
-        if int(getattr(result, "returncode", 1)) != 0:
-            raise BrokerError("operation_failed", "fixed operation failed")
+        returncode = int(getattr(result, "returncode", 1))
+        if returncode != 0:
+            code = _kr260_failure_code(
+                returncode, str(getattr(result, "stderr", "") or "")[:4096]
+            )
+            raise BrokerError(code, "fixed KR260 operation failed")
         return str(getattr(result, "stdout", "")) if capture else ""
 
     def _desktop_control(
@@ -1248,6 +1272,34 @@ class FixedBrokerOperations:
         if int(getattr(result, "returncode", 1)) != 0:
             raise BrokerError("operation_failed", "fixed operation failed")
         return {"accepted": True}
+
+
+def _kr260_failure_code(returncode: int, stderr: str) -> str:
+    """Map an ssh failure to one fixed code. ssh itself exits 255."""
+
+    if returncode == 255:
+        if (
+            "Host key verification failed" in stderr
+            or "REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr
+        ):
+            return "host_key_mismatch"
+        if "Permission denied" in stderr:
+            return "ssh_auth_failed"
+        if any(
+            marker in stderr
+            for marker in (
+                "No route to host",
+                "Connection timed out",
+                "Connection refused",
+                "Network is unreachable",
+                "Could not resolve hostname",
+            )
+        ):
+            return "host_unreachable"
+        return "ssh_failed"
+    if "a password is required" in stderr or "Interactive authentication" in stderr:
+        return "reboot_unauthorized"
+    return "operation_failed"
 
 
 def _metered_watts(payload: object) -> float | None:

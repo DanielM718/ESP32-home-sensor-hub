@@ -13,6 +13,23 @@ from typing import Any
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.assistant_config import Kr260Settings
 
+# An explicit refresh still re-probes at most this often, so a repeatedly
+# clicked Admin refresh cannot turn into an SSH loop against an offline board.
+MIN_REFRESH_INTERVAL_SECONDS = 10.0
+
+# Broker failure codes and what they say about the board. Anything else is an
+# unclassified SSH failure. Only these fixed literals reach the result.
+_BROKER_FAILURES: dict[str, tuple[str, bool]] = {
+    # code -> (error, the board answered SSH as some host)
+    "identity_mismatch": ("identity_mismatch", True),
+    "host_key_mismatch": ("host_key_mismatch", True),
+    "ssh_auth_failed": ("ssh_auth_failed", False),
+    "host_unreachable": ("host_unreachable", False),
+    "operation_timeout": ("ssh_timeout", False),
+    "malformed_result": ("malformed_result", False),
+    "operation_unavailable": ("capability_disabled", False),
+}
+
 
 @dataclass(frozen=True, slots=True)
 class Kr260Observation:
@@ -45,12 +62,14 @@ class Kr260Observer:
             return self._unavailable("disabled")
         with self._lock:
             cached = self._cached
-            if (
-                cached is not None
-                and not refresh
-                and self.monotonic() - cached.cached_at < self.settings.poll_interval_seconds
-            ):
-                return dict(cached.value)
+            if cached is not None:
+                age = self.monotonic() - cached.cached_at
+                if age < (
+                    MIN_REFRESH_INTERVAL_SECONDS
+                    if refresh
+                    else self.settings.poll_interval_seconds
+                ):
+                    return dict(cached.value)
             value = self._probe()
             self._cached = Kr260Observation(dict(value), self.monotonic())
             return value
@@ -67,17 +86,10 @@ class Kr260Observer:
         except BrokerError:
             return self._offline(observed_at, ping, "ssh_unavailable")
         if not result.ok:
-            error = (
-                "identity_mismatch"
-                if result.error_code == "identity_mismatch"
-                else "ssh_failed"
+            error, answered = _BROKER_FAILURES.get(
+                str(result.error_code), ("ssh_failed", False)
             )
-            return self._offline(
-                observed_at,
-                ping,
-                error,
-                ssh=error == "identity_mismatch",
-            )
+            return self._offline(observed_at, ping, error, ssh=answered)
         telemetry = result.status.get("telemetry")
         if not isinstance(telemetry, str):
             return self._offline(observed_at, ping, "malformed_result")
@@ -148,12 +160,24 @@ class Kr260Observer:
             return False
         return completed.returncode == 0
 
+    def invalidate(self) -> None:
+        """Drop the cached observation, e.g. after a reboot was requested."""
+
+        with self._lock:
+            self._cached = None
+
     def _offline(
         self, observed_at: float, ping: bool, error: str, *, ssh: bool = False
     ) -> dict[str, object]:
         return {
             **self._unavailable(error),
-            "operational_state": "identity_failed" if ssh else "offline",
+            "operational_state": (
+                "identity_failed"
+                if ssh
+                else "disabled"
+                if error == "capability_disabled"
+                else "offline"
+            ),
             "online": bool(ping),
             "network_reachable": bool(ping),
             "ssh_available": ssh,
