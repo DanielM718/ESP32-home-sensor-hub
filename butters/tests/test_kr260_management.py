@@ -38,8 +38,10 @@ if_state=up
 if_mac=00:0a:35:00:00:01
 if_rx=1234
 if_tx=5678
-ipv4=2: eth1    inet 192.168.1.125/24 scope global eth1
-ipv6=2: eth1    inet6 fd00::125/64 scope global
+ipv4=14: eth1    inet 192.168.1.125/24 brd 192.168.1.255 scope global dynamic noprefixroute eth1\\       valid_lft 42889sec preferred_lft 42889sec
+ipv6=14: eth1    inet6 2603:7081:4700:16c0::15ec/128 scope global dynamic noprefixroute \\       valid_lft 604490sec preferred_lft 604490sec
+14: eth1    inet6 fd00:2e67:be6b:f009:bc5f:30d4:9c55:f885/64 scope global temporary dynamic \\       valid_lft 604490sec preferred_lft 85862sec
+14: eth1    inet6 FD00::0125/64 scope global dynamic mngtmpaddr noprefixroute \\       valid_lft 604490sec preferred_lft 604490sec
 default_route=default via 192.168.1.1 dev eth1
 soc_temp_millic=29687
 """
@@ -467,6 +469,87 @@ def test_kr260_non_text_telemetry_is_malformed(tmp_path) -> None:
         settings(tmp_path), broker=OddBroker(), runner=Runner()
     ).observe(refresh=True)
     assert observed["error"] == "malformed_result"
+
+
+def observe_network(tmp_path, telemetry):
+    observed = Kr260Observer(
+        settings(tmp_path), broker=Broker(output=telemetry), runner=Runner()
+    ).observe(refresh=True)
+    assert observed["identity_verified"] is True
+    return observed["network"]
+
+
+def test_kr260_addresses_are_normalized_cidrs_per_family(tmp_path) -> None:
+    network = observe_network(tmp_path, TELEMETRY)
+
+    assert network["ipv4"] == ["192.168.1.125/24"]
+    # Every IPv6 record, including the ones `ip -o` prints on unprefixed
+    # lines, in board order and in canonical compressed form.
+    assert network["ipv6"] == [
+        "2603:7081:4700:16c0::15ec/128",
+        "fd00:2e67:be6b:f009:bc5f:30d4:9c55:f885/64",
+        "fd00::125/64",
+    ]
+    assert network["default_route"] == "default via 192.168.1.1 dev eth1"
+
+
+def test_kr260_empty_address_fields_do_not_swallow_the_next_field(tmp_path) -> None:
+    start = TELEMETRY.index("ipv4=")
+    end = TELEMETRY.index("default_route=")
+    telemetry = TELEMETRY[:start] + "ipv4=ipv6=" + TELEMETRY[end:]
+
+    network = observe_network(tmp_path, telemetry)
+
+    assert network["ipv4"] == []
+    assert network["ipv6"] == []
+    assert network["default_route"] == "default via 192.168.1.1 dev eth1"
+
+
+def test_kr260_missing_interface_reports_nothing_instead_of_neighbours(tmp_path) -> None:
+    start = TELEMETRY.index("if_state=")
+    end = TELEMETRY.index("default_route=")
+    telemetry = (
+        TELEMETRY[:start]
+        + "if_state=if_mac=if_rx=if_tx=ipv4=ipv6="
+        + TELEMETRY[end:].replace("dev eth1", "dev eth0")
+    )
+
+    network = observe_network(tmp_path, telemetry)
+
+    assert network["state"] == ""
+    assert network["mac"] == ""
+    assert network["rx_bytes"] is None
+    assert network["tx_bytes"] is None
+    assert network["ipv4"] == []
+    assert network["ipv6"] == []
+    assert network["default_route"] == "default via 192.168.1.1 dev eth0"
+
+
+@pytest.mark.parametrize(
+    "record",
+    (
+        "15: eth0    inet 10.0.0.5/24 scope global eth0",  # another interface
+        "14: eth1    inet fd00::1/64 scope global",  # family mismatch
+        "14: eth1    inet6 192.168.1.9/24 scope global",  # family mismatch
+        "14: eth1    inet 999.1.1.1/24 scope global",  # not an address
+        "14: eth1    inet 192.168.1.9/99 scope global",  # bad prefix
+        "eth1 inet 192.168.1.9/24",  # not an `ip -o` record
+    ),
+)
+def test_kr260_malformed_address_records_are_ignored(tmp_path, record) -> None:
+    telemetry = TELEMETRY.replace("soc_temp_millic=", f"{record}\nsoc_temp_millic=")
+
+    network = observe_network(tmp_path, telemetry)
+
+    assert network["ipv4"] == ["192.168.1.125/24"]
+    assert len(network["ipv6"]) == 3
+
+
+def test_kr260_address_lists_are_bounded(tmp_path) -> None:
+    flood = "".join(f"14: eth1    inet 10.0.{i}.1/24 scope global\n" for i in range(40))
+    telemetry = TELEMETRY.replace("soc_temp_millic=", f"{flood}soc_temp_millic=")
+
+    assert len(observe_network(tmp_path, telemetry)["ipv4"]) == 16
 
 
 def test_kr260_unreachable_broker_is_offline_not_an_exception(tmp_path) -> None:

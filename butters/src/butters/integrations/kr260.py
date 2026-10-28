@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ipaddress
+import re
 import secrets
 import subprocess
 import threading
@@ -29,6 +31,18 @@ _BROKER_FAILURES: dict[str, tuple[str, bool]] = {
     "malformed_result": ("malformed_result", False),
     "operation_unavailable": ("capability_disabled", False),
 }
+
+
+# The fixed telemetry command reads only this interface.
+_INTERFACE = "eth1"
+# One `ip -o addr` record: "<index>: <ifname>    inet[6] <address>/<prefix> ...".
+_ADDRESS_RECORD = re.compile(
+    r"\d+:\s+(?P<ifname>[^\s:]+)\s+(?P<family>inet6?)\s+(?P<cidr>\S+)"
+)
+# Each field is `printf 'key='; command`, so a command that prints nothing
+# (no address, missing interface) leaves the next field glued to its line.
+_GLUED_FIELD = re.compile(r"[a-z][a-z0-9_]*=")
+_MAX_ADDRESSES = 16
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,11 +145,11 @@ class Kr260Observer:
             "swap_free_bytes": _kib(parsed.get("SwapFree")),
             "soc_temperature_c": _millic(parsed.get("soc_temp_millic")),
             "network": {
-                "interface": "eth1",
+                "interface": _INTERFACE,
                 "state": parsed.get("if_state"),
                 "mac": parsed.get("if_mac"),
-                "ipv4": parsed.get("ipv4"),
-                "ipv6": parsed.get("ipv6"),
+                "ipv4": _addresses(telemetry, 4),
+                "ipv6": _addresses(telemetry, 6),
                 "default_route": parsed.get("default_route"),
                 "rx_bytes": _int(parsed.get("if_rx")),
                 "tx_bytes": _int(parsed.get("if_tx")),
@@ -204,6 +218,9 @@ def _parse(output: str) -> dict[str, str]:
     for line in output.splitlines():
         key, separator, value = line.partition("=")
         if separator and key and key.replace("_", "").isalnum():
+            while _GLUED_FIELD.match(value):
+                parsed[key] = ""
+                key, _, value = value.partition("=")
             parsed[key] = value.strip()[:4096]
             continue
         if ":" in line:
@@ -211,6 +228,36 @@ def _parse(output: str) -> dict[str, str]:
             if name in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
                 parsed[name] = raw.strip().split()[0]
     return parsed
+
+
+def _addresses(output: str, version: int) -> list[str]:
+    """Global addresses of the fixed interface as CIDR strings, in board order.
+
+    Records are found by shape rather than by which `key=` line they follow, so
+    extra addresses on unprefixed lines and glued empty fields are both handled.
+    """
+
+    family = "inet6" if version == 6 else "inet"
+    found: list[str] = []
+    for line in output.splitlines():
+        while _GLUED_FIELD.match(line):
+            line = line.partition("=")[2]
+        record = _ADDRESS_RECORD.match(line.strip())
+        if (
+            record is None
+            or record["ifname"] != _INTERFACE
+            or record["family"] != family
+        ):
+            continue
+        try:
+            address = ipaddress.ip_interface(record["cidr"])
+        except ValueError:
+            continue
+        if address.version == version and str(address) not in found:
+            found.append(str(address))
+        if len(found) >= _MAX_ADDRESSES:
+            break
+    return found
 
 
 def _int(value: object) -> int | None:
