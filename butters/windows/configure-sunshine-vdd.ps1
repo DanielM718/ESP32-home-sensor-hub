@@ -153,6 +153,7 @@ $audit = [ordered]@{
     desired_height = $targetHeight
     desired_refresh = $targetRefresh
     available_modes = @($availableModes | Sort-Object width,height,refresh -Unique)
+    displays = @($validatedInventory.displays)
 }
 if ($AuditOnly) {
     $auditResult = [pscustomobject]$audit
@@ -210,17 +211,19 @@ $values = [ordered]@{
 $lines = [Collections.Generic.List[string]]::new()
 foreach ($line in @(Get-Content -LiteralPath $sunshineConfig)) { $lines.Add([string]$line) }
 foreach ($entry in $values.GetEnumerator()) {
-    $matches = @()
+    # Not $matches: a successful -match replaces it with the automatic $Matches
+    # hashtable, and appending an index to that throws for any existing key.
+    $keyIndexes = [Collections.Generic.List[int]]::new()
     for ($index = 0; $index -lt $lines.Count; $index += 1) {
-        if ($lines[$index] -match ('^\s*' + [regex]::Escape($entry.Key) + '\s*=')) { $matches += $index }
+        if ($lines[$index] -match ('^\s*' + [regex]::Escape($entry.Key) + '\s*=')) { $keyIndexes.Add($index) }
     }
-    if ($matches.Count -eq 0) {
+    if ($keyIndexes.Count -eq 0) {
         $lines.Add("$($entry.Key) = $($entry.Value)")
         continue
     }
-    $lines[$matches[0]] = "$($entry.Key) = $($entry.Value)"
-    for ($matchIndex = $matches.Count - 1; $matchIndex -ge 1; $matchIndex -= 1) {
-        $lines.RemoveAt($matches[$matchIndex])
+    $lines[$keyIndexes[0]] = "$($entry.Key) = $($entry.Value)"
+    for ($keyIndex = $keyIndexes.Count - 1; $keyIndex -ge 1; $keyIndex -= 1) {
+        $lines.RemoveAt($keyIndexes[$keyIndex])
     }
 }
 $temporary = $sunshineConfig + '.vdd-config.tmp'

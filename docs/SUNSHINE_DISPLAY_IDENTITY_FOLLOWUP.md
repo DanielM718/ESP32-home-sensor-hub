@@ -40,9 +40,26 @@ The current fixed inventory is:
 | Gigabyte G27QC | `{379ade36-a9ac-587a-b130-9bffdcab7058}` | `DISPLAY\GBT270B\5&19CEA493&0&UID4353` | GBT / 270B / 158 |
 | AORUS FO32U2 | `{5d53b114-72f4-51ef-b227-befdc81192db}` | `DISPLAY\GBT3214\5&19CEA493&0&UID4357` | GBT / 3214 / serial unavailable |
 
-Every topology-affecting operation must re-query this inventory immediately
-before use. Missing, duplicate, or changed identity fails closed. The current
-`DISPLAYn` name is used only after it has been bound to the stable MTT target.
+No Butters helper changes Windows topology or display modes. The inventory is
+re-queried immediately before each readiness claim and before the Sunshine
+configuration write. Missing, duplicate, or changed identity fails closed. The
+current `DISPLAYn` name is used only after it has been bound to the stable MTT
+target, and only the dxgi-info output block whose name equals that source
+exactly can satisfy the capture-ready check.
+
+`QDC_ALL_PATHS` also returns every unused connector and, right after Gaming
+powers the outlets off, departing physical targets. Those can have an empty
+device path or fail the target-name query. Only a path that is both active and
+available must be fully identifiable; anything else is skipped because it
+cannot be the capture source. Failing on those rows would make the post-monitor
+readiness check fail on every Gaming transition.
+
+The pinned EDID manufacturer values are the big-endian PNP encodings (`MTT` =
+13972, `GBT` = 7252). `DISPLAYCONFIG_TARGET_DEVICE_NAME` does not document its
+byte order and is commonly observed byte-swapped, so the helper accepts either
+order and requires the `edidIdsValid` flag. The swapped forms of these two codes
+are not valid PNP IDs, so this cannot match another manufacturer. The read-only
+audit reports the observed values; record which order the host uses.
 
 ## Sunshine policy
 
@@ -80,16 +97,27 @@ bounds rather than best-effort socket timeouts.
 
 1. Back up `sunshine.conf`, `apps.json`, the installed Butters Windows helpers,
    and Sunshine's display-device log.
-2. Run only the read-only inventory and verify exactly one MTT, G27QC, and
-   FO32U2 identity. Stop on any mismatch.
-3. Validate the `QueryDisplayConfig` helper on Windows without calling
-   `ChangeDisplaySettingsEx`.
-4. With both outlets already on, confirm Local mode reports both Home Assistant
+2. Run only the read-only inventory (`-AuditOnly`, with both outlets already
+   on) and verify exactly one MTT, G27QC, and FO32U2 identity in its
+   `displays` list, including `edid_ids_valid` and the manufacturer byte
+   order. Stop on any mismatch.
+3. Validate the `QueryDisplayConfig` helper on Windows; no helper calls
+   `ChangeDisplaySettingsEx` any more. Confirm that `SunshineStatus` still
+   reports `virtual_display_ready` with both outlets off, since unused and
+   departing targets must be skipped rather than fail the inventory.
+4. Confirm `sunshine.conf` has no `global_prep_cmd` and `apps.json` has no
+   prep/undo commands that touch displays or outlets. This branch does not
+   manage either file.
+5. With `dd_configuration_option = disabled`, Sunshine no longer verifies the
+   target itself. Confirm what the installed build captures when `output_name`
+   cannot be resolved (it may fall back to another display). Butters' readiness
+   gate still requires the bound MTT target before reporting Gaming ready.
+6. With both outlets already on, confirm Local mode reports both Home Assistant
    entities `on` and leaves Sunshine and Windows topology untouched.
-5. In a supervised test window, start a stream, activate a physical display,
+7. In a supervised test window, start a stream, activate a physical display,
    end the stream, and confirm the physical display stays active. Do not run
    this while Vivado or another important workload is unattended.
-6. Verify a second identical disconnect notification is a no-op and verify a
+8. Verify a second identical disconnect notification is a no-op and verify a
    remote request superseded by Local mode never issues monitor-off after the
    Local request.
 

@@ -93,6 +93,7 @@ namespace Butters {
         public string MonitorDevicePath { get; internal set; }
         public ushort EdidManufacturerId { get; internal set; }
         public ushort EdidProductCodeId { get; internal set; }
+        public bool EdidIdsValid { get; internal set; }
         public uint ConnectorInstance { get; internal set; }
         public bool Active { get; internal set; }
         public bool Available { get; internal set; }
@@ -103,6 +104,7 @@ namespace Butters {
         const uint DISPLAYCONFIG_PATH_ACTIVE = 1;
         const uint GET_SOURCE_NAME = 1;
         const uint GET_TARGET_NAME = 2;
+        const uint TARGET_NAME_EDID_IDS_VALID = 4;
         const int ERROR_INSUFFICIENT_BUFFER = 122;
 
         [DllImport("user32.dll")]
@@ -143,11 +145,17 @@ namespace Butters {
                     source.header.adapterId = path.sourceInfo.adapterId;
                     source.header.id = path.sourceInfo.id;
                     bool active = (path.flags & DISPLAYCONFIG_PATH_ACTIVE) != 0;
+                    bool available = path.targetInfo.targetAvailable;
+                    // QDC_ALL_PATHS also returns every unused connector and,
+                    // right after an outlet powers a monitor off, departing
+                    // targets. Those may have no name; they cannot be the
+                    // capture source, so only a live path must be identifiable.
+                    bool required = active && available;
                     string sourceName = "";
                     if (active) {
-                        Check(DisplayConfigGetDeviceInfo(ref source),
-                            "DisplayConfigGetDeviceInfo(source)");
-                        sourceName = source.viewGdiDeviceName ?? "";
+                        int sourceStatus = DisplayConfigGetDeviceInfo(ref source);
+                        if (required) Check(sourceStatus, "DisplayConfigGetDeviceInfo(source)");
+                        if (sourceStatus == 0) sourceName = source.viewGdiDeviceName ?? "";
                     }
 
                     var target = new TARGET_DEVICE_NAME();
@@ -155,17 +163,21 @@ namespace Butters {
                     target.header.size = (uint)Marshal.SizeOf(typeof(TARGET_DEVICE_NAME));
                     target.header.adapterId = path.targetInfo.adapterId;
                     target.header.id = path.targetInfo.id;
-                    Check(DisplayConfigGetDeviceInfo(ref target),
-                        "DisplayConfigGetDeviceInfo(target)");
+                    int targetStatus = DisplayConfigGetDeviceInfo(ref target);
+                    if (targetStatus != 0) {
+                        if (required) Check(targetStatus, "DisplayConfigGetDeviceInfo(target)");
+                        continue;
+                    }
                     values.Add(new DisplayTarget {
                         SourceName = sourceName,
                         FriendlyName = target.monitorFriendlyDeviceName ?? "",
                         MonitorDevicePath = target.monitorDevicePath ?? "",
                         EdidManufacturerId = target.edidManufactureId,
                         EdidProductCodeId = target.edidProductCodeId,
+                        EdidIdsValid = (target.flags & TARGET_NAME_EDID_IDS_VALID) != 0,
                         ConnectorInstance = target.connectorInstance,
                         Active = active,
-                        Available = path.targetInfo.targetAvailable
+                        Available = available
                     });
                 }
                 return values.ToArray();
@@ -193,14 +205,19 @@ function Get-ButtersDisplayInventory {
             friendly_name = [string]$_.FriendlyName
             edid_manufacturer_id = [int]$_.EdidManufacturerId
             edid_product_code_id = [int]$_.EdidProductCodeId
+            edid_ids_valid = [bool]$_.EdidIdsValid
             connector_instance = [int64]$_.ConnectorInstance
             active = [bool]$_.Active
             available = [bool]$_.Available
         }
     })
-    if (@($raw | Where-Object { -not $_.instance_path }).Count -gt 0) {
-        throw 'Windows returned a monitor device path that cannot be mapped to a PnP instance'
+    # Unused connectors and departing targets report an empty device path. A
+    # live (active and available) path that cannot be mapped is a genuine
+    # identity gap and fails closed; anything else cannot be a capture source.
+    if (@($raw | Where-Object { -not $_.instance_path -and $_.active -and $_.available }).Count -gt 0) {
+        throw 'Windows returned an active monitor device path that cannot be mapped to a PnP instance'
     }
+    $raw = @($raw | Where-Object { $_.instance_path })
     # QDC_ALL_PATHS may describe the same target through several possible
     # source routes. Collapse those routes by stable target identity, but fail
     # if Windows claims two of them are active at once.
@@ -217,6 +234,7 @@ function Get-ButtersDisplayInventory {
             friendly_name = [string]$selected.friendly_name
             edid_manufacturer_id = [int]$selected.edid_manufacturer_id
             edid_product_code_id = [int]$selected.edid_product_code_id
+            edid_ids_valid = [bool]$selected.edid_ids_valid
             connector_instance = [int64]$selected.connector_instance
             active = $active.Count -eq 1
             available = @($_.Group | Where-Object { $_.available }).Count -gt 0
@@ -224,17 +242,29 @@ function Get-ButtersDisplayInventory {
     })
 }
 
+# Do not name result variables $matches: PowerShell names are case-insensitive
+# and any later -match would replace them with the automatic $Matches table.
 function Get-ButtersVirtualDisplay {
-    $matches = @(Get-ButtersDisplayInventory | Where-Object {
+    $found = @(Get-ButtersDisplayInventory | Where-Object {
         $_.instance_path -ieq $script:ButtersDisplayIdentity.VirtualInstance
     })
-    if ($matches.Count -ne 1) {
+    if ($found.Count -ne 1) {
         throw 'The stable MTT virtual display identity is missing or ambiguous'
     }
-    if (-not $matches[0].active -or -not $matches[0].source_name) {
+    if (-not $found[0].active -or -not $found[0].source_name) {
         throw 'The stable MTT virtual display identity is not active'
     }
-    return $matches[0]
+    return $found[0]
+}
+
+# EDID bytes 8-9 hold a big-endian PNP ID, and the pinned values use that
+# encoding. DISPLAYCONFIG_TARGET_DEVICE_NAME does not document its byte order
+# and is commonly observed byte-swapped, so accept either order. The swapped
+# forms of the pinned MTT and GBT codes are not valid PNP IDs, so this cannot
+# match a different manufacturer.
+function Test-ButtersEdidManufacturer([int]$Observed, [int]$Expected) {
+    $swapped = (($Expected -band 0xFF) -shl 8) -bor (($Expected -shr 8) -band 0xFF)
+    return ($Observed -eq $Expected -or $Observed -eq $swapped)
 }
 
 function Get-ButtersValidatedDisplayInventory {
@@ -256,13 +286,20 @@ function Get-ButtersValidatedDisplayInventory {
             product = $script:ButtersDisplayIdentity.OledEdidProductCodeId
         }
     )) {
-        $matches = @($inventory | Where-Object {
-            $_.instance_path -ieq $expected.instance -and
-            $_.edid_manufacturer_id -eq $expected.manufacturer -and
+        $candidates = @($inventory | Where-Object { $_.instance_path -ieq $expected.instance })
+        $found = @($candidates | Where-Object {
+            $_.edid_ids_valid -and
+            (Test-ButtersEdidManufacturer $_.edid_manufacturer_id $expected.manufacturer) -and
             $_.edid_product_code_id -eq $expected.product
         })
-        if ($matches.Count -ne 1) {
-            throw "Display identity $($expected.instance) has missing, ambiguous, or changed EDID data"
+        if ($found.Count -ne 1) {
+            # Report the observation so a read-only audit can be diagnosed
+            # without a second Windows session.
+            $observed = @($candidates | ForEach-Object {
+                "valid=$($_.edid_ids_valid) manufacturer=$($_.edid_manufacturer_id) product=$($_.edid_product_code_id)"
+            }) -join '; '
+            if (-not $observed) { $observed = 'absent' }
+            throw "Display identity $($expected.instance) has missing, ambiguous, or changed EDID data (observed: $observed)"
         }
     }
     $virtual = @($inventory | Where-Object {

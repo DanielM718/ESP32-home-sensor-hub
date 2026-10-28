@@ -53,6 +53,19 @@ function Invoke-SunshineCaptureProbe {
     return [pscustomobject]@{ capture_ready = $false; virtual_display_ready = $false }
 }
 
+function Test-DxgiOutputAttached([string]$DxgiOutput, [string]$SourceName) {
+    # Judge only the block for exactly this source: a bare prefix regex would
+    # let \\.\DISPLAY2 match \\.\DISPLAY26, or borrow a later output's
+    # AttachedToDesktop line.
+    if (-not $SourceName) { return $false }
+    foreach ($block in ($DxgiOutput -split '(?m)^(?=[ \t]*Output Name[ \t]*:)')) {
+        if ($block -notmatch '(?m)\A[ \t]*Output Name[ \t]*:[ \t]*(?<name>[^\r\n]*?)[ \t]*\r?$') { continue }
+        if ($Matches.name -ine $SourceName) { continue }
+        return [bool]($block -match '(?m)^[ \t]*AttachedToDesktop[ \t]*:[ \t]*yes[ \t]*\r?$')
+    }
+    return $false
+}
+
 function Write-SunshineCaptureProbe {
     $dxgiOutput = ''
     try { $dxgiOutput = (& $sunshineDxgiInfo 2>$null | Out-String) } catch {}
@@ -71,11 +84,7 @@ function Write-SunshineCaptureProbe {
     $virtualDisplayReady = [bool](
         $stableVirtual -and
         $configuredOutput -ieq $script:ButtersDisplayIdentity.VirtualSunshineId -and
-        $dxgiOutput -match (
-            '(?ms)Output Name\s*:\s*' +
-            [regex]::Escape([string]$stableVirtual.source_name) +
-            '.*?AttachedToDesktop\s*:\s*yes'
-        )
+        (Test-DxgiOutputAttached $dxgiOutput ([string]$stableVirtual.source_name))
     )
     $result = [pscustomobject][ordered]@{
         timestamp_utc = (Get-Date).ToUniversalTime().ToString('o')
