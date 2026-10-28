@@ -400,7 +400,7 @@ async function refreshKr260() {
     axis(document.querySelector("#kr260-network"), [
       ["Interface", network.interface||"unknown"],
       ["Link", network.state||"unknown"],
-      ["IPv4", network.ipv4||"unknown"],
+      ["IPv4", Array.isArray(network.ipv4)&&network.ipv4.length?network.ipv4.join(", "):"unknown"],
       ["Default route", network.default_route||"unknown"],
     ]);
     renderLastOperation(document.querySelector("#kr260-last-operation"), state.last_operation, "No KR260 operation has been requested from this console.");
