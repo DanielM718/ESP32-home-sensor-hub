@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import threading
 import time
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
@@ -210,15 +211,40 @@ class NasAdapter:
 class Kr260Adapter:
     """One identity-verified KR260 with observation and normal reboot only."""
 
+    # A reboot that may have been sent blocks another until the board reports
+    # a different boot ID or this long has passed: a K26 normally boots in ~2
+    # minutes, and a second request against the dying sshd would be ambiguous.
+    REBOOT_COOLDOWN_SECONDS = 300.0
+    # Failures decided before the reboot command could run on the board.
+    _NOT_SENT = frozenset(
+        {
+            "identity_mismatch",
+            "host_key_mismatch",
+            "ssh_auth_failed",
+            "host_unreachable",
+            "reboot_unauthorized",
+            "operation_unavailable",
+            "broker_unconfigured",
+            "broker_unavailable",
+            "cancelled",
+        }
+    )
+
     def __init__(
         self,
         observer: Kr260Observer,
         actions: FixedActionAdapter,
         reboot_settings: KnownDeviceSettings,
+        *,
+        monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.observer = observer
         self.actions = actions
         self.reboot_settings = reboot_settings
+        self.monotonic = monotonic
+        self._lock = threading.Lock()
+        # (monotonic time, boot ID before) of the last reboot that may have run.
+        self._last_reboot: tuple[float, str | None] | None = None
 
     def status(self, *, refresh: bool = False) -> dict[str, object]:
         value = self.observer.observe(refresh=refresh)
@@ -228,6 +254,17 @@ class Kr260Adapter:
             "shutdown": False,
             "jtag_reset": False,
         }
+        last = self._last_reboot
+        if last is not None:
+            booted = value.get("boot_id")
+            value["last_reboot_request"] = {
+                "age_seconds": round(self.monotonic() - last[0], 1),
+                "previous_boot_id": last[1],
+                # None until the board is observed again; never inferred.
+                "boot_changed": None
+                if not value.get("identity_verified") or not booted
+                else booted != last[1],
+            }
         return value
 
     def reboot(self, cancel_event: threading.Event | None = None) -> dict[str, object]:
@@ -235,19 +272,45 @@ class Kr260Adapter:
             raise IntegrationError(
                 "capability_unavailable", "KR260 reboot is not configured"
             )
-        before = self.observer.observe(refresh=True)
-        if not before.get("identity_verified"):
-            raise IntegrationError(
-                "identity_unverified", "KR260 identity could not be verified"
-            )
-        result = self.actions.execute(
-            BrokerOperation.KR260_REBOOT, cancel_event=cancel_event
-        )
+        # Serialized, so two concurrent requests cannot both pass the checks.
+        with self._lock:
+            before = self.observer.observe(refresh=True)
+            if not before.get("identity_verified"):
+                raise IntegrationError(
+                    "identity_unverified", "KR260 identity could not be verified"
+                )
+            last = self._last_reboot
+            if (
+                last is not None
+                and self.monotonic() - last[0] < self.REBOOT_COOLDOWN_SECONDS
+                and before.get("boot_id") == last[1]
+            ):
+                raise IntegrationError(
+                    "reboot_in_progress",
+                    "a KR260 reboot was already requested and has not completed",
+                )
+            try:
+                result = self.actions.execute(
+                    BrokerOperation.KR260_REBOOT, cancel_event=cancel_event
+                )
+            except IntegrationError as exc:
+                if exc.code not in self._NOT_SENT:
+                    # The outcome is unknown, so treat it as possibly sent.
+                    self._last_reboot = (self.monotonic(), _boot_id(before))
+                    self.observer.invalidate()
+                raise
+            self._last_reboot = (self.monotonic(), _boot_id(before))
+            self.observer.invalidate()
         return {
             **result,
             "outcome": "reboot_requested",
             "previous_boot_id": before.get("boot_id"),
         }
+
+
+def _boot_id(observation: dict[str, object]) -> str | None:
+    value = observation.get("boot_id")
+    return value if isinstance(value, str) else None
 
 
 class EnvironmentControlAdapter:

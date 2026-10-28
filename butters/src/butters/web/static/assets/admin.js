@@ -382,7 +382,8 @@ async function refreshKr260() {
     const load=Number.isFinite(state.load_1m)&&Number.isFinite(state.load_5m)&&Number.isFinite(state.load_15m);
     const memory=Number.isFinite(state.memory_utilization_percent)?state.memory_utilization_percent:null;
     const temperature=Number.isFinite(state.soc_temperature_c)?state.soc_temperature_c:null;
-    summary.textContent=`${state.operational_state}${state.identity_verified?" · identity verified":""}`;
+    // The fixed failure code says why: unreachable, auth, host key, timeout.
+    summary.textContent=`${state.operational_state}${state.identity_verified?" · identity verified":""}${state.error?` · ${state.error}`:""}`;
     axis(document.querySelector("#kr260-status"), [
       ["Online", state.online?"yes":"no"],
       ["SSH", state.ssh_available?"yes":"no"],

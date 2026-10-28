@@ -167,6 +167,7 @@ safety_max_age_seconds = 120.0
 
 # Normal reboot only. This gate remains closed until the KR260 account has one
 # narrowly authorized non-interactive reboot path and a live reboot succeeds.
+# That path is config/kr260/butters-kr260-reboot.sudoers (see KR260_MANAGEMENT.md).
 # Shutdown is intentionally not a capability.
 [actions.kr260_reboot]
 enabled = false
