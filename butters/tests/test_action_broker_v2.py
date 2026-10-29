@@ -187,6 +187,8 @@ def test_fixed_operations_use_only_server_configuration_and_explicit_argv(
     def opener(request, **_kwargs):
         ha_requests.append(request)
         entity = request.full_url.rsplit("/", 1)[-1]
+        if request.method == "GET" and entity.startswith("sensor."):
+            return Response({"state": "0.0", "attributes": {"unit_of_measurement": "W"}})
         if request.method == "GET":
             return Response({"entity_id": entity, "state": states[entity]})
         payload = json.loads(request.data)
@@ -209,8 +211,10 @@ def test_fixed_operations_use_only_server_configuration_and_explicit_argv(
         BrokerOperation.DESKTOP_WAKE,
         BrokerOperation.DESKTOP_MONITORS_OFF,
     }
-    handlers[BrokerOperation.DESKTOP_WAKE]()
+    # The wake precondition reads the outlets, so they are turned off first.
     monitor_result = handlers[BrokerOperation.DESKTOP_MONITORS_OFF]()
+    wake_result = handlers[BrokerOperation.DESKTOP_WAKE]()
+    assert wake_result["monitors_verified_off"] is True
     assert invocations[0][0] == [
         "/usr/bin/wakeonlan",
         "-i",
@@ -280,6 +284,8 @@ def test_monitor_control_reports_already_partial_auth_and_unavailable_states(
 
     def partial_opener(request, **_kwargs):
         entity = request.full_url.rsplit("/", 1)[-1]
+        if request.method == "GET" and entity.startswith("sensor."):
+            return Response({"state": "0.0", "attributes": {"unit_of_measurement": "W"}})
         if request.method == "GET":
             return Response({"state": states[entity]})
         states["switch.desktop_gigabyte"] = "off"
@@ -573,6 +579,9 @@ class _MonitorHarness:
         self.total_reads = 0
         self.posts: list[dict[str, object]] = []
         self.get_paths: list[str] = []
+        self.power_paths: list[str] = []
+        self.power: dict[str, str] = {}
+        self.power_failure: Exception | None = None
 
     class Response:
         status = 200
@@ -600,6 +609,17 @@ class _MonitorHarness:
             self.desired = path.rsplit("turn_", 1)[-1]
             return self.Response([])
         entity = request.full_url.rsplit("/", 1)[-1]
+        if entity.startswith("sensor."):
+            # The fixed P115 meters, read after the outlets settle.
+            self.power_paths.append(request.full_url.split("/api/", 1)[-1])
+            if self.power_failure is not None:
+                raise self.power_failure
+            return self.Response(
+                {
+                    "state": self.power.get(entity, "0.0"),
+                    "attributes": {"unit_of_measurement": "W"},
+                }
+            )
         self.get_paths.append(request.full_url.split("/api/", 1)[-1])
         self.total_reads += 1
         if (
@@ -856,10 +876,15 @@ def test_monitor_settling_never_widens_the_fixed_entity_or_service_surface(
             "switch.desktop_oled",
         ]
     }
-    # Every polled read targeted only the two approved entities.
+    # Every polled read targeted only the two approved entities, and the only
+    # other reads were their two fixed meters.
     assert set(harness.get_paths) == {
         "states/switch.desktop_gigabyte",
         "states/switch.desktop_oled",
+    }
+    assert set(harness.power_paths) == {
+        "states/sensor.desktop_gigabyte_current_consumption",
+        "states/sensor.desktop_oled_current_consumption",
     }
     # The settling bounds are broker-local constants, not caller or config input.
     assert broker_module.MONITOR_SETTLE_DEADLINE_SECONDS == 20.0
@@ -1355,3 +1380,158 @@ def test_a_healthy_settle_still_returns_a_bounded_partial_result(tmp_path) -> No
     assert result["accepted"] is False
     assert result["partial"] is False
     assert clock.now < MONITOR_OPERATION_DEADLINE_SECONDS
+
+
+# --- desktop.wake precondition: both outlets read off right now -------------
+
+
+def _wake_operations(tmp_path, harness, *, token: str = "token"):
+    ran: list[list[str]] = []
+
+    class Result:
+        returncode = 0
+
+    def runner(argv, **_kwargs):
+        ran.append(argv)
+        return Result()
+
+    clock = FakeClock()
+    operations = FixedBrokerOperations(
+        FixedBrokerConfig(
+            "192.168.1.209",
+            "Daniel",
+            "34:5A:60:D7:4C:2C",
+            "192.168.1.255",
+            tmp_path / "windows_remote_mode",
+            enabled_operations=frozenset({BrokerOperation.DESKTOP_WAKE}),
+        ),
+        runner=runner,
+        home_assistant_token=token,
+        opener=harness.opener,
+        sleeper=clock.sleep,
+        monotonic=clock.monotonic,
+    )
+    return operations, ran
+
+
+def test_wake_runs_only_after_a_fresh_read_finds_both_outlets_off(tmp_path) -> None:
+    harness = _MonitorHarness("off", {})
+    operations, ran = _wake_operations(tmp_path, harness)
+
+    result = operations.handlers()[BrokerOperation.DESKTOP_WAKE]()
+
+    assert ran == [["/usr/bin/wakeonlan", "-i", "192.168.1.255", "34:5A:60:D7:4C:2C"]]
+    assert result["accepted"] is True
+    assert result["monitors_verified_off"] is True
+    assert result["monitor_entities"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, "off"
+    )
+    assert result["monitor_power_w"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, 0.0
+    )
+    # The precondition only reads: no service call reaches Home Assistant.
+    assert harness.posts == []
+    assert set(harness.power_paths) == {
+        "states/sensor.desktop_gigabyte_current_consumption",
+        "states/sensor.desktop_oled_current_consumption",
+    }
+
+
+@pytest.mark.parametrize("other_state", ("on", "unavailable", "unknown"))
+def test_wake_is_refused_unless_both_outlets_read_off(tmp_path, other_state) -> None:
+    harness = _MonitorHarness("off", {})
+    harness.states["switch.desktop_oled"] = other_state
+    operations, ran = _wake_operations(tmp_path, harness)
+
+    with pytest.raises(BrokerError) as refused:
+        operations.desktop_wake()
+
+    assert refused.value.code == "monitors_not_off"
+    assert ran == []
+    assert harness.posts == []
+
+
+def test_wake_is_refused_while_a_meter_still_reports_a_draw(tmp_path) -> None:
+    harness = _MonitorHarness("off", {})
+    harness.power["sensor.desktop_gigabyte_current_consumption"] = "27.4"
+    operations, ran = _wake_operations(tmp_path, harness)
+
+    with pytest.raises(BrokerError) as refused:
+        operations.desktop_wake()
+
+    assert refused.value.code == "monitor_power_present"
+    assert ran == []
+
+
+def test_wake_tolerates_an_unreadable_meter_when_outlets_read_off(tmp_path) -> None:
+    harness = _MonitorHarness("off", {})
+    harness.power_failure = URLError("meter read failed")
+    operations, ran = _wake_operations(tmp_path, harness)
+
+    result = operations.desktop_wake()
+
+    assert len(ran) == 1
+    assert result["monitor_power_w"] == dict.fromkeys(
+        FixedBrokerOperations.MONITOR_ENTITIES, None
+    )
+
+
+def test_wake_fails_closed_without_home_assistant(tmp_path) -> None:
+    harness = _MonitorHarness(
+        "off", {}, fail_after_reads=0, failure=URLError("home assistant down")
+    )
+    operations, ran = _wake_operations(tmp_path, harness)
+    with pytest.raises(BrokerError) as unavailable:
+        operations.desktop_wake()
+    assert unavailable.value.code == "home_assistant_unavailable"
+
+    unconfigured, ran_unconfigured = _wake_operations(
+        tmp_path, _MonitorHarness("off", {}), token=""
+    )
+    with pytest.raises(BrokerError) as missing:
+        unconfigured.desktop_wake()
+    assert missing.value.code == "home_assistant_unconfigured"
+    assert ran == ran_unconfigured == []
+
+
+def test_monitors_off_reports_metered_power_from_only_the_fixed_sensors(
+    tmp_path,
+) -> None:
+    harness = _MonitorHarness(
+        "on", dict.fromkeys(FixedBrokerOperations.MONITOR_ENTITIES, 0)
+    )
+    harness.power["sensor.desktop_oled_current_consumption"] = "unavailable"
+    operations, _clock = _monitor_operations(tmp_path, harness)
+
+    off = operations.desktop_monitors_off()
+    on = operations.desktop_monitors_on()
+
+    assert off["power_w"] == {
+        "switch.desktop_gigabyte": 0.0,
+        "switch.desktop_oled": None,
+    }
+    # Turning on reports no power evidence and reads no meter.
+    assert "power_w" not in on
+    assert harness.power_paths == [
+        "states/sensor.desktop_gigabyte_current_consumption",
+        "states/sensor.desktop_oled_current_consumption",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("payload", "expected"),
+    (
+        ({"state": "0.0", "attributes": {"unit_of_measurement": "W"}}, 0.0),
+        ({"state": "12.5", "attributes": {"unit_of_measurement": "W"}}, 12.5),
+        ({"state": "0.0", "attributes": {"unit_of_measurement": "kW"}}, None),
+        ({"state": "unavailable", "attributes": {"unit_of_measurement": "W"}}, None),
+        ({"state": "nan", "attributes": {"unit_of_measurement": "W"}}, None),
+        ({"state": "-1", "attributes": {"unit_of_measurement": "W"}}, None),
+        ({"state": "0.0"}, None),
+        ([], None),
+    ),
+)
+def test_metered_watts_accepts_only_finite_watt_readings(payload, expected) -> None:
+    from butters.actions.broker import _metered_watts
+
+    assert _metered_watts(payload) == expected

@@ -113,6 +113,17 @@ heartbeat_aging_seconds = 30
 heartbeat_stale_seconds = 45
 request_timeout_seconds = 30
 
+# Fixed KR260 observation through the root-owned, pinned-host action broker.
+# The unprivileged web process has no SSH credential or remote-command path.
+[kr260]
+enabled = false
+host = "192.168.1.125"
+expected_hostname = "kria"
+expected_machine_id = "7a6ccc6abe67407b93558d1efcb36587"
+interface = "eth1"
+poll_interval_seconds = 45.0
+command_timeout_seconds = 10.0
+
 # Separate NAS machine ingress. This repository and production deployment ship
 # it disabled; staging requires independent nas-primary credentials.
 [nas_agent_ingress]
@@ -146,6 +157,19 @@ safety_max_age_seconds = 120.0
 # never imply shutdown. This server gate and the NAS Agent's local gate both
 # ship false; a later staging approval must enable them independently.
 [actions.nas_shutdown]
+enabled = false
+configured = false
+maximum_duration_minutes = 1
+local_console_allowed = false
+require_fresh_sensor = false
+safety_entity = ""
+safety_max_age_seconds = 120.0
+
+# Normal reboot only. This gate remains closed until the KR260 account has one
+# narrowly authorized non-interactive reboot path and a live reboot succeeds.
+# That path is config/kr260/butters-kr260-reboot.sudoers (see KR260_MANAGEMENT.md).
+# Shutdown is intentionally not a capability.
+[actions.kr260_reboot]
 enabled = false
 configured = false
 maximum_duration_minutes = 1

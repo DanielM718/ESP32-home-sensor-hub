@@ -1,0 +1,19 @@
+# KR260 board-side authorization for the one Butters restart operation.
+#
+# Install over the earlier /etc/sudoers.d/butters-kr260-reboot, which granted
+# `systemctl --no-wall --no-block reboot`. That warm reboot wedges this board
+# (KR260_MANAGEMENT.md), so it is removed by this replacement, not kept beside
+# it. Install as root:root 0440 only after validating it:
+#
+#   sudo visudo -cf butters-kr260-reboot.sudoers
+#   sudo install -o root -g root -m 0440 butters-kr260-reboot.sudoers \
+#       /etc/sudoers.d/butters-kr260-reboot
+#   sudo visudo -c
+#
+# It removes the password prompt for exactly one command, the root-owned kexec
+# restart wrapper, with no arguments: `""` forbids every argument, including
+# the wrapper's `check` mode. There is no wildcard, no shell, and no reboot,
+# poweroff, halt or shutdown. Never add SETENV or env_keep here: the wrapper's
+# KX_* variables are test seams that sudo's env_reset must keep stripping.
+# Remove the file to revoke it; the broker then reports reboot_unauthorized.
+ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/butters-kr260-kexec-restart ""

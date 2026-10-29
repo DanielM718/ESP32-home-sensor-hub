@@ -22,6 +22,7 @@
         <h2>Systems</h2>
         <button data-panel="system">Butters</button>
         <button data-panel="desktop">Desktop</button>
+        <button data-panel="kr260">KR260</button>
         <button data-panel="nas">NAS</button>
       </div>
       <div class="nav-group">
@@ -150,6 +151,29 @@
         <div class="button-row"><button id="desktop-shutdown" class="danger-button" type="button">Shut Down Desktop…</button></div>
         <div id="desktop-shutdown-confirm" class="confirm-panel" role="group" aria-label="Confirm desktop shutdown" hidden></div>
         <p id="desktop-shutdown-status" class="tool-action-status" role="status">Shutdown has not been requested.</p>
+      </div>
+    </section>
+
+    <section id="panel-kr260" class="admin-panel">
+      <div class="control-card tool-card" id="kr260-card">
+        <div class="tool-head">
+          <h2>KR260</h2>
+          <span id="kr260-summary" class="tool-headline" role="status">Checking KR260 state…</span>
+        </div>
+        <h3>Current observed state</h3>
+        <p class="tool-note">One fixed board over pinned-host SSH. The interface cannot accept a host, username, command, or shell input.</p>
+        <div id="kr260-status" class="axis-grid" role="group" aria-label="Current observed KR260 state">Select KR260 to load status.</div>
+        <h3>Network</h3>
+        <div id="kr260-network" class="axis-grid" role="group" aria-label="KR260 network state"></div>
+        <h3>Last operation</h3>
+        <p id="kr260-last-operation" class="tool-note" role="status">No KR260 operation has been requested from this console.</p>
+        <div class="button-row">
+          <button id="kr260-refresh" class="secondary-button" type="button">Refresh status</button>
+          <button id="kr260-reboot" class="danger-button" type="button">Restart KR260 (kexec)…</button>
+        </div>
+        <div id="kr260-reboot-confirm" class="confirm-panel" role="group" aria-label="Confirm KR260 restart" hidden></div>
+        <p id="kr260-action-status" class="tool-action-status" role="status">Reboot has not been requested.</p>
+        <p class="tool-note">Shutdown and JTAG reset are intentionally unavailable until shutdown-to-JTAG recovery is proven on the installed hardware.</p>
       </div>
     </section>
 

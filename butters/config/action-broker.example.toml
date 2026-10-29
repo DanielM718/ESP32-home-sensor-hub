@@ -32,6 +32,12 @@ broadcast = "192.168.1.255"
 api_url = ""
 api_key = ""
 
+[kr260]
+host = "192.168.1.125"
+user = "ubuntu"
+key = "/etc/butters/kr260/id_ed25519"
+expected_machine_id = "7a6ccc6abe67407b93558d1efcb36587"
+
 # Every privileged operation has a second, broker-local gate. Keep all values
 # false until its fixed target, credential, and operation have been reviewed.
 [operations]
@@ -64,6 +70,8 @@ api_key = ""
 "host.shutdown" = false
 "nas.wake" = false
 "nas.shutdown" = false
+"kr260.status" = false
+"kr260.reboot" = false
 "environment.heater_on" = false
 "environment.heater_off" = false
 "environment.dehumidifier_on" = false

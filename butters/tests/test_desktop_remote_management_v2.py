@@ -280,15 +280,34 @@ def test_wake_and_simple_parsec_start_are_separate_fixed_operations() -> None:
     calls: list[BrokerOperation] = []
 
     class Actions:
+        def __init__(self) -> None:
+            self.monitors: dict[str, object] = {"accepted": True, "partial": False}
+
         def execute(self, operation, *, cancel_event=None):
             calls.append(operation)
+            if operation is BrokerOperation.DESKTOP_MONITORS_OFF:
+                return dict(self.monitors)
             return {"accepted": True}
 
-    implementation = ActionSkillImplementations(None, Actions(), None, None)
+    actions = Actions()
+    implementation = ActionSkillImplementations(None, actions, None, None)
     arguments = DesktopArgs("desktop")
 
+    # A direct wake turns both outlets off and verifies them first.
     implementation.wake_desktop(arguments)
-    assert calls == [BrokerOperation.DESKTOP_WAKE]
+    assert calls == [BrokerOperation.DESKTOP_MONITORS_OFF, BrokerOperation.DESKTOP_WAKE]
+
+    for unverified in (
+        {"accepted": False, "partial": True},
+        {"accepted": True, "partial": True},
+        {"accepted": True},
+    ):
+        calls.clear()
+        actions.monitors = unverified
+        with pytest.raises(IntegrationError) as refused:
+            implementation.wake_desktop(arguments)
+        assert refused.value.code == "monitor_off_unverified"
+        assert calls == [BrokerOperation.DESKTOP_MONITORS_OFF]
 
     calls.clear()
     implementation.ensure_parsec_running(arguments)

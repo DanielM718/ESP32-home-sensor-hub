@@ -10,8 +10,10 @@ from butters.integrations.actions import (
     EnvironmentControlAdapter,
     FixedActionAdapter,
     HostStatusAdapter,
+    Kr260Adapter,
     NasAdapter,
 )
+from butters.integrations.model import IntegrationError
 from butters.skills.model import (
     ActionClass,
     AuthenticationLevel,
@@ -39,11 +41,13 @@ class ActionSkillImplementations:
         actions: FixedActionAdapter,
         nas: NasAdapter,
         environment: EnvironmentControlAdapter,
+        kr260: Kr260Adapter | None = None,
     ) -> None:
         self.host = host
         self.actions = actions
         self.nas = nas
         self.environment = environment
+        self.kr260 = kr260
 
     @staticmethod
     def authorize_desktop(arguments: SkillArguments) -> None:
@@ -84,11 +88,35 @@ class ActionSkillImplementations:
             "environment_control_status", self.environment.status()
         )
 
+    def get_kr260_status(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        return StructuredSkillResult("kr260_status", self.kr260.status())
+
+    def reboot_kr260(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        return StructuredSkillResult(
+            "action_result", self.kr260.reboot(current_cancel_event())
+        )
+
     def broker_action(self, operation: BrokerOperation) -> SkillResult:
         result = self.actions.execute(operation, cancel_event=current_cancel_event())
         return StructuredSkillResult("action_result", result)
 
     def wake_desktop(self, _arguments: SkillArguments) -> SkillResult:
+        # desktop.wake refuses unless both monitor outlets read off, so they
+        # are turned off and verified through the fixed operation first. An
+        # unverified result stops here; the broker re-checks before the packet.
+        monitors = self.actions.execute(
+            BrokerOperation.DESKTOP_MONITORS_OFF,
+            cancel_event=current_cancel_event(),
+        )
+        if monitors.get("accepted") is not True or monitors.get("partial") is not False:
+            raise IntegrationError(
+                "monitor_off_unverified",
+                "both monitor outlets must verify off before the desktop is woken",
+            )
         return self.broker_action(BrokerOperation.DESKTOP_WAKE)
 
     def monitors_off(self, _arguments: SkillArguments) -> SkillResult:
@@ -164,8 +192,9 @@ def register_action_skills(
     action_adapter: FixedActionAdapter,
     nas: NasAdapter,
     environment: EnvironmentControlAdapter,
+    kr260: Kr260Adapter | None = None,
 ) -> None:
-    impl = ActionSkillImplementations(host, action_adapter, nas, environment)
+    impl = ActionSkillImplementations(host, action_adapter, nas, environment, kr260)
     empty_schema = {"type": "object", "properties": {}, "additionalProperties": False}
     desktop_schema = {
         "type": "object",
@@ -227,6 +256,11 @@ def register_action_skills(
         "get_environment_control_status",
         "Read configured heater, dehumidifier, ventilation, and override status.",
         impl.get_environment_control_status,
+    )
+    read(
+        "get_kr260_status",
+        "Read the identity-verified KR260's bounded hardware and Linux status.",
+        impl.get_kr260_status,
     )
 
     def action(
@@ -382,6 +416,18 @@ def register_action_skills(
         # Powering the NAS off is never a local-console convenience, and it is
         # deliberately absent from every conversational planner catalog: see
         # CONVERSATIONAL_PLANNER_ACTIONS in butters.web.service.
+        local_console=False,
+        schema=empty_schema,
+        parser=_parse_none,
+    )
+    action(
+        "reboot_kr260",
+        "Restart Linux on only the identity-verified KR260 through its fixed kexec wrapper.",
+        impl.reboot_kr260,
+        authentication=AuthenticationLevel.FRESH,
+        available=(
+            actions.kr260_reboot.enabled and actions.kr260_reboot.configured
+        ),
         local_console=False,
         schema=empty_schema,
         parser=_parse_none,

@@ -1584,6 +1584,46 @@ class BetaAssistantService:
             subject="desktop",
         )
 
+    # ----- KR260 -------------------------------------------------------------
+
+    def kr260_admin_status(self, *, refresh: bool = False) -> dict[str, object]:
+        """Current fixed-board observation plus separate operation history."""
+
+        adapter = self.assistant.kr260_adapter
+        if adapter is None:
+            return {
+                "device": "kr260",
+                "operational_state": "unconfigured",
+                "online": False,
+                "error": "adapter_unavailable",
+                "capability": {
+                    "monitoring": False,
+                    "reboot": False,
+                    "shutdown": False,
+                    "jtag_reset": False,
+                },
+                "last_operation": self.last_operation("kr260"),
+            }
+        return {
+            **adapter.status(refresh=refresh),
+            "last_operation": self.last_operation("kr260"),
+        }
+
+    def start_admin_kr260_reboot(
+        self, session: BrowserSession, *, confirmed: bool
+    ) -> dict[str, object]:
+        if not confirmed:
+            raise ActionCoordinatorError(
+                "confirmation_required", "KR260 reboot requires confirmation"
+            )
+        return self._start_admin_action(
+            session,
+            skill="reboot_kr260",
+            arguments={},
+            summary="Restart the identity-verified KR260 (kexec)",
+            subject="kr260",
+        )
+
     # ----- NAS ---------------------------------------------------------------
 
     def nas_admin_status(self, *, refresh: bool = False) -> dict[str, object]:

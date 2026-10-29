@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import re
 import secrets
 import socket
@@ -13,13 +14,13 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -58,6 +59,19 @@ MONITOR_SETTLE_POLL_SECONDS = 0.5
 # which is the state that invites a retry of an operation already in flight.
 MONITOR_OPERATION_DEADLINE_SECONDS = 25.0
 
+# desktop.wake never transmits a packet unless a fresh read, taken by the wake
+# operation itself, finds both monitor outlets off. Windows enumerates whatever
+# physical display is powered while it boots, which defeats the virtual-display
+# capture every remote mode depends on, so the order is an invariant enforced
+# here, below every caller. The precondition only reads; turning the outlets
+# off stays the caller's explicit, separately audited desktop.monitors_off.
+WAKE_PRECONDITION_DEADLINE_SECONDS = 8.0
+# A P115 whose relay is open meters 0.0 W. A reading above this contradicts a
+# reported "off" -- typically the plug has not reported since the outlet
+# changed -- so it blocks a wake until a later reading agrees. A missing or
+# non-numeric reading is not evidence either way; the switch state decides.
+MONITOR_OFF_POWER_CEILING_W = 1.0
+
 # urlopen's timeout is per socket operation, not a wall-clock bound, so a peer
 # that sends one byte just inside every timeout window holds a single read open
 # for as long as it likes. The broker answers connections serially, so that one
@@ -71,6 +85,56 @@ HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
 # the serial broker open.
 NAS_API_DEADLINE_SECONDS = 10.0
 NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
+
+# Fixed KR260 restart: exactly the argv the board's sudoers rule permits. The
+# board's warm reboot (`systemctl reboot` -> PMUFW system reset) wedges it until
+# a power cycle, so the restart is a kexec through a root-owned wrapper
+# (config/kr260/kr260-kexec-restart.sh) that refuses rather than reboots.
+_KR260_RESTART_WRAPPER = "/usr/local/sbin/butters-kr260-kexec-restart"
+_KR260_REBOOT_COMMAND = f"/usr/bin/sudo -n {_KR260_RESTART_WRAPPER}"
+# The wrapper's refusals. Each is decided before the kexec handoff, so nothing
+# was restarted.
+_KR260_RESTART_REFUSALS: dict[int, str] = {
+    10: "restart_already_staged",
+    11: "restart_precondition_failed",
+    12: "restart_precondition_failed",
+    13: "restart_precondition_failed",
+    14: "watchdog_active",
+    15: "pl_workload_active",
+    21: "restart_failed",
+    22: "restart_failed",
+}
+KR260_CONNECT_TIMEOUT_SECONDS = 5
+
+# Fixed KR260 observation script. It has no caller-controlled interpolation and
+# returns only bounded OS/proc/sysfs data for parsing by the unprivileged tier.
+_KR260_TELEMETRY_COMMAND = r"""LC_ALL=C
+printf 'hostname='; hostname
+printf 'machine_id='; cat /etc/machine-id
+printf 'boot_id='; cat /proc/sys/kernel/random/boot_id
+printf 'kernel='; uname -sr
+printf 'uptime='; cut -d' ' -f1 /proc/uptime
+printf 'load='; cat /proc/loadavg
+printf 'cpu_start='; head -n1 /proc/stat
+sleep 0.1
+printf 'cpu_end='; head -n1 /proc/stat
+grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo
+printf 'reboot_required='; if test -f /var/run/reboot-required; then echo true; else echo false; fi
+printf 'system_state='; systemctl is-system-running 2>/dev/null || true
+printf 'if_state='; cat /sys/class/net/eth1/operstate
+printf 'if_mac='; cat /sys/class/net/eth1/address
+printf 'if_rx='; cat /sys/class/net/eth1/statistics/rx_bytes
+printf 'if_tx='; cat /sys/class/net/eth1/statistics/tx_bytes
+printf 'ipv4='; ip -o -4 addr show dev eth1 scope global
+printf 'ipv6='; ip -o -6 addr show dev eth1 scope global
+printf 'default_route='; ip route show default | head -n1
+for hw in /sys/class/hwmon/hwmon*; do
+  test -r "$hw/name" || continue
+  test "$(cat "$hw/name")" = ams || continue
+  test -r "$hw/temp1_input" && { printf 'soc_temp_millic='; cat "$hw/temp1_input"; }
+  break
+done
+"""
 
 
 class _NoRedirect(HTTPRedirectHandler):
@@ -124,6 +188,8 @@ class BrokerOperation(str, Enum):
     HOST_SHUTDOWN = "host.shutdown"
     NAS_WAKE = "nas.wake"
     NAS_SHUTDOWN = "nas.shutdown"
+    KR260_STATUS = "kr260.status"
+    KR260_REBOOT = "kr260.reboot"
     HEATER_ON = "environment.heater_on"
     HEATER_OFF = "environment.heater_off"
     DEHUMIDIFIER_ON = "environment.dehumidifier_on"
@@ -449,6 +515,10 @@ class FixedBrokerConfig:
     nas_api_url: str = ""
     enabled_operations: frozenset[BrokerOperation] = frozenset()
     home_assistant_url: str = "http://127.0.0.1:8123"
+    kr260_host: str = ""
+    kr260_user: str = "ubuntu"
+    kr260_key: Path = Path("/nonexistent")
+    kr260_expected_machine_id: str = ""
 
     @property
     def desktop_known_hosts(self) -> Path:
@@ -461,6 +531,10 @@ class FixedBrokerConfig:
         """
 
         return self.desktop_key.parent / "known_hosts"
+
+    @property
+    def kr260_known_hosts(self) -> Path:
+        return self.kr260_key.parent / "known_hosts"
 
 
 class FixedBrokerOperations:
@@ -475,6 +549,11 @@ class FixedBrokerOperations:
     # desktop.primary_monitor_on observes it but never changes it.
     PRIMARY_MONITOR_ENTITY = "switch.desktop_gigabyte"
     PRESERVED_MONITOR_ENTITY = "switch.desktop_oled"
+    # Each outlet's own P115 meter, read only as supporting evidence for "off".
+    MONITOR_POWER_SENSORS: ClassVar[dict[str, str]] = {
+        "switch.desktop_gigabyte": "sensor.desktop_gigabyte_current_consumption",
+        "switch.desktop_oled": "sensor.desktop_oled_current_consumption",
+    }
 
     def __init__(
         self,
@@ -537,6 +616,9 @@ class FixedBrokerOperations:
             candidates[BrokerOperation.NAS_WAKE] = self.nas_wake
         if self.config.nas_api_url and self.nas_api_key:
             candidates[BrokerOperation.NAS_SHUTDOWN] = self.nas_shutdown
+        if self.config.kr260_host and self.config.kr260_expected_machine_id:
+            candidates[BrokerOperation.KR260_STATUS] = self.kr260_status
+            candidates[BrokerOperation.KR260_REBOOT] = self.kr260_reboot
         return {
             operation: handler
             for operation, handler in candidates.items()
@@ -544,7 +626,8 @@ class FixedBrokerOperations:
         }
 
     def desktop_wake(self) -> dict[str, object]:
-        return self._run(
+        evidence = self._require_monitors_off_for_wake()
+        status = self._run(
             [
                 "/usr/bin/wakeonlan",
                 "-i",
@@ -553,6 +636,40 @@ class FixedBrokerOperations:
             ],
             10,
         )
+        return {**status, **evidence}
+
+    def _require_monitors_off_for_wake(self) -> dict[str, object]:
+        """Refuse the wake unless both outlets read off right now.
+
+        Every failure raises before wakeonlan runs: no Home Assistant token, a
+        failed or malformed read, an outlet in any state but "off" (including
+        "unavailable"), or a meter that still reports a draw.
+        """
+
+        if not self.home_assistant_token:
+            raise BrokerError(
+                "home_assistant_unconfigured",
+                "Home Assistant authentication is not configured",
+            )
+        deadline = self.monotonic() + WAKE_PRECONDITION_DEADLINE_SECONDS
+        states = self._monitor_states(deadline)
+        if any(states.get(entity) != "off" for entity in self.MONITOR_ENTITIES):
+            raise BrokerError(
+                "monitors_not_off", "both monitor outlets must be off before a wake"
+            )
+        power = self._monitor_power(deadline)
+        if any(
+            watts is not None and watts > MONITOR_OFF_POWER_CEILING_W
+            for watts in power.values()
+        ):
+            raise BrokerError(
+                "monitor_power_present", "a monitor outlet still meters power"
+            )
+        return {
+            "monitors_verified_off": True,
+            "monitor_entities": states,
+            "monitor_power_w": power,
+        }
 
     def desktop_monitors_off(self) -> dict[str, object]:
         return self._set_desktop_monitors("off")
@@ -678,6 +795,7 @@ class FixedBrokerOperations:
                 "already_in_state": True,
                 "partial": False,
                 "entities": before,
+                **self._off_power_evidence(desired_state, deadline),
             }
 
         self._home_assistant_request(
@@ -693,7 +811,36 @@ class FixedBrokerOperations:
             "already_in_state": False,
             "partial": 0 < matching < len(self.MONITOR_ENTITIES),
             "entities": after,
+            **self._off_power_evidence(desired_state, deadline),
         }
+
+    def _off_power_evidence(
+        self, desired_state: str, deadline: float
+    ) -> dict[str, object]:
+        # Metering only corroborates "off"; turning on reports no power.
+        if desired_state != "off":
+            return {}
+        return {"power_w": self._monitor_power(deadline)}
+
+    def _monitor_power(self, deadline: float) -> dict[str, float | None]:
+        """Best-effort metered draw per outlet; None where it cannot be read.
+
+        Power is supporting evidence, so an unreadable meter never fails the
+        operation. Only the two fixed sensors beside the fixed outlets are read.
+        """
+
+        power: dict[str, float | None] = {}
+        for entity in self.MONITOR_ENTITIES:
+            try:
+                payload = self._home_assistant_request(
+                    f"/api/states/{self.MONITOR_POWER_SENSORS[entity]}",
+                    deadline=deadline,
+                )
+            except BrokerError:
+                power[entity] = None
+                continue
+            power[entity] = _metered_watts(payload)
+        return power
 
     def _await_monitor_convergence(
         self,
@@ -944,6 +1091,113 @@ class FixedBrokerOperations:
             15,
         )
 
+    def kr260_reboot(self) -> dict[str, object]:
+        """Identity-check then request one kexec restart over pinned SSH.
+
+        Success means the wrapper staged the running kernel and systemd accepted
+        the kexec, not that the board came back; the adapter confirms that from
+        a changed boot ID.
+        """
+
+        identity = self._kr260_ssh("/usr/bin/cat /etc/machine-id", capture=True)
+        if identity.strip() != self.config.kr260_expected_machine_id:
+            raise BrokerError("identity_mismatch", "KR260 identity did not match")
+        # The board grants this exact argv, with no arguments, through a
+        # NOPASSWD sudoers rule (config/kr260/butters-kr260-reboot.sudoers);
+        # -n makes an unprovisioned board fail at once as reboot_unauthorized
+        # rather than prompt.
+        self._kr260_ssh(
+            _KR260_REBOOT_COMMAND, capture=False, refusals=_KR260_RESTART_REFUSALS
+        )
+        return {
+            "accepted": True,
+            "identity_verified": True,
+            "restart_method": "kexec",
+            "restart_confirmed": False,
+        }
+
+    def kr260_status(self) -> dict[str, object]:
+        telemetry = self._kr260_ssh(_KR260_TELEMETRY_COMMAND, capture=True)
+        if len(telemetry.encode("utf-8")) > 16384:
+            raise BrokerError("malformed_result", "KR260 telemetry exceeded its limit")
+        identities = [
+            line.partition("=")[2].strip()
+            for line in telemetry.splitlines()
+            if line.partition("=")[:2] == ("machine_id", "=")
+        ]
+        if identities != [self.config.kr260_expected_machine_id]:
+            raise BrokerError("identity_mismatch", "KR260 identity did not match")
+        return {
+            "accepted": True,
+            "identity_verified": True,
+            "telemetry": telemetry,
+        }
+
+    def _kr260_ssh(
+        self,
+        command: str,
+        *,
+        capture: bool,
+        refusals: Mapping[int, str] | None = None,
+    ) -> str:
+        """Run one fixed command; raise a fixed code that names the failure.
+
+        stderr is read only to choose among the fixed codes below. It is never
+        returned, logged, or compared beyond those literal markers.
+        """
+
+        # command is selected only from fixed literals in this module. No request or
+        # configuration value can become remote shell text.
+        argv = [
+            "/usr/bin/ssh",
+            "-T",
+            "-i",
+            str(self.config.kr260_key),
+            "-o",
+            "BatchMode=yes",
+            "-o",
+            "IdentitiesOnly=yes",
+            "-o",
+            "PreferredAuthentications=publickey",
+            "-o",
+            "ClearAllForwardings=yes",
+            "-o",
+            "StrictHostKeyChecking=yes",
+            "-o",
+            "UpdateHostKeys=no",
+            "-o",
+            f"UserKnownHostsFile={self.config.kr260_known_hosts}",
+            # Fail an unreachable board inside the 10s bound, as a classified
+            # connect error instead of an anonymous subprocess timeout.
+            "-o",
+            f"ConnectTimeout={KR260_CONNECT_TIMEOUT_SECONDS}",
+            f"{self.config.kr260_user}@{self.config.kr260_host}",
+            command,
+        ]
+        try:
+            result = self.runner(
+                argv,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise BrokerError("operation_timeout", "fixed operation timed out") from exc
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise BrokerError("operation_failed", "fixed operation failed") from exc
+        returncode = int(getattr(result, "returncode", 1))
+        if returncode != 0:
+            code = _kr260_failure_code(
+                returncode,
+                str(getattr(result, "stderr", "") or "")[:4096],
+                refusals or {},
+            )
+            raise BrokerError(code, "fixed KR260 operation failed")
+        return str(getattr(result, "stdout", "")) if capture else ""
+
     def _desktop_control(
         self, operation: _DesktopControlOperation
     ) -> dict[str, object]:
@@ -1052,6 +1306,51 @@ class FixedBrokerOperations:
         if int(getattr(result, "returncode", 1)) != 0:
             raise BrokerError("operation_failed", "fixed operation failed")
         return {"accepted": True}
+
+
+def _kr260_failure_code(
+    returncode: int, stderr: str, refusals: Mapping[int, str]
+) -> str:
+    """Map an ssh failure to one fixed code. ssh itself exits 255."""
+
+    if returncode == 255:
+        if (
+            "Host key verification failed" in stderr
+            or "REMOTE HOST IDENTIFICATION HAS CHANGED" in stderr
+        ):
+            return "host_key_mismatch"
+        if "Permission denied" in stderr:
+            return "ssh_auth_failed"
+        if any(
+            marker in stderr
+            for marker in (
+                "No route to host",
+                "Connection timed out",
+                "Connection refused",
+                "Network is unreachable",
+                "Could not resolve hostname",
+            )
+        ):
+            return "host_unreachable"
+        return "ssh_failed"
+    if "a password is required" in stderr or "Interactive authentication" in stderr:
+        return "reboot_unauthorized"
+    return refusals.get(returncode, "operation_failed")
+
+
+def _metered_watts(payload: object) -> float | None:
+    """A Home Assistant power state in watts, or None if it is not one."""
+
+    if not isinstance(payload, dict):
+        return None
+    attributes = payload.get("attributes")
+    if not isinstance(attributes, dict) or attributes.get("unit_of_measurement") != "W":
+        return None
+    try:
+        watts = float(str(payload.get("state")))
+    except ValueError:
+        return None
+    return watts if math.isfinite(watts) and watts >= 0 else None
 
 
 _PARSEC_STATE_KEYS = frozenset(
