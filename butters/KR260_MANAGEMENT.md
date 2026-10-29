@@ -134,6 +134,160 @@ Until a warm reboot is shown to work, the only reset known to recover this
 board is a power cycle, so a smart plug on its 12 V supply is the most
 reliable remote recovery.
 
+### Third-party match: SoC-Labs KR260 lockup report (not our data)
+
+[SoC-Labs `LOCKUP_RECOVERY.md`](https://github.com/SoC-Labs/Kria-260/blob/main/docs/LOCKUP_RECOVERY.md)
+reports, for two KR260s:
+
+- `sudo reboot` → PSCI SYSTEM_RESET → TF-A → PMUFW `XPfw_ResetSystem()` → a
+  raw CRL soft SRST, "**without** the PMU-orchestrated idle/isolation drain".
+- The board "goes dark: no PMU banner, no U-Boot, console UART held in reset
+  (`RST_LPD_IOU2` bit 2)".
+- Over JTAG, the A53 is halted in Reset Catch at `0xFFFF0000`.
+- Their mechanism is that un-drained AXI transactions deadlock the LPD/FPD
+  interconnect, so the next boot hangs. The report presents this as inferred,
+  with no bus-level evidence.
+- Workarounds: a `kexec` reboot ("~65 s **without** invoking the PMUFW
+  reset"), and unattended `rst -por` over the KR260's FTDI cable (serial
+  `XFL1EAUJ5SPO`; POR 4.7 s, boot ~95 s). "The carrier reset button is also
+  `PS_SRST_B`", "Neither can a watchdog" recover the board.
+
+AMD's [Restart solution](https://xilinx-wiki.atlassian.net/wiki/spaces/A/pages/18841820/Zynq+UltraScale+MPSoC+Restart+solution)
+documents the hazard in general terms: "it is necessary to stop/complete any
+ongoing transaction ... before resetting them", and PMU firmware must not
+reset components "while leaving unfinished transactions in the interconnect".
+Idling needs `ENABLE_NODE_IDLING` and `IDLE_PERIPHERALS`, and PL AXI masters
+need user code to stop. [UG1137 System Reset](https://docs.amd.com/r/en-US/ug1137-zynq-ultrascale-mpsoc-swdev/System-Reset):
+a system reset resets PS and PL, "Preserves debug states", and does not
+resample boot-mode pins. Neither AMD page mentions KR260 warm-reboot hangs.
+
+| Their observation | Ours (2026-10-29) | Match |
+|---|---|---|
+| warm `reboot` → no output before FSBL | clean shutdown, `reboot: Restarting system`, no FSBL banner for 10 min | yes |
+| PSCI → PMUFW system reset | `shutdown_scope` = `[system]` | consistent; PMUFW path not traced by us |
+| A53 in Reset Catch at `0xFFFF0000` | A53 #0 `Running`, then `Reset Catch` 7 s into our attach; #1–#3 `Reset`; PC not read | partial; our catch was caused by the attach, and theirs ran with a permanently attached `hw_server` |
+| UART held in reset | COM5 silent | consistent; not verified by register |
+| recovered by POR | recovered by 12 V power cycle | yes |
+| AXI interconnect deadlock | not observed or tested | unestablished on both boards |
+
+Our board: SOM `SMK-K26-XCL2G` rev 1, carrier `SCK-KR-G` rev 1 (`5100-01`).
+Kria A/B boot firmware in QSPI (Image Selector, golden copy, Persistent
+Register, Image A/B, Recovery). FSBL, PMUFW and BL31 v2.8 from release 2023.2;
+U-Boot 2023.01. Both cadence watchdogs are inactive with `bootstatus=0`.
+
+### Normal restart: kexec (proposal; nothing installed)
+
+Read-only checks on the board:
+
+- `CONFIG_KEXEC=y`, `CONFIG_KEXEC_FILE=y`, `CONFIG_KEXEC_SIG=y` (not forced),
+  `kexec_load_disabled=0`, lockdown `[none]`.
+- No EFI; U-Boot boots a FIT image. `kexec-tools` is not installed (candidate
+  1:2.0.28-0ubuntu3).
+- Kernel and initramfs: `/boot/vmlinuz` and `/boot/initrd.img` (6.8.0-1015).
+  `/sys/firmware/fdt` holds the DT U-Boot passed in (KR revB, with U-Boot
+  fixups). Root is `LABEL=writable` on the USB SSD `sda2`.
+
+Kexec skips the boot ROM, FSBL, PMUFW reset and U-Boot, so there is no FSBL
+banner and no `SOFT` reset. It leaves in place everything those stages would
+reset:
+
+- The PL stays configured and keeps running, so a PL AXI master can still
+  write to DDR while the new kernel boots. `dfx-mgr` reloads its default app
+  (`k26-starter-kits`) at boot, reprogramming a live PL.
+- PMUFW node and requirement state carry over.
+- Clocks carry over (`clk_ignore_unused` is set).
+- The debug state carries over. Secondaries go through PSCI CPU_OFF/ON, so a
+  JTAG attach during kexec can catch them, exactly as at boot.
+- The runtime deep-idle setting is lost, as with any boot.
+
+For FPGA work: unload the PL app (`xmutil unloadapp`) and quiesce any
+PL DMA before a kexec. Treat a design with AXI masters as unsafe to kexec
+until it is shown to stop cleanly.
+
+Pitfall: if the final `kexec -e` fails, `systemd-shutdown` falls back to an
+ordinary reboot, which is the wedge. A wrapper must load and verify
+(`/sys/kernel/kexec_loaded` = 1) before calling `systemctl kexec`. It must
+never fall back to `systemctl reboot` itself.
+
+Proposed wrapper, a root-owned script with no arguments:
+
+```sh
+#!/bin/sh
+# /usr/local/sbin/butters-kr260-kexec-reboot
+set -eu
+k=/boot/vmlinuz-$(uname -r); i=/boot/initrd.img-$(uname -r)
+[ -r "$k" ] && [ -r "$i" ] || exit 3
+kexec -l "$k" --initrd="$i" --reuse-cmdline --dtb=/sys/firmware/fdt
+[ "$(cat /sys/kernel/kexec_loaded)" = 1 ] || exit 4
+exec systemctl --no-wall --no-block kexec
+```
+
+Sudoers: one exact argv, `ubuntu ALL=(root) NOPASSWD:
+/usr/local/sbin/butters-kr260-kexec-reboot`, replacing the `systemctl
+reboot` grant. The broker's `_KR260_REBOOT_COMMAND` would change to
+`/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-reboot`, a code change
+with tests. Answer "no" to the `kexec-tools` debconf question about handling
+reboots, so plain `reboot` semantics do not change silently.
+
+Supervised validation, each step separately approved:
+
+1. Owner installs `kexec-tools` and the wrapper. Dry run with no reboot:
+   `sudo kexec -l …`, check `kexec_loaded` = 1, then `sudo kexec -u` and
+   check it is 0.
+   This also proves `kexec-tools` accepts the `vmlinuz` format, which is
+   unverified because the file is root-only.
+2. One supervised kexec, with COM5, 1 Hz ping and SSH heartbeat running and
+   the PL app unloaded first. Expect `kexec_core: Starting new kernel`, then
+   kernel messages with no FSBL. Then a new boot ID, CPUs `0-3`, `eth1` 1000,
+   telemetry `online`, `fpga0` `operating`, the `dfx-mgr` app loaded, and no
+   new kernel warnings.
+3. Abort: no kernel output within 30 s of `Starting new kernel`, or no SSH
+   within 240 s. Preserve COM5, do not retry, and have the owner power-cycle.
+   Rollback: remove the wrapper and its sudoers file.
+
+### Dead-Linux recovery: JTAG POR (wiring unconfirmed)
+
+- XSDB `help rst`: `-por` pulses "the POR pin on the JTAG cable".
+- SoC-Labs ran `rst -por` successfully on a KR260 FTDI cable (`XFL1…`, the
+  same family as ours, `XFL11R5N0BBZA`). That is strong third-party evidence
+  that the carrier wires it, but it is not our board or revision.
+- Our own non-invasive evidence is only suggestive: Windows exposes FT4232H
+  interfaces C and D with no COM port, as D2XX-only, so they are not UARTs.
+- No public KR260 schematic was found that ties an FT4232H line to
+  `PS_POR_B`. The U-Boot KR revB DT shows the SLG7XL45106 reset chip only for
+  USB, SD, hub and GEM resets.
+- Check the AMD KR260 carrier schematic (design files, login required)
+  before relying on it.
+- The reset button is `PS_SRST_B` (per SoC-Labs), the same path as the
+  failing warm reset.
+
+### Watchdog: incidental to this failure, and no recovery path
+
+- `RebootWatchdogSec=10min` made systemd open `/dev/watchdog0` (FPD
+  `fd4d0000`) during shutdown. Setting 10 min failed (max 516 s), so it ran at
+  its 60 s default.
+- The system reset happened about 4 s later and resets the PS watchdogs too,
+  so it cannot have fired.
+- Nothing arms a watchdog again before Linux, and its expiry action is the
+  same PMUFW reset, or APU restart only in a recovery-enabled PMUFW, which
+  this build is not known to be.
+- A watchdog is therefore expected not to recover an interconnect-level
+  wedge. SoC-Labs reaches the same conclusion. Leaving it as is costs
+  nothing; `RuntimeWatchdogSec` stays 0.
+
+### Recommended architecture
+
+| Operation | Recommended | Why | Not |
+|---|---|---|---|
+| Normal restart of a live board | validated kexec wrapper through the one-argv sudoers grant | avoids the PMUFW warm reset; graceful | `systemctl reboot`: shown to wedge this board |
+| Recovery of a dead board | external 12 V switching (HA smart plug) | a true power-on of SOM and carrier; independent of Windows, `hw_server`, cable wiring and debug state | warm reset, the reset button, a watchdog |
+| Recovery, secondary | JTAG `rst -por`, only after the wiring is confirmed and one supervised test passes | no power interruption to the SSD; documented to work on a KR260 by a third party | `rst -system` (preserves debug state) |
+
+Both POR and 12 V switching are abrupt (no filesystem sync). The board booted
+with no filesystem errors after two power cycles on 2026-10-28/29. No
+`fsck` was run.
+12 V switching also cuts power to the SSD.
+
 ## JTAG (Windows desktop, FT4232H VID_0403/PID_6011)
 
 Not a capability. Channel A of the FT4232H is the JTAG cable
