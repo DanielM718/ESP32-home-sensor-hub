@@ -56,6 +56,52 @@ def test_tcl_pins_the_kr260_cable_and_chain() -> None:
     assert "finally" in text and "catch {disconnect}" in text
 
 
+def test_tcl_probes_the_board_before_attaching_and_immediately_before_rst() -> None:
+    code = _code(TCL)
+    main = code[code.index("proc kr260::main") :]
+    assert main.index("still_dark $address before_attach") < main.index("{connect}")
+    # The last probe precedes rst -por with only the time stamp in between.
+    tail = main[main.rindex("still_dark $address attached") :]
+    between = tail[: tail.index("rst -por")].splitlines()[1:]
+    assert [line.strip() for line in between if line.strip()] == [
+        "return",
+        "}",
+        "set at [stamp]",
+        "if {[catch {",
+    ]
+    assert main.count("still_dark $address attached") == 2
+    check = main[main.index('if {$mode eq "check"} {') :]
+    assert check.index("still_dark $address attached") < check.index("CHECK_OK")
+
+
+def test_tcl_probe_is_one_tcp_attempt_that_sends_nothing() -> None:
+    code = _code(TCL)
+    assert re.findall(r"\bsocket\b[^\n]*", code) == [
+        "socket -async $address $probe_port} sock]} {"
+    ]
+    assert "variable probe_port 22" in code
+    assert "variable probe_ms 1000" in code
+    # Nothing is written to or read from the socket; it is only closed.
+    for forbidden in (r"puts\s+\$sock", r"gets\s+\$sock", r"read\s+\$sock"):
+        assert not re.search(forbidden, code), forbidden
+    assert "catch {close $sock}" in code
+    # Doubt refuses: only silence or "host is unreachable" is dark.
+    verdict = code[code.index("proc kr260::probe_verdict") :]
+    verdict = verdict[: verdict.index("\n}\n")]
+    assert verdict.count("return dark") == 2
+    assert verdict.rstrip().endswith("return unknown")
+
+
+def test_tcl_and_wrapper_validate_the_board_address() -> None:
+    tcl = _code(TCL)
+    assert "![valid_address $address]" in tcl
+    assert "(0|[1-9][0-9]{0,2})" in tcl
+    ps1 = _code(PS1)
+    assert "[ValidatePattern('^\\d{1,3}(\\.\\d{1,3}){3}$')][string]$BoardAddress" in ps1
+    assert "$Mode, $CableSerial, $BoardAddress)" in ps1
+    assert "$_ -match '^PROBE '" in ps1
+
+
 @pytest.mark.skipif(
     not (os.environ.get("KR260_TCLSH") or shutil.which("tclsh")),
     reason="no plain tclsh here (the harness ran on the desktop's Git tclsh 8.6.17)",

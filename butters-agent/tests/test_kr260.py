@@ -110,6 +110,8 @@ def test_check_runs_fixed_wrapper_arguments(platform, clock):
                 "check",
                 "-CableSerial",
                 "XFL11R5N0BBZA",
+                "-BoardAddress",
+                "192.168.1.125",
                 "-TimeoutSeconds",
                 str(kr260.WRAPPER_TIMEOUT_SECONDS),
             ],
@@ -132,12 +134,16 @@ def test_reset_runs_fixed_wrapper_arguments_with_confirmation(platform, clock):
 
 def test_run_timeout_budget_fits_the_request_window():
     assert kr260.WRAPPER_TIMEOUT_SECONDS < kr260.RUN_TIMEOUT_SECONDS
+    # Two seconds of the 30 s request window are left for the transport.
     assert (
         kr260.PREFLIGHT_SECONDS + kr260.RUN_TIMEOUT_SECONDS + kr260.CLEANUP_SECONDS
-        <= 30
+        <= 28
     )
-    # The supervised attach-only check took 14.6 s end to end.
-    assert kr260.WRAPPER_TIMEOUT_SECONDS > 14.6
+    # The supervised attach-only check took 14.6 s end to end; the script's
+    # two probes add up to 1 s each on a dark board.
+    assert kr260.WRAPPER_TIMEOUT_SECONDS > 14.6 + 2
+    # Measured on the desktop: two ACL checks, tasklist and a dark ping.
+    assert kr260.PREFLIGHT_SECONDS > 2 * 0.3 + 0.2 + 3.0
 
 
 # ----- refusals: none starts the wrapper ------------------------------------------
@@ -350,36 +356,121 @@ def _toml(values):
     return "\n".join(lines) + "\n"
 
 
-# ----- reachability is rechecked immediately before the wrapper -------------------
+# ----- reachability is checked last, immediately before the wrapper -----------------
+
+
+def _record_order(platform):
+    order = []
+    for name, label in (
+        ("validate_registry", "acl"),
+        ("file_sha256", "hash"),
+        ("debuggers_running", "tasklist"),
+        ("host_answers_ping", "ping"),
+        ("run_wrapper", "run"),
+    ):
+        original = getattr(platform, name)
+
+        def traced(*arguments, _original=original, _label=label):
+            order.append(_label)
+            return _original(*arguments)
+
+        setattr(platform, name, traced)
+    return order
 
 
 @pytest.mark.parametrize("action", sorted(kr260.ACTIONS))
-def test_board_returning_during_the_checks_stops_the_run(platform, clock, action):
-    # Dark at the first ping, answering at the recheck just before the wrapper.
-    platform.ping_sequence = [False, True]
+def test_the_one_ping_follows_every_slow_check_and_precedes_the_wrapper(
+    platform, clock, action
+):
+    order = _record_order(platform)
+    platform.wrapper_outcome = (0, RST_ISSUED if action == kr260.RESET else CHECK_OK)
+    engine_for(platform, clock).invoke(action, {})
+    assert order.count("ping") == 1
+    before_run = order[: order.index("run")]
+    assert before_run[-1] == "ping"
+    assert {"acl", "hash", "tasklist"} <= set(before_run[:-1])
+
+
+@pytest.mark.parametrize("action", sorted(kr260.ACTIONS))
+def test_board_returning_during_the_slow_checks_stops_the_run(platform, clock, action):
+    # Dark when the request arrives; answering by the time the ACL and hash
+    # checks finish. The ping after them refuses, and nothing starts.
+    validate = platform.validate_registry
+
+    def returns_during_checks(path):
+        platform.board_pings = True
+        return validate(path)
+
+    platform.validate_registry = returns_during_checks
     result = engine_for(platform, clock).invoke(action, {})
     assert result["error"] == "board_reachable"
     assert platform.wrapper_calls == []
-    assert platform.ping_calls == 2
+    assert platform.ping_calls == 1
 
 
-def test_both_pings_run_and_the_last_precedes_the_wrapper(platform, clock):
-    order = []
-    ping = platform.host_answers_ping
-    run = platform.run_wrapper
-    platform.host_answers_ping = lambda address: order.append("ping") or ping(address)
-    platform.run_wrapper = lambda *a: order.append("run") or run(*a)
-    platform.wrapper_outcome = (0, RST_ISSUED)
-    engine_for(platform, clock).invoke(kr260.RESET, {})
-    assert order == ["ping", "ping", "run"]
-
-
-def test_a_reset_refused_at_the_recheck_does_not_consume_the_interval(platform, clock):
+def test_a_reset_refused_by_the_ping_does_not_consume_the_interval(platform, clock):
     engine = engine_for(platform, clock)
-    platform.ping_sequence = [False, True]
+    platform.ping_sequence = [True]
     assert engine.invoke(kr260.RESET, {})["error"] == "board_reachable"
     platform.wrapper_outcome = (0, RST_ISSUED)
     assert engine.invoke(kr260.RESET, {})["success"] is True
+
+
+@pytest.mark.parametrize(
+    "line, code",
+    [
+        ("RESULT REFUSED_REACHABLE before_attach", "REFUSED_REACHABLE"),
+        ("RESULT REFUSED_REACHABLE attached", "REFUSED_REACHABLE"),
+        ("RESULT REFUSED_PROBE attached unknown", "REFUSED_PROBE"),
+    ],
+)
+def test_board_returning_during_the_run_is_refused_by_the_script(
+    platform, clock, line, code
+):
+    # The ping saw a dark board; the script's own probe, while XSDB runs, did
+    # not. rst -por never ran, so this is no reset, and it is not retried.
+    platform.wrapper_outcome = (
+        1,
+        "2026-10-29T19:45:55.832Z PROBE attached reachable at=2026-10-29T19:45:55.793Z\n"
+        f"2026-10-29T19:45:55.857Z {line}\n",
+    )
+    engine = engine_for(platform, clock)
+    result = engine.invoke(kr260.RESET, {})
+    assert result["success"] is False
+    assert result["error"] == "jtag_failed"
+    assert result["jtag_result"] == code
+    assert result["reset_may_have_run"] is False
+    assert result["reset_issued_at"] is None
+    assert len(platform.wrapper_calls) == 1
+    # The agent's own interval still counts the attempt: a board that came
+    # back by itself is left alone, and Butters needs a new passkey anyway.
+    assert engine.invoke(kr260.RESET, {})["error"] == "rate_limited"
+
+
+def test_a_check_during_a_reset_is_busy(platform, clock):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    jtag = kr260.Kr260Jtag(platform, config(), clock)
+    engine = Engine(platform, kr260=jtag)
+
+    def slow_run(*arguments):
+        platform.wrapper_calls.append(arguments)
+        started.set()
+        release.wait(5)
+        return (0, RST_ISSUED)
+
+    platform.run_wrapper = slow_run
+    worker = threading.Thread(target=lambda: engine.invoke(kr260.RESET, {}))
+    worker.start()
+    assert started.wait(5)
+    pings = platform.ping_calls
+    assert engine.invoke(kr260.CHECK, {})["error"] == "busy"
+    release.set()
+    worker.join(5)
+    # The refused check did no probing of its own.
+    assert platform.ping_calls == pings
+    assert len(platform.wrapper_calls) == 1
 
 
 # ----- debugger cleanup ------------------------------------------------------------

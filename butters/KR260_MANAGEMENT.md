@@ -862,30 +862,40 @@ through a boot**.
 
 | File | Role | sha256 |
 |---|---|---|
-| `config/kr260/kr260-jtag-por.tcl` | XSDB script | `e3338289…` |
-| `config/kr260/kr260-jtag-por.ps1` | Windows wrapper | `dc5502f7…` |
+| `config/kr260/kr260-jtag-por.tcl` | XSDB script | `a7709d8f…` (PR #9; Steps 1–2 below ran `e3338289…`) |
+| `config/kr260/kr260-jtag-por.ps1` | Windows wrapper | `ee16ce33…` (PR #9; Steps 1–2 below ran `dc5502f7…`) |
 | `tests/tcl/kr260_jtag_por_harness.tcl` | plain-Tcl harness | — |
 | `src/butters/integrations/kr260_reset.py` + `scripts/kr260-reset-verdict` | verdict from the evidence | — |
 
-`kr260-jtag-por.tcl check|por <cable-serial> [confirm-por]`:
+`kr260-jtag-por.tcl check|por <cable-serial> <board-address> [confirm-por]`:
 
-1. Attach.
+1. Probe the board (below). Anything but silence refuses
+   (`REFUSED_REACHABLE before_attach`, `REFUSED_PROBE …`) without attaching.
+   Attach.
 2. Poll `jtag targets` (hw_server scans asynchronously) and require
    **exactly one** cable: an `SCK-KR` cable whose last word is the given
    serial, with exactly `xck26 04724093` then `arm_dap 5ba00477`. A second
    board on the same hw_server is a refusal, not a guess.
 3. Select `PSU` and require it to be the active target.
-4. `check`: print `RESULT CHECK_OK` and detach.
-5. `por`: requires the literal `confirm-por`. Issues `rst -por` **once**:
-   no `rst -system`, no retry, a second call is refused. Prints
+4. Probe again while attached (`REFUSED_REACHABLE attached`).
+5. `check`: print `RESULT CHECK_OK` and detach.
+6. `por`: requires the literal `confirm-por`. Issues `rst -por` **once**,
+   with only the time stamp between it and the second probe: no
+   `rst -system`, no retry, a second call is refused. Prints
    `RESULT RST_ISSUED at=…` or `RESULT RST_ERROR …`.
-6. Always detaches (`try … finally`).
+7. Always detaches (`try … finally`).
+
+The probe is one TCP connection attempt to the board's port 22, closed without
+sending anything. An accepted or refused connection is `reachable`, silence
+for 1 s (or the OS's "host is unreachable") is `dark`, and anything else is
+`unknown`, which refuses like `reachable`. Each probe prints
+`PROBE <moment> <verdict> at=<UTC>`, which the wrapper relays.
 
 Every refusal happens before any reset and prints a specific `RESULT`
 code. The file contains no other `rst`, and no `stop`, `con`, `mwr`, `rwr`,
 `dow`, `fpga` or `exec`.
 
-`kr260-jtag-por.ps1 -Mode check|por [-Confirm confirm-por]`:
+`kr260-jtag-por.ps1 -Mode check|por [-BoardAddress <ip>] [-Confirm confirm-por]`:
 
 - refuses while any hw_server, xsdb, rdi_xsdb, cs_server or vivado process
   runs, so every debugger process left afterwards is its own;
@@ -914,6 +924,10 @@ Tests (2026-10-29):
   on both files, all verdict states including this session's real warm,
   kexec and cold-boot logs, the parsers and the CLI. It runs the Tcl harness
   when `KR260_TCLSH` or `tclsh` is available.
+- PR #9 added the reachability probes. The harness now has 99 checks, all
+  passing on the same tclsh: probe order, every refusal at either probe,
+  address validation, the verdict table and real local sockets. There are
+  also 3 more static pytest checks. See *Windows runtime validation* below.
 
 #### Telling a real reset from a returned command
 
@@ -1114,12 +1128,13 @@ Kr260Adapter._jtag_run  ── gate actions.kr260_jtag_recovery
 AgentHub.kr260_jtag ── signed frame over the agent's pinned WSS, no parameters
    ▼
 Desktop Agent Kr260Jtag ── gate kr260-jtag.toml enabled; hash + ACL of both files;
-   │  ping, debugger check, ping again; one reset per 30 min
+   │  debugger check, then one ping, last; one reset per 30 min
    ▼
 powershell -File C:\ProgramData\Butters\kr260\kr260-jtag-por.ps1 (fixed argv)
    ▼
-xsdb kr260-jtag-por.tcl: exactly one SCK-KR cable XFL11R5N0BBZA, chain
-xck26 04724093 + arm_dap 5ba00477, target PSU, one `rst -por`, disconnect
+xsdb kr260-jtag-por.tcl: TCP probe; exactly one SCK-KR cable XFL11R5N0BBZA,
+chain xck26 04724093 + arm_dap 5ba00477, target PSU; TCP probe; one
+`rst -por`; disconnect
    ▼
 Butters status(): new boot ID from the identity-verified board ⇒ confirmed
 ```
@@ -1140,7 +1155,7 @@ Butters status(): new boot ID from the identity-verified board ⇒ confirmed
 
 | Condition | Butters | Agent | Script |
 |---|---|---|---|
-| Board unreachable | dark (no ping and SSH `host_unreachable`/`ssh_timeout`) for ≥300 s over ≥2 probes, re-probed at execution | no echo reply from Windows, checked first and again immediately before PowerShell | — |
+| Board unreachable | dark (no ping and SSH `host_unreachable`/`ssh_timeout`) for ≥300 s over ≥2 probes, re-probed at execution | no ICMP echo reply from Windows, checked after the slow checks, immediately before PowerShell | no TCP answer from port 22 immediately before attaching and again immediately before `CHECK_OK`/`rst -por` |
 | Not just restarted | no kexec request in the last 600 s | — | — |
 | One reset per 30 min | in memory and from the persistent job table (survives a Butters restart) | in memory | one `rst -por` per process |
 | Exact hardware | — | cable serial from local config | exactly one `SCK-KR` cable with that serial; the exact chain; PSU selected |
@@ -1149,8 +1164,28 @@ Butters status(): new boot ID from the identity-verified board ⇒ confirmed
 | No fallback | never `rst -system`, never a retry or a different action | no retry; a failure is reported once | no `rst` other than `-por`, no stop/con/mwr/dow/fpga |
 | Cleanup | — | kills the PowerShell tree on timeout, then any debugger left (`debugger_cleanup`) | wrapper stops hw_server as XSDB exits |
 
-What remains: about 10 s between the agent's last ping and `rst -por` (XSDB's
-attach and chain scan). A board that comes back within that window is reset.
+##### Time of check to time of use
+
+Measured on 2026-10-29: `rst -por` ran 12.4 s after XSDB started (start-up,
+`connect`, chain scan). With only the agent's ping before PowerShell, a board
+that came back by itself within about 13 s was still reset (and attached to,
+which can hang a board that runs with deep idle).
+
+Now the script probes the board itself immediately before `connect` and again
+immediately before `rst -por`. No debugger operation was added, and there is
+still exactly one attach. What remains:
+
+| Window | Size | Why it cannot shrink further here |
+|---|---|---|
+| Last probe → `rst -por` | the probe's own 1 s of silence, plus microseconds | a silence can only be observed for some time; 1 s is about 1000× this LAN's SSH answer time |
+| Board up, SSH not yet listening | a few seconds in every boot | Windows reports a refused connection only after about 2 s of retries (measured: 2.03 s), so within 1 s it reads as silence. The agent's ICMP ping just before PowerShell covers it. |
+| Board alive with no network at all (FSBL, U-Boot, early kernel) | about 60 s of a boot | indistinguishable from dead over the network. Butters requires 300 s of darkness, longer than any boot (kexec about 70 s, cold about 80 s). |
+
+So a board that recovers by itself during a request is refused whenever it
+answers on the network before `rst -por`: `REFUSED_REACHABLE`, then
+`failed` (nothing sent). The authorization is consumed; another attempt needs
+a new request and a fresh passkey. The agent's own 30-minute latch still
+counts that attempt.
 
 ##### State machine
 
@@ -1196,7 +1231,7 @@ text crosses the wire):
 | Field | Values |
 |---|---|
 | `success` | true only for exit 0 with `CHECK_OK` (check) or `RST_ISSUED` (reset) |
-| `jtag_result` | `CHECK_OK`, `RST_ISSUED`, `RST_ERROR`, `CONNECT_FAILED`, `REFUSED_USAGE`, `REFUSED_UNCONFIRMED`, `REFUSED_CHAIN`, `REFUSED_TARGET`, `REFUSED_REPEAT`, `REFUSED_DEBUGGER_ACTIVE`, `REFUSED_MISSING_SCRIPT`, `NO_RESULT` |
+| `jtag_result` | `CHECK_OK`, `RST_ISSUED`, `RST_ERROR`, `CONNECT_FAILED`, `REFUSED_USAGE`, `REFUSED_UNCONFIRMED`, `REFUSED_CHAIN`, `REFUSED_TARGET`, `REFUSED_REPEAT`, `REFUSED_DEBUGGER_ACTIVE`, `REFUSED_MISSING_SCRIPT`, `REFUSED_REACHABLE`, `REFUSED_PROBE`, `NO_RESULT` |
 | `reset_may_have_run` | reset only; true for `RST_ISSUED`, `RST_ERROR`, `NO_RESULT` |
 | `reset_issued_at` | reset only; the script's UTC stamp for `RST_ISSUED` |
 | `debugger_cleanup` | `clean`, `forced` (the agent stopped leftovers), `failed` (some survived) |
@@ -1224,7 +1259,8 @@ supervised run also keep the COM5 log and use `kr260-reset-verdict` as in Step
 | After a kexec request | 600 s |
 | Between reset attempts | 1800 s (Butters, persisted; and the agent) |
 | Confirmation window | 300 s, then `unconfirmed` (a late new boot still confirms) |
-| Agent request window | 30 s: ≤8 s checks, XSDB 17 s inside a 20 s process deadline, ≤2 s cleanup |
+| Agent request window | 30 s: ≤5 s checks, XSDB 19 s inside a 21 s process deadline, ≤2 s cleanup, 2 s left for the transport |
+| Script probes | 1 s each, two per run on a dark board |
 | Skill job timeout | 60 s; the Admin page waits up to 75 s |
 
 ##### Read-only FPGA telemetry
@@ -1282,8 +1318,9 @@ as a branch**. Build the candidate on the production line instead:
    - create `C:\ProgramData\Butters\kr260\` (Administrators/SYSTEM only) and
      copy `kr260-jtag-por.ps1` and `.tcl` from the candidate; check both
      SHA-256 values;
-   - write `kr260-jtag.toml` next to `config.toml` with `enabled = false`
-     and both hashes;
+   - write `C:\ProgramData\Butters\DesktopAgent\kr260-jtag.toml` (next to
+     `agent.toml`, Administrators/SYSTEM-owned) with `enabled = false` and
+     both hashes;
    - back up `venv\Lib\site-packages\butters_agent`, then `pip install
      --force-reinstall --no-deps` the candidate's `butters-agent` package;
    - restart only the Desktop Agent process (its logon task).
@@ -1315,19 +1352,47 @@ before any Butters rollback.
 
 ##### Known limitations
 
-- Never run against hardware through this path. On Windows, the following
-  have not run at all: `tasklist`/`PING.EXE`/`taskkill` parsing, the `-File`
-  invocation, and the timeout tree-kill.
+- Never run against hardware through this path. The Windows helpers have
+  run natively, but only against simulated wrappers and a fake XSDB (below).
 - Recovery of a genuinely wedged board is still untested (only a healthy POR
   passed).
-- About 10 s between the agent's last ping and `rst -por`.
+- The scripts that ran live (Steps 1–2) are the pre-probe versions. The
+  probe has run inside XSDB 2026.1 (Tcl 8.6.13), but never in a run that
+  attached.
+- The residual time-of-check windows above.
+- The agent's task runs as the logged-on user with a limited token. Every
+  live XSDB run so far was elevated (SSH). hw_server has inbound firewall
+  rules and the FTDI driver needs no elevation, but its cable access under
+  the agent's token is unverified.
 - The agent's 30-minute latch is in memory: an agent restart clears it, while
   Butters' persisted check remains.
 - FSBL-banner evidence needs COM5, which is not wired into the agent.
-- A slow `hw_server` start can exceed the 17 s XSDB deadline. That gives
-  `NO_RESULT`, which counts as possibly reset.
+- A slow `hw_server` start can exceed the 19 s XSDB deadline (expected run
+  about 16.5 s). That gives `NO_RESULT`, which counts as possibly reset.
 - Depends on Windows being up, the agent connected and the cable present.
   The independent recovery remains a 12 V switch.
+
+##### Windows runtime validation (2026-10-29, owner away, nothing installed)
+
+All of this ran from a temp folder, using the agent venv's Python 3.11.9 and
+the PR #9 source, without touching the running agent. There was no JTAG, no
+hw_server and no real wrapper in POR mode.
+
+| Area | Result |
+|---|---|
+| Fixed tool paths | `powershell.exe`, `PING.EXE`, `tasklist.exe`, `taskkill.exe` present |
+| Process list | `tasklist /FO CSV /NH`: 339 rows parsed in 0.22 s; no debugger running; a missing `tasklist` fails closed |
+| Ping | healthy board `TTL=` in 1.03 s; an unused on-link address (ARP fails) and an unrouted one read silent in 2.8–3.0 s, exit 1; a missing `PING.EXE` fails closed |
+| Hashes | `file_sha256` of the copied scripts equals the Linux SHA-256 (no CRLF rewrite by scp) |
+| ACL | the production `apps.toml` passes (0.25 s); a user-writable temp file is refused `unsafe_registry_permissions`; a missing file is refused |
+| Wrapper launch | a simulated wrapper with the real `param()` block receives the agent's exact argv for check and POR; a bad serial, mode or address is rejected by PowerShell before the body runs; exit codes and last-`RESULT`-wins parse; malformed and unknown codes read `NO_RESULT` |
+| Timeout | a hanging simulated wrapper with two children: the whole tree (3 PIDs) was gone 4.1 s into a 4 s deadline; an unrelated process survived |
+| Debugger cleanup | `stop_debuggers` on a uniquely named copy of `PING.EXE` killed only it |
+| Whole action | `Kr260Jtag.invoke` with real ping, tasklist, hashing and PowerShell (ACL stubbed for the temp files): check and reset in 3.2–3.5 s; a second reset `rate_limited`; a healthy board `board_reachable` with no PowerShell; a wrong hash `integrity_failed` |
+| Real wrapper, fake XSDB | check mode with `-Xsdb` pointing at Git `tclsh` and stub debugger commands: a dark address got `CHECK_OK` with both `PROBE` lines relayed; the healthy board got `REFUSED_REACHABLE before_attach` with no `connect` |
+| Tcl harness | Git Tcl 8.6.17: 99 of 99, including real sockets: an accepting listener and a refused port read reachable, a silent address dark in <1.5 s |
+| Probe inside XSDB | `xsdb.bat` 2026.1 (Tcl 8.6.13), with every cable command replaced before sourcing: KR260:22 reachable in 2 ms, two dark addresses dark in 1.0 s, a refused port reachable at 3 s; no hw_server or cs_server appeared |
+| Tool versions | Vivado/Vitis 2026.1 `xsdb.bat` and `hw_server.bat` present; `hw_server.exe`, `xsdb.exe` and `cs_server.exe` built 2026-06-16; PowerShell 5.1.26100; Windows build 26200 |
 
 ##### Supervised validation plan (owner present, each step separately approved)
 
@@ -1338,13 +1403,15 @@ before any Butters rollback.
    - Through the hub (or the open Butters gate), both actions are refused
      before PowerShell starts, and no `hw_server` starts.
    - Close the Butters gate again.
-3. **Windows-side checks on a healthy board, without the wrapper.** Run the
-   agent's platform methods directly in the agent venv:
-   - `host_answers_ping` must be true for the board and false for an unused
-     address;
-   - `debuggers_running` must be false, then true while a harmless process is
-     renamed `xsdb.exe`;
-   - `file_sha256` must match the reviewed hashes.
+3. **The installed wrapper on a healthy board, as the agent's user.** Do
+   this only with the deep-idle unit active (`state1/disable` = 1 on all
+   four CPUs). From a non-elevated PowerShell on the desktop, run
+   `kr260-jtag-por.ps1 -Mode check` from `C:\ProgramData\Butters\kr260\`.
+   - Expect `PROBE before_attach reachable` and
+     `RESULT REFUSED_REACHABLE before_attach`, exit 1.
+   - Expect no hw_server at any point. XSDB never connects.
+   - This is the first run of the installed files under the agent's token.
+     The platform methods themselves already passed natively (below).
 4. **The attach-only check on a dark board.** Requires a genuinely dark board.
    - Do not wedge a board deliberately without a separate decision.
    - Keep COM5 logging running.

@@ -1,5 +1,5 @@
 # Optional KR260 JTAG recovery (butters_agent.kr260). Install, only after
-# review, as kr260-jtag.toml next to config.toml, owned by Administrators with
+# review, as kr260-jtag.toml next to agent.toml, owned by Administrators with
 # no write access for anyone else. Without this file, or with enabled = false,
 # the agent neither advertises nor runs the two kr260.jtag_por.* actions.
 #

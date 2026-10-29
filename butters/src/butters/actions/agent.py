@@ -104,6 +104,8 @@ class AgentHub:
             "REFUSED_REPEAT",
             "REFUSED_DEBUGGER_ACTIVE",
             "REFUSED_MISSING_SCRIPT",
+            "REFUSED_REACHABLE",
+            "REFUSED_PROBE",
             "NO_RESULT",
         }
     )

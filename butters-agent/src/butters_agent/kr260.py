@@ -5,8 +5,10 @@ script live in an admin-only directory and must match the SHA-256 values in the
 agent-local configuration before every run. Both actions refuse while this
 desktop can still ping the board: attaching a debugger to a running KR260 with
 deep idle enabled hangs it (butters/KR260_MANAGEMENT.md), and a board that
-answers needs no power-on reset. The actions are advertised only when the
-local configuration enables them, so a default hello is unchanged.
+answers needs no power-on reset. The Tcl script then probes the board again
+immediately before it attaches and immediately before rst -por. The actions
+are advertised only when the local configuration enables them, so a default
+hello is unchanged.
 """
 
 from __future__ import annotations
@@ -35,12 +37,15 @@ DEBUGGERS = frozenset(
     {"hw_server.exe", "xsdb.exe", "rdi_xsdb.exe", "cs_server.exe", "vivado.exe"}
 )
 # The wrapper's own XSDB deadline. The attach-only check took 14.6 s on
-# 2026-10-29. The whole action must finish inside the 30 s request window:
-# up to PREFLIGHT_SECONDS of ping, ACL, hash and process-list checks, the run,
-# then up to CLEANUP_SECONDS of debugger cleanup.
-WRAPPER_TIMEOUT_SECONDS = 17
-RUN_TIMEOUT_SECONDS = 20
-PREFLIGHT_SECONDS = 8
+# 2026-10-29; the script's two reachability probes add up to 1 s each on a
+# dark board. The whole action must finish inside the 30 s request window,
+# with room for the transport: up to PREFLIGHT_SECONDS of ACL, hash,
+# process-list and ping checks (measured on this desktop: 0.3 s per ACL check,
+# 0.2 s tasklist, 3.0 s for a ping of a dark address), the run, then up to
+# CLEANUP_SECONDS of debugger cleanup.
+WRAPPER_TIMEOUT_SECONDS = 19
+RUN_TIMEOUT_SECONDS = 21
+PREFLIGHT_SECONDS = 5
 CLEANUP_SECONDS = 2
 # One reset attempt per half hour from this agent, whatever Butters asks.
 RESET_INTERVAL_SECONDS = 1800.0
@@ -73,6 +78,8 @@ RESULT_CODES = frozenset(
         "REFUSED_REPEAT",
         "REFUSED_DEBUGGER_ACTIVE",
         "REFUSED_MISSING_SCRIPT",
+        "REFUSED_REACHABLE",
+        "REFUSED_PROBE",
         "NO_RESULT",
     }
 )
@@ -138,20 +145,19 @@ class Kr260Jtag:
                 and self.monotonic() - self.last_reset < RESET_INTERVAL_SECONDS
             ):
                 raise ProtocolError("rate_limited")
-            # Cheap refusal first, before the slower ACL and hash checks.
-            self._require_dark()
             self._verify_files()
             if self.platform.debuggers_running(DEBUGGERS):
                 raise ProtocolError("debugger_active")
-            # Again immediately before the wrapper starts: the board may have
-            # come back while the checks above ran. What remains is the
-            # wrapper's own attach and chain scan (about 10 s) before rst -por.
+            # Last, so nothing but PowerShell and XSDB start-up separates it
+            # from the script's own probe before it attaches.
             self._require_dark()
             arguments = [
                 "-Mode",
                 "check" if action == CHECK else "por",
                 "-CableSerial",
                 self.config["cable_serial"],
+                "-BoardAddress",
+                self.config["board_address"],
                 "-TimeoutSeconds",
                 str(WRAPPER_TIMEOUT_SECONDS),
             ]

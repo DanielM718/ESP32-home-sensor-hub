@@ -448,6 +448,20 @@ def test_second_reset_within_the_interval_is_refused():
             },
             False,
         ),
+        # The script's probe found the board answering before rst -por.
+        (
+            {
+                "success": False,
+                "error": "jtag_failed",
+                "jtag_result": "REFUSED_REACHABLE",
+                "reset_may_have_run": False,
+            },
+            False,
+        ),
+        (
+            {"success": False, "error": "jtag_failed", "jtag_result": "REFUSED_PROBE"},
+            False,
+        ),
         # Possibly sent.
         ({"success": False, "error": "timeout"}, True),
         ({"success": False, "error": "malformed_result"}, True),
@@ -499,6 +513,14 @@ def test_only_a_possibly_sent_reset_consumes_the_interval(result, counts):
             "jtag_connect_failed",
         ),
         ({"success": False, "error": "debugger_active"}, "debugger_active"),
+        (
+            {
+                "success": False,
+                "error": "jtag_failed",
+                "jtag_result": "REFUSED_REACHABLE",
+            },
+            "jtag_refused_reachable",
+        ),
         ({"success": False}, "agent_action_failed"),
     ],
 )
@@ -1065,3 +1087,37 @@ def test_the_request_is_timed_from_before_it_was_sent():
     clock.now += 60
     attempt = _summary(adapter)["last_attempt"]
     assert (attempt["state"], attempt["evidence"]) == ("booted", "uptime_after_request")
+
+
+def test_butters_and_the_agent_agree_on_every_wrapper_result_code():
+    from butters_agent import kr260 as agent_kr260
+
+    assert agent_kr260.RESULT_CODES == AgentHub._KR260_JTAG_RESULTS
+    # Every code after which the agent says no POR can have run is one Butters
+    # also treats as not sent, so a restarted Butters keeps the same interval.
+    for code in agent_kr260.RESULT_CODES - agent_kr260._MAY_HAVE_RESET:
+        if code in agent_kr260.SUCCESS.values():
+            continue
+        assert f"jtag_{code.lower()}" in kr260_jtag.RESET_NOT_SENT, code
+    for code in agent_kr260._MAY_HAVE_RESET:
+        assert f"jtag_{code.lower()}" not in kr260_jtag.RESET_NOT_SENT, code
+
+
+def test_the_scripts_refusal_is_not_a_reset_and_needs_a_new_request():
+    hub = Hub(
+        {
+            "success": False,
+            "error": "jtag_failed",
+            "jtag_result": "REFUSED_REACHABLE",
+            "reset_may_have_run": False,
+        }
+    )
+    adapter, hub, _broker, clock = _adapter(hub=hub)
+    _dark_for(adapter, clock, 300)
+    with pytest.raises(IntegrationError) as error:
+        adapter.jtag_reset()
+    assert error.value.code == "jtag_refused_reachable"
+    assert len(hub.calls) == 1
+    summary = adapter.status()["jtag_recovery"]
+    assert summary["last_attempt"]["state"] == "failed"
+    assert summary["reset_blocked_reason"] != "reset_rate_limited"
