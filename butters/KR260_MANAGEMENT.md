@@ -1251,9 +1251,20 @@ as a branch**. Build the candidate on the production line instead:
 1. `git switch -c deploy/kr260-jtag-recovery deploy/kr260-management-recovery`,
    then cherry-pick, in order, PR #8's later commits `a1f0b48 be8f291 811a1cb
    2b2b4c9 ca7e813` and PR #9's commits.
-2. Verify the exclusion: `git diff deploy/kr260-jtag-recovery
-   feature/kr260-jtag-recovery-agent --stat` must list exactly the files of
-   `git show --stat 1e36895`, and no other.
+2. Verify the exclusion. `git diff deploy/kr260-jtag-recovery
+   feature/kr260-jtag-recovery-agent --stat` must list exactly the files and
+   line counts of `git show --stat 1e36895`. Every `+` line of that diff must
+   be a `+` line of `1e36895`, and every `-` line a `-` line of it.
+   - Patch IDs do not match, because context differs: PR #9 also edits
+     `broker.py`.
+   - `git revert 1e36895` on PR #9 conflicts in `broker.py`, because
+     production resolved `_metered_watts` by hand. Do not use either check.
+
+   Dry run 2026-10-29:
+   - all seven cherry-picks applied cleanly on `ba675b4`;
+   - the diff against the PR #9 head is exactly `1e36895`'s 8 files
+     (+967/−33), with no other line in either direction;
+   - local branch `deploy/kr260-jtag-recovery-candidate`, not pushed.
 3. Run both suites on the candidate. Compute the tree digest with `LC_ALL=C`.
 4. **Butters first.** From the long-lived deploy worktree (it has the models
    tree): `install-beta1 --start`. It keeps `/opt/butters.previous` and
