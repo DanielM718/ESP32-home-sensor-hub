@@ -283,6 +283,9 @@ class BetaAssistantService:
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
         register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
+        if self.assistant.kr260_adapter is not None:
+            # KR260 JTAG recovery runs on the desktop's cable, through the agent.
+            self.assistant.kr260_adapter.attach_jtag(self.desktop_agent)
         self.nas_agent = NasAgentHub(settings.nas_agent_ingress)
         register_nas_agent_skills(
             self.assistant.skills,
@@ -1621,6 +1624,29 @@ class BetaAssistantService:
             skill="reboot_kr260",
             arguments={},
             summary="Restart the identity-verified KR260 (kexec)",
+            subject="kr260",
+        )
+
+    def start_admin_kr260_jtag(
+        self, session: BrowserSession, *, operation: str, confirmed: bool
+    ) -> dict[str, object]:
+        skill, summary = {
+            "check": ("check_kr260_jtag", "Attach-only JTAG check of the dark KR260"),
+            "reset": ("reset_kr260_jtag", "JTAG power-on reset of the dark KR260"),
+        }.get(operation, (None, None))
+        if skill is None or summary is None:
+            raise ActionCoordinatorError(
+                "invalid_arguments", "KR260 JTAG operation must be check or reset"
+            )
+        if not confirmed:
+            raise ActionCoordinatorError(
+                "confirmation_required", "KR260 JTAG recovery requires confirmation"
+            )
+        return self._start_admin_action(
+            session,
+            skill=skill,
+            arguments={},
+            summary=summary,
             subject="kr260",
         )
 

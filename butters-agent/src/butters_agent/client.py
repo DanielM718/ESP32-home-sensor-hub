@@ -19,7 +19,6 @@ from websockets.asyncio.client import connect
 from . import AGENT_VERSION
 from .protocol import (
     MAX_FRAME,
-    SCHEMAS,
     ProtocolError,
     ReplayCache,
     canonical,
@@ -123,7 +122,7 @@ class Client:
                         "agent_id": self.config["agent_id"],
                         "version": AGENT_VERSION,
                         "token": self.credentials["token"],
-                        "actions": sorted(SCHEMAS),
+                        "actions": self.engine.actions(),
                     }
                 )
             )

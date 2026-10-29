@@ -90,6 +90,7 @@ GATE_KEYS: tuple[str, ...] = (
             "nas",
             "nas_shutdown",
             "kr260_reboot",
+            "kr260_jtag_recovery",
             "heater",
             "dehumidifier",
             "ventilation",

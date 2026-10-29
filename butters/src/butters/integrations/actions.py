@@ -16,6 +16,7 @@ from typing import Any, ClassVar
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
+from butters.integrations import kr260_jtag
 from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
 from butters.integrations.nas_status import NasStatusObserver
@@ -209,7 +210,7 @@ class NasAdapter:
 
 
 class Kr260Adapter:
-    """One identity-verified KR260 with observation and kexec restart only."""
+    """One identity-verified KR260: observation, kexec restart, JTAG recovery."""
 
     # A reboot that may have been sent blocks another until the board reports
     # a different boot ID or this long has passed: a K26 normally boots in ~2
@@ -235,6 +236,28 @@ class Kr260Adapter:
             "cancelled",
         }
     )
+    # Desktop Agent failures decided before the JTAG wrapper could pulse the
+    # POR line. Anything else (a timeout, a lost connection, a malformed
+    # result) may have reset the board.
+    _JTAG_NOT_SENT = frozenset(
+        {
+            "invalid_action",
+            "invalid_parameter",
+            "invalid_request_id",
+            "duplicate_request",
+            "agent_unavailable",
+            "unsupported_action",
+            "superseded_connection",
+            "busy",
+            "cancelled",
+            "board_reachable",
+            "debugger_active",
+            "integrity_failed",
+            "rate_limited",
+        }
+    )
+    _JTAG_CHECK = "kr260.jtag_por.check"
+    _JTAG_RESET = "kr260.jtag_por.reset"
 
     def __init__(
         self,
@@ -242,24 +265,71 @@ class Kr260Adapter:
         actions: FixedActionAdapter,
         reboot_settings: KnownDeviceSettings,
         *,
+        jtag_settings: KnownDeviceSettings | None = None,
         monotonic: Callable[[], float] = time.monotonic,
     ) -> None:
         self.observer = observer
         self.actions = actions
         self.reboot_settings = reboot_settings
+        self.jtag_settings = jtag_settings or KnownDeviceSettings()
+        # The Desktop Agent hub, attached once the web runtime has built it.
+        self.jtag: Any | None = None
         self.monotonic = monotonic
         self._lock = threading.Lock()
+        self._observe_lock = threading.Lock()
         # (monotonic time, boot ID before) of the last reboot that may have run.
         self._last_reboot: tuple[float, str | None] | None = None
+        # The same for the last JTAG reset that may have run.
+        self._last_jtag: tuple[float, str | None] | None = None
+        self._dark = kr260_jtag.DarkRun()
+        self._recorded_at: object = None
+        self._last_boot_id: str | None = None
+
+    def attach_jtag(self, hub: Any) -> None:
+        self.jtag = hub
+
+    def _jtag_available(self) -> bool:
+        return bool(
+            self.jtag_settings.enabled
+            and self.jtag_settings.configured
+            and self.jtag is not None
+            and self.jtag.configured
+        )
+
+    def _observe(self, *, refresh: bool) -> dict[str, object]:
+        value = self.observer.observe(refresh=refresh)
+        with self._observe_lock:
+            # The observer caches; count each probe once, when first seen.
+            stamp = value.get("observed_at")
+            if stamp is not None and stamp != self._recorded_at:
+                self._recorded_at = stamp
+                self._dark.record(value, self.monotonic())
+            boot_id = value.get("boot_id")
+            if value.get("identity_verified") and isinstance(boot_id, str) and boot_id:
+                self._last_boot_id = boot_id
+        return value
 
     def status(self, *, refresh: bool = False) -> dict[str, object]:
-        value = self.observer.observe(refresh=refresh)
+        value = self._observe(refresh=refresh)
         value["capability"] = {
             "monitoring": self.observer.settings.enabled,
             "reboot": self.reboot_settings.enabled and self.reboot_settings.configured,
             "shutdown": False,
-            "jtag_reset": False,
+            "jtag_reset": self._jtag_available(),
         }
+        value["dark_seconds"] = round(self._dark.seconds(self.monotonic()), 1)
+        last_jtag = self._last_jtag
+        if last_jtag is not None:
+            age = self.monotonic() - last_jtag[0]
+            booted, state = kr260_jtag.reset_state(
+                value, age_seconds=age, previous_boot_id=last_jtag[1]
+            )
+            value["last_jtag_reset_request"] = {
+                "age_seconds": round(age, 1),
+                "previous_boot_id": last_jtag[1],
+                "boot_changed": booted,
+                "state": state,
+            }
         last = self._last_reboot
         if last is not None:
             booted = value.get("boot_id")
@@ -290,7 +360,7 @@ class Kr260Adapter:
             )
         # Serialized, so two concurrent requests cannot both pass the checks.
         with self._lock:
-            before = self.observer.observe(refresh=True)
+            before = self._observe(refresh=True)
             if not before.get("identity_verified"):
                 raise IntegrationError(
                     "identity_unverified", "KR260 identity could not be verified"
@@ -325,6 +395,86 @@ class Kr260Adapter:
             "restart_confirmed": False,
             "previous_boot_id": before.get("boot_id"),
         }
+
+    def jtag_check(
+        self, cancel_event: threading.Event | None = None
+    ) -> dict[str, object]:
+        """Attach-only JTAG check through the Desktop Agent, dark board only."""
+
+        self._require_jtag()
+        with self._lock:
+            self._jtag_preflight(reset=False)
+            result = self.jtag.kr260_jtag(self._JTAG_CHECK, cancel=cancel_event)
+        if not result.get("success"):
+            raise self._jtag_error(result, "KR260 JTAG check failed")
+        return {**result, "outcome": "check_passed"}
+
+    def jtag_reset(
+        self,
+        cancel_event: threading.Event | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, object]:
+        """One JTAG power-on reset of a board Butters has seen dark for minutes."""
+
+        self._require_jtag()
+        with self._lock:
+            previous = self._last_boot_id
+            self._jtag_preflight(reset=True)
+            result = self.jtag.kr260_jtag(
+                self._JTAG_RESET,
+                cancel=cancel_event,
+                idempotency_key=idempotency_key,
+            )
+            if self._may_have_reset(result):
+                self._last_jtag = (self.monotonic(), previous)
+                self.observer.invalidate()
+        if not result.get("success"):
+            raise self._jtag_error(result, "KR260 JTAG reset failed")
+        return {
+            **result,
+            # Issued only; status() reports it confirmed once the board answers
+            # from a boot that started after the request.
+            "outcome": "reset_requested",
+            "reset_confirmed": False,
+            "previous_boot_id": previous,
+        }
+
+    def _require_jtag(self) -> None:
+        if not self._jtag_available():
+            raise IntegrationError(
+                "capability_unavailable", "KR260 JTAG recovery is not configured"
+            )
+
+    def _jtag_preflight(self, *, reset: bool) -> None:
+        self._observe(refresh=True)
+        code = kr260_jtag.refusal(
+            now=self.monotonic(),
+            dark=self._dark,
+            last_kexec_at=self._last_reboot[0] if self._last_reboot else None,
+            last_reset_at=self._last_jtag[0] if self._last_jtag else None,
+            reset=reset,
+        )
+        if code is not None:
+            raise IntegrationError(code, "KR260 JTAG recovery precondition failed")
+
+    def _may_have_reset(self, result: dict[str, object]) -> bool:
+        if result.get("success") is True:
+            return True
+        may_have_run = result.get("reset_may_have_run")
+        if type(may_have_run) is bool:
+            return may_have_run
+        return result.get("error") not in self._JTAG_NOT_SENT
+
+    @staticmethod
+    def _jtag_error(result: dict[str, object], message: str) -> IntegrationError:
+        code = result.get("jtag_result")
+        if isinstance(code, str):
+            return IntegrationError(f"jtag_{code.lower()}", message)
+        error = result.get("error")
+        return IntegrationError(
+            error if isinstance(error, str) else "agent_action_failed", message
+        )
 
 
 def _boot_id(observation: dict[str, object]) -> str | None:

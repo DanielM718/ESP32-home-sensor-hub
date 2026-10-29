@@ -21,8 +21,14 @@ SCHEMAS = {
     "desktop.app.list": set(),
     "desktop.app.status": {"app"},
     "desktop.app.launch": {"app"},
+    # KR260 recovery through this desktop's JTAG cable (butters_agent.kr260).
+    "kr260.jtag_por.check": set(),
+    "kr260.jtag_por.reset": set(),
 }
-MUTATIONS = frozenset({"desktop.app.launch"})
+MUTATIONS = frozenset({"desktop.app.launch", "kr260.jtag_por.reset"})
+# Advertised only when enabled by agent-local configuration, so a default hello
+# still lists exactly the actions an older server knows.
+OPTIONAL = frozenset({"kr260.jtag_por.check", "kr260.jtag_por.reset"})
 
 
 class ProtocolError(ValueError):

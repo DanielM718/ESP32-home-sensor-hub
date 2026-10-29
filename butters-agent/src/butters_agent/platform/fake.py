@@ -1,5 +1,8 @@
 """Deterministic backend for tests. Never selected implicitly on Windows."""
 
+import hashlib
+from pathlib import Path
+
 from .win32 import resolve_application_state
 
 
@@ -14,6 +17,14 @@ class Platform:
         self.launches = 0
         self.missing = set()
         self.failure = False
+        # KR260 JTAG recovery: file contents by path, ACL failures, and the
+        # scripted wrapper outcome (returncode, stdout) or exception.
+        self.files = {}
+        self.unprotected = set()
+        self.debuggers = set()
+        self.board_pings = False
+        self.wrapper_outcome = (1, "")
+        self.wrapper_calls = []
 
     def session(self):
         return {
@@ -51,5 +62,28 @@ class Platform:
         )
 
     def validate_registry(self, path):
+        if str(path) in self.unprotected:
+            raise ValueError("unsafe_registry_permissions")
+        if str(path) in self.files:
+            return
+        if not isinstance(path, Path):
+            raise OSError("missing")
         if path.stat().st_mode & 0o022:
             raise ValueError("unsafe_registry_permissions")
+
+    def file_sha256(self, path):
+        if str(path) not in self.files:
+            raise OSError("missing")
+        return hashlib.sha256(self.files[str(path)]).hexdigest()
+
+    def debuggers_running(self, images):
+        return bool(self.debuggers & images)
+
+    def host_answers_ping(self, address):
+        return self.board_pings
+
+    def run_wrapper(self, path, arguments, timeout):
+        self.wrapper_calls.append((str(path), list(arguments), timeout))
+        if isinstance(self.wrapper_outcome, BaseException):
+            raise self.wrapper_outcome
+        return self.wrapper_outcome

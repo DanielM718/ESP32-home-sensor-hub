@@ -1,0 +1,16 @@
+# Optional KR260 JTAG recovery (butters_agent.kr260). Install, only after
+# review, as kr260-jtag.toml next to config.toml, owned by Administrators with
+# no write access for anyone else. Without this file, or with enabled = false,
+# the agent neither advertises nor runs the two kr260.jtag_por.* actions.
+#
+# Butters gates them again with actions.kr260_jtag_recovery (ships false), and
+# both actions refuse while this desktop can ping the board.
+schema_version = 1
+enabled = false
+# The KR260 carrier's integrated FT4232H; the only cable the script accepts.
+cable_serial = "XFL11R5N0BBZA"
+board_address = "192.168.1.125"
+# SHA-256 of C:\ProgramData\Butters\kr260\kr260-jtag-por.ps1 and .tcl, from
+# butters/config/kr260/ at the reviewed commit. Checked before every run.
+wrapper_sha256 = "REPLACE_WITH_REVIEWED_PS1_SHA256"
+script_sha256 = "REPLACE_WITH_REVIEWED_TCL_SHA256"

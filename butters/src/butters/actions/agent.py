@@ -65,16 +65,21 @@ class AgentHub:
             "agent_disconnected",
             "agent_unavailable",
             "app_not_installed",
+            "board_reachable",
             "busy",
             "cancelled",
+            "debugger_active",
             "duplicate_request",
+            "integrity_failed",
             "interactive_session_unavailable",
             "invalid_action",
             "invalid_parameter",
             "invalid_request_id",
+            "jtag_failed",
             "launch_failed",
             "malformed_result",
             "platform_error",
+            "rate_limited",
             "session_inactive",
             "superseded_connection",
             "timeout",
@@ -83,6 +88,26 @@ class AgentHub:
             "unsupported_action",
         }
     )
+    # The KR260 JTAG recovery actions and the wrapper's fixed result codes
+    # (butters_agent.kr260); an unknown code is a malformed result.
+    KR260_JTAG_ACTIONS = frozenset({"kr260.jtag_por.check", "kr260.jtag_por.reset"})
+    _KR260_JTAG_RESULTS = frozenset(
+        {
+            "CHECK_OK",
+            "RST_ISSUED",
+            "RST_ERROR",
+            "CONNECT_FAILED",
+            "REFUSED_USAGE",
+            "REFUSED_UNCONFIRMED",
+            "REFUSED_CHAIN",
+            "REFUSED_TARGET",
+            "REFUSED_REPEAT",
+            "REFUSED_DEBUGGER_ACTIVE",
+            "REFUSED_MISSING_SCRIPT",
+            "NO_RESULT",
+        }
+    )
+    _UTC_STAMP = re.compile(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z")
     _PUBLIC_REASONS = frozenset(
         {
             "app_not_installed",
@@ -300,6 +325,46 @@ class AgentHub:
             "outcome": "already_running" if state == "already_running" else "launched",
             **app,
         }
+
+    def kr260_jtag(
+        self,
+        action: str,
+        *,
+        cancel: threading.Event | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, object]:
+        """Run one fixed KR260 JTAG action; only fixed fields come back."""
+
+        if action not in self.KR260_JTAG_ACTIONS:
+            return self._failure(action, "invalid_action")
+        result = self._request(
+            action, {}, cancel=cancel, idempotency_key=idempotency_key
+        )
+        code = result.get("jtag_result")
+        expected = "CHECK_OK" if action == "kr260.jtag_por.check" else "RST_ISSUED"
+        if (code is not None and code not in self._KR260_JTAG_RESULTS) or (
+            result.get("success") is True and code != expected
+        ):
+            return self._failure(action, "malformed_result")
+        projected = (
+            {
+                **self._transport_metadata(result),
+                "action": action,
+                "success": True,
+            }
+            if result.get("success") is True
+            else self._public_failure(action, result)
+        )
+        if code is not None:
+            projected["jtag_result"] = code
+        if action == "kr260.jtag_por.reset":
+            may_have_run = result.get("reset_may_have_run")
+            if type(may_have_run) is bool:
+                projected["reset_may_have_run"] = may_have_run
+            issued_at = result.get("reset_issued_at")
+            if isinstance(issued_at, str) and self._UTC_STAMP.fullmatch(issued_at):
+                projected["reset_issued_at"] = issued_at
+        return projected
 
     def _known_app(self, name: str) -> str | bool | dict[str, object]:
         with self._state_lock:

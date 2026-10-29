@@ -1093,34 +1093,98 @@ Conclusion:
   SoC-Labs reports recovering.
 - Like 12 V, it is abrupt (no unmount).
 
-#### Butters → Desktop Agent recovery interface (design only, not implemented)
+#### Butters → Desktop Agent recovery interface (implemented, gated off, not live-validated)
 
-- **Windows side.** New fixed Desktop Agent actions `kr260.jtag_por.check`
-  and `kr260.jtag_por.reset`, with no parameters. Like the existing app
-  actions, they run one fixed, hash-pinned wrapper installed admin-only at
-  `C:\ProgramData\Butters\kr260\kr260-jtag-por.ps1`, with the cable serial
-  taken from agent-local config, never from the request.
-- **Second gate.** A separate agent-local gate (`kr260_jtag_recovery`, ships
-  false) is a second gate, as for desktop shutdown.
-- **Agent refusals:** `kr260.jtag_por.reset` is refused while Windows itself
-  can ping `192.168.1.125`, or while another debugger runs.
-- **Result.** It returns the wrapper's `RESULT` code and timestamps, with no
-  free text.
-- **Butters side.** A new admin-only, fresh-passkey, non-conversational skill
-  `kr260_jtag_recovery`, with gate `actions.kr260_jtag_recovery`
-  enabled/configured (ships false).
-- **Butters preconditions:**
-  - the observer reports the board offline: ping and broker `kr260.status`
-    both failing for at least 5 minutes;
-  - no kexec restart in the last 10 minutes;
-  - one POR per 30 minutes, then a human.
-- **Confirmation.** The verdict is `confirmed` only when the identity-verified
-  board answers with a new boot ID. The agent may later supply COM5 evidence
-  for the banner check.
-- **No unattended trigger** until the supervised Admin path has passed;
-  unattended use is a separate approval.
-- **Never** `rst -system`, a halt or resume, a memory write or programming.
-  Never on a board Butters can still reach.
+Branch `feature/kr260-jtag-recovery-agent` (stacked on PR #8). Nothing is
+installed on the desktop and nothing is deployed. Both gates ship closed, and
+the code has only run against fakes.
+
+**Desktop Agent (`butters-agent/src/butters_agent/kr260.py`)**
+
+- Two fixed actions with no parameters: `kr260.jtag_por.check` (attach only)
+  and `kr260.jtag_por.reset` (one `rst -por`).
+- **Second gate:** the agent-local `kr260-jtag.toml` next to `config.toml`
+  (example: `butters-agent/kr260-jtag.example.toml`), Administrators-owned
+  and ACL-checked like `apps.toml`. It holds `enabled` (ships false), the cable
+  serial, the board address and the SHA-256 of both wrapper files. A missing
+  or invalid file disables only this feature; the agent still starts.
+- **Advertised only when enabled.** Butters rejects a hello that lists an
+  action it does not know, so an agent that always advertised these would
+  stop connecting to an older Butters. With the file absent or disabled the
+  hello is unchanged. Deploy Butters before enabling the agent gate.
+- **Fixed argv.** `powershell -File C:\ProgramData\Butters\kr260\kr260-jtag-por.ps1
+  -Mode check|por -CableSerial <config> -TimeoutSeconds 18 [-Confirm confirm-por]`.
+  An 18 s XSDB deadline and a 21 s process deadline, after up to about 8 s of
+  checks, fit the 30 s request window. The attach-only check took 14.6 s, so
+  a slow hw_server start can time out: that is `NO_RESULT`, which counts as
+  possibly reset.
+- **Agent refusals, before PowerShell starts:**
+
+  | Code | When |
+  |---|---|
+  | `integrity_failed` | either file is missing, writable by non-admins, or its SHA-256 differs |
+  | `debugger_active` | hw_server, xsdb, rdi_xsdb, cs_server or vivado runs (or the process list is unreadable) |
+  | `board_reachable` | Windows gets an echo reply from the board (`TTL=`; a "destination unreachable" exit 0 does not count; a ping failure counts as reachable) |
+  | `rate_limited` | a reset attempt was made in the last 30 minutes |
+  | `busy` | another JTAG run is in progress |
+
+- **Result:** only `jtag_result` (one of the wrapper's fixed `RESULT` codes),
+  `reset_issued_at` (for `RST_ISSUED`) and `reset_may_have_run`. No wrapper
+  text crosses the wire. Once started, a run is not cancelled.
+
+**Butters**
+
+- `AgentHub.kr260_jtag()` sends no parameters and projects only those fields.
+  It rejects an unknown code, or a success whose code is not `CHECK_OK` or
+  `RST_ISSUED` as the action requires.
+- `Kr260Adapter.jtag_check()` / `jtag_reset()`, gate
+  `actions.kr260_jtag_recovery` enabled+configured (ships false; overlay keys
+  are machine-owned).
+- **Butters refusals** (`butters/integrations/kr260_jtag.py`):
+
+  | Code | When |
+  |---|---|
+  | `capability_unavailable` | either gate closed, or the agent is not configured; no probe is made |
+  | `board_reachable` | the latest observation is not dark: ping answered, SSH answered as any host, or the failure was Butters-side (broker down, capability disabled) |
+  | `offline_not_established` | fewer than two dark probes, or less than 300 s between the first and now |
+  | `restart_recent` | Butters requested a kexec restart in the last 600 s |
+  | `reset_rate_limited` | a reset that may have run was requested in the last 1800 s (checks are exempt) |
+
+  "Dark" means `host_unreachable` or `ssh_timeout` with no ping reply. Each
+  observer probe is counted once, however often status is read.
+- **Possibly sent.** Agent refusals before the wrapper ran do not start the
+  30-minute interval. A timeout, a lost connection, a malformed result,
+  `RST_ERROR` or `NO_RESULT` do.
+- **Confirmation.** `status()["last_jtag_reset_request"]` is `requested`, then
+  `confirmed` only when the identity-verified board answers with a different
+  boot ID. If Butters never saw the previous boot, an uptime shorter than the
+  request's age counts instead. It is `unconfirmed` after 300 s.
+- **Skills** `check_kr260_jtag` and `reset_kr260_jtag`: administrator,
+  `FRESH` passkey, confirmation required, no local console, absent from the
+  conversational planner. A retried job reuses its agent idempotency key, so
+  the agent replays the first result instead of resetting again.
+- **Admin route** `POST /api/admin/tools/kr260/jtag` with exactly
+  `{"operation": "check"|"reset", "confirm": true}`. No Admin page button yet.
+
+**Not done**
+
+- No Admin UI button, and no COM5 evidence (FSBL banner) in the verdict.
+- No unattended trigger. Unattended use needs separate approval, after the
+  supervised Admin path has passed.
+- Never live-tested: the Windows backend methods (`tasklist`, `PING.EXE`,
+  `-File` invocation) have run only as code review, not on the desktop.
+
+**Supervised validation order (owner present, each step separately approved)**
+
+1. Install the wrapper files admin-only in `C:\ProgramData\Butters\kr260\`
+   and check their hashes. Install `kr260-jtag.toml` with `enabled = false`.
+   Restart the agent once and confirm the hello is unchanged.
+2. Deploy Butters with `actions.kr260_jtag_recovery` closed.
+3. With the board healthy, open both gates, then confirm both actions are
+   refused with `board_reachable` and no hw_server starts.
+4. Only with a genuinely dark board: the Admin check, then the Admin reset.
+   Keep COM5 logging running and use `kr260-reset-verdict` as before.
+5. Close both gates again unless separately approved to keep them open.
 
 ### Before unattended JTAG recovery
 
