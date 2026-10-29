@@ -1620,7 +1620,7 @@ class BetaAssistantService:
             session,
             skill="reboot_kr260",
             arguments={},
-            summary="Reboot the identity-verified KR260",
+            summary="Restart the identity-verified KR260 (kexec)",
             subject="kr260",
         )
 

@@ -395,6 +395,7 @@ async function refreshKr260() {
       ["SoC temperature", temperature===null?"unknown":"yes", temperature===null?undefined:`${temperature} °C`],
       ["Reboot required", state.reboot_required?"warning":"no"],
       ["Linux", state.linux_state||"unknown"],
+      ...(state.last_reboot_request?[["Last restart", state.last_reboot_request.state==="confirmed"?"yes":state.last_reboot_request.state==="unconfirmed"?"warning":"unknown", `${state.last_reboot_request.state} · ${Math.round(state.last_reboot_request.age_seconds)}s ago`]]:[]),
     ]);
     const network=state.network||{};
     axis(document.querySelector("#kr260-network"), [
@@ -405,23 +406,24 @@ async function refreshKr260() {
     ]);
     renderLastOperation(document.querySelector("#kr260-last-operation"), state.last_operation, "No KR260 operation has been requested from this console.");
     document.querySelector("#kr260-reboot").disabled=!(state.capability&&state.capability.reboot);
-    if(!(state.capability&&state.capability.reboot)) document.querySelector("#kr260-action-status").textContent="Reboot remains disabled until its fixed authorization path passes a live test.";
+    if(!(state.capability&&state.capability.reboot)) document.querySelector("#kr260-action-status").textContent="Restart remains disabled until its fixed kexec path passes a live test.";
   } catch(error) { summary.textContent=`KR260 status unavailable: ${error.message||"unknown error"}`; }
 }
 
 async function rebootKr260() {
   const status=document.querySelector("#kr260-action-status");
-  status.textContent="Submitting the fixed KR260 reboot action…";
+  status.textContent="Submitting the fixed KR260 restart (kexec)…";
   try {
     let result=(await api("/api/admin/tools/kr260/reboot",{method:"POST",body:JSON.stringify({confirm:true})})).value;
     if(result.status==="authentication_required"){
       status.textContent="Fresh passkey authentication is required…";
       result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
     }
-    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("KR260 reboot was not queued");
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("KR260 restart was not queued");
     await waitForAdminAction(result.jobs[0].job_id);
-    status.textContent="Reboot requested. Refresh status to observe recovery.";
-  } catch(error) { status.textContent=`Reboot KR260 failed: ${error.message||"unknown error"}`; }
+    // Accepted is not restarted: Last restart turns confirmed only on a new boot ID.
+    status.textContent="Restart requested, not yet confirmed. Refresh status: it is confirmed when the board reports a new boot ID (about 70 s).";
+  } catch(error) { status.textContent=`Restart KR260 failed: ${error.message||"unknown error"}`; }
   finally { await refreshKr260(); }
 }
 
@@ -555,7 +557,7 @@ document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
 document.querySelector("#kr260-refresh").addEventListener("click",refreshKr260);
 document.querySelector("#kr260-reboot").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#kr260-reboot-confirm"),
-    "This restarts Linux on the identity-verified KR260. Shutdown and JTAG recovery are not part of this action.",
+    "This restarts Linux on the identity-verified KR260 through kexec, without a firmware reset. It refuses unreviewed FPGA workloads. Shutdown and JTAG recovery are not part of this action.",
     rebootKr260);
 });
 document.querySelector("#nas-refresh").addEventListener("click",refreshNas);

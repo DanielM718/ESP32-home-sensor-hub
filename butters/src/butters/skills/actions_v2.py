@@ -422,7 +422,7 @@ def register_action_skills(
     )
     action(
         "reboot_kr260",
-        "Reboot only the identity-verified KR260 through its fixed SSH transport.",
+        "Restart Linux on only the identity-verified KR260 through its fixed kexec wrapper.",
         impl.reboot_kr260,
         authentication=AuthenticationLevel.FRESH,
         available=(

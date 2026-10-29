@@ -14,7 +14,7 @@ import subprocess
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeout
 from dataclasses import dataclass
@@ -86,8 +86,24 @@ HOME_ASSISTANT_MAX_RESPONSE_BYTES = 65536
 NAS_API_DEADLINE_SECONDS = 10.0
 NAS_SHUTDOWN_PATH = "/api/v2.0/system/shutdown"
 
-# Fixed KR260 reboot: exactly the argv the board's sudoers rule permits.
-_KR260_REBOOT_COMMAND = "/usr/bin/sudo -n /usr/bin/systemctl --no-wall --no-block reboot"
+# Fixed KR260 restart: exactly the argv the board's sudoers rule permits. The
+# board's warm reboot (`systemctl reboot` -> PMUFW system reset) wedges it until
+# a power cycle, so the restart is a kexec through a root-owned wrapper
+# (config/kr260/kr260-kexec-restart.sh) that refuses rather than reboots.
+_KR260_RESTART_WRAPPER = "/usr/local/sbin/butters-kr260-kexec-restart"
+_KR260_REBOOT_COMMAND = f"/usr/bin/sudo -n {_KR260_RESTART_WRAPPER}"
+# The wrapper's refusals. Each is decided before the kexec handoff, so nothing
+# was restarted.
+_KR260_RESTART_REFUSALS: dict[int, str] = {
+    10: "restart_already_staged",
+    11: "restart_precondition_failed",
+    12: "restart_precondition_failed",
+    13: "restart_precondition_failed",
+    14: "watchdog_active",
+    15: "pl_workload_active",
+    21: "restart_failed",
+    22: "restart_failed",
+}
 KR260_CONNECT_TIMEOUT_SECONDS = 5
 
 # Fixed KR260 observation script. It has no caller-controlled interpolation and
@@ -1076,19 +1092,29 @@ class FixedBrokerOperations:
         )
 
     def kr260_reboot(self) -> dict[str, object]:
-        """Identity-check then request one normal Linux reboot over pinned SSH."""
+        """Identity-check then request one kexec restart over pinned SSH.
+
+        Success means the wrapper staged the running kernel and systemd accepted
+        the kexec, not that the board came back; the adapter confirms that from
+        a changed boot ID.
+        """
 
         identity = self._kr260_ssh("/usr/bin/cat /etc/machine-id", capture=True)
         if identity.strip() != self.config.kr260_expected_machine_id:
             raise BrokerError("identity_mismatch", "KR260 identity did not match")
-        # Plain `systemctl reboot` from a non-interactive SSH session is denied
-        # by polkit ("Interactive authentication required"), which is how the
-        # first supervised attempt failed. The board instead grants this exact
-        # argv, and nothing else, through a NOPASSWD sudoers rule
-        # (config/kr260/butters-kr260-reboot.sudoers); -n makes an unprovisioned
-        # board fail at once as reboot_unauthorized rather than prompt.
-        self._kr260_ssh(_KR260_REBOOT_COMMAND, capture=False)
-        return {"accepted": True, "identity_verified": True}
+        # The board grants this exact argv, with no arguments, through a
+        # NOPASSWD sudoers rule (config/kr260/butters-kr260-reboot.sudoers);
+        # -n makes an unprovisioned board fail at once as reboot_unauthorized
+        # rather than prompt.
+        self._kr260_ssh(
+            _KR260_REBOOT_COMMAND, capture=False, refusals=_KR260_RESTART_REFUSALS
+        )
+        return {
+            "accepted": True,
+            "identity_verified": True,
+            "restart_method": "kexec",
+            "restart_confirmed": False,
+        }
 
     def kr260_status(self) -> dict[str, object]:
         telemetry = self._kr260_ssh(_KR260_TELEMETRY_COMMAND, capture=True)
@@ -1107,7 +1133,13 @@ class FixedBrokerOperations:
             "telemetry": telemetry,
         }
 
-    def _kr260_ssh(self, command: str, *, capture: bool) -> str:
+    def _kr260_ssh(
+        self,
+        command: str,
+        *,
+        capture: bool,
+        refusals: Mapping[int, str] | None = None,
+    ) -> str:
         """Run one fixed command; raise a fixed code that names the failure.
 
         stderr is read only to choose among the fixed codes below. It is never
@@ -1159,7 +1191,9 @@ class FixedBrokerOperations:
         returncode = int(getattr(result, "returncode", 1))
         if returncode != 0:
             code = _kr260_failure_code(
-                returncode, str(getattr(result, "stderr", "") or "")[:4096]
+                returncode,
+                str(getattr(result, "stderr", "") or "")[:4096],
+                refusals or {},
             )
             raise BrokerError(code, "fixed KR260 operation failed")
         return str(getattr(result, "stdout", "")) if capture else ""
@@ -1274,7 +1308,9 @@ class FixedBrokerOperations:
         return {"accepted": True}
 
 
-def _kr260_failure_code(returncode: int, stderr: str) -> str:
+def _kr260_failure_code(
+    returncode: int, stderr: str, refusals: Mapping[int, str]
+) -> str:
     """Map an ssh failure to one fixed code. ssh itself exits 255."""
 
     if returncode == 255:
@@ -1299,7 +1335,7 @@ def _kr260_failure_code(returncode: int, stderr: str) -> str:
         return "ssh_failed"
     if "a password is required" in stderr or "Interactive authentication" in stderr:
         return "reboot_unauthorized"
-    return "operation_failed"
+    return refusals.get(returncode, "operation_failed")
 
 
 def _metered_watts(payload: object) -> float | None:
