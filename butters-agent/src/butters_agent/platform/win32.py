@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import subprocess
+from contextlib import suppress
 from ctypes import wintypes as w
 from pathlib import Path
 
@@ -18,6 +19,9 @@ PS = os.path.join(
 PING = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), r"System32\PING.EXE")
 TASKLIST = os.path.join(
     os.environ.get("SystemRoot", r"C:\Windows"), r"System32\tasklist.exe"
+)
+TASKKILL = os.path.join(
+    os.environ.get("SystemRoot", r"C:\Windows"), r"System32\taskkill.exe"
 )
 
 
@@ -338,7 +342,7 @@ ConvertTo-Json -InputObject $safe -Compress
         return b"TTL=" in result.stdout
 
     def run_wrapper(self, path, arguments, timeout):
-        result = subprocess.run(
+        process = subprocess.Popen(
             [
                 PS,
                 "-NoLogo",
@@ -351,9 +355,32 @@ ConvertTo-Json -InputObject $safe -Compress
                 *arguments,
             ],
             stdin=subprocess.DEVNULL,
-            capture_output=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NO_WINDOW,
-            check=False,
         )
-        return result.returncode, result.stdout.decode("utf-8-sig", errors="replace")
+        try:
+            stdout, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Killing PowerShell alone would orphan xsdb and hw_server.
+            self._taskkill(["/T", "/PID", str(process.pid)])
+            process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.communicate(timeout=2)
+            raise
+        return process.returncode, stdout.decode("utf-8-sig", errors="replace")
+
+    def stop_debuggers(self, images):
+        for image in sorted(images):
+            self._taskkill(["/IM", image])
+
+    @staticmethod
+    def _taskkill(arguments):
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [TASKKILL, "/F", *arguments],
+                capture_output=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )

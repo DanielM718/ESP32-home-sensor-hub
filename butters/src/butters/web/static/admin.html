@@ -165,6 +165,9 @@
         <div id="kr260-status" class="axis-grid" role="group" aria-label="Current observed KR260 state">Select KR260 to load status.</div>
         <h3>Network</h3>
         <div id="kr260-network" class="axis-grid" role="group" aria-label="KR260 network state"></div>
+        <h3>FPGA (programmable logic)</h3>
+        <p class="tool-note">Read-only: the FPGA Manager state and the applied overlays, identified by their reviewed hash. Programming is not available here.</p>
+        <div id="kr260-fpga" class="axis-grid" role="group" aria-label="KR260 FPGA state"></div>
         <h3>Last operation</h3>
         <p id="kr260-last-operation" class="tool-note" role="status">No KR260 operation has been requested from this console.</p>
         <div class="button-row">
@@ -173,7 +176,22 @@
         </div>
         <div id="kr260-reboot-confirm" class="confirm-panel" role="group" aria-label="Confirm KR260 restart" hidden></div>
         <p id="kr260-action-status" class="tool-action-status" role="status">Reboot has not been requested.</p>
-        <p class="tool-note">Shutdown and JTAG reset are intentionally unavailable until shutdown-to-JTAG recovery is proven on the installed hardware.</p>
+        <p class="tool-note">Shutdown is intentionally unavailable.</p>
+      </div>
+      <div class="control-card tool-card" id="kr260-jtag-card">
+        <div class="tool-head">
+          <h2>KR260 JTAG recovery</h2>
+          <span id="kr260-jtag-summary" class="tool-headline" role="status">Checking recovery state…</span>
+        </div>
+        <p class="tool-note"><strong>Abrupt hardware reset.</strong> For a board Butters has seen dark for at least five minutes. A JTAG power-on reset restarts the KR260 like a power cut: no shutdown and no unmount. It runs through the Desktop Agent's fixed, hash-pinned wrapper on the desktop's JTAG cable, at most once per authorization and once per 30 minutes, and is never retried automatically. Use the kexec restart above for a board that still answers.</p>
+        <div id="kr260-jtag-status" class="axis-grid" role="group" aria-label="KR260 JTAG recovery state"></div>
+        <p id="kr260-jtag-reason" class="tool-note" role="status"></p>
+        <div class="button-row">
+          <button id="kr260-jtag-check" class="secondary-button" type="button" disabled>JTAG attach check…</button>
+          <button id="kr260-jtag-reset" class="danger-button" type="button" disabled>JTAG power-on reset (abrupt)…</button>
+        </div>
+        <div id="kr260-jtag-confirm" class="confirm-panel" role="group" aria-label="Confirm KR260 JTAG recovery" hidden></div>
+        <p id="kr260-jtag-action-status" class="tool-action-status" role="status">No JTAG recovery has been requested from this console.</p>
       </div>
     </section>
 

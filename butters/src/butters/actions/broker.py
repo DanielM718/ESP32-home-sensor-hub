@@ -134,6 +134,16 @@ for hw in /sys/class/hwmon/hwmon*; do
   test -r "$hw/temp1_input" && { printf 'soc_temp_millic='; cat "$hw/temp1_input"; }
   break
 done
+printf 'fpga_state=%s\n' "$(cat /sys/class/fpga_manager/fpga0/state 2>/dev/null)"
+printf 'fpga_status=%s\n' "$(cat /sys/class/fpga_manager/fpga0/status 2>/dev/null | tr '\n' ' ')"
+n=0
+for o in /sys/kernel/config/device-tree/overlays/*/; do
+  test -d "$o" || continue
+  n=$((n + 1)); test "$n" -le 4 || break
+  p=$(cat "$o/path" 2>/dev/null)
+  case "$p" in ""|/*|*..*) s=- ;; *) s=$(sha256sum < "/lib/firmware/$p" 2>/dev/null | cut -d' ' -f1) ;; esac
+  printf 'fpga_overlay=%s %s %s\n' "$(basename "$o")" "$(cat "$o/status" 2>/dev/null)" "${s:--}"
+done
 """
 
 
