@@ -138,7 +138,7 @@ document.querySelector("#add-passkey").addEventListener("click",addPasskey);
 /* Poll one frozen action job to a terminal state. The job ID comes from the
  * server's own response to the POST that created it; nothing here can name an
  * arbitrary job. */
-async function waitForAdminAction(jobId){for(let attempt=0;attempt<60;attempt+=1){const job=(await api(`/api/actions/jobs/${encodeURIComponent(jobId)}`)).value;if(job.state==="completed")return job;if(["failed","cancelled","expired"].includes(job.state))throw new Error(job.failure_reason||"the action did not complete");await new Promise(resolve=>window.setTimeout(resolve,500));}throw new Error("the action is still running; check Actions / Broker for its final status");}
+async function waitForAdminAction(jobId,attempts=60){for(let attempt=0;attempt<attempts;attempt+=1){const job=(await api(`/api/actions/jobs/${encodeURIComponent(jobId)}`)).value;if(job.state==="completed")return job;if(["failed","cancelled","expired"].includes(job.state))throw new Error(job.failure_reason||"the action did not complete");await new Promise(resolve=>window.setTimeout(resolve,500));}throw new Error("the action is still running; check Actions / Broker for its final status");}
 
 async function refreshTraces(){renderTraces((await api("/api/admin/traces?limit=50")).value.traces);}
 function createTraceCard(traceId){const card=document.createElement("details");card.className="trace-card";card.dataset.traceId=traceId;const summary=document.createElement("summary");const label=document.createElement("span");label.className="trace-summary-label";summary.append(label);summary.addEventListener("click",event=>{event.preventDefault();selectTrace(traceId);});const events=document.createElement("div");events.className="trace-events";card.append(summary,events);traceCards.set(traceId,card);return card;}
@@ -404,6 +404,8 @@ async function refreshKr260() {
       ["IPv4", Array.isArray(network.ipv4)&&network.ipv4.length?network.ipv4.join(", "):"unknown"],
       ["Default route", network.default_route||"unknown"],
     ]);
+    renderKr260Fpga(state.fpga);
+    renderKr260Jtag(state.jtag_recovery);
     renderLastOperation(document.querySelector("#kr260-last-operation"), state.last_operation, "No KR260 operation has been requested from this console.");
     document.querySelector("#kr260-reboot").disabled=!(state.capability&&state.capability.reboot);
     if(!(state.capability&&state.capability.reboot)) document.querySelector("#kr260-action-status").textContent="Restart remains disabled until its fixed kexec path passes a live test.";
@@ -425,6 +427,146 @@ async function rebootKr260() {
     status.textContent="Restart requested, not yet confirmed. Refresh status: it is confirmed when the board reports a new boot ID (about 70 s).";
   } catch(error) { status.textContent=`Restart KR260 failed: ${error.message||"unknown error"}`; }
   finally { await refreshKr260(); }
+}
+
+const KR260_FPGA_STATE = {
+  operating:["Operating","good"], operating_without_overlay:["Configured, no overlay","warn"], unconfigured:["Not configured","muted"],
+  unreviewed_design:["Unreviewed design","warn"], error:["Error","bad"], unrecognized:["Unrecognized","warn"], unavailable:["Not reported","muted"],
+};
+
+function renderKr260Fpga(fpga) {
+  const node=document.querySelector("#kr260-fpga");
+  if(!fpga){ axis(node,[["FPGA","unknown","Not observed while the board is unreachable"]]); return; }
+  const [label,tone]=KR260_FPGA_STATE[fpga.state]||["Unrecognized","warn"];
+  const overlays=Array.isArray(fpga.overlays)?fpga.overlays:[];
+  axis(node, [
+    ["PL state", label, fpga.manager_state?`FPGA Manager: ${fpga.manager_state}`:undefined, tone],
+    ["Design", fpga.design||"none", fpga.starter_kit_loaded?"Reviewed starter-kit design":undefined, fpga.design?"good":"muted"],
+    ...overlays.map(item=>[`Overlay ${item.name}`, item.status, item.sha256?`sha256 ${item.sha256.slice(0,12)}…${item.design?` · ${item.design}`:" · not reviewed"}`:"no firmware hash", item.status==="applied"?(item.design?"good":"warn"):"muted"]),
+    ...(fpga.status?[["Driver status", fpga.status, undefined, "bad"]]:[]),
+  ]);
+}
+
+/* ---------- KR260 JTAG recovery ---------- */
+
+// Every code is decided by Butters; this page only explains it.
+const KR260_JTAG_BOARD = {
+  online:["Online and healthy","good"],
+  degraded:["Answering, not verified","warn"],
+  unreachable:["Temporarily unreachable","warn"],
+  unreachable_confirmed:["Unreachable (confirmed)","bad"],
+  monitoring_unavailable:["Monitoring unavailable","muted"],
+};
+const KR260_JTAG_REASON = {
+  gate_closed:"JTAG recovery is disabled in Butters (actions.kr260_jtag_recovery). It ships disabled.",
+  agent_unconfigured:"The Desktop Agent is not configured in Butters.",
+  agent_disconnected:"The Desktop Agent is not connected. Recovery runs on the desktop's JTAG cable, so it needs the agent.",
+  agent_awaiting_heartbeat:"The Desktop Agent connected but has not sent a heartbeat yet.",
+  agent_heartbeat_aging:"The Desktop Agent's heartbeat is late.",
+  agent_heartbeat_stale:"The Desktop Agent's heartbeat is stale.",
+  agent_jtag_not_offered:"The Desktop Agent is connected but does not offer JTAG recovery: its local gate (kr260-jtag.toml) is off.",
+  board_reachable:"The KR260 answers, so it does not need a power-on reset. Use the kexec restart if it needs restarting.",
+  offline_not_established:"The KR260 has not yet been unreachable for five minutes over at least two observations.",
+  restart_recent:"A kexec restart was requested in the last ten minutes; the board may still be booting.",
+  reset_rate_limited:"A JTAG reset was attempted in the last thirty minutes. Investigate in person before another.",
+  busy:"Another KR260 operation is running.",
+};
+const KR260_JTAG_ATTEMPT = {
+  requested:["Requested, not confirmed","warn","XSDB reported the reset was issued. Waiting for the board to answer from a new boot."],
+  confirmed:["Confirmed","good","The identity-verified board answered with a new boot ID."],
+  booted:["Booted after request","good","The verified board's uptime began after the request; its previous boot ID was not known."],
+  no_effect:["No effect","bad","The verified board answered from the same boot: the reset did not restart it."],
+  unconfirmed:["Unconfirmed","bad","No new boot was observed within five minutes. Recover the board in person."],
+  failed:["Failed, nothing sent","bad","The request was refused before any reset could run."],
+  check_passed:["Check passed","good","The JTAG cable and the KR260 chain were found and detached cleanly."],
+  check_failed:["Check failed","bad","The attach-only check did not pass."],
+};
+const KR260_JTAG_EVIDENCE = {
+  new_boot_id:"new boot ID", same_boot_id:"same boot ID", uptime_after_request:"uptime began after the request", uptime_before_request:"uptime predates the request",
+  identity_mismatch:"another machine answered", network_only:"ping answers, Linux/SSH does not", monitoring_unavailable:"monitoring unavailable",
+  no_answer:"no answer", not_sent:"not sent", identity_verified_without_boot_id:"no boot ID reported", none:"",
+};
+let kr260JtagInFlight=false;
+let kr260JtagState=null;
+
+function renderKr260Jtag(recovery) {
+  kr260JtagState=recovery||null;
+  const summary=document.querySelector("#kr260-jtag-summary");
+  const reason=document.querySelector("#kr260-jtag-reason");
+  const check=document.querySelector("#kr260-jtag-check");
+  const reset=document.querySelector("#kr260-jtag-reset");
+  if(!recovery){
+    summary.textContent="Not available";
+    axis(document.querySelector("#kr260-jtag-status"),[["Recovery","unavailable"]]);
+    reason.textContent="This Butters build reports no JTAG recovery state.";
+    check.disabled=true; reset.disabled=true; return;
+  }
+  const [board,boardTone]=KR260_JTAG_BOARD[recovery.board]||[recovery.board||"Unknown","muted"];
+  const dark=Math.round(recovery.dark_seconds||0);
+  const attempt=recovery.last_attempt;
+  const [attemptLabel,attemptTone,attemptNote]=attempt?(KR260_JTAG_ATTEMPT[attempt.state]||[attempt.state,"muted",""]):["None","muted",""];
+  summary.textContent=recovery.reset_permitted?"Recovery permitted by policy":"Recovery blocked";
+  axis(document.querySelector("#kr260-jtag-status"), [
+    ["Board", board, recovery.board==="unreachable"||recovery.board==="unreachable_confirmed"?`dark ${dark}s of ${Math.round(recovery.required_dark_seconds)}s · ${recovery.dark_probes} probes`:undefined, boardTone],
+    ["Last known boot ID", recovery.last_known_boot_id||"unknown", undefined, recovery.last_known_boot_id?"info":"muted"],
+    ["Recovery configured", recovery.configured?"yes":"no", recovery.configured?undefined:"Butters gate closed", recovery.configured?"good":"muted"],
+    ["Desktop Agent", recovery.agent, undefined, recovery.agent==="connected"?"good":"muted"],
+    ["Reset permitted", recovery.reset_permitted?"yes":"no", undefined, recovery.reset_permitted?"warn":"muted"],
+    ["Last JTAG request", attemptLabel, attempt?`${attempt.operation} · ${ago(attempt.age_seconds)}${attempt.evidence&&KR260_JTAG_EVIDENCE[attempt.evidence]?` · ${KR260_JTAG_EVIDENCE[attempt.evidence]}`:""}${attempt.jtag_result?` · XSDB ${attempt.jtag_result}`:""}${attempt.error?` · ${attempt.error}`:""}`:undefined, attemptTone],
+  ]);
+  const blocked=recovery.reset_blocked_reason;
+  reason.textContent=recovery.reset_permitted
+    ? "Recovery is permitted: the board has been dark long enough and no restart or reset is recent. Butters and the agent both recheck immediately before acting."
+    : (KR260_JTAG_REASON[blocked]||`Recovery is blocked (${blocked}).`)+(attempt&&attemptNote?` Last request: ${attemptNote}`:"");
+  check.disabled=kr260JtagInFlight||!recovery.check_permitted;
+  reset.disabled=kr260JtagInFlight||!recovery.reset_permitted;
+}
+
+function confirmKr260Jtag(operation) {
+  const node=document.querySelector("#kr260-jtag-confirm");
+  node.replaceChildren();
+  const text=document.createElement("p");
+  text.textContent=operation==="reset"
+    ? "This pulses the KR260's power-on reset line through the desktop's JTAG cable. It is an abrupt hardware reset, like a power cut: Linux is not shut down and filesystems are not unmounted. It runs once and is not retried. Success here means only that the reset was issued; Butters confirms recovery only when the board answers with a new boot ID."
+    : "This attaches a debugger to the KR260 through the desktop's JTAG cable, checks the cable and chain identity, and detaches. It changes nothing on the board, but attaching to a running board is what this runbook forbids, so it is only offered for a dark board.";
+  const label=document.createElement("label");
+  const box=document.createElement("input"); box.type="checkbox";
+  label.append(box, document.createTextNode(operation==="reset"?" I understand this is an abrupt hardware reset of the KR260.":" I understand this attaches a JTAG debugger to the KR260."));
+  const row=document.createElement("div"); row.className="button-row";
+  const yes=document.createElement("button"); yes.className="danger-button"; yes.type="button"; yes.textContent=operation==="reset"?"Reset with fresh passkey":"Check with fresh passkey"; yes.disabled=true;
+  const no=document.createElement("button"); no.className="secondary-button"; no.type="button"; no.textContent="Cancel";
+  box.addEventListener("change",()=>{yes.disabled=!box.checked;});
+  no.addEventListener("click",()=>{node.hidden=true;});
+  yes.addEventListener("click",()=>{node.hidden=true; runKr260Jtag(operation);},{once:true});
+  row.append(yes,no); node.append(text,label,row); node.hidden=false;
+}
+
+async function runKr260Jtag(operation) {
+  // One request per click, never retried: a second click while one is in
+  // flight does nothing, and a failure is reported, not repeated.
+  if(kr260JtagInFlight) return;
+  kr260JtagInFlight=true;
+  const status=document.querySelector("#kr260-jtag-action-status");
+  document.querySelector("#kr260-jtag-check").disabled=true;
+  document.querySelector("#kr260-jtag-reset").disabled=true;
+  status.textContent=operation==="reset"?"Submitting one JTAG power-on reset…":"Submitting the JTAG attach-only check…";
+  try {
+    let result=(await api("/api/admin/tools/kr260/jtag",{method:"POST",body:JSON.stringify({operation,confirm:true})})).value;
+    if(result.status==="authentication_required"){
+      status.textContent="Fresh passkey authentication bound to this exact action is required…";
+      result=await authenticatePurpose("pending_action",null,result.pending_action.pending_action_id);
+    }
+    if(!Array.isArray(result.jobs)||!result.jobs.length) throw new Error("the JTAG request was not queued");
+    await waitForAdminAction(result.jobs[0].job_id,150);
+    status.textContent=operation==="reset"
+      ? "Reset issued, not confirmed. The Last JTAG request row turns Confirmed only when the identity-verified board answers with a new boot ID (about 80 s)."
+      : "Check passed: the cable and chain were found, and the debugger detached.";
+  } catch(error) {
+    status.textContent=`${operation==="reset"?"JTAG reset":"JTAG check"} failed: ${error.message||"unknown error"}. It will not be retried automatically.`;
+  } finally {
+    kr260JtagInFlight=false;
+    await refreshKr260();
+  }
 }
 
 /* ---------- Portal enrollment ---------- */
@@ -555,9 +697,11 @@ document.querySelector("#desktop-shutdown").addEventListener("click",()=>{
     ()=>runDesktopAction("Shut Down Desktop",()=>api("/api/admin/tools/desktop/shutdown",{method:"POST",body:JSON.stringify({})})));
 });
 document.querySelector("#kr260-refresh").addEventListener("click",refreshKr260);
+document.querySelector("#kr260-jtag-check").addEventListener("click",()=>confirmKr260Jtag("check"));
+document.querySelector("#kr260-jtag-reset").addEventListener("click",()=>confirmKr260Jtag("reset"));
 document.querySelector("#kr260-reboot").addEventListener("click",()=>{
   confirmPanel(document.querySelector("#kr260-reboot-confirm"),
-    "This restarts Linux on the identity-verified KR260 through kexec, without a firmware reset. It refuses unreviewed FPGA workloads. Shutdown and JTAG recovery are not part of this action.",
+    "This restarts Linux on the identity-verified KR260 through kexec, without a firmware reset. It refuses unreviewed FPGA workloads. Shutdown and JTAG recovery are not part of this action; JTAG recovery has its own card below.",
     rebootKr260);
 });
 document.querySelector("#nas-refresh").addEventListener("click",refreshNas);

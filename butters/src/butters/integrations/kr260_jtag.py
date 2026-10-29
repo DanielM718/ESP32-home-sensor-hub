@@ -26,6 +26,61 @@ CONFIRM_SECONDS = 300.0
 DARK_ERRORS = frozenset({"host_unreachable", "ssh_timeout"})
 
 
+# The Admin page's vocabulary. Every value Butters can report has text there
+# (tests/test_kr260_jtag_admin_ui.py).
+BOARD_STATES = frozenset(
+    {
+        "online",
+        "degraded",
+        "unreachable",
+        "unreachable_confirmed",
+        "monitoring_unavailable",
+    }
+)
+ATTEMPT_STATES = frozenset(
+    {
+        "requested",
+        "confirmed",
+        "booted",
+        "no_effect",
+        "unconfirmed",
+        "failed",
+        "check_passed",
+        "check_failed",
+    }
+)
+EVIDENCE = frozenset(
+    {
+        "new_boot_id",
+        "same_boot_id",
+        "uptime_after_request",
+        "uptime_before_request",
+        "identity_verified_without_boot_id",
+        "identity_mismatch",
+        "monitoring_unavailable",
+        "network_only",
+        "no_answer",
+        "not_sent",
+        "none",
+    }
+)
+BLOCKED_REASONS = frozenset(
+    {
+        "gate_closed",
+        "agent_unconfigured",
+        "agent_disconnected",
+        "agent_awaiting_heartbeat",
+        "agent_heartbeat_aging",
+        "agent_heartbeat_stale",
+        "agent_jtag_not_offered",
+        "board_reachable",
+        "offline_not_established",
+        "restart_recent",
+        "reset_rate_limited",
+    }
+)
+
+
 def is_dark(observation: dict[str, object]) -> bool:
     return (
         observation.get("operational_state") == "offline"
@@ -34,6 +89,21 @@ def is_dark(observation: dict[str, object]) -> bool:
         and observation.get("identity_verified") is False
         and observation.get("error") in DARK_ERRORS
     )
+
+
+@dataclass(slots=True)
+class Attempt:
+    """One JTAG request Butters sent to the Desktop Agent."""
+
+    operation: str  # "check" or "reset"
+    at: float  # monotonic
+    previous_boot_id: str | None
+    may_have_reset: bool
+    error: str | None
+    jtag_result: str | None
+    issued_at: str | None
+    # Latched once boot evidence decides it: (state, evidence).
+    final: tuple[str, str] | None = None
 
 
 @dataclass(slots=True)
@@ -82,27 +152,101 @@ def refusal(
     return None
 
 
+# Failure codes of a reset job that ran nothing on the board: Butters and agent
+# refusals, and wrapper refusals before rst -por. Every other failed or
+# interrupted reset job may have pulsed the POR line and starts the interval.
+RESET_NOT_SENT = frozenset(
+    {
+        "capability_unavailable",
+        "board_reachable",
+        "offline_not_established",
+        "restart_recent",
+        "reset_rate_limited",
+        "invalid_action",
+        "invalid_parameter",
+        "invalid_request_id",
+        "duplicate_request",
+        "agent_unavailable",
+        "unsupported_action",
+        "superseded_connection",
+        "busy",
+        "cancelled",
+        "debugger_active",
+        "integrity_failed",
+        "rate_limited",
+        "jtag_connect_failed",
+        "jtag_refused_usage",
+        "jtag_refused_unconfirmed",
+        "jtag_refused_chain",
+        "jtag_refused_target",
+        "jtag_refused_repeat",
+        "jtag_refused_debugger_active",
+        "jtag_refused_missing_script",
+    }
+)
+
+# Observation errors that are Butters-side: nothing is known about the board.
+_MONITORING_ERRORS = frozenset({"ssh_unavailable", "capability_disabled", "disabled"})
+
+
+def board_state(observation: dict[str, object], dark: DarkRun, now: float) -> str:
+    """One word for what Butters currently knows about the board.
+
+    online                 identity-verified answer
+    degraded               something answered (ping, SSH as another host,
+                           an auth failure) but not the verified board
+    unreachable            dark, but not yet for DARK_SECONDS over two probes
+    unreachable_confirmed  dark for DARK_SECONDS over at least two probes
+    monitoring_unavailable Butters cannot observe (broker down, disabled)
+    """
+
+    if observation.get("identity_verified"):
+        return "online"
+    if observation.get("error") in _MONITORING_ERRORS:
+        return "monitoring_unavailable"
+    if not is_dark(observation):
+        return "degraded"
+    if dark.count >= 2 and dark.seconds(now) >= DARK_SECONDS:
+        return "unreachable_confirmed"
+    return "unreachable"
+
+
 def reset_state(
     observation: dict[str, object],
     *,
     age_seconds: float,
     previous_boot_id: str | None,
-) -> tuple[bool | None, str]:
-    """(booted after the reset, state) for one requested reset.
+) -> tuple[str, str]:
+    """(state, evidence) for one reset that may have run.
 
-    Only an identity-verified answer counts. With a known previous boot ID, a
-    different one confirms; without one (Butters restarted while the board was
-    dark), an uptime shorter than the time since the request does.
+    States: ``confirmed`` (the identity-verified board answers with a boot ID
+    different from the last one Butters saw), ``booted`` (no previous boot ID
+    was known, but the verified board's uptime began after the request),
+    ``no_effect`` (the verified board answers from the same boot), and
+    ``requested`` until CONFIRM_SECONDS, then ``unconfirmed``. A wrapper
+    RST_ISSUED alone is only ever ``requested``.
     """
 
-    booted: bool | None = None
     if observation.get("identity_verified"):
         boot_id = observation.get("boot_id")
         uptime = observation.get("uptime_seconds")
         if previous_boot_id is not None and isinstance(boot_id, str) and boot_id:
-            booted = boot_id != previous_boot_id
-        elif isinstance(uptime, (int, float)):
-            booted = uptime <= age_seconds
-    if booted:
-        return True, "confirmed"
-    return booted, "requested" if age_seconds < CONFIRM_SECONDS else "unconfirmed"
+            if boot_id != previous_boot_id:
+                return "confirmed", "new_boot_id"
+            return "no_effect", "same_boot_id"
+        if isinstance(uptime, (int, float)):
+            if uptime <= age_seconds:
+                return "booted", "uptime_after_request"
+            return "no_effect", "uptime_before_request"
+        evidence = "identity_verified_without_boot_id"
+    elif observation.get("operational_state") == "identity_failed":
+        # Some other host answers at the board's address: never confirmed.
+        evidence = "identity_mismatch"
+    elif observation.get("error") in _MONITORING_ERRORS:
+        evidence = "monitoring_unavailable"
+    elif observation.get("network_reachable"):
+        # Booting, or Linux up without SSH: not a confirmation.
+        evidence = "network_only"
+    else:
+        evidence = "no_answer"
+    return ("requested" if age_seconds < CONFIRM_SECONDS else "unconfirmed"), evidence

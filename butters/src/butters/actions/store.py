@@ -393,6 +393,28 @@ class ActionStateStore:
             ).fetchall()
         return tuple(_job(row) for row in rows)
 
+    def last_job_that_may_have_run(
+        self, skill: str, *, not_run: frozenset[str]
+    ) -> float | None:
+        """Creation time of the newest finished ``skill`` job that may have acted.
+
+        Jobs still queued or running are skipped (the caller is usually one),
+        as are failures whose code says the action never ran. A job failed by a
+        process restart counts: its outcome is unknown.
+        """
+
+        with self._lock, self._connect() as connection:
+            rows = connection.execute(
+                "SELECT created_at, state, failure_code FROM action_jobs "
+                "WHERE skill=? AND state NOT IN ('queued','running','waiting') "
+                "ORDER BY created_at DESC LIMIT 50",
+                (skill,),
+            ).fetchall()
+        for created_at, state, failure_code in rows:
+            if state == "completed" or failure_code not in not_run:
+                return float(created_at)
+        return None
+
     def audit(
         self,
         *,

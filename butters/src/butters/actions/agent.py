@@ -326,6 +326,12 @@ class AgentHub:
             **app,
         }
 
+    def supports(self, action: str) -> bool:
+        """Whether the current connection advertised ``action`` in its hello."""
+
+        with self._state_lock:
+            return self.connection_id is not None and action in self._actions
+
     def kr260_jtag(
         self,
         action: str,
@@ -364,6 +370,9 @@ class AgentHub:
             issued_at = result.get("reset_issued_at")
             if isinstance(issued_at, str) and self._UTC_STAMP.fullmatch(issued_at):
                 projected["reset_issued_at"] = issued_at
+        cleanup = result.get("debugger_cleanup")
+        if cleanup in {"clean", "forced", "failed"}:
+            projected["debugger_cleanup"] = cleanup
         return projected
 
     def _known_app(self, name: str) -> str | bool | dict[str, object]:

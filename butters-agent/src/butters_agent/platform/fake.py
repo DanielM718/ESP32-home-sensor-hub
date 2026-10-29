@@ -25,6 +25,12 @@ class Platform:
         self.board_pings = False
         self.wrapper_outcome = (1, "")
         self.wrapper_calls = []
+        self.debuggers_after_run = set()
+        self.debuggers_survive = False
+        self.stop_calls = 0
+        # Successive host_answers_ping results; then board_pings.
+        self.ping_sequence = []
+        self.ping_calls = 0
 
     def session(self):
         return {
@@ -80,10 +86,20 @@ class Platform:
         return bool(self.debuggers & images)
 
     def host_answers_ping(self, address):
+        self.ping_calls += 1
+        if self.ping_sequence:
+            return self.ping_sequence.pop(0)
         return self.board_pings
 
     def run_wrapper(self, path, arguments, timeout):
         self.wrapper_calls.append((str(path), list(arguments), timeout))
+        # Debuggers the wrapper left running.
+        self.debuggers |= self.debuggers_after_run
         if isinstance(self.wrapper_outcome, BaseException):
             raise self.wrapper_outcome
         return self.wrapper_outcome
+
+    def stop_debuggers(self, images):
+        self.stop_calls += 1
+        if not self.debuggers_survive:
+            self.debuggers -= images

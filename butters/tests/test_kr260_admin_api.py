@@ -155,3 +155,209 @@ def test_kr260_jtag_endpoint_is_authorized_confirmed_and_gated(tmp_path) -> None
         code, body = observed[name]
         assert (code, body["error"]) == (409, "capability_unavailable"), (name, body)
         assert "jobs" not in body
+
+
+# ----- an open gate: fresh passkey, one reset, no replay ---------------------------------
+
+
+class _DarkObserver:
+    """A board that has been dark; each probe gets a new timestamp."""
+
+    def __init__(self, settings):
+        self.settings = settings
+        self.probes = 0
+
+    def observe(self, *, refresh=False):
+        self.probes += 1
+        return {
+            "device": "kr260",
+            "operational_state": "offline",
+            "online": False,
+            "network_reachable": False,
+            "ssh_available": False,
+            "identity_verified": False,
+            "observed_at": float(self.probes),
+            "error": "host_unreachable",
+        }
+
+    def invalidate(self):
+        pass
+
+
+class _AgentHub:
+    configured = True
+
+    def __init__(self):
+        self.calls = []
+
+    def status(self):
+        return {"state": "connected"}
+
+    def supports(self, action):
+        return True
+
+    def kr260_jtag(self, action, *, cancel=None, idempotency_key=None):
+        self.calls.append((action, idempotency_key))
+        return {
+            "action": action,
+            "success": True,
+            "jtag_result": "RST_ISSUED",
+            "reset_may_have_run": True,
+            "reset_issued_at": "2026-10-29T03:26:40.012Z",
+        }
+
+
+def _jtag_application(tmp_path):
+    from dataclasses import replace
+
+    import test_nas_admin_controls as nas_tests
+
+    from butters.integrations import kr260_jtag
+
+    base = nas_tests.load_assistant_settings()
+    opened = replace(base.actions.kr260_jtag_recovery, enabled=True, configured=True)
+    original = nas_tests.load_assistant_settings
+
+    def settings_with_jtag():
+        loaded = original()
+        return replace(
+            loaded,
+            kr260=replace(
+                loaded.kr260,
+                enabled=True,
+                host="192.168.1.125",
+                expected_machine_id="7a6ccc6abe67407b93558d1efcb36587",
+            ).validated(),
+            actions=replace(loaded.actions, kr260_jtag_recovery=opened),
+        )
+
+    nas_tests.load_assistant_settings = settings_with_jtag
+    try:
+        app, service, _nas = _application(tmp_path)
+    finally:
+        nas_tests.load_assistant_settings = original
+    adapter = service.assistant.kr260_adapter
+    adapter.observer = _DarkObserver(adapter.observer.settings)
+    hub = _AgentHub()
+    persisted = adapter._persisted_reset_at
+    adapter.attach_jtag(hub, persisted_reset_at=persisted)
+    # Dark long enough: two probes, DARK_SECONDS apart.
+    adapter._dark.since = adapter.monotonic() - kr260_jtag.DARK_SECONDS - 1
+    adapter._dark.count = 2
+    return app, service, hub
+
+
+async def _passkey(http, mutation, plan):
+    from test_nas_admin_controls import _credential
+
+    begin = await http.post(
+        "/api/auth/authenticate/options",
+        headers=mutation,
+        json={"purpose": "pending_action", "pending_action_id": plan},
+    )
+    if begin.status_code != 200:
+        # A consumed or expired plan is refused before any ceremony starts.
+        return begin
+    return await http.post(
+        "/api/auth/authenticate/verify",
+        headers=mutation,
+        json={"ceremony_id": begin.json()["ceremony_id"], "credential": _credential()},
+    )
+
+
+async def _exercise_open_gate(tmp_path) -> dict[str, object]:
+    from test_nas_admin_controls import _await_job
+
+    app, service, hub = _jtag_application(tmp_path)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    observed: dict[str, object] = {"hub": hub}
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as http:
+            before = (
+                await http.get("/api/admin/tools/kr260?refresh=1", headers=ADMIN)
+            ).json()
+            observed["before"] = before["jtag_recovery"]
+            mutation = await _session(http, ADMIN)
+            # Even an elevated session must present a fresh passkey for this plan.
+            await _elevate(http, mutation)
+            first = await http.post(
+                "/api/admin/tools/kr260/jtag",
+                headers=mutation,
+                json={"operation": "reset", "confirm": True},
+            )
+            observed["first"] = first.json()
+            observed["calls_before_passkey"] = len(hub.calls)
+            plan = first.json()["pending_action"]["pending_action_id"]
+            verified = await _passkey(http, mutation, plan)
+            observed["job"] = await _await_job(
+                http, mutation, verified.json()["jobs"][0]["job_id"]
+            )
+            # The same authorization cannot be used twice.
+            replayed = await _passkey(http, mutation, plan)
+            observed["replayed"] = replayed.status_code
+            # A new authorization is refused by the 30-minute interval.
+            second = await http.post(
+                "/api/admin/tools/kr260/jtag",
+                headers=mutation,
+                json={"operation": "reset", "confirm": True},
+            )
+            again = await _passkey(
+                http, mutation, second.json()["pending_action"]["pending_action_id"]
+            )
+            observed["second_job"] = await _await_job(
+                http, mutation, again.json()["jobs"][0]["job_id"]
+            )
+            after = (
+                await http.get("/api/admin/tools/kr260?refresh=1", headers=ADMIN)
+            ).json()
+            observed["after"] = after["jtag_recovery"]
+            observed["audit"] = [
+                entry
+                for entry in service.action_state.audit_entries(200)
+                if entry["skill"] == "reset_kr260_jtag"
+            ]
+    finally:
+        await app.state.shutdown_workers()
+        del service
+    return observed
+
+
+def test_open_gate_needs_a_fresh_passkey_and_sends_exactly_one_reset(tmp_path) -> None:
+    observed = asyncio.run(_exercise_open_gate(tmp_path))
+    hub = observed["hub"]
+
+    assert observed["before"]["reset_permitted"] is True
+    assert observed["before"]["board"] == "unreachable_confirmed"
+
+    first = observed["first"]
+    assert first["status"] == "authentication_required"
+    assert first["authentication_required"] == "fresh"
+    assert observed["calls_before_passkey"] == 0
+
+    job = observed["job"]
+    assert job["state"] == "completed", job
+    assert len(hub.calls) == 1
+    action, key = hub.calls[0]
+    assert action == "kr260.jtag_por.reset"
+    assert key is not None  # the job's stable idempotency key
+
+    assert observed["replayed"] in {400, 403, 404, 409}
+    assert observed["second_job"]["state"] == "failed"
+    assert observed["second_job"]["failure_code"] == "reset_rate_limited"
+    assert len(hub.calls) == 1
+
+    after = observed["after"]
+    assert after["reset_permitted"] is False
+    assert after["reset_blocked_reason"] == "reset_rate_limited"
+    assert after["last_attempt"]["state"] == "requested"
+    assert after["last_attempt"]["jtag_result"] == "RST_ISSUED"
+
+    # Every step is audited: two pending authorizations, then each outcome.
+    audit = observed["audit"]
+    outcomes = [entry["outcome"] for entry in audit]
+    assert outcomes.count("pending_auth") == 2
+    assert all(entry["authentication"] == "fresh" for entry in audit)
+    assert all(entry["arguments"] == {} for entry in audit)
+    assert len(audit) > 2

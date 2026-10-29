@@ -35,11 +35,13 @@ DEBUGGERS = frozenset(
     {"hw_server.exe", "xsdb.exe", "rdi_xsdb.exe", "cs_server.exe", "vivado.exe"}
 )
 # The wrapper's own XSDB deadline. The attach-only check took 14.6 s on
-# 2026-10-29. The whole action must finish inside the 30 s request window,
-# after up to PREFLIGHT_SECONDS of ACL, hash, process-list and ping checks.
-WRAPPER_TIMEOUT_SECONDS = 18
-RUN_TIMEOUT_SECONDS = 21
+# 2026-10-29. The whole action must finish inside the 30 s request window:
+# up to PREFLIGHT_SECONDS of ping, ACL, hash and process-list checks, the run,
+# then up to CLEANUP_SECONDS of debugger cleanup.
+WRAPPER_TIMEOUT_SECONDS = 17
+RUN_TIMEOUT_SECONDS = 20
 PREFLIGHT_SECONDS = 8
+CLEANUP_SECONDS = 2
 # One reset attempt per half hour from this agent, whatever Butters asks.
 RESET_INTERVAL_SECONDS = 1800.0
 
@@ -136,11 +138,15 @@ class Kr260Jtag:
                 and self.monotonic() - self.last_reset < RESET_INTERVAL_SECONDS
             ):
                 raise ProtocolError("rate_limited")
+            # Cheap refusal first, before the slower ACL and hash checks.
+            self._require_dark()
             self._verify_files()
             if self.platform.debuggers_running(DEBUGGERS):
                 raise ProtocolError("debugger_active")
-            if self.platform.host_answers_ping(self.config["board_address"]):
-                raise ProtocolError("board_reachable")
+            # Again immediately before the wrapper starts: the board may have
+            # come back while the checks above ran. What remains is the
+            # wrapper's own attach and chain scan (about 10 s) before rst -por.
+            self._require_dark()
             arguments = [
                 "-Mode",
                 "check" if action == CHECK else "por",
@@ -158,18 +164,36 @@ class Kr260Jtag:
                     WRAPPER, arguments, RUN_TIMEOUT_SECONDS
                 )
             except subprocess.TimeoutExpired:
+                # The platform has already killed the PowerShell process tree.
                 returncode, output = None, ""
+            cleanup = self._cleanup()
         finally:
             self.lock.release()
         code, at = parse_result(output)
         success = returncode == 0 and code == SUCCESS[action]
-        result = {"success": success, "jtag_result": code}
+        result = {"success": success, "jtag_result": code, "debugger_cleanup": cleanup}
         if not success:
             result["error"] = "jtag_failed"
         if action == RESET:
             result["reset_may_have_run"] = code in _MAY_HAVE_RESET
             result["reset_issued_at"] = at
         return result
+
+    def _require_dark(self):
+        if self.platform.host_answers_ping(self.config["board_address"]):
+            raise ProtocolError("board_reachable")
+
+    def _cleanup(self):
+        """No debugger may stay attached while the board boots.
+
+        None ran before this run started, so any debugger process now is this
+        run's. The wrapper normally stops them itself ("clean").
+        """
+
+        if not self.platform.debuggers_running(DEBUGGERS):
+            return "clean"
+        self.platform.stop_debuggers(DEBUGGERS)
+        return "failed" if self.platform.debuggers_running(DEBUGGERS) else "forced"
 
     def _verify_files(self):
         for path, expected in (

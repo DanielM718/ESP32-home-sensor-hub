@@ -132,7 +132,10 @@ def test_reset_runs_fixed_wrapper_arguments_with_confirmation(platform, clock):
 
 def test_run_timeout_budget_fits_the_request_window():
     assert kr260.WRAPPER_TIMEOUT_SECONDS < kr260.RUN_TIMEOUT_SECONDS
-    assert kr260.PREFLIGHT_SECONDS + kr260.RUN_TIMEOUT_SECONDS <= 30
+    assert (
+        kr260.PREFLIGHT_SECONDS + kr260.RUN_TIMEOUT_SECONDS + kr260.CLEANUP_SECONDS
+        <= 30
+    )
     # The supervised attach-only check took 14.6 s end to end.
     assert kr260.WRAPPER_TIMEOUT_SECONDS > 14.6
 
@@ -269,6 +272,7 @@ def test_reset_results_are_fixed_codes(
         "reset_issued_at",
         "completed_at",
         "duration_seconds",
+        "debugger_cleanup",
     }
     assert result["stdout"] == result["stderr"] == ""
 
@@ -344,3 +348,124 @@ def _toml(values):
         else:
             lines.append(f'{key} = "{value}"')
     return "\n".join(lines) + "\n"
+
+
+# ----- reachability is rechecked immediately before the wrapper -------------------
+
+
+@pytest.mark.parametrize("action", sorted(kr260.ACTIONS))
+def test_board_returning_during_the_checks_stops_the_run(platform, clock, action):
+    # Dark at the first ping, answering at the recheck just before the wrapper.
+    platform.ping_sequence = [False, True]
+    result = engine_for(platform, clock).invoke(action, {})
+    assert result["error"] == "board_reachable"
+    assert platform.wrapper_calls == []
+    assert platform.ping_calls == 2
+
+
+def test_both_pings_run_and_the_last_precedes_the_wrapper(platform, clock):
+    order = []
+    ping = platform.host_answers_ping
+    run = platform.run_wrapper
+    platform.host_answers_ping = lambda address: order.append("ping") or ping(address)
+    platform.run_wrapper = lambda *a: order.append("run") or run(*a)
+    platform.wrapper_outcome = (0, RST_ISSUED)
+    engine_for(platform, clock).invoke(kr260.RESET, {})
+    assert order == ["ping", "ping", "run"]
+
+
+def test_a_reset_refused_at_the_recheck_does_not_consume_the_interval(platform, clock):
+    engine = engine_for(platform, clock)
+    platform.ping_sequence = [False, True]
+    assert engine.invoke(kr260.RESET, {})["error"] == "board_reachable"
+    platform.wrapper_outcome = (0, RST_ISSUED)
+    assert engine.invoke(kr260.RESET, {})["success"] is True
+
+
+# ----- debugger cleanup ------------------------------------------------------------
+
+
+def test_clean_run_reports_clean(platform, clock):
+    platform.wrapper_outcome = (0, CHECK_OK)
+    result = engine_for(platform, clock).invoke(kr260.CHECK, {})
+    assert result["debugger_cleanup"] == "clean"
+    assert platform.stop_calls == 0
+
+
+def test_leftover_debuggers_are_stopped(platform, clock):
+    platform.wrapper_outcome = (0, RST_ISSUED)
+    platform.debuggers_after_run = {"hw_server.exe"}
+    result = engine_for(platform, clock).invoke(kr260.RESET, {})
+    assert result["debugger_cleanup"] == "forced"
+    assert platform.stop_calls == 1
+    assert platform.debuggers == set()
+    # A forced cleanup does not turn a reset into a failure or a retry.
+    assert result["success"] is True
+    assert len(platform.wrapper_calls) == 1
+
+
+def test_debuggers_that_survive_cleanup_are_reported(platform, clock):
+    platform.wrapper_outcome = subprocess.TimeoutExpired("powershell", 20)
+    platform.debuggers_after_run = {"xsdb.exe"}
+    platform.debuggers_survive = True
+    result = engine_for(platform, clock).invoke(kr260.RESET, {})
+    assert result["debugger_cleanup"] == "failed"
+    assert result["jtag_result"] == "NO_RESULT"
+    assert result["reset_may_have_run"] is True
+
+
+# ----- concurrency and repeats -----------------------------------------------------------
+
+
+def test_concurrent_requests_run_the_wrapper_once(platform, clock):
+    import threading
+
+    started, release = threading.Event(), threading.Event()
+    jtag = kr260.Kr260Jtag(platform, config(), clock)
+    engine = Engine(platform, kr260=jtag)
+
+    def slow_run(*arguments):
+        platform.wrapper_calls.append(arguments)
+        started.set()
+        release.wait(5)
+        return (0, RST_ISSUED)
+
+    platform.run_wrapper = slow_run
+    results = {}
+    first = threading.Thread(
+        target=lambda: results.setdefault("first", engine.invoke(kr260.RESET, {}))
+    )
+    first.start()
+    assert started.wait(5)
+    results["second"] = engine.invoke(kr260.RESET, {})
+    release.set()
+    first.join(5)
+    assert results["first"]["success"] is True
+    assert results["second"]["error"] == "busy"
+    assert len(platform.wrapper_calls) == 1
+
+
+def test_there_is_no_fallback_or_second_run_after_an_xsdb_error(platform, clock):
+    platform.wrapper_outcome = (
+        1,
+        "2026-10-29T03:00:00Z RESULT RST_ERROR at=2026-10-29T03:00:00.000Z boom\n",
+    )
+    result = engine_for(platform, clock).invoke(kr260.RESET, {})
+    assert result["jtag_result"] == "RST_ERROR"
+    assert len(platform.wrapper_calls) == 1
+    assert platform.wrapper_calls[0][1][:2] == ["-Mode", "por"]
+
+
+def test_wrapper_arguments_never_name_another_reset():
+    import inspect
+
+    source = inspect.getsource(kr260)
+    assert "rst -system" not in source
+    assert '"system"' not in source
+
+
+def test_a_success_code_with_no_reset_time_is_still_only_a_request(platform, clock):
+    # XSDB said RST_ISSUED: the agent reports exactly that, never "reset done".
+    platform.wrapper_outcome = (0, RST_ISSUED)
+    result = engine_for(platform, clock).invoke(kr260.RESET, {})
+    assert set(result) & {"confirmed", "reset_confirmed", "booted"} == set()
