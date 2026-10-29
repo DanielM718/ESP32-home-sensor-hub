@@ -368,7 +368,7 @@ To allow a new design, first review its masters and how it quiesces them on
 commit. The policy cannot see bus masters inside a reviewed bitstream; the
 review is what covers that.
 
-#### Production installation (prepared, not installed)
+#### Production installation (steps 1–4 installed 2026-10-29; Butters not deployed)
 
 Artifacts in `config/kr260/` at the commit being installed. Check every hash
 on the board before installing:
@@ -420,6 +420,31 @@ Order, owner present, each step checked before the next:
 6. One supervised restart from Admin, with the procedure and abort criteria
    above. Expect `restart_requested`, then `last_reboot_request.state =
    confirmed` on a new boot ID, with deep idle disabled again by the unit.
+
+Installed by the owner on 2026-10-29 (boot `63d18cfd`), each step verified
+before the next:
+
+- 01:16:45Z, wrapper: root:root 0755, sha256 `9fa2e930…`. `check` printed
+  `CHECK OK`, staging nothing.
+- 01:19Z, sudoers: `visudo -cf` and `visudo -c` parsed OK; the file is root:root
+  0440.
+  - `sudo -n -l` lists only
+    `(root) NOPASSWD: /usr/local/sbin/butters-kr260-kexec-restart ""`.
+  - `sudo -ll` finds no `systemctl` or `reboot` grant anywhere, so the
+    warm-reboot path is gone.
+  - Nine safe probes were refused with "a password is required": `wrapper
+    check`, `wrapper --help`, `wrapper ""`, `/usr/bin/true`, `systemctl
+    --version`, `systemctl --no-wall --no-block --version`, `/bin/sh -c true`,
+    `-s true`, `-E /usr/bin/true`.
+  - The old reboot argv was deliberately not executed as a test: had the
+    grant survived, the test itself would have wedged the board.
+- 01:20:42Z, deep-idle unit: enabled and `active (exited)`, `Result=success`.
+  The journal shows `APPLIED: cpu-sleep-0 disabled on 4 CPUs; WFI untouched`,
+  with the saved originals all `0`. Script root:root 0755 `2225e79b…`; unit
+  root:root 0644 `cbbca1db…`.
+- Afterwards: same boot ID, CPUs `0-3`, `kexec_loaded=0`, `running`, no
+  failed units. Production broker unchanged: no `[kr260]` section,
+  `desktop.wake=false`.
 
 Rollback:
 
