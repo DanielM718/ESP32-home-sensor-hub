@@ -29,7 +29,7 @@ Observations are cached for `poll_interval_seconds` (45 s); an explicit
 refresh re-probes at most every 10 s, so an offline board costs one ping and
 one bounded SSH attempt per window. There is no background poller.
 
-## Reboot authorization (not yet installed)
+## Reboot authorization (installed on the board; broker gate off)
 
 Plain `systemctl reboot` from a non-interactive SSH session is denied by
 polkit: `Call to Reboot failed: Interactive authentication required.` That is
@@ -49,7 +49,19 @@ a reboot with an unknown outcome counts as possibly sent.
    `sudo visudo -cf /etc/sudoers.d/butters-kr260-reboot`.
 2. Check the grant without rebooting (from the Pi, through the root key):
    `sudo -n ssh -i /etc/butters/kr260/id_ed25519 -o UserKnownHostsFile=/etc/butters/kr260/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes ubuntu@192.168.1.125 'sudo -n -l /usr/bin/systemctl --no-wall --no-block reboot'`
-   must print the command path and exit 0.
+   must print the command path and exit 0. `sudo -n -l <cmd>` is **not** a
+   boundary test: `ubuntu` is in `sudo` with `(ALL:ALL) ALL` (password
+   required), and once any NOPASSWD rule exists `-l` answers "permitted by
+   some rule" for every command. Test the boundary by *running* argv that
+   cannot reboot, each of which must fail with "a password is required":
+   `/usr/bin/true`, `/bin/sh -c true`, `systemctl --version`,
+   `systemctl --no-wall --no-block status`,
+   `systemctl --no-wall --no-block reboot --help`,
+   `systemctl --version --no-wall --no-block reboot`, `-s true`, `-i true`,
+   `-E /usr/bin/true`. On 2026-10-29 all 16 such variants were refused, and
+   `sudo -ll` showed the rule loaded from
+   `/etc/sudoers.d/butters-kr260-reboot` with `RunAsUsers: root` and
+   `!authenticate`.
 3. Add the `[kr260]` section from `config/action-broker.example.toml` to
    `/etc/butters/action-broker.toml`, set `"kr260.status" = true`, restart
    `butters-action-broker`, enable `[kr260]` in the assistant overlay, and
@@ -58,6 +70,69 @@ a reboot with an unknown outcome counts as possibly sent.
    `[actions.kr260_reboot] enabled = configured = true`, run one reboot from
    Admin, and confirm `last_reboot_request.boot_changed` becomes `true` and
    `eth1` returns. Decide afterwards whether the gate stays open.
+
+**Blocked: a Linux warm reboot does not restart this board (2026-10-29).**
+Do not set `"kr260.reboot" = true` until a warm reboot is shown to come back.
+
+### Linux reboot test, 2026-10-29: shut down cleanly, did not restart
+
+Issued once through the dev broker's `kr260_reboot()` (identity check, then
+the exact argv) with COM5, a 1 Hz ping and a 10 s SSH heartbeat running, and
+`cpu-sleep-0` disabled at runtime.
+
+| UTC | Event |
+|---|---|
+| 00:04:50.856 | identity check: machine ID matched |
+| 00:04:51.483 | `sudo -n /usr/bin/systemctl --no-wall --no-block reboot`, exit 0 |
+| 00:04:55 | journal: `systemd-reboot.service` finished; systemd and systemd-shutdown "Using hardware watchdog 'cdns_wdt watchdog' … /dev/watchdog0", "Failed to set timeout to 10min: Invalid argument" (`RebootWatchdogSec=10min`; watchdog0 max is 516 s); filesystems synced |
+| 00:04:59.808 | COM5: `reboot: Restarting system` (the last byte) |
+| 00:05:00.097 | last ping reply |
+| 00:05:00–00:15:27 | no COM5 output at all (no FSBL banner); ARP `FAILED`/`INCOMPLETE` |
+
+The firmware's `shutdown_scope` is `[system]`, so Linux asked the PMU firmware
+for a full system reset (not a POR). By comparison, every cold boot prints the
+FSBL banner within about a second.
+
+Read-only JTAG inspection of the hung board (00:13:03–00:13:18Z,
+`connect; jtag targets; targets; targets; disconnect`; `hw_server` stopped
+after):
+
+| | 00:13:11Z | 00:13:18Z |
+|---|---|---|
+| A53 #0 | `Running` | `Reset Catch, EL3(S)/A64` |
+| A53 #1–#3 | `Reset` | `Reset` |
+| R5 #0–#1 | `RPU Reset` | `RPU Reset` |
+
+Core #0 was executing, eight minutes after the reboot, without any console
+output. It then went through a reset within 7 s, and the attached debugger
+caught it. That Reset Catch was caused by the inspection, so it does not
+support "a debug state retained from the 23:44Z attach caught the core". The
+first listing (`Running`) is evidence against that idea, though not proof. A
+reset inside a 7 s window after 8 silent minutes suggests core #0 is in a
+silent reset loop before FSBL prints. A firmware-level warm-reset failure
+(boot ROM, Kria image selector or FSBL, or the board's reset path) fits, but
+is not proven: only one reset was observed. A Linaro KV260 change notes "kv260
+HW issues" that need a power cycle before capsule updates, which is related at
+most.
+
+A 12 V power cycle (00:15Z) restored a normal boot. FSBL 00:15:28.213Z (`Reset
+Mode: System Reset`, `MultiBootOffset: 0x40`) → BL31 v2.8 → U-Boot 2023.01
+(`Reset reason: SOFT`) → kernel 00:15:42.9Z → 4 CPUs → ping 00:16:32.5Z →
+login 00:16:37.5Z. New boot `208bb0b2`, identity and host key matched, no
+failed units, telemetry `online`. Only the known warnings appeared. The reboot
+wiped `/tmp` (the staged idle script) and the runtime idle setting.
+
+Next questions, each needing separate approval:
+
+- Does a warm reboot fail with no prior JTAG attach this power cycle? This
+  separates a firmware/board warm-reset fault from a debugger effect.
+- Does it fail with `RebootWatchdogSec=0`? This rules out the watchdog armed
+  during shutdown.
+- Do `shutdown_scope` `ps_only` or `subsystem` behave differently?
+
+Until a warm reboot is shown to work, the only reset known to recover this
+board is a power cycle, so a smart plug on its 12 V supply is the most
+reliable remote recovery.
 
 ## JTAG (Windows desktop, FT4232H VID_0403/PID_6011)
 
@@ -262,9 +337,11 @@ After a successful boot, the owner re-runs
 - Attach only when the board is confirmed unresponsive (ping, SSH and COM5
   all silent). Reset, detach and kill `hw_server` in one step. Allow one
   attempt, followed by a human.
-- Validate the restricted Linux reboot (sudoers grant, broker `kr260.reboot`)
-  first. It is graceful and needs no JTAG. JTAG remains the path for a board
-  whose Linux is already dead.
+- The restricted Linux reboot was validated first (2026-10-29). Its
+  authorization path works, but the board did not come back from the warm
+  system reset (see "Linux reboot test" above). A `rst -por` would be a
+  different reset (cable POR line) and is still untested. JTAG remains the
+  path only for a board whose Linux is already dead.
 - Simpler independent options:
   - a Home Assistant smart plug on the KR260's 12 V supply, for a true power
     cycle;
