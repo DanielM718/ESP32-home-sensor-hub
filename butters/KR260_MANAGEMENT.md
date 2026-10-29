@@ -175,14 +175,14 @@ Kria A/B boot firmware in QSPI (Image Selector, golden copy, Persistent
 Register, Image A/B, Recovery). FSBL, PMUFW and BL31 v2.8 from release 2023.2;
 U-Boot 2023.01. Both cadence watchdogs are inactive with `bootstatus=0`.
 
-### Normal restart: kexec (proposal; nothing installed)
+### Normal restart: kexec (installed; dry run passed; restart not yet run)
 
 Read-only checks on the board:
 
 - `CONFIG_KEXEC=y`, `CONFIG_KEXEC_FILE=y`, `CONFIG_KEXEC_SIG=y` (not forced),
   `kexec_load_disabled=0`, lockdown `[none]`.
-- No EFI; U-Boot boots a FIT image. `kexec-tools` is not installed (candidate
-  1:2.0.28-0ubuntu3).
+- No EFI; U-Boot boots a FIT image. `kexec-tools` 1:2.0.28-0ubuntu3 was
+  installed on 2026-10-29 (below).
 - Kernel and initramfs: `/boot/vmlinuz` and `/boot/initrd.img` (6.8.0-1015).
   `/sys/firmware/fdt` holds the DT U-Boot passed in (KR revB, with U-Boot
   fixups). Root is `LABEL=writable` on the USB SSD `sda2`.
@@ -209,41 +209,93 @@ ordinary reboot, which is the wedge. A wrapper must load and verify
 (`/sys/kernel/kexec_loaded` = 1) before calling `systemctl kexec`. It must
 never fall back to `systemctl reboot` itself.
 
-Proposed wrapper, a root-owned script with no arguments:
+#### Installed and dry-run (2026-10-29)
 
-```sh
-#!/bin/sh
-# /usr/local/sbin/butters-kr260-kexec-reboot
-set -eu
-k=/boot/vmlinuz-$(uname -r); i=/boot/initrd.img-$(uname -r)
-[ -r "$k" ] && [ -r "$i" ] || exit 3
-kexec -l "$k" --initrd="$i" --reuse-cmdline --dtb=/sys/firmware/fdt
-[ "$(cat /sys/kernel/kexec_loaded)" = 1 ] || exit 4
-exec systemctl --no-wall --no-block kexec
-```
+- `kexec-tools` 1:2.0.28-0ubuntu3 was installed by the owner at 00:34:56Z
+  from the inspected `.deb` (sha256 `c647ace7…8424`), with
+  `use_grub_config=false` preseeded.
+  - Files added: `/sbin/kexec`, `/sbin/kexec-load-kernel`,
+    `/sbin/vmcore-dmesg`, `/sbin/coldreboot` (a plain `/sbin/reboot`
+    wrapper: never use it here), the `finalrd` hook
+    `/usr/share/finalrd/kexec-tools.finalrd` (copies `/sbin/kexec` into the
+    shutdown pivot root), and `/etc/default/kexec` (unused by our scripts).
+  - 2.0.28 ships no services and no "handle reboots" option: `kexec.target`
+    stays `disabled`, `reboot.target` has no kexec dependency, and `reboot`
+    is unchanged.
+- [`config/kr260/kr260-kexec-dryrun.sh`](config/kr260/kr260-kexec-dryrun.sh)
+  (sha256 `4e3388db…`) passed at 00:39:01–00:39:03Z. It confirmed that
+  `/boot/vmlinuz` and `/boot/initrd.img` match the SHA-1s U-Boot verified in
+  the booted FIT (`b136ee87…`, `beb7508b…`) and that the cmdline carries
+  `root=LABEL=writable`. Then load rc=0 → `kexec_loaded=1`, unload rc=0 →
+  `kexec_loaded=0`, `DRY RUN PASS`.
+- Afterwards: the same boot `208bb0b2`, CPUs `0-3`, `cpu-sleep-0` still
+  disabled, `eth1` 1000, no failed units, `fpga0` `operating` with the
+  overlay loaded. `/boot` and `/boot/firmware` were unchanged
+  (`boot.scr.uimg` sha256 `690fe122…`).
+- The kernel logged `PEFILE: Unsigned PE binary`. kexec-tools used
+  `kexec_file_load`: it decompressed the gzip Image, and the kernel checked
+  its PE signature. Unsigned images are accepted only because
+  `KEXEC_SIG_FORCE` is unset and lockdown is `none`; either change would
+  break kexec. On this path arm64 builds the next DT from its own boot-time
+  FDT, which is the same source as `/sys/firmware/fdt`.
 
-Sudoers: one exact argv, `ubuntu ALL=(root) NOPASSWD:
-/usr/local/sbin/butters-kr260-kexec-reboot`, replacing the `systemctl
-reboot` grant. The broker's `_KR260_REBOOT_COMMAND` would change to
-`/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-reboot`, a code change
-with tests. Answer "no" to the `kexec-tools` debconf question about handling
-reboots, so plain `reboot` semantics do not change silently.
+#### Restart script (staged, not run)
 
-Supervised validation, each step separately approved:
+[`config/kr260/kr260-kexec-restart.sh`](config/kr260/kr260-kexec-restart.sh)
+runs the dry run's preconditions (nothing staged, FIT-matching kernel and
+initrd, SSD root in the cmdline) and then two more checks:
 
-1. Owner installs `kexec-tools` and the wrapper. Dry run with no reboot:
-   `sudo kexec -l …`, check `kexec_loaded` = 1, then `sudo kexec -u` and
-   check it is 0.
-   This also proves `kexec-tools` accepts the `vmlinuz` format, which is
-   unverified because the file is root-only.
-2. One supervised kexec, with COM5, 1 Hz ping and SSH heartbeat running and
-   the PL app unloaded first. Expect `kexec_core: Starting new kernel`, then
-   kernel messages with no FSBL. Then a new boot ID, CPUs `0-3`, `eth1` 1000,
-   telemetry `online`, `fpga0` `operating`, the `dfx-mgr` app loaded, and no
-   new kernel warnings.
-3. Abort: no kernel output within 30 s of `Starting new kernel`, or no SSH
-   within 240 s. Preserve COM5, do not retry, and have the owner power-cycle.
-   Rollback: remove the wrapper and its sudoers file.
+- every `/sys/class/watchdog/*/state` must be `inactive`;
+- `KExecWatchdogUSec` must be `0`.
+
+A hardware watchdog survives kexec and, unfed, would fire the SRST that
+wedges the board. The script then runs the same `kexec -l … --reuse-cmdline`
+as the dry run, verifies `kexec_loaded=1`, and calls `systemctl --no-wall
+--no-block kexec`. Any failure unloads and exits; it never requests a reboot.
+
+Residual fallback risk: `systemctl kexec` runs `systemd-shutdown`, which
+`finalrd` copies into the pivot root along with `/sbin/kexec`.
+`systemd-shutdown` runs `kexec -e`, and if that returns it falls back to an
+ordinary reboot, i.e. the wedge. The staged-image check makes this unlikely;
+its recovery is a 12 V power cycle.
+
+#### Supervised kexec restart (owner present; not yet authorized)
+
+1. Preflight:
+   - boot ID recorded; CPUs `0-3`; `eth1` up; `kexec_loaded=0`; both
+     watchdogs `inactive`; no JTAG process on the desktop;
+   - COM5 logger, 1 Hz ping and 10 s SSH heartbeat running;
+   - no apt or dpkg jobs.
+2. PL: the default `k26-starter-kits` app shows no PL or PS DMA activity
+   (`zynqmp-dma` IRQs 0), so it stays loaded for the first test, and the
+   result is recorded. Custom designs with AXI masters must be unloaded
+   first (`sudo xmutil unloadapp`).
+3. The owner runs `sudo bash /tmp/kr260-kexec-restart.sh` once. It must print
+   `staged: kexec_loaded=1` and `kexec requested`. Any `ABORT` stops the test
+   with nothing changed. Never retry automatically.
+4. Watch COM5. Expected: systemd stop messages, then
+   `kexec_core: Starting new kernel`, then `[    0.000000] Booting Linux` or
+   `Linux version`, with **no FSBL banner**.
+5. Success:
+   - a new boot ID, the same kernel release, CPUs `0-3`, `eth1` 1000, SSH
+     with the pinned host key;
+   - `systemctl is-system-running` = `running`, Butters telemetry `online`;
+   - `fpga0` `operating` and the dfx-mgr app loaded again;
+   - no new kernel warnings beyond the known set;
+   - `journalctl -b -1` ends with the kexec stop sequence;
+   - `/boot` unchanged.
+   Then re-stage the scripts (`/tmp` is cleared) and the owner re-applies the
+   deep-idle workaround.
+6. Abort and recovery (owner power-cycles 12 V; no JTAG):
+   - `reboot: Restarting system` on COM5 means the fallback took the warm
+     path: expect the wedge.
+   - `Starting new kernel` followed by no kernel output within 15 s.
+   - No login prompt within 150 s, or no SSH within 240 s.
+
+Only after this passes would the sudoers grant and the broker's
+`_KR260_REBOOT_COMMAND` move to a root-owned copy of the restart script
+(`/usr/local/sbin/…`, one exact argv), as a code change with tests and a
+separate approval. Until then `kr260.reboot` stays disabled.
 
 ### Dead-Linux recovery: JTAG POR (wiring unconfirmed)
 
