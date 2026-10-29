@@ -467,6 +467,93 @@ Constraints that remain:
 - The `systemd-shutdown` fallback: if `kexec -e` returns, systemd falls back
   to an ordinary reboot. That is the wedge.
 
+#### Production deployment, 2026-10-29: monitoring on, restart off
+
+- Deployed `ba675b4` (branch `deploy/kr260-gated-20261029`) at 01:35:36Z with
+  `install-beta1 --start` from `worktrees/kr260-management-recovery-deploy`.
+  - That commit is `be6d1fd` **minus `1e36895`** (the desktop monitor-off-before-WoL
+    change, which has never been validated live). The 12 KR260 commits were
+    cherry-picked onto the previous production commit `dbb5e02`, with one
+    positional conflict resolved by dropping `_metered_watts` (it belongs to
+    `1e36895`).
+  - The deploy differs from `be6d1fd` by exactly `1e36895`'s changed lines,
+    file for file. Its diff against `dbb5e02` touches only KR260 code,
+    configs, the Admin KR260 UI and wording, and tests.
+  - Suite on the deploy branch: 2264 passed, 2 skipped.
+  - Installer: "Deployment preserves all 47 declared approvals"; rollback tree
+    `/opt/butters.previous` = `dbb5e02`.
+- Configuration (each candidate parsed by the new code as root before it went
+  live):
+  - `/etc/butters/action-broker.toml` gained `[kr260]` (host, `ubuntu`,
+    `/etc/butters/kr260/id_ed25519`, machine ID) and the operations
+    `"kr260.status" = true` and `"kr260.reboot" = false`.
+  - `/etc/butters/assistant.local.toml` gained `[kr260] enabled = true`.
+  - Nothing else changed. Broker gates are the previous eight plus
+    `kr260.status`; `desktop.wake = false`. Web: `actions.kr260_reboot` is
+    disabled and unconfigured.
+- Restarted: `butters-web` (by the installer) and `butters-action-broker`.
+  Not restarted: the agent ingress and the KR260.
+- Before the deploy, production was byte-identical to `dbb5e02`: the C-locale
+  tree digest matched `DEPLOYMENT`. A digest taken with `sort` under
+  `en_GB.UTF-8` differs only because of collation.
+- Backup: `/var/backups/butters-predeploy-20261029T013306Z` (root 0700). It
+  holds both configs, `DEPLOYMENT`, SQLite-API copies of every
+  `/var/lib/butters/*.sqlite3`, and `MANIFEST.txt`.
+- Verified after deploy:
+  - `/readyz` ready on all seven checks; no warnings.
+  - The Desktop Agent reconnected; `desktop.sunshine_status` through the
+    broker returned ok.
+  - A live `kr260.status` through the broker as `butters` (audited
+    `peer_uid=996`) returned `online`, identity verified (`kria`, the
+    expected machine ID, boot `63d18cfd`), 31.5 °C, memory 11.8 %, and
+    `eth1` up with 1 IPv4 and 5 IPv6 addresses.
+  - The served `/assets/admin.js` is the new one.
+  - The NAS Agent's last session was 2026-10-27; it was absent before the
+    deploy too.
+- Rollback: `sudo systemctl stop butters-web && sudo rm -rf /opt/butters && sudo
+  mv /opt/butters.previous /opt/butters`, then restore both configs from the
+  backup per its `MANIFEST.txt`, then `sudo systemctl start butters-web && sudo
+  systemctl restart butters-action-broker`.
+- Found during verification: the board's `unattended-upgrades` (allowed
+  origins include `noble-security`) has pending `linux-image-xilinx`
+  6.8.0-1036, `flash-kernel` and `u-boot-tools`. Installing them would
+  regenerate `boot.scr.uimg` and `image.fit`. The wrapper would then refuse
+  restarts (FIT mismatch, fail closed), and the next cold boot would run an
+  unvalidated kernel. That is an owner decision (hold the packages or accept
+  them); nothing was changed.
+
+#### Supervised Admin restart (prepared; not authorized)
+
+1. Preflight:
+   - Admin → KR260 shows `online · identity verified`;
+   - board: `kexec_loaded=0`, the deep-idle unit `active`, no apt or dpkg
+     running, `/boot/firmware` unchanged (`boot.scr.uimg` `690fe122…`);
+   - COM5 logger, 1 Hz ping and SSH heartbeat running.
+   - Optionally run `sudo /usr/local/sbin/butters-kr260-kexec-restart check`
+     (owner, password). Keep the word `check`.
+2. Open the gate on both sides:
+   - broker `"kr260.reboot" = true` (then restart `butters-action-broker`);
+   - overlay `[actions.kr260_reboot] enabled = true` and `configured = true`
+     (then restart `butters-web`).
+   - Confirm Admin shows the Restart button enabled.
+3. The owner presses **Restart KR260 (kexec)…**, confirms, and completes the
+   fresh passkey prompt.
+4. Expected:
+   - job result `outcome: restart_requested`, `restart_confirmed: false`;
+   - the Admin "Last restart" reads `requested`, then `confirmed` once a
+     refresh sees a new boot ID (about 70–90 s; refreshes are cached up to
+     45 s, explicit refresh at most every 10 s);
+   - COM5 shows the kernel restarting with no FSBL banner;
+   - afterwards, the deep-idle unit is `active` with `cpu-sleep-0
+     disable=1`.
+5. If it fails:
+   - a refusal code (`restart_precondition_failed`, `pl_workload_active`, …)
+     means nothing was restarted;
+   - `unconfirmed` after 300 s, or the abort criteria above, means manual
+     12 V recovery.
+6. Close the gate again on both sides and restart both services, unless the
+   owner decides to keep it.
+
 #### Manual 12 V recovery (the board does not come back)
 
 1. Do not retry the restart, issue `reboot`, attach JTAG or `rst -por`.
