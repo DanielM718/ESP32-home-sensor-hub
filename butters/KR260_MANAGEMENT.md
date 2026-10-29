@@ -522,7 +522,7 @@ Constraints that remain:
   unvalidated kernel. That is an owner decision (hold the packages or accept
   them); nothing was changed.
 
-#### Supervised Admin restart (prepared; not authorized)
+#### Supervised Admin restart procedure
 
 1. Preflight:
    - Admin → KR260 shows `online · identity verified`;
@@ -553,6 +553,88 @@ Constraints that remain:
      12 V recovery.
 6. Close the gate again on both sides and restart both services, unless the
    owner decides to keep it.
+
+#### Boot-critical update holds (2026-10-29, owner)
+
+`unattended-upgrades` installs from `noble` and `noble-security`; automatic
+reboot is not set, so it defaults to false. It would have installed kernel
+6.8.0-1036 (`linux-xilinx`, `linux-image-xilinx`, `linux-headers-xilinx`) and
+`u-boot-tools`. Five eligible security updates (`udev`, `kmod`,
+`klibc-utils`, `sg3-utils-udev`, `ntfs-3g`) also trigger `update-initramfs
+-u`, whose post-update hook runs `flash-kernel` and rewrites `boot.scr.uimg`
+and `image.fit`. Applied:
+
+    sudo apt-mark hold linux-xilinx linux-image-xilinx linux-headers-xilinx flash-kernel u-boot-tools xlnx-image-update
+    sudo sed -i 's/^update_initramfs=yes$/update_initramfs=no/' /etc/initramfs-tools/update-initramfs.conf
+    # backup: /etc/initramfs-tools/update-initramfs.conf.butters-backup-20261029
+
+Verified:
+
+- the six packages are `hi` (held, installed);
+- 6.8.0-1015 is the only kernel installed and running;
+- hashes unchanged: `boot.scr.uimg` `690fe122…`, `image.fit` `b007246e…`,
+  `initrd.img-6.8.0-1015-xilinx` `cdfd3b01…`;
+- `apt-get -s dist-upgrade` keeps the six back and still offers `udev`,
+  `kmod`, `openssl` and `sudo`.
+
+With `update_initramfs=no` those packages update their userspace files, but
+the initramfs and FIT stay as validated. A held kernel never rebuilds.
+
+Rollback, as planned maintenance followed by a supervised cold boot:
+
+    sudo apt-mark unhold linux-xilinx linux-image-xilinx linux-headers-xilinx flash-kernel u-boot-tools xlnx-image-update
+    sudo sed -i 's/^update_initramfs=no$/update_initramfs=yes/' /etc/initramfs-tools/update-initramfs.conf
+
+#### Supervised Admin restart, 2026-10-29: passed end to end
+
+Gate opened temporarily at 01:51:35Z on both sides: broker
+`"kr260.reboot" = true`, and the overlay `[actions.kr260_reboot] enabled =
+configured = true`. Preflight checks were all green, with boot `63d18cfd`.
+The owner clicked once in Admin and completed the passkey prompt.
+
+| UTC | Event |
+|---|---|
+| ≈01:55:17 | Admin audit: `pending_auth`, then fresh `webauthn`, `completed` (job `ac-2WTK7…`, 6.7 s) |
+| 01:55:26 | broker: `operation=kr260.reboot outcome=accepted result=ok peer_uid=996`, the only one |
+| board | `sudo` of `/usr/local/sbin/butters-kr260-kexec-restart` with no TTY (the broker over SSH); `kexec.target`; filesystems synced |
+| 01:55:32.660 → .815 | last old-kernel console line → `Booting Linux` (155 ms). **No** FSBL, PMU, BL31, U-Boot or `Restarting system` |
+| 01:55:33.8 – 01:56:23.4 | ICMP down (≈50 s) |
+| 01:55:39 | `butters-kr260-deep-idle` re-applied `cpu-sleep-0` disabled on 4 CPUs, WFI untouched |
+| 01:56:27.3 | `kria login:` |
+| 01:56:33.7 | SSH on boot `bdaa97be` (≈67 s after the click) |
+
+State transitions:
+
+- the job result was `outcome: restart_requested`, `restart_confirmed:
+  false`, previous boot `63d18cfd`; no premature success;
+- after the board answered on the new boot, Admin → KR260 showed `Last
+  restart: confirmed` (owner-observed refresh);
+- `unconfirmed` did not occur.
+
+After the restart:
+
+- identity and host key verified; `running` with no failed units; CPUs
+  `0-3`; `eth1` 1000;
+- `fpga0` `operating` with the overlay applied and dfx-mgr active;
+- root fsck `clean`, mounted `rw`;
+- watchdogs `inactive` with `bootstatus=0`; `kexec_loaded=0`;
+- holds and `update_initramfs=no` unchanged; boot media hashes unchanged;
+- only the known warnings.
+
+Gate closed again:
+
+- the broker first (01:57:46Z, so a second click would be refused while the
+  web process kept its record);
+- then the web overlay, after the owner had seen `confirmed`, with
+  `butters-web` restarted at 02:03:07Z.
+
+The live configs are byte-identical to the pre-test closed copies: broker
+`kr260.status` on, `kr260.reboot` off, `desktop.wake` off; web `kr260`
+enabled, `actions.kr260_reboot` disabled and unconfigured. Telemetry
+afterwards: `online`, identity verified, boot `bdaa97be`.
+
+Remote restart stays disabled. Keeping it on permanently needs separate
+authorization.
 
 #### Manual 12 V recovery (the board does not come back)
 
