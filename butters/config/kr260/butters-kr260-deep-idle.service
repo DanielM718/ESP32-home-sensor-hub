@@ -1,0 +1,26 @@
+# Disable the KR260's PSCI power-down idle state (cpu-sleep-0) at every boot,
+# keeping WFI, so a JTAG attach cannot catch cores in reset (KR260_MANAGEMENT.md).
+# The script refuses, and this unit fails visibly, on any idle-state layout
+# other than four CPUs with state0=WFI and a cpu-sleep-0 state; it then writes
+# nothing. Installed as /etc/systemd/system/butters-kr260-deep-idle.service with
+# the script at /usr/local/sbin/butters-kr260-deep-idle (both root:root).
+#   rollback now:      sudo systemctl stop butters-kr260-deep-idle
+#   rollback for good: sudo systemctl disable --now butters-kr260-deep-idle
+[Unit]
+Description=Butters KR260: disable cpu-sleep-0 (keep WFI) for safe JTAG attach
+Documentation=https://github.com/DanielM718/ESP32-home-sensor-hub/blob/main/butters/KR260_MANAGEMENT.md
+After=sysinit.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/butters-kr260-deep-idle apply
+ExecStop=/usr/local/sbin/butters-kr260-deep-idle rollback
+NoNewPrivileges=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

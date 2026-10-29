@@ -7,7 +7,7 @@ broker. The web process has no SSH key. Every gate ships closed:
 | Capability | Gate | Shipped |
 |---|---|---|
 | Telemetry | `[kr260] enabled` (assistant), `"kr260.status"` + `[kr260]` (broker) | off |
-| Linux reboot | `[actions.kr260_reboot]` (assistant), `"kr260.reboot"` (broker) | off |
+| Linux restart (kexec) | `[actions.kr260_reboot]` (assistant), `"kr260.reboot"` (broker) | off |
 | Shutdown / halt | none; not an operation | absent |
 | JTAG reset | none; not an operation | absent |
 
@@ -24,55 +24,53 @@ never returned or logged). `ConnectTimeout=5` inside a 10 s process bound.
 | `identity_mismatch` | machine ID did not match |
 | `operation_timeout` | 10 s process bound expired |
 | `reboot_unauthorized` | the board has no sudoers grant (`sudo -n` refused) |
+| `restart_already_staged` | wrapper exit 10: a kexec image was already staged; nothing changed |
+| `restart_precondition_failed` | wrapper exit 11–13: kernel/initrd missing or not the booted FIT, or no `root=LABEL=writable` |
+| `watchdog_active` | wrapper exit 14: a hardware watchdog is running or `KExecWatchdogUSec` ≠ 0 |
+| `pl_workload_active` | wrapper exit 15: the PL is not a reviewed configuration (see below) |
+| `restart_failed` | wrapper exit 21–22: staging failed or systemd refused the kexec; unloaded |
+
+Every wrapper code is a refusal before the kexec handoff, so it starts no
+cooldown. A successful request returns `outcome: restart_requested` with
+`restart_confirmed: false`. Status then reports `last_reboot_request.state`:
+
+- `requested` until the board answers again;
+- `confirmed` only when the identity-verified board reports a different boot
+  ID;
+- `unconfirmed` if 300 s pass without one.
+
+An SSH drop during the handoff counts as possibly sent.
 
 Observations are cached for `poll_interval_seconds` (45 s); an explicit
 refresh re-probes at most every 10 s, so an offline board costs one ping and
 one bounded SSH attempt per window. There is no background poller.
 
-## Reboot authorization (installed on the board; broker gate off)
+## Restart authorization (history; current design in "Production installation")
 
-Plain `systemctl reboot` from a non-interactive SSH session is denied by
-polkit: `Call to Reboot failed: Interactive authentication required.` That is
-what the first supervised attempt hit (2026-10-28 20:04:44Z); the boot ID was
-unchanged afterwards. The broker now sends exactly
+- 2026-10-28: a plain `systemctl reboot` over non-interactive SSH was denied by
+  polkit ("Interactive authentication required").
+- 2026-10-29: a NOPASSWD grant for exactly
+  `/usr/bin/systemctl --no-wall --no-block reboot` was installed on the board.
+  The warm reboot it allows **wedges this board** (below).
+- The broker now sends `/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-restart`.
+  The replacement
+  [`config/kr260/butters-kr260-reboot.sudoers`](config/kr260/butters-kr260-reboot.sudoers)
+  grants only that wrapper, with no arguments, and removes the warm-reboot
+  grant when it is installed.
+- Until that replacement is installed, the board still carries the old grant.
+  `"kr260.reboot"` must stay `false`.
 
-    /usr/bin/sudo -n /usr/bin/systemctl --no-wall --no-block reboot
+A second restart is refused for 300 s unless the board reports a new boot ID.
+A restart with an unknown outcome counts as possibly sent.
 
-and the board grants that one argv, and nothing else, with
-[`config/kr260/butters-kr260-reboot.sudoers`](config/kr260/butters-kr260-reboot.sudoers).
-A second reboot is refused for 300 s unless the board reports a new boot ID;
-a reboot with an unknown outcome counts as possibly sent.
-
-### Provisioning, with the owner present
-
-1. On the KR260: install the sudoers file as shown in its header, then
-   `sudo visudo -cf /etc/sudoers.d/butters-kr260-reboot`.
-2. Check the grant without rebooting (from the Pi, through the root key):
-   `sudo -n ssh -i /etc/butters/kr260/id_ed25519 -o UserKnownHostsFile=/etc/butters/kr260/known_hosts -o StrictHostKeyChecking=yes -o BatchMode=yes ubuntu@192.168.1.125 'sudo -n -l /usr/bin/systemctl --no-wall --no-block reboot'`
-   must print the command path and exit 0. `sudo -n -l <cmd>` is **not** a
-   boundary test: `ubuntu` is in `sudo` with `(ALL:ALL) ALL` (password
-   required), and once any NOPASSWD rule exists `-l` answers "permitted by
-   some rule" for every command. Test the boundary by *running* argv that
-   cannot reboot, each of which must fail with "a password is required":
-   `/usr/bin/true`, `/bin/sh -c true`, `systemctl --version`,
-   `systemctl --no-wall --no-block status`,
-   `systemctl --no-wall --no-block reboot --help`,
-   `systemctl --version --no-wall --no-block reboot`, `-s true`, `-i true`,
-   `-E /usr/bin/true`. On 2026-10-29 all 16 such variants were refused, and
-   `sudo -ll` showed the rule loaded from
-   `/etc/sudoers.d/butters-kr260-reboot` with `RunAsUsers: root` and
-   `!authenticate`.
-3. Add the `[kr260]` section from `config/action-broker.example.toml` to
-   `/etc/butters/action-broker.toml`, set `"kr260.status" = true`, restart
-   `butters-action-broker`, enable `[kr260]` in the assistant overlay, and
-   confirm Admin → KR260 shows `online · identity verified`.
-4. Only then, supervised: set `"kr260.reboot" = true` and
-   `[actions.kr260_reboot] enabled = configured = true`, run one reboot from
-   Admin, and confirm `last_reboot_request.boot_changed` becomes `true` and
-   `eth1` returns. Decide afterwards whether the gate stays open.
-
-**Blocked: a Linux warm reboot does not restart this board (2026-10-29).**
-Do not set `"kr260.reboot" = true` until a warm reboot is shown to come back.
+Testing the sudoers boundary: `sudo -n -l <cmd>` is **not** a valid test.
+`ubuntu` is in `sudo` with `(ALL:ALL) ALL` (password required), and once any
+NOPASSWD rule exists, `-l` answers "permitted by some rule" for every
+command. Test the boundary by *running* argv that cannot restart anything;
+each must fail with "a password is required". On 2026-10-29, 16 such
+variants of the old grant were refused, and `sudo -ll` showed the rule loaded
+from `/etc/sudoers.d/butters-kr260-reboot` with `RunAsUsers: root` and
+`!authenticate`.
 
 ### Linux reboot test, 2026-10-29: shut down cleanly, did not restart
 
@@ -342,42 +340,122 @@ Verified afterwards:
 - As expected, the deep-idle setting returned to its default (`disable=0`)
   and `/tmp` was cleared. The scripts were re-staged with committed hashes.
 
-#### Plan: replace the warm-reboot grant with the kexec restart (not installed)
+#### FPGA workloads across kexec
 
-1. Install a root-owned copy:
-   `sudo install -o root -g root -m 0755 kr260-kexec-restart.sh /usr/local/sbin/butters-kr260-kexec-restart`.
-2. Replace `/etc/sudoers.d/butters-kr260-reboot` with one rule:
-   `ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/butters-kr260-kexec-restart ""`.
-   - The `""` forbids arguments; a bare path in sudoers would allow any.
-   - Never add `SETENV` or `env_keep` for `KX_*`, because those are the
-     script's test seams.
-   - Removing the `systemctl --no-wall --no-block reboot` grant takes the
-     wedging warm reboot away from the broker entirely.
-   - Validate with `visudo -cf`, then run the boundary execution tests.
-3. Broker (code change with tests): set `_KR260_REBOOT_COMMAND =
-   "/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-restart"` and map
-   the script's exit codes to fixed failure codes:
-   - 10 → `already_staged`;
-   - 11–13 → `restart_precondition_failed`;
-   - 14 → `watchdog_active`;
-   - 21–22 → `restart_failed`.
-   The 300 s cooldown and the `boot_changed` check stay. Admin wording
-   becomes "Restart (kexec)".
-4. One supervised restart through the broker and Admin. Expect
-   `boot_changed: true` and the same checks as above. Only then consider
-   `"kr260.reboot" = true`, separately approved.
+The PL keeps running through a kexec, so a PL bus master could write DDR under
+the new kernel. The wrapper therefore restarts only reviewed PL configurations
+and otherwise exits 15 (`pl_workload_active`) before staging anything.
+
+Required:
+
+- `/sys/class/fpga_manager/fpga0/state` readable.
+- Every applied overlay `applied`, with a plain firmware `path` whose file in
+  `/lib/firmware` hashes to an entry in `SAFE_OVERLAYS`.
+  - Today that is only `k26_starter_kits.dtbo`, sha256 `1e998ffd…`: no PL
+    device nodes, only `firmware-name` and the four `pl_resetn` lines.
+  - dfx-mgr copies the loaded dtbo there.
+- A PL in state `operating` with no reviewed overlay is refused.
+
+Refused:
+
+- the `zocl` or `dmaproxy` module loaded;
+- any process holding `/dev/uio*` open, except the four PS AXI perf monitors
+  (`ffa00000`, `fd0b0000`, `fd490000`, `ffa10000`);
+- any process holding `/dev/dma_proxy*`, `/dev/xclmgmt*` or `/dev/zocl*` open.
+
+To allow a new design, first review its masters and how it quiesces them on
+`pl_resetn`. Then add its dtbo sha256 to `SAFE_OVERLAYS` in a reviewed
+commit. The policy cannot see bus masters inside a reviewed bitstream; the
+review is what covers that.
+
+#### Production installation (prepared, not installed)
+
+Artifacts in `config/kr260/` at the commit being installed. Check every hash
+on the board before installing:
+
+| File | Installed as | sha256 |
+|---|---|---|
+| `kr260-kexec-restart.sh` | `/usr/local/sbin/butters-kr260-kexec-restart` (root:root 0755) | `9fa2e930…43e5` |
+| `butters-kr260-reboot.sudoers` | `/etc/sudoers.d/butters-kr260-reboot` (root:root 0440), **replacing** the `systemctl reboot` grant | `ceda3a10…554a` |
+| `kr260-deep-idle.sh` | `/usr/local/sbin/butters-kr260-deep-idle` (root:root 0755) | `2225e79b…ac90` |
+| `butters-kr260-deep-idle.service` | `/etc/systemd/system/butters-kr260-deep-idle.service` (root:root 0644) | `cbbca1db…cbef` |
+
+Order, owner present, each step checked before the next:
+
+1. Stage the four files in `/tmp/butters-kr260/` and compare `sha256sum`
+   against the table.
+2. Wrapper:
+   `sudo install -o root -g root -m 0755 kr260-kexec-restart.sh /usr/local/sbin/butters-kr260-kexec-restart`,
+   then `sudo /usr/local/sbin/butters-kr260-kexec-restart check`. It must
+   print `CHECK OK` and exit 0; it stages nothing.
+3. Sudoers:
+   - Validate the replacement first: `sudo visudo -cf butters-kr260-reboot.sudoers`.
+   - Install it:
+     `sudo install -o root -g root -m 0440 butters-kr260-reboot.sudoers /etc/sudoers.d/butters-kr260-reboot`,
+     then `sudo visudo -c`.
+   - Check without restarting, from the Pi through the broker key:
+     `sudo -n -l` must list only
+     `(root) NOPASSWD: /usr/local/sbin/butters-kr260-kexec-restart ""`.
+   - Boundary execution tests, each of which must say "a password is
+     required":
+     - `sudo -n /usr/bin/systemctl --no-wall --no-block reboot`; this proves
+       the old grant is gone, and with it the broker's warm-reboot path;
+     - `sudo -n /usr/local/sbin/butters-kr260-kexec-restart check`;
+     - `sudo -n /usr/local/sbin/butters-kr260-kexec-restart --help`;
+     - `sudo -n /usr/bin/true`.
+   - Never run the bare wrapper as a "test": that one is the restart.
+4. Deep-idle service:
+   - `sudo install -o root -g root -m 0755 kr260-deep-idle.sh /usr/local/sbin/butters-kr260-deep-idle`
+   - `sudo install -o root -g root -m 0644 butters-kr260-deep-idle.service /etc/systemd/system/`
+   - `sudo systemctl daemon-reload`
+   - `sudo systemctl enable --now butters-kr260-deep-idle`
+   - Check: `systemctl is-active butters-kr260-deep-idle` reports `active`,
+     and `bash /tmp/kr260-deep-idle.sh status` shows `cpu-sleep-0 disable=1`
+     and `WFI disable=0` on cpu0–3.
+   - If the runtime workaround is already applied, the unit's `apply` keeps
+     the saved originals.
+5. Butters (separate approval): deploy the broker and web change, add the
+   `[kr260]` broker section with `"kr260.status" = true`, and keep
+   `"kr260.reboot" = false` until step 6 is authorized.
+6. One supervised restart from Admin, with the procedure and abort criteria
+   above. Expect `restart_requested`, then `last_reboot_request.state =
+   confirmed` on a new boot ID, with deep idle disabled again by the unit.
+
+Rollback:
+
+- Wrapper and sudoers: `sudo rm /etc/sudoers.d/butters-kr260-reboot
+  /usr/local/sbin/butters-kr260-kexec-restart`. The broker then reports
+  `reboot_unauthorized`. Do **not** reinstall the old `systemctl reboot`
+  grant.
+- Deep idle: `sudo systemctl disable --now butters-kr260-deep-idle` restores
+  the saved values via `ExecStop`. Then `sudo rm
+  /etc/systemd/system/butters-kr260-deep-idle.service
+  /usr/local/sbin/butters-kr260-deep-idle && sudo systemctl daemon-reload`.
+- kexec-tools: `sudo apt-get remove kexec-tools` (no services, so nothing
+  else changes).
 
 Constraints that remain:
 
-- Kernel upgrades: the script loads only the running release and refuses if
-  the files differ from the booted FIT. After `flash-kernel` installs a new
-  kernel, kexec restarts are refused (fail closed), and switching kernels
-  needs a 12 V power cycle while the warm reboot wedges.
-- A custom PL design with AXI masters must be unloaded first.
-- The deep-idle workaround is lost at every restart. Persist it (a boot unit)
-  before any JTAG-based recovery depends on it.
-- The residual risk (`systemd-shutdown` falling back to an ordinary reboot if
-  `kexec -e` returns) stays, with a 12 V power cycle as recovery.
+- Kernel upgrades fail closed: after `flash-kernel` writes a new FIT, the
+  wrapper refuses, and switching kernels needs a 12 V power cycle while the
+  warm reboot wedges.
+- The `systemd-shutdown` fallback: if `kexec -e` returns, systemd falls back
+  to an ordinary reboot. That is the wedge.
+
+#### Manual 12 V recovery (the board does not come back)
+
+1. Do not retry the restart, issue `reboot`, attach JTAG or `rst -por`.
+2. Preserve evidence:
+   - the COM5 log (last line `Restarting system` = the fallback; no
+     `[    0.000000]` after the old kernel's last line = a stuck handoff);
+   - the Pi ping and heartbeat logs.
+3. Confirm no `hw_server`/`xsdb` runs on the desktop, by process list only.
+4. Owner: unplug the KR260 12 V barrel, wait 10 s, reconnect, and leave
+   Micro-USB connected.
+5. Expect the FSBL banner within about 1 s, ping in about 85 s and SSH in
+   about 70–90 s. Verify the new boot ID, identity and host key, `running`,
+   CPUs `0-3`, `eth1`, `fpga0` and telemetry. Re-stage the `/tmp` scripts;
+   the deep-idle unit, once installed, re-applies itself.
 
 ### Dead-Linux recovery: JTAG POR (wiring unconfirmed)
 

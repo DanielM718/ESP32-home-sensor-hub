@@ -209,13 +209,14 @@ class NasAdapter:
 
 
 class Kr260Adapter:
-    """One identity-verified KR260 with observation and normal reboot only."""
+    """One identity-verified KR260 with observation and kexec restart only."""
 
     # A reboot that may have been sent blocks another until the board reports
     # a different boot ID or this long has passed: a K26 normally boots in ~2
     # minutes, and a second request against the dying sshd would be ambiguous.
     REBOOT_COOLDOWN_SECONDS = 300.0
-    # Failures decided before the reboot command could run on the board.
+    # Failures decided before the restart could be handed off on the board,
+    # including every refusal of the kexec wrapper.
     _NOT_SENT = frozenset(
         {
             "identity_mismatch",
@@ -223,6 +224,11 @@ class Kr260Adapter:
             "ssh_auth_failed",
             "host_unreachable",
             "reboot_unauthorized",
+            "restart_already_staged",
+            "restart_precondition_failed",
+            "watchdog_active",
+            "pl_workload_active",
+            "restart_failed",
             "operation_unavailable",
             "broker_unconfigured",
             "broker_unavailable",
@@ -257,13 +263,23 @@ class Kr260Adapter:
         last = self._last_reboot
         if last is not None:
             booted = value.get("boot_id")
-            value["last_reboot_request"] = {
-                "age_seconds": round(self.monotonic() - last[0], 1),
-                "previous_boot_id": last[1],
-                # None until the board is observed again; never inferred.
-                "boot_changed": None
+            age = self.monotonic() - last[0]
+            # None until the board is observed again; never inferred.
+            changed = (
+                None
                 if not value.get("identity_verified") or not booted
-                else booted != last[1],
+                else booted != last[1]
+            )
+            value["last_reboot_request"] = {
+                "age_seconds": round(age, 1),
+                "previous_boot_id": last[1],
+                "boot_changed": changed,
+                # A request is only confirmed by a new boot ID on the same board.
+                "state": "confirmed"
+                if changed
+                else "requested"
+                if age < self.REBOOT_COOLDOWN_SECONDS
+                else "unconfirmed",
             }
         return value
 
@@ -303,7 +319,10 @@ class Kr260Adapter:
             self.observer.invalidate()
         return {
             **result,
-            "outcome": "reboot_requested",
+            # Accepted for execution only; status() reports it confirmed once
+            # the board answers with a different boot ID.
+            "outcome": "restart_requested",
+            "restart_confirmed": False,
             "previous_boot_id": before.get("boot_id"),
         }
 

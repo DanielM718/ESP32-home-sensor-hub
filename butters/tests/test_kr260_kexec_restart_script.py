@@ -66,6 +66,41 @@ class Board:
             f" Image 1 (ramdisk-1)\n  Hash value:   {i}\nEOF\n"
         )
         self.dumpimage.chmod(0o755)
+        # PL: the starter-kit overlay applied, the four PS perf-monitor UIOs.
+        self.fpga_state = tmp_path / "fpga0_state"
+        self.fpga_state.write_text("operating\n")
+        self.firmware = tmp_path / "firmware"
+        self.firmware.mkdir()
+        (self.firmware / "k26_starter_kits.dtbo").write_bytes(b"reviewed overlay")
+        self.safe = hashlib.sha256(b"reviewed overlay").hexdigest()
+        self.overlays = tmp_path / "overlays"
+        self.add_overlay("k26-starter-kits_image_1", "k26_starter_kits.dtbo")
+        self.uio = tmp_path / "uio"
+        devices = tmp_path / "devices"
+        for n, dev in enumerate(
+            ("ffa00000.perf-monitor", "fd0b0000.perf-monitor", "fd490000.perf-monitor")
+        ):
+            (devices / dev).mkdir(parents=True)
+            (self.uio / f"uio{n}").mkdir(parents=True)
+            (self.uio / f"uio{n}" / "device").symlink_to(devices / dev)
+        (devices / "a0000000.axi_dma").mkdir()
+        (self.uio / "uio7").mkdir()
+        (self.uio / "uio7" / "device").symlink_to(devices / "a0000000.axi_dma")
+        self.proc = tmp_path / "proc"
+        self.proc.mkdir()
+        self.modules = tmp_path / "modules"
+        self.modules.write_text("uio_pdrv_genirq 16384 0 - Live 0x0\n")
+
+    def add_overlay(self, name: str, path: str, status: str = "applied") -> None:
+        overlay = self.overlays / name
+        overlay.mkdir(parents=True)
+        (overlay / "status").write_text(f"{status}\n")
+        (overlay / "path").write_text(f"{path}\n")
+
+    def hold_open(self, pid: int, device: str) -> None:
+        fd = self.proc / str(pid) / "fd"
+        fd.mkdir(parents=True, exist_ok=True)
+        (fd / str(len(list(fd.iterdir())) + 3)).symlink_to(device)
 
     def run(self, *args: str):
         env = {
@@ -80,6 +115,13 @@ class Board:
             "KX_FDT": str(self.fdt),
             "KX_CMDLINE": str(self.cmdline),
             "KX_RELEASE": RELEASE,
+            "KX_FPGA_STATE": str(self.fpga_state),
+            "KX_OVERLAYS": str(self.overlays),
+            "KX_FIRMWARE": str(self.firmware),
+            "KX_UIO": str(self.uio),
+            "KX_PROC": str(self.proc),
+            "KX_MODULES": str(self.modules),
+            "KX_SAFE_OVERLAYS": self.safe,
             "FAKE_LOG": str(self.log),
             "FAKE_MODE": self.mode,
             "FAKE_KEXEC_WD": self.kexec_wd,
@@ -239,3 +281,98 @@ def test_requires_root_without_test_fakes() -> None:
     )
     assert result.returncode == 2
     assert "run with sudo" in result.stderr
+
+
+def test_the_production_allowlist_is_only_the_reviewed_starter_kit_overlay() -> None:
+    lines = [
+        line
+        for line in SCRIPT.read_text().splitlines()
+        if line.startswith("SAFE_OVERLAYS=")
+    ]
+    assert lines == [
+        'SAFE_OVERLAYS="1e998ffd5d33a05da3746df3603e65603e1628006bc878209a836cc9bd3c4ae1"'
+    ]
+
+
+def test_check_runs_every_precondition_and_stages_nothing(tmp_path) -> None:
+    board = Board(tmp_path)
+
+    result = board.run("check")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "CHECK OK" in result.stdout
+    assert board.calls() == ["systemctl show -p KExecWatchdogUSec --value"]
+    assert board.staged() == "0"
+
+
+def test_ps_perf_monitor_uio_users_are_not_pl_workloads(tmp_path) -> None:
+    board = Board(tmp_path)
+    board.hold_open(812, "/dev/uio1")
+    board.hold_open(812, "/dev/dri/renderD128")
+
+    assert board.run("check").returncode == 0
+
+
+def _unsafe(board: Board, case: str) -> None:
+    if case == "unknown_overlay":
+        (board.firmware / "custom.dtbo").write_bytes(b"an unreviewed design")
+        board.add_overlay("custom_image_1", "custom.dtbo")
+    elif case == "overlay_not_applied":
+        (board.overlays / "k26-starter-kits_image_1" / "status").write_text(
+            "unapplied\n"
+        )
+    elif case == "overlay_from_blob":
+        (board.overlays / "k26-starter-kits_image_1" / "path").write_text("\n")
+    elif case == "overlay_path_escape":
+        (board.overlays / "k26-starter-kits_image_1" / "path").write_text("../etc/x\n")
+    elif case == "configured_without_overlay":
+        for item in (board.overlays / "k26-starter-kits_image_1").iterdir():
+            item.unlink()
+        (board.overlays / "k26-starter-kits_image_1").rmdir()
+    elif case == "no_fpga_manager":
+        board.fpga_state.unlink()
+    elif case == "zocl_loaded":
+        board.modules.write_text("zocl 262144 0 - Live 0x0\n")
+    elif case == "dmaproxy_loaded":
+        board.modules.write_text("dmaproxy 16384 0 - Live 0x0\n")
+    elif case == "pl_uio_open":
+        board.hold_open(4242, "/dev/uio7")
+    elif case == "dma_proxy_open":
+        board.hold_open(4242, "/dev/dma_proxy_rx")
+
+
+@pytest.mark.parametrize(
+    "case",
+    (
+        "unknown_overlay",
+        "overlay_not_applied",
+        "overlay_from_blob",
+        "overlay_path_escape",
+        "configured_without_overlay",
+        "no_fpga_manager",
+        "zocl_loaded",
+        "dmaproxy_loaded",
+        "pl_uio_open",
+        "dma_proxy_open",
+    ),
+)
+@pytest.mark.parametrize("mode", ("check", "restart"))
+def test_an_unreviewed_pl_workload_refuses_before_staging(tmp_path, case, mode) -> None:
+    board = Board(tmp_path)
+    _unsafe(board, case)
+
+    result = board.run(*(() if mode == "restart" else ("check",)))
+
+    assert result.returncode == 15, result.stdout + result.stderr
+    assert "PL workload not known safe" in result.stdout
+    assert not any(call.startswith("kexec") for call in board.calls())
+    assert "systemctl --no-wall --no-block kexec" not in board.calls()
+    assert board.staged() == "0"
+
+
+def test_an_unconfigured_pl_without_overlays_is_safe(tmp_path) -> None:
+    board = Board(tmp_path)
+    _unsafe(board, "configured_without_overlay")
+    board.fpga_state.write_text("unknown\n")
+
+    assert board.run("check").returncode == 0

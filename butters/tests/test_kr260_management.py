@@ -230,10 +230,10 @@ def test_failed_kr260_reboot_stops_after_identity_check(tmp_path) -> None:
     assert error.value.code == "reboot_unauthorized"
     assert len(calls) == 2
     assert calls[0][-1] == "/usr/bin/cat /etc/machine-id"
-    # Exactly the argv the board's sudoers rule grants; never a bare systemctl,
-    # which polkit denies from a non-interactive SSH session.
+    # Exactly the argv the board's sudoers rule grants: the no-argument kexec
+    # wrapper, never systemctl reboot, whose firmware warm reset wedges the board.
     assert calls[1][-1] == (
-        "/usr/bin/sudo -n /usr/bin/systemctl --no-wall --no-block reboot"
+        "/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-restart"
     )
 
 
@@ -358,9 +358,68 @@ def test_sudoers_artifact_grants_exactly_the_broker_reboot_argv() -> None:
     ]
     granted = _KR260_REBOOT_COMMAND.removeprefix("/usr/bin/sudo -n ")
 
-    assert rules == [f"ubuntu ALL=(root) NOPASSWD: {granted}"]
-    for forbidden in ("*", "ALL:", "poweroff", "halt", "shutdown", "/bin/sh", "bash"):
-        assert forbidden not in rules[0].split("NOPASSWD:", 1)[1]
+    # `""` forbids arguments; a bare path in sudoers would allow any.
+    assert rules == [f'ubuntu ALL=(root) NOPASSWD: {granted} ""']
+    assert granted == "/usr/local/sbin/butters-kr260-kexec-restart"
+    command = rules[0].split("NOPASSWD:", 1)[1]
+    for forbidden in ("*", "ALL", "systemctl", "reboot", "poweroff", "halt",
+                      "shutdown", "/bin/sh", "bash", "SETENV", ","):
+        assert forbidden not in command
+
+
+@pytest.mark.parametrize(
+    ("returncode", "code"),
+    (
+        (10, "restart_already_staged"),
+        (11, "restart_precondition_failed"),
+        (12, "restart_precondition_failed"),
+        (13, "restart_precondition_failed"),
+        (14, "watchdog_active"),
+        (15, "pl_workload_active"),
+        (21, "restart_failed"),
+        (22, "restart_failed"),
+        (2, "operation_failed"),
+        (99, "operation_failed"),
+    ),
+)
+def test_kexec_wrapper_refusals_map_to_fixed_codes(tmp_path, returncode, code) -> None:
+    calls = []
+
+    def runner(argv, **_kwargs):
+        calls.append(argv[-1])
+        if len(calls) == 1:
+            return subprocess.CompletedProcess(argv, 0, MACHINE_ID + "\n", "")
+        return subprocess.CompletedProcess(argv, returncode, "", "ABORT: anything\n")
+
+    with pytest.raises(BrokerError) as error:
+        _broker_operations(tmp_path, runner, BrokerOperation.KR260_REBOOT).kr260_reboot()
+
+    assert error.value.code == code
+    assert calls == ["/usr/bin/cat /etc/machine-id", _KR260_REBOOT_COMMAND]
+
+
+def test_wrapper_exit_codes_do_not_reclassify_other_kr260_failures(tmp_path) -> None:
+    def runner(argv, **_kwargs):
+        return subprocess.CompletedProcess(argv, 15, "", "")
+
+    with pytest.raises(BrokerError) as error:
+        _broker_operations(tmp_path, runner, BrokerOperation.KR260_STATUS).kr260_status()
+    assert error.value.code == "operation_failed"
+
+
+def test_an_accepted_kexec_is_reported_as_requested_not_confirmed(tmp_path) -> None:
+    def runner(argv, **_kwargs):
+        out = MACHINE_ID + "\n" if argv[-1].endswith("machine-id") else ""
+        return subprocess.CompletedProcess(argv, 0, out, "")
+
+    operations = _broker_operations(tmp_path, runner, BrokerOperation.KR260_REBOOT)
+
+    assert operations.kr260_reboot() == {
+        "accepted": True,
+        "identity_verified": True,
+        "restart_method": "kexec",
+        "restart_confirmed": False,
+    }
 
 
 def test_broker_audits_kr260_failures_without_remote_text(tmp_path, caplog) -> None:
@@ -708,6 +767,80 @@ def test_reboot_with_an_unknown_outcome_is_treated_as_possibly_sent(tmp_path) ->
 
     assert again.value.code == "reboot_in_progress"
     assert len(actions.calls) == 1
+
+
+@pytest.mark.parametrize(
+    "code",
+    (
+        "restart_already_staged",
+        "restart_precondition_failed",
+        "watchdog_active",
+        "pl_workload_active",
+        "restart_failed",
+    ),
+)
+def test_a_kexec_wrapper_refusal_starts_no_cooldown(tmp_path, code) -> None:
+    actions = Actions(failure=code)
+    adapter, clock = _adapter(tmp_path, actions)
+
+    with pytest.raises(IntegrationError):
+        adapter.reboot()
+    clock.now += 11.0
+    with pytest.raises(IntegrationError) as again:
+        adapter.reboot()
+
+    # Refused before the handoff: nothing restarted, so a retry is allowed and
+    # fails the same way instead of reporting a restart in progress.
+    assert again.value.code == code
+    assert len(actions.calls) == 2
+    assert "last_reboot_request" not in adapter.status()
+
+
+def test_an_accepted_restart_is_requested_until_a_new_boot_confirms_it(tmp_path) -> None:
+    actions = Actions()
+    broker = Broker()
+    adapter, clock = _adapter(tmp_path, actions, broker)
+
+    result = adapter.reboot()
+    assert result["outcome"] == "restart_requested"
+    assert result["restart_confirmed"] is False
+
+    clock.now += 11.0
+    assert adapter.status(refresh=True)["last_reboot_request"]["state"] == "requested"
+
+    broker.output = TELEMETRY.replace(
+        "63bb230d-e96c-438c-917a-dcc464a80a44", "11111111-2222-3333-4444-555555555555"
+    )
+    clock.now += 11.0
+    last = adapter.status(refresh=True)["last_reboot_request"]
+    assert last["state"] == "confirmed"
+    assert last["boot_changed"] is True
+
+
+def test_a_restart_that_never_changes_the_boot_becomes_unconfirmed(tmp_path) -> None:
+    actions = Actions()
+    adapter, clock = _adapter(tmp_path, actions)
+
+    adapter.reboot()
+    clock.now += Kr260Adapter.REBOOT_COOLDOWN_SECONDS + 1
+    last = adapter.status(refresh=True)["last_reboot_request"]
+
+    assert last["boot_changed"] is False
+    assert last["state"] == "unconfirmed"
+
+
+def test_an_unobservable_board_never_reads_as_confirmed(tmp_path) -> None:
+    actions = Actions()
+    broker = Broker()
+    adapter, clock = _adapter(tmp_path, actions, broker)
+
+    adapter.reboot()
+    broker.ok, broker.error_code = False, "host_unreachable"
+    clock.now += 11.0
+    last = adapter.status(refresh=True)["last_reboot_request"]
+
+    assert last["boot_changed"] is None
+    assert last["state"] == "requested"
 
 
 def test_kr260_capability_gates_ship_closed() -> None:
