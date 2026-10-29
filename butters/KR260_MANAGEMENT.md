@@ -974,6 +974,44 @@ Then:
 3. Optional, separately: press SW2 once on a healthy board and expect the
    same `por_confirmed` evidence. That validates the manual alternative.
 
+#### Step 1, attach-only check: passed (2026-10-29)
+
+Preflight:
+
+- boot `bdaa97be`; CPUs `0-3`; `eth1` up; `running`;
+- WFI `disable=0` and `cpu-sleep-0` `disable=1` on cpu0–3; the deep-idle
+  unit active and enabled;
+- nothing staged; no apt;
+- COM5 logger open; 1 Hz ping and 10 s SSH heartbeat running;
+- no debugger on the desktop.
+
+Windows: no installer, update worker, hypervisor or pending reboot. An
+interactive Codex CLI session (started 02:57:56Z from SSH) was idle; its
+sandboxed commands had exited, and nothing touched Vivado, XSDB or the FTDI.
+
+The staged files were hash-identical to `811a1cb` (`e3338289…`, `dc5502f7…`).
+
+Ran once, 03:01:57.750–03:02:12.393Z: `kr260-jtag-por.ps1 -Mode check`. That
+is `xsdb -no-ini kr260-jtag-por.tcl check XFL11R5N0BBZA`, which runs
+`connect`, polls `jtag targets`, `targets -set -nocase -filter {name ==
+"PSU"}`, `targets`, then `disconnect`. No `rst` exists on that path.
+
+| Check | Result |
+|---|---|
+| Cable | `Xilinx SCK-KR XFL11R5N0BBZA` (one cable) |
+| Chain | `xck26 04724093`, `arm_dap 5ba00477` |
+| Target | `4* PSU` active |
+| Cores | A53 #0–#3 `Running`; R5 `No Power`; RPU `Reset` |
+| Result | `RESULT CHECK_OK cable=XFL11R5N0BBZA`, wrapper exit 0 |
+| Detach | the wrapper stopped its own hw_server (pid 32920) at 03:02:12.343Z, 14.6 s after start; no debugger left; 3121 only `TimeWait` |
+| Ping | 366/366, no gaps (before 37, during 14, after 301); max 0.28 ms |
+| SSH | 35/35 on boot `bdaa97be`; per-CPU `arch_timer` rose every interval (≥427), no stalls |
+| Linux | `running`, CPUs `0-3`, `cpu-sleep-0` still disabled, no kernel messages, COM5 silent |
+| 5 min after detach | clean (until 03:07:18Z) |
+
+The guarded path behaved as designed. The staged files were removed
+afterwards. Step 2 (one `rst -por`) needs its own authorization.
+
 #### Butters → Desktop Agent recovery interface (design only, not implemented)
 
 - **Windows side.** New fixed Desktop Agent actions `kr260.jtag_por.check`
