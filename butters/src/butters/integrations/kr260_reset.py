@@ -151,13 +151,39 @@ def _epoch(stamp: str) -> float:
 
 
 def parse_console(text: str) -> list[tuple[float, str]]:
-    """The COM5 logger's UTC line-stamped log ("<ISO>Z <text>")."""
+    """The COM5 logger's UTC line-stamped log ("<ISO>Z <text>").
 
-    lines = []
+    The logger stamps a line when it starts. Linux's `kria login: ` prompt ends
+    without a newline, so the next boot's output is appended to it and would
+    inherit the prompt's old stamp (2026-10-29: the POR's FSBL banner landed on
+    a line stamped 90 minutes earlier). A marker found after other text is
+    therefore split off and dated by the next stamped line, the earliest time
+    the line is known to have been complete.
+    """
+
+    stamped = []
     for raw in text.splitlines():
         match = _CONSOLE.match(raw)
         if match and not match[2].startswith("###"):
-            lines.append((_epoch(match[1]), match[2]))
+            stamped.append((_epoch(match[1]), match[2]))
+    lines = []
+    for index, (start, line) in enumerate(stamped):
+        completed = stamped[index + 1][0] if index + 1 < len(stamped) else start
+        cut = min(
+            (
+                at
+                # Output that starts fresh after an unterminated line. The login
+                # prompt itself ("kria login:") never qualifies.
+                for marker in (FSBL_BANNER, WARM_RESET)
+                if (at := line.find(marker)) > 0 and line[:at].strip()
+            ),
+            default=None,
+        )
+        if cut is None:
+            lines.append((start, line))
+        else:
+            lines.append((start, line[:cut]))
+            lines.append((completed, line[cut:]))
     return lines
 
 

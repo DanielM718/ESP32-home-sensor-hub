@@ -820,9 +820,9 @@ supervised JTAG test below shows it is sufficient.
 
 Butters → Desktop Agent → JTAG stays unimplemented until all three pass.
 
-### JTAG reset (`rst -por`): prepared, not yet run
+### JTAG reset (`rst -por`): validated 2026-10-29 (one supervised POR)
 
-#### Does the KR260 wire the FTDI POR line? Very likely; unconfirmed on this board
+#### Does the KR260 wire the FTDI POR line? Yes: confirmed by the Step 2 POR below
 
 | Evidence | Source | Kind |
 |---|---|---|
@@ -1011,6 +1011,87 @@ is `xsdb -no-ini kr260-jtag-por.tcl check XFL11R5N0BBZA`, which runs
 
 The guarded path behaved as designed. The staged files were removed
 afterwards. Step 2 (one `rst -por`) needs its own authorization.
+
+#### Step 2, one JTAG POR: passed, the integrated FTDI asserts a real POR (2026-10-29)
+
+Preflight:
+
+- everything listed for Step 1 rechecked: boot `bdaa97be`, deep idle
+  disabled on 4 cores and the unit active, nothing staged, no apt or DMA,
+  holds in place, boot hashes unchanged, no debugger;
+- Windows: no installer, update or pending reboot, and Codex idle;
+- the owner confirmed being at the 12 V supply;
+- scripts hash-identical to `811a1cb`;
+- 1 Hz ping and SSH heartbeat restarted; `sync` at 03:26:27.484Z (Dirty
+  0 kB).
+
+Ran once: `kr260-jtag-por.ps1 -Mode por -Confirm confirm-por`.
+
+- The chain validated (one `SCK-KR XFL11R5N0BBZA`, `xck26 04724093`,
+  `arm_dap 5ba00477`, `4* PSU`), with all four A53s `Running`.
+- `RESULT RST_ISSUED at=2026-10-29T03:26:40.012Z`; hw_server stopped at
+  03:26:42.020Z; no debugger left (3121 only `TimeWait`).
+
+| UTC | Event (COM5 logger stamps; the banner's is an upper bound) |
+|---|---|
+| 03:26:40.012 | `rst -por` issued |
+| ≤03:26:42.070 | `Zynq MP First Stage Boot Loader`, then `Release 2023.2`, `MultiBootOffset: 0x40`, `Reset Mode: System Reset` |
+| 03:26:42.103 / .305 | PMU Firmware 2023.2 / BL31 v2.8 |
+| 03:26:43.283 | U-Boot 2023.01 (`Reset reason: SOFT`, as after a 12 V cycle) |
+| 03:26:44.4 | ICMP down |
+| 03:26:56.674 / .735 | `Starting kernel` / `Linux version 6.8.0-1015-xilinx` |
+| 03:26:59.703 | 4 CPUs up |
+| 03:27:09.670 | `sda2` mounted |
+| 03:27:32.697 | starter-kit overlay applied |
+| 03:27:47.8 | ICMP up (out ≈63 s) |
+| 03:27:52.605 | `kria login:` |
+| 03:27:56.682 | SSH on the **new boot `329affab`**, 76.7 s after the reset |
+
+`kr260-reset-verdict` on the real logs gives `por_confirmed` (`fsbl_after_s`
+2.058, an upper bound; `ssh_after_s` 76.67). There were no Linux shutdown
+or warm-reset lines.
+
+After the reset:
+
+- identity and host key verified; `running`, no failed units; CPUs `0-3`;
+  `eth1` 1000;
+- the deep-idle unit re-applied (`cpu-sleep-0` disabled on 4 CPUs, WFI
+  untouched);
+- `fpga0` `operating` with the overlay applied and dfx-mgr active;
+- root fsck `clean`, mounted `rw`;
+- watchdogs `inactive`, `bootstatus=0`; `kexec_loaded=0`;
+- boot hashes, holds and `update_initramfs=no` unchanged;
+- production telemetry `online`, identity verified;
+- stable since (heartbeats all OK, timers advancing).
+
+Expected abrupt-reset artifact: journald replaced the previous boot's
+`system.journal` as "uncleanly shut down"; its last entry is the 03:26:27
+`sync`. New-boot warnings were the known cold-boot set (KASLR seed, TPM
+self-test, `dmaproxy`/`usb5744` modules).
+
+Two things this run taught:
+
+- **The classifier first said `unexpected_restart`.** The logger stamps a
+  line when it starts. The banner was appended to the unterminated
+  `kria login: ` prompt, stamped 01:56:27, so the reset filter discarded it.
+  `parse_console` now splits a banner or warm-reset marker off a line where
+  it follows other text, and dates it by the next stamped line. The
+  regression test uses this exact excerpt and fails on the old parser.
+- hw_server was gone about 2 s after the reset, while the boot ROM and FSBL
+  were starting. The boot was unaffected: a POR clears debug state, and
+  deep idle is irrelevant before Linux. Keep that window short.
+
+Conclusion:
+
+- The KR260's integrated FT4232H **does** drive a usable power-on reset
+  through `rst -por`. It is the cold path (boot ROM, then FSBL, then U-Boot),
+  not the warm path that wedges, and it recovers in about 77 s.
+- That makes JTAG POR a practical remote recovery for an unresponsive
+  KR260, **as long as** Windows, the USB cable and XSDB work.
+- It was tested on a healthy board. A truly wedged board (the warm-reboot
+  hang) has not been tested yet. That case is the same reset mechanism
+  SoC-Labs reports recovering.
+- Like 12 V, it is abrupt (no unmount).
 
 #### Butters → Desktop Agent recovery interface (design only, not implemented)
 

@@ -309,3 +309,46 @@ def test_cli_reads_the_monitoring_logs(tmp_path, capsys) -> None:
     out = json.loads(capsys.readouterr().out)
     assert code == 0
     assert out["state"] == "por_confirmed" and out["needs_power_cycle"] is False
+
+
+# 2026-10-29 03:26Z, the first real POR: the banner was appended to the
+# unterminated login prompt, a line stamped 90 minutes earlier.
+POR_ON_PROMPT = """\
+2026-10-29T01:56:27.344Z 
+2026-10-29T01:56:27.344Z kria login: Zynq MP First Stage Boot Loader 
+2026-10-29T03:26:42.070Z Release 2023.2   Mar 18 2024  -  06:43:04
+2026-10-29T03:26:42.070Z Reset Mode\t:\tSystem Reset
+2026-10-29T03:26:56.674Z Starting kernel ...
+2026-10-29T03:27:52.605Z kria login: 
+"""
+
+
+def test_a_banner_appended_to_the_old_login_prompt_is_dated_by_the_next_line() -> None:
+    console = parse_console(POR_ON_PROMPT)
+    banner = [(t, line) for t, line in console if "First Stage Boot Loader" in line]
+    prompt = [(t, line) for t, line in console if line.startswith("kria login:")]
+
+    assert len(banner) == 1 and banner[0][1].startswith("Zynq MP First Stage")
+    assert banner[0][0] == console[3][0]  # 03:26:42.070, the next stamped line
+    assert prompt[0][1] == "kria login: " and prompt[0][0] < banner[0][0]
+
+    issued = banner[0][0] - 2.058  # RST_ISSUED at 03:26:40.012Z
+    v = classify(
+        issued_at=issued,
+        now=issued + 90,
+        boot_id_before=BEFORE,
+        console=console,
+        heartbeats=[
+            Heartbeat(issued - 1, BEFORE[:8]),
+            Heartbeat(issued + 76.67, "329affab"),
+        ],
+        pings=[],
+    )
+    assert v.state == "por_confirmed"
+    assert v.fsbl_after_s == 2.058  # an upper bound: the banner came no later
+
+
+def test_the_login_prompt_alone_is_never_split() -> None:
+    assert (
+        parse_console("2026-10-29T01:56:27.344Z kria login: \n")[0][1] == "kria login: "
+    )
