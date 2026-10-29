@@ -1296,10 +1296,14 @@ as a branch**. Build the candidate on the production line instead:
    - `git revert 1e36895` on PR #9 conflicts in `broker.py`, because
      production resolved `_metered_watts` by hand. Do not use either check.
 
-   Dry run 2026-10-29:
-   - all seven cherry-picks applied cleanly on `ba675b4`;
+   Dry run 2026-10-29, repeated after PR #9's probe commit:
+   - every cherry-pick applied cleanly on `ba675b4`;
    - the diff against the PR #9 head is exactly `1e36895`'s 8 files
-     (+967/−33), with no other line in either direction;
+     (+967/−33). Counting duplicate lines, every `+` and `-` line is one of
+     `1e36895`'s and none of its lines is missing;
+   - relative to `ba675b4` the candidate touches no desktop, Wake-on-LAN,
+     monitor or Sunshine file. Its only `broker.py` change is the FPGA lines
+     of the telemetry command;
    - local branch `deploy/kr260-jtag-recovery-candidate`, not pushed.
 3. Run both suites on the candidate. Compute the tree digest with `LC_ALL=C`.
 4. **Butters first.** From the long-lived deploy worktree (it has the models
@@ -1315,25 +1319,44 @@ as a branch**. Build the candidate on the production line instead:
    - the agent still connects, with a hello unchanged.
 5. **Desktop Agent second, gate off** (no Windows restart). Owner, in an
    elevated shell:
-   - create `C:\ProgramData\Butters\kr260\` (Administrators/SYSTEM only) and
-     copy `kr260-jtag-por.ps1` and `.tcl` from the candidate; check both
-     SHA-256 values;
+   - create `C:\ProgramData\Butters\kr260\` and protect it **before**
+     copying anything. `C:\ProgramData\Butters` grants `BUILTIN\Users`
+     inherited Write (checked 2026-10-29). With that ACL the agent refuses
+     every run as `integrity_failed`. Mirror `install-task.ps1`:
+     ```
+     icacls C:\ProgramData\Butters\kr260 /inheritance:r /grant:r *S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F "DESKTOP-G4CFVL1\Daniel:(OI)(CI)RX"
+     icacls C:\ProgramData\Butters\kr260 /setowner *S-1-5-32-544 /T
+     ```
+     The agent's user needs read and execute only.
+   - copy `kr260-jtag-por.ps1` and `.tcl` from the candidate, re-run
+     `/setowner … /T`, and check both SHA-256 values;
    - write `C:\ProgramData\Butters\DesktopAgent\kr260-jtag.toml` (next to
      `agent.toml`, Administrators/SYSTEM-owned) with `enabled = false` and
      both hashes;
    - back up `venv\Lib\site-packages\butters_agent`, then `pip install
      --force-reinstall --no-deps` the candidate's `butters-agent` package;
-   - restart only the Desktop Agent process (its logon task).
+   - restart only the Desktop Agent process: `Stop-ScheduledTask` then
+     `Start-ScheduledTask -TaskPath '\Butters\' -TaskName DesktopAgent`. The
+     task runs at `LeastPrivilege` as the logged-on user, ignores a second
+     instance, and re-triggers every 5 minutes.
    Then check, in this order:
    - `agent.jsonl` shows `kr260_jtag_loaded` with `success: false`;
    - Butters shows the agent `connected` and `jtag_not_offered`;
    - Sunshine, SSH and the app actions are unaffected.
 6. Stop there. Enabling either gate is the supervised validation below.
 
-Compatibility: an old agent with the new Butters is fine. The new agent with
-its gate off and the old Butters is fine (same hello). **The new agent with its
-gate on and the old Butters is rejected at hello**, so close the agent gate
-before any Butters rollback.
+Compatibility: Butters accepts a hello only if every advertised action is in
+its own `butters_agent.protocol.SCHEMAS`. Checked 2026-10-29 against the
+agent installed on the desktop, production `ba675b4` and the candidate:
+
+| Agent | Butters | Result |
+|---|---|---|
+| installed (5 actions) | candidate (7) | accepted |
+| candidate, agent gate off | production | accepted; the hello is the same 5 actions |
+| candidate, agent gate on | candidate | accepted; the JTAG actions are offered only now |
+| candidate, agent gate on | production | **rejected at hello**: the whole agent disconnects |
+
+So close the agent gate before any Butters rollback.
 
 ##### Rollback (no Windows restart)
 
@@ -1342,8 +1365,8 @@ before any Butters rollback.
 - **Butters gate:** remove `actions.kr260_jtag_recovery` from
   `/etc/butters/assistant.local.toml` and restart `butters-web`.
 - **Agent code:** restore the backed-up `site-packages\butters_agent` and
-  restart the agent. The `C:\ProgramData\Butters\kr260\` files are inert
-  without the gate.
+  restart the agent task as above. The `C:\ProgramData\Butters\kr260\`
+  files are inert without the gate.
 - **Butters code:**
   1. Close the agent gate first.
   2. Swap `/opt/butters.previous` back as for earlier releases.
