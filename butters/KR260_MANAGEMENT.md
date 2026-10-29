@@ -175,7 +175,7 @@ Kria A/B boot firmware in QSPI (Image Selector, golden copy, Persistent
 Register, Image A/B, Recovery). FSBL, PMUFW and BL31 v2.8 from release 2023.2;
 U-Boot 2023.01. Both cadence watchdogs are inactive with `bootstatus=0`.
 
-### Normal restart: kexec (installed; dry run passed; restart not yet run)
+### Normal restart: kexec (dry run and one supervised restart passed)
 
 Read-only checks on the board:
 
@@ -239,7 +239,7 @@ never fall back to `systemctl reboot` itself.
   break kexec. On this path arm64 builds the next DT from its own boot-time
   FDT, which is the same source as `/sys/firmware/fdt`.
 
-#### Restart script (staged, not run)
+#### Restart script
 
 [`config/kr260/kr260-kexec-restart.sh`](config/kr260/kr260-kexec-restart.sh)
 runs the dry run's preconditions (nothing staged, FIT-matching kernel and
@@ -259,7 +259,7 @@ Residual fallback risk: `systemctl kexec` runs `systemd-shutdown`, which
 ordinary reboot, i.e. the wedge. The staged-image check makes this unlikely;
 its recovery is a 12 V power cycle.
 
-#### Supervised kexec restart (owner present; not yet authorized)
+#### Supervised kexec restart procedure (owner present)
 
 1. Preflight:
    - boot ID recorded; CPUs `0-3`; `eth1` up; `kexec_loaded=0`; both
@@ -292,10 +292,92 @@ its recovery is a 12 V power cycle.
    - `Starting new kernel` followed by no kernel output within 15 s.
    - No login prompt within 150 s, or no SSH within 240 s.
 
-Only after this passes would the sudoers grant and the broker's
-`_KR260_REBOOT_COMMAND` move to a root-owned copy of the restart script
-(`/usr/local/sbin/…`, one exact argv), as a code change with tests and a
-separate approval. Until then `kr260.reboot` stays disabled.
+#### Supervised kexec restart, 2026-10-29: passed
+
+Preflight:
+
+- boot `208bb0b2`; CPUs `0-3`; `cpu-sleep-0` disabled.
+- `kexec_loaded=0`; both watchdogs `inactive`; `KExecWatchdogUSec=0`.
+- The starter-kit overlay has no PL device nodes (only `firmware-name` and
+  four `pl_resetn` resets); the UIOs are PS `axi-pmon`; all `zynqmp-dma` IRQs
+  were 0; no XRT or UIO users.
+- Script sha256 `138cea29…` (= `39d4af0`); no JTAG process; no apt or jobs.
+
+The owner ran the script once.
+
+| UTC | Event |
+|---|---|
+| 00:50:31.758 | `sudo bash /tmp/kr260-kexec-restart.sh` (journal) |
+| 00:50:35.9 | SSH session closed; services stopping |
+| 00:50:37.648 | `Reached target kexec.target`; 00:50:37.753 syncing filesystems; 00:50:38.248 journal stopped |
+| 00:50:38.252 | last old-kernel console line |
+| 00:50:38.469 | `Booting Linux on physical CPU 0x0` (217 ms later; no FSBL, U-Boot or `Restarting system`) |
+| 00:50:38.5 | last ping reply |
+| 00:50:40.886 | `smp: Brought up 1 node, 4 CPUs` |
+| ≈00:50:53 | journald started (kernel +14.8 s) |
+| 00:51:12.98 | starter-kit overlay applied (kernel +33.9 s) |
+| 00:51:29.354 | ping back (network out ≈51 s) |
+| 00:51:34.233 | `kria login:` |
+| 00:51:43.093 | first SSH heartbeat on boot `63d18cfd` (≈71 s after the command) |
+
+`kexec_core: Starting new kernel` is below the console loglevel, so it does
+not appear on COM5. The handoff shows as the jump from kernel time
+`[2094.5…]` to `[0.000000]`. Until NTP syncs, the new boot's first journal
+entries carry the timesyncd-restored clock (00:50:18), about 20 s early.
+
+Verified afterwards:
+
+- Identity: new boot ID `63d18cfd`, same kernel build (#16, 2025-04-16), same
+  cmdline; host key matches the pin.
+- Health: `running` with no failed units; CPUs `0-3`; `eth1` 1000 with the
+  same IPv4 address and default route.
+- Root: fsck reports `writable: clean`, mounted `rw`.
+- FPGA: `fpga0` `operating`, overlay `applied`, `dfx-mgr` active with
+  "Default firmware detected: k26-starter-kits".
+- Watchdogs `inactive`, `bootstatus=0`; `kexec_loaded=0`.
+- Butters telemetry `online`, identity verified.
+- Boot media unchanged (`boot.scr.uimg` `690fe122…`).
+- Warnings and errors are only the known set. `Failed to find module
+  'dmaproxy'/'usb5744'` also appears in the two previous cold boots.
+- As expected, the deep-idle setting returned to its default (`disable=0`)
+  and `/tmp` was cleared. The scripts were re-staged with committed hashes.
+
+#### Plan: replace the warm-reboot grant with the kexec restart (not installed)
+
+1. Install a root-owned copy:
+   `sudo install -o root -g root -m 0755 kr260-kexec-restart.sh /usr/local/sbin/butters-kr260-kexec-restart`.
+2. Replace `/etc/sudoers.d/butters-kr260-reboot` with one rule:
+   `ubuntu ALL=(root) NOPASSWD: /usr/local/sbin/butters-kr260-kexec-restart ""`.
+   - The `""` forbids arguments; a bare path in sudoers would allow any.
+   - Never add `SETENV` or `env_keep` for `KX_*`, because those are the
+     script's test seams.
+   - Removing the `systemctl --no-wall --no-block reboot` grant takes the
+     wedging warm reboot away from the broker entirely.
+   - Validate with `visudo -cf`, then run the boundary execution tests.
+3. Broker (code change with tests): set `_KR260_REBOOT_COMMAND =
+   "/usr/bin/sudo -n /usr/local/sbin/butters-kr260-kexec-restart"` and map
+   the script's exit codes to fixed failure codes:
+   - 10 → `already_staged`;
+   - 11–13 → `restart_precondition_failed`;
+   - 14 → `watchdog_active`;
+   - 21–22 → `restart_failed`.
+   The 300 s cooldown and the `boot_changed` check stay. Admin wording
+   becomes "Restart (kexec)".
+4. One supervised restart through the broker and Admin. Expect
+   `boot_changed: true` and the same checks as above. Only then consider
+   `"kr260.reboot" = true`, separately approved.
+
+Constraints that remain:
+
+- Kernel upgrades: the script loads only the running release and refuses if
+  the files differ from the booted FIT. After `flash-kernel` installs a new
+  kernel, kexec restarts are refused (fail closed), and switching kernels
+  needs a 12 V power cycle while the warm reboot wedges.
+- A custom PL design with AXI masters must be unloaded first.
+- The deep-idle workaround is lost at every restart. Persist it (a boot unit)
+  before any JTAG-based recovery depends on it.
+- The residual risk (`systemd-shutdown` falling back to an ordinary reboot if
+  `kexec -e` returns) stays, with a 12 V power cycle as recovery.
 
 ### Dead-Linux recovery: JTAG POR (wiring unconfirmed)
 
