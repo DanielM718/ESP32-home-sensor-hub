@@ -1,8 +1,14 @@
 # KR260 guarded JTAG power-on reset, run by XSDB on the Windows desktop.
-#   xsdb -no-ini kr260-jtag-por.tcl check <cable-serial>
-#   xsdb -no-ini kr260-jtag-por.tcl por   <cable-serial> confirm-por
+#   xsdb -no-ini kr260-jtag-por.tcl check <cable-serial> <board-address>
+#   xsdb -no-ini kr260-jtag-por.tcl por   <cable-serial> <board-address> confirm-por
 # `check` attaches, validates the cable and chain, selects the target and
 # detaches. `por` does the same, then pulses the cable's POR line once.
+#
+# Both refuse unless the board is still dark immediately before attaching and
+# again, while attached, immediately before CHECK_OK or rst -por: one TCP
+# connection attempt to its SSH port, closed without sending anything. That
+# narrows the race with a board that comes back by itself from the length of
+# a run (about 13 s) to the probe's own second.
 #
 # Every run ends with exactly one "RESULT <code> ..." line. The only
 # state-changing command in this file is the single `rst -por`: there is no rst
@@ -18,6 +24,14 @@ namespace eval kr260 {
     variable devices {xck26 04724093 arm_dap 5ba00477}
     variable resets_issued 0
     variable last_result ""
+    # Any TCP answer from this port, accepted or refused, means the board's
+    # kernel is running. Its sshd accepts in about 1 ms on this LAN. Windows
+    # reports a refusal only after retrying for about 2 s (measured
+    # 2026-10-29), so a board whose kernel is up before sshd listens reads as
+    # silent here; the agent's ICMP ping just before this run covers that.
+    variable probe_port 22
+    variable probe_ms 1000
+    variable probe_state ""
 }
 
 proc kr260::result {code args} {
@@ -30,6 +44,73 @@ proc kr260::result {code args} {
 proc kr260::stamp {} {
     set ms [clock milliseconds]
     return "[clock format [expr {$ms / 1000}] -gmt 1 -format %Y-%m-%dT%H:%M:%S].[format %03d [expr {$ms % 1000}]]Z"
+}
+
+# A dotted IPv4 address without leading zeros (Tcl would read 010 as octal).
+proc kr260::valid_address {address} {
+    if {![regexp {^(0|[1-9][0-9]{0,2})(\.(0|[1-9][0-9]{0,2})){3}$} $address]} {
+        return 0
+    }
+    foreach octet [split $address .] {
+        if {$octet > 255} { return 0 }
+    }
+    return 1
+}
+
+# dark only for silence (or the OS's own "host is unreachable"); reachable for
+# an accepted or refused connection; unknown for anything else, which refuses
+# exactly like a reachable board.
+proc kr260::probe_verdict {state error} {
+    if {$state eq "silent"} { return dark }
+    if {$state ne "answered"} { return unknown }
+    if {$error eq "" || [string match -nocase "*refused*" $error]} { return reachable }
+    if {[string match -nocase "*host is unreachable*" $error]
+            || [string match -nocase "*timed out*" $error]} {
+        return dark
+    }
+    return unknown
+}
+
+proc kr260::board_probe {address} {
+    variable probe_port
+    variable probe_ms
+    variable probe_state
+    if {[catch {socket -async $address $probe_port} sock]} {
+        return [probe_verdict failed $sock]
+    }
+    set probe_state waiting
+    set error ""
+    try {
+        fileevent $sock writable [list set ::kr260::probe_state answered]
+        set timer [after $probe_ms [list set ::kr260::probe_state silent]]
+        vwait ::kr260::probe_state
+        after cancel $timer
+        if {$probe_state eq "answered"} {
+            set error [fconfigure $sock -error]
+            if {$error eq "" && ![catch {fconfigure $sock -connecting} connecting]
+                    && $connecting} {
+                set probe_state pending
+            }
+        }
+    } finally {
+        catch {close $sock}
+    }
+    return [probe_verdict $probe_state $error]
+}
+
+# 1 if the board is still dark at this moment; otherwise reports the refusal.
+proc kr260::still_dark {address moment} {
+    if {[catch {board_probe $address} verdict]} {
+        set verdict unknown
+    }
+    puts "PROBE $moment $verdict at=[stamp]"
+    flush stdout
+    switch -- $verdict {
+        dark { return 1 }
+        reachable { result REFUSED_REACHABLE $moment }
+        default { result REFUSED_PROBE $moment $verdict }
+    }
+    return 0
 }
 
 # `jtag targets` lists cables at indent < 4 and their devices deeper:
@@ -65,16 +146,22 @@ proc kr260::main {argv} {
     variable resets_issued
     set mode [lindex $argv 0]
     set serial [lindex $argv 1]
-    if {$mode ni {check por} || ![regexp {^[A-Z0-9]{12}A$} $serial] || [llength $argv] > 3} {
-        result REFUSED_USAGE "mode=$mode serial=$serial"
+    set address [lindex $argv 2]
+    if {$mode ni {check por} || ![regexp {^[A-Z0-9]{12}A$} $serial]
+            || ![valid_address $address] || [llength $argv] > 4} {
+        result REFUSED_USAGE "mode=$mode serial=$serial address=$address"
         return
     }
-    if {$mode eq "por" && [lindex $argv 2] ne "confirm-por"} {
+    if {$mode eq "por" && [lindex $argv 3] ne "confirm-por"} {
         result REFUSED_UNCONFIRMED
         return
     }
-    if {$mode eq "check" && [llength $argv] != 2} {
+    if {$mode eq "check" && [llength $argv] != 3} {
         result REFUSED_USAGE "check takes no confirmation"
+        return
+    }
+    # Attaching to a running board with deep idle enabled hangs it.
+    if {![still_dark $address before_attach]} {
         return
     }
     if {[catch {connect} err]} {
@@ -106,11 +193,17 @@ proc kr260::main {argv} {
             return
         }
         if {$mode eq "check"} {
-            result CHECK_OK cable=$serial
+            if {[still_dark $address attached]} {
+                result CHECK_OK cable=$serial
+            }
             return
         }
         if {[incr resets_issued] != 1} {
             result REFUSED_REPEAT
+            return
+        }
+        # The last check before the reset: nothing but the time stamp between.
+        if {![still_dark $address attached]} {
             return
         }
         set at [stamp]

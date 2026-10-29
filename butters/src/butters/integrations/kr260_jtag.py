@@ -182,6 +182,10 @@ RESET_NOT_SENT = frozenset(
         "jtag_refused_repeat",
         "jtag_refused_debugger_active",
         "jtag_refused_missing_script",
+        # The script's own probe found the board answering (or could not
+        # tell) immediately before attaching or before rst -por.
+        "jtag_refused_reachable",
+        "jtag_refused_probe",
     }
 )
 
