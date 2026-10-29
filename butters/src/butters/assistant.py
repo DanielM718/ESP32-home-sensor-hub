@@ -491,6 +491,7 @@ def create_assistant(
             Kr260Observer(settings.kr260, broker=broker_client),
             fixed_actions,
             settings.actions.kr260_reboot,
+            jtag_settings=settings.actions.kr260_jtag_recovery,
         )
         register_action_skills(
             skills,

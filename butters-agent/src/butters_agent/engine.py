@@ -10,15 +10,17 @@ from pathlib import PureWindowsPath
 
 import tomllib
 
-from .protocol import NAME, ProtocolError, parameters
+from .protocol import NAME, OPTIONAL, SCHEMAS, ProtocolError, parameters
 
 # A Win32 window class name: letters, digits, dot, underscore, hyphen only.
 WINDOW_CLASS = re.compile(r"[A-Za-z][A-Za-z0-9._-]{0,63}")
 
 
 class Engine:
-    def __init__(self, platform, registry=None):
+    def __init__(self, platform, registry=None, kr260=None):
         self.platform = platform
+        # Optional KR260 JTAG recovery (butters_agent.kr260); absent by default.
+        self.kr260 = kr260
         self.apps = {}
         self.invalid = {}
         self.lock = threading.Lock()
@@ -66,6 +68,12 @@ class Engine:
                 except (TypeError, ValueError):
                     self.invalid[name] = "invalid_registry_entry"
 
+    def actions(self):
+        """The hello's action list: optional actions only when enabled locally."""
+
+        enabled = self.kr260.actions() if self.kr260 is not None else frozenset()
+        return sorted((set(SCHEMAS) - OPTIONAL) | (set(enabled) & OPTIONAL))
+
     def invoke(self, action, values, cancel=None):
         started = time.time()
         parameters(action, values)
@@ -94,6 +102,11 @@ class Engine:
         return result
 
     def _invoke(self, action, values, cancel):
+        if action in OPTIONAL:
+            if action not in self.actions():
+                raise ProtocolError("unsupported_action")
+            # Runs to completion once started: a reset cannot be taken back.
+            return self.kr260.invoke(action)
         if action in {"desktop.agent.status", "desktop.session.status"}:
             return {"success": True, "session": self.platform.session()}
         if action == "desktop.app.list":

@@ -89,3 +89,69 @@ def test_kr260_admin_endpoints_are_authorized_confirmed_and_gated(tmp_path) -> N
     assert "jobs" not in body
     # No shutdown capability exists at all.
     assert observed["shutdown"] in {404, 405}
+
+
+async def _exercise_jtag(tmp_path) -> dict[str, object]:
+    app, service, _nas = _application(tmp_path)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
+    observed: dict[str, object] = {}
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as anonymous_http:
+            anonymous = await _session(anonymous_http, {})
+            observed["anonymous"] = (
+                await anonymous_http.post(
+                    "/api/admin/tools/kr260/jtag",
+                    headers=anonymous,
+                    json={"operation": "reset", "confirm": True},
+                )
+            ).status_code
+
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as http:
+            mutation = await _session(http, ADMIN)
+            await _elevate(http, mutation)
+            for name, payload in (
+                ("unconfirmed", {"operation": "reset", "confirm": False}),
+                ("no_operation", {"confirm": True}),
+                ("other_operation", {"operation": "system", "confirm": True}),
+                ("rst_system", {"operation": "rst -system", "confirm": True}),
+                (
+                    "smuggled",
+                    {"operation": "reset", "confirm": True, "serial": "XFL1EAUJ5SPOA"},
+                ),
+                ("gated_check", {"operation": "check", "confirm": True}),
+                ("gated_reset", {"operation": "reset", "confirm": True}),
+            ):
+                response = await http.post(
+                    "/api/admin/tools/kr260/jtag", headers=mutation, json=payload
+                )
+                observed[name] = (response.status_code, response.json())
+    finally:
+        await app.state.shutdown_workers()
+        del service
+    return observed
+
+
+def test_kr260_jtag_endpoint_is_authorized_confirmed_and_gated(tmp_path) -> None:
+    observed = asyncio.run(_exercise_jtag(tmp_path))
+
+    assert observed["anonymous"] in {401, 403}
+    for name in (
+        "unconfirmed",
+        "no_operation",
+        "other_operation",
+        "rst_system",
+        "smuggled",
+    ):
+        code, body = observed[name]
+        assert code in {400, 403, 409}, (name, body)
+        assert "jobs" not in body
+    assert observed["unconfirmed"][1]["error"] == "confirmation_required"
+    # The shipped gate is closed: nothing is queued for either operation.
+    for name in ("gated_check", "gated_reset"):
+        code, body = observed[name]
+        assert (code, body["error"]) == (409, "capability_unavailable"), (name, body)
+        assert "jobs" not in body

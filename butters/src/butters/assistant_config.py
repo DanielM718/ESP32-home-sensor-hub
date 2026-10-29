@@ -443,6 +443,9 @@ class ActionSettings:
     # Powering the NAS off is gated independently of waking it.
     nas_shutdown: KnownDeviceSettings = KnownDeviceSettings()
     kr260_reboot: KnownDeviceSettings = KnownDeviceSettings()
+    # JTAG power-on reset of a dead KR260 through the Desktop Agent. Gated
+    # separately from the kexec restart, and again on the agent itself.
+    kr260_jtag_recovery: KnownDeviceSettings = KnownDeviceSettings()
     heater: KnownDeviceSettings = KnownDeviceSettings()
     dehumidifier: KnownDeviceSettings = KnownDeviceSettings()
     ventilation: KnownDeviceSettings = KnownDeviceSettings()
@@ -455,6 +458,7 @@ class ActionSettings:
         self.nas.validated("actions.nas")
         self.nas_shutdown.validated("actions.nas_shutdown")
         self.kr260_reboot.validated("actions.kr260_reboot")
+        self.kr260_jtag_recovery.validated("actions.kr260_jtag_recovery")
         self.heater.validated("actions.heater")
         self.dehumidifier.validated("actions.dehumidifier")
         self.ventilation.validated("actions.ventilation")
@@ -1184,6 +1188,7 @@ def load_assistant_settings(path: Path | None = None) -> AssistantSettings:
         nas=device_settings("nas"),
         nas_shutdown=device_settings("nas_shutdown"),
         kr260_reboot=device_settings("kr260_reboot"),
+        kr260_jtag_recovery=device_settings("kr260_jtag_recovery"),
         heater=device_settings("heater"),
         dehumidifier=device_settings("dehumidifier"),
         ventilation=device_settings("ventilation"),

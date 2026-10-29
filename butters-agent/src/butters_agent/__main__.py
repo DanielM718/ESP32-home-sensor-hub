@@ -14,6 +14,7 @@ import tomllib
 
 from .client import Client
 from .engine import Engine
+from .kr260 import Kr260Jtag, load_config
 
 LOG = logging.getLogger("butters_agent")
 
@@ -36,6 +37,31 @@ class SafeJsonFormatter(logging.Formatter):
         except (ValueError, AttributeError):
             fields = {"event": "unstructured_diagnostic_suppressed"}
         return json.dumps({"timestamp": time.time(), **fields})
+
+
+def load_kr260(platform, config_path):
+    """Optional KR260 JTAG recovery; an invalid file disables only that feature."""
+
+    path = config_path.parent / "kr260-jtag.toml"
+    if not path.exists():
+        return None
+    try:
+        platform.validate_registry(path)
+        text = path.read_text(encoding="utf-8-sig")
+        kr260 = Kr260Jtag(platform, load_config(text))
+    except (OSError, ValueError):
+        LOG.error('{"event":"kr260_jtag_disabled","reason":"invalid_kr260_config"}')
+        return None
+    LOG.info(
+        json.dumps(
+            {
+                "event": "kr260_jtag_loaded",
+                "success": kr260.config["enabled"],
+                "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            }
+        )
+    )
+    return kr260
 
 
 def main():
@@ -67,7 +93,7 @@ def main():
         encrypted = (local / "credentials.dpapi").read_bytes()
         credentials = json.loads(dpapi(encrypted, protect=False))
         registry = options.config.parent / "apps.toml"
-        engine = Engine(platform, registry)
+        engine = Engine(platform, registry, load_kr260(platform, options.config))
         LOG.info(
             json.dumps(
                 {
