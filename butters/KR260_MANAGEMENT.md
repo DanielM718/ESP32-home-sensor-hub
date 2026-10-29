@@ -820,92 +820,201 @@ supervised JTAG test below shows it is sufficient.
 
 Butters → Desktop Agent → JTAG stays unimplemented until all three pass.
 
-### JTAG reset (`rst -por`): plan, not yet run
+### JTAG reset (`rst -por`): prepared, not yet run
 
-The installed XSDB (2026.1) `help rst` says:
+#### Does the KR260 wire the FTDI POR line? Very likely; unconfirmed on this board
 
-- `rst -por` "generate[s] a pulse on the POR pin on the JTAG cable". It works
-  only if the KR260 carrier wires that FT4232H line to the SOM's PS_POR_B.
-  That is unconfirmed: the first supervised attempt is also the test. If it is
-  wired, it is a cold reset. The whole PS, the PL configuration and the debug
-  logic reset, the boot-mode pins are resampled (UG1137), DDR contents are
-  lost, and nothing is synced to disk.
-- `rst -system` (the default) resets the system but, per UG1137, preserves
-  debug state, and by default the debugger resumes the cores. A reset catch
-  could therefore survive the reset and trap the cores at FSBL or at Linux
-  secondary-CPU bring-up. Do not use it for recovery.
-- `rst -processor`, `-cores` and `-cluster` reset cores only and leave them
-  suspended. They are debug operations, not recovery.
+| Evidence | Source | Kind |
+|---|---|---|
+| XSDB `rst -por` "generate[s] a pulse on the POR pin on the JTAG cable" | installed XSDB 2026.1 `help rst` | ours |
+| Xilinx FTDI cables drive ADBUS6 = POR_B to `PS_POR_B` (open-collector, wired-OR) and ADBUS7 = SRST_B to `PS_SRST_B`; AMD's Kria FTDI table marks POR_B and SRST_B as used on **both** KV260 and KR260 | [Ethereal Wake summary](https://etherealwake.com/2024/06/xilinx-ftdi-jtag/) of AMD's Kria CC FTDI design table | secondary |
+| `rst -por` over a KR260's own FTDI cable (`XFL1EAUJ5SPO`) recovered a wedged board (POR 4.7 s, boot ≈95 s) | [SoC-Labs `LOCKUP_RECOVERY.md`](https://github.com/SoC-Labs/Kria-260/blob/main/docs/LOCKUP_RECOVERY.md) | third-party, live |
+| Our cable is `Xilinx SCK-KR XFL11R5N0BBZA`: FT4232H channel A, D2XX with no COM port. Channels C and D also have no COM port | Windows PnP, `jtag targets` | ours |
+| UG1092: SW2 "Push button that resets the SOM via the device POR_B signal"; J1 can route the watchdog to SRST; J3 is direct JTAG that bypasses the FTDI | [UG1092 Interfaces](https://docs.amd.com/r/en-US/ug1092-kr260-starter-kit/Interfaces) | AMD, primary |
+| SoC-Labs instead says "the carrier reset button is also `PS_SRST_B`" | SoC-Labs | contradicts UG1092 |
+| Schematic net FT4232H ADBUS6 → buffer → `PS_POR_B` | AMD KR260 carrier schematic (login required) | **not checked** |
 
-After a reset the runtime deep-idle workaround is gone. `cpu-sleep-0` is
-active again as soon as Linux boots, so **`hw_server` must be gone before the
-board boots**. The reset script issues `rst -por`, then `disconnect`, and the
-wrapper kills the `hw_server` it started in the same step, within about a
-second. Never leave `hw_server` attached through a boot.
+The local AMD install has no per-board metadata (`program_ftdi/boards.tcl`
+holds only placeholders). We did not open the FTDI device to read its EEPROM:
+opening channel A changes the state of the very pin wired to POR_B. The first
+supervised `rst -por` is therefore also the wiring test.
 
-Proposed reset script, read-only apart from the one reset:
+UG1092's SW2 = POR_B, if true on this board, makes **SW2 a manual recovery
+without unplugging 12 V**. That is also unverified, and worth testing once
+under supervision.
 
-    connect
-    after 5000
-    targets -set -nocase -filter {name =~ "PSU"}
-    puts [targets]                          ;# pre-reset core states, for the record
-    if {[catch {rst -por} err]} { puts "RST ERROR: $err" } else { puts "RST ISSUED" }
-    disconnect
+#### What each reset does
 
-Confirm the reset executed, and the return to Ubuntu, by four independent
-signals:
+- `rst -por`, if wired: a cold reset. The PS, the PL configuration and the
+  debug logic reset, the boot-mode pins are resampled (UG1137), DDR contents
+  are lost, and nothing is synced to disk. COM5's FTDI is USB-powered and
+  stays up.
+- `rst -system` (the default) preserves debug state, and the debugger then
+  resumes the cores. It is the warm path. **Never used here.**
+- `rst -processor`, `-cores` and `-cluster` are debug operations, not
+  recovery.
 
-- COM5 shows a new `Zynq MP First Stage Boot Loader` banner within about 2 s.
-- ICMP drops, then returns about 70 s later.
-- `/proc/sys/kernel/random/boot_id` changes and `uptime` is small.
-- `journalctl --list-boots` gains an entry, and the previous boot ends with no
-  shutdown sequence.
+The runtime deep-idle setting is gone after any reset. The deep-idle unit
+re-applies it about 10 s into Linux, but **no debugger may stay attached
+through a boot**.
 
-U-Boot's `Reset reason` is not a usable signal: it read `SOFT` even after a
-12 V power cycle, probably because of Kria's image-selector soft reset.
+#### Artifacts (development; nothing staged on the desktop)
 
-Success means all of these:
+| File | Role | sha256 |
+|---|---|---|
+| `config/kr260/kr260-jtag-por.tcl` | XSDB script | `e3338289…` |
+| `config/kr260/kr260-jtag-por.ps1` | Windows wrapper | `dc5502f7…` |
+| `tests/tcl/kr260_jtag_por_harness.tcl` | plain-Tcl harness | — |
+| `src/butters/integrations/kr260_reset.py` + `scripts/kr260-reset-verdict` | verdict from the evidence | — |
 
-- COM5 reaches `kria login:`.
-- SSH works with the pinned host key, with the expected hostname and machine
-  ID.
-- `systemctl is-system-running` reports `running`.
-- CPUs `0-3` are online and `eth1` is up at 1000.
-- Butters telemetry reports `online`.
-- No new kernel warnings beyond the known set (TPM self-test, `mtdoops`,
-  `OF: overlay`).
+`kr260-jtag-por.tcl check|por <cable-serial> [confirm-por]`:
 
-Abort and recovery criteria (no automatic retry, ever):
+1. Attach.
+2. Poll `jtag targets` (hw_server scans asynchronously) and require
+   **exactly one** cable: an `SCK-KR` cable whose last word is the given
+   serial, with exactly `xck26 04724093` then `arm_dap 5ba00477`. A second
+   board on the same hw_server is a refusal, not a guess.
+3. Select `PSU` and require it to be the active target.
+4. `check`: print `RESULT CHECK_OK` and detach.
+5. `por`: requires the literal `confirm-por`. Issues `rst -por` **once**:
+   no `rst -system`, no retry, a second call is refused. Prints
+   `RESULT RST_ISSUED at=…` or `RESULT RST_ERROR …`.
+6. Always detaches (`try … finally`).
 
-- `RST ERROR`, or no FSBL banner within 10 s: the reset did not execute. Check
-  that Linux is still up (ping, SSH, COM5). Do not retry; investigate cable POR
-  wiring.
-- FSBL but no `Starting kernel` within 60 s, no login prompt within 150 s, or
-  no SSH within 240 s: the boot is stuck. Preserve COM5, confirm no
-  `hw_server` is running, and have the owner power-cycle the 12 V supply.
-- Linux is up but degraded (`eth1` down, CPUs missing, failed units): collect
-  the journal, do not reset again, and report.
+Every refusal happens before any reset and prints a specific `RESULT`
+code. The file contains no other `rst`, and no `stop`, `con`, `mwr`, `rwr`,
+`dow`, `fpga` or `exec`.
 
-After a successful boot, the owner re-runs
-`sudo bash kr260-deep-idle.sh apply` before any further JTAG attach.
+`kr260-jtag-por.ps1 -Mode check|por [-Confirm confirm-por]`:
+
+- refuses while any hw_server, xsdb, rdi_xsdb, cs_server or vivado process
+  runs, so every debugger process left afterwards is its own;
+- passes only fixed, validated arguments;
+- has a 90 s timeout;
+- stops every debugger process the moment XSDB exits;
+- prints UTC-stamped lines ending in `RESULT`, and exits 0 only for
+  `CHECK_OK` or `RST_ISSUED`.
+
+Tests (2026-10-29):
+
+- The harness ran under the desktop's Git `tclsh86.exe` (Tcl 8.6.17), which
+  has no XSDB commands; the harness refuses to run otherwise. **52 of 52
+  checks passed**, covering:
+  - both success paths, and `RST_ERROR` with no fallback;
+  - every refusal: usage, confirmation, an empty chain, another cable, two
+    cables, a wrong product, a wrong IDCODE, a missing DAP, target selection,
+    PSU not active, and connect failure;
+  - a repeated reset;
+  - disconnect on every path.
+- Mutants with a `rst -system` fallback, a disabled chain check or a
+  disabled confirmation were each caught.
+- The wrapper parses, and its parameter validation rejects a bad mode or
+  serial. No hw_server ran at any point.
+- `tests/test_kr260_jtag_por.py` (pytest) has 18 tests: static safety checks
+  on both files, all verdict states including this session's real warm,
+  kexec and cold-boot logs, the parsers and the CLI. It runs the Tcl harness
+  when `KR260_TCLSH` or `tclsh` is available.
+
+#### Telling a real reset from a returned command
+
+`kr260-reset-verdict --issued-at … --boot-id-before … --console <COM5 log>
+--heartbeat <ssh heartbeat> --ping <ping -D>` reads the existing monitoring
+logs (COM5 logger, `jtag-heartbeat.sh`, `ping -D`). `RST_ISSUED` proves only
+that XSDB accepted the command.
+
+| Verdict | Evidence | Action |
+|---|---|---|
+| `por_confirmed` | new FSBL banner after the reset, then a new boot ID | verify health |
+| `pending` / `booting` | under 15 s with no banner yet, or a banner while waiting for SSH | wait |
+| `no_effect` | no banner within 15 s; the same boot still answers and ping stays up | the POR line did nothing. Stop and do not retry |
+| `dark_without_console` | no banner; the board stopped answering | 12 V power cycle |
+| `stuck_in_boot` | banner but no kernel in 60 s, no login in 150 s, or no SSH in 240 s | 12 V power cycle |
+| `warm_path` | `reboot: Restarting system` (the PMUFW warm reset) | 12 V power cycle |
+| `unexpected_restart` | a new boot ID without a banner (kexec-like) | investigate |
+
+Abort rules, with no automatic retry, ever:
+
+- `RST_ERROR`, a `REFUSED_*` code or `no_effect`: stop, keep the evidence and
+  investigate.
+- Any "12 V power cycle" verdict: preserve COM5, confirm no hw_server runs
+  (process list only), and the owner power-cycles 12 V. Once validated, SW2
+  may serve instead.
+
+#### Proposed supervised experiment (two separately authorized steps)
+
+Preflight:
+
+- boot ID recorded; CPUs `0-3`; `eth1` up;
+- deep-idle unit `active`, `cpu-sleep-0 disable=1` (required for any
+  attach);
+- no apt or dpkg running; the package holds in place; nothing staged;
+- the reviewed FPGA overlay only;
+- no debugger process on the desktop;
+- COM5 logger, 1 Hz `ping -D` and the 10 s SSH heartbeat running, and the
+  COM5 offset marked.
+
+Then:
+
+1. **Attach-only check.** Stage both files in
+   `C:\Users\Daniel\Desktop\KR260-serial\por\` and compare hashes. Run
+   `kr260-jtag-por.ps1 -Mode check`. Expect `CHECK_OK`, all four A53s
+   `Running`, the debugger stopped, and Linux undisturbed for 5 minutes. This
+   is the same attach that passed on 2026-10-28, now through the guarded
+   script.
+2. **One POR**, on the healthy board:
+   - First `sync` over SSH, so the abrupt reset loses nothing written.
+   - Run `kr260-jtag-por.ps1 -Mode por -Confirm confirm-por` once.
+   - Expected: `RST_ISSUED`; COM5 shows the FSBL banner within about 2 s
+     (`Reset Mode`, BL31, U-Boot), then the kernel, then login, as in a 12 V
+     cycle. SSH back on a new boot ID in about 70–95 s.
+   - `kr260-reset-verdict` must say `por_confirmed`. The deep-idle unit must
+     have re-applied, and the holds and boot hashes must be unchanged.
+   - If it says `no_effect`, the line is not wired on this board: record it
+     and fall back to 12 V switching.
+3. Optional, separately: press SW2 once on a healthy board and expect the
+   same `por_confirmed` evidence. That validates the manual alternative.
+
+#### Butters → Desktop Agent recovery interface (design only, not implemented)
+
+- **Windows side.** New fixed Desktop Agent actions `kr260.jtag_por.check`
+  and `kr260.jtag_por.reset`, with no parameters. Like the existing app
+  actions, they run one fixed, hash-pinned wrapper installed admin-only at
+  `C:\ProgramData\Butters\kr260\kr260-jtag-por.ps1`, with the cable serial
+  taken from agent-local config, never from the request.
+- **Second gate.** A separate agent-local gate (`kr260_jtag_recovery`, ships
+  false) is a second gate, as for desktop shutdown.
+- **Agent refusals:** `kr260.jtag_por.reset` is refused while Windows itself
+  can ping `192.168.1.125`, or while another debugger runs.
+- **Result.** It returns the wrapper's `RESULT` code and timestamps, with no
+  free text.
+- **Butters side.** A new admin-only, fresh-passkey, non-conversational skill
+  `kr260_jtag_recovery`, with gate `actions.kr260_jtag_recovery`
+  enabled/configured (ships false).
+- **Butters preconditions:**
+  - the observer reports the board offline: ping and broker `kr260.status`
+    both failing for at least 5 minutes;
+  - no kexec restart in the last 10 minutes;
+  - one POR per 30 minutes, then a human.
+- **Confirmation.** The verdict is `confirmed` only when the identity-verified
+  board answers with a new boot ID. The agent may later supply COM5 evidence
+  for the banner check.
+- **No unattended trigger** until the supervised Admin path has passed;
+  unattended use is a separate approval.
+- **Never** `rst -system`, a halt or resume, a memory write or programming.
+  Never on a board Butters can still reach.
 
 ### Before unattended JTAG recovery
 
-- Persist the deep-idle workaround: a root systemd oneshot that runs
-  `kr260-deep-idle.sh apply` at boot. Even then it is absent for the first
-  ~20 s of every boot, so recovery tooling must never attach during a boot.
+- The deep-idle workaround is persisted (`butters-kr260-deep-idle.service`,
+  installed 2026-10-29), but it is absent for the first ~10 s of every boot.
+  Recovery tooling must never attach during a boot.
 - Attach only when the board is confirmed unresponsive (ping, SSH and COM5
   all silent). Reset, detach and kill `hw_server` in one step. Allow one
   attempt, followed by a human.
-- The restricted Linux reboot was validated first (2026-10-29). Its
-  authorization path works, but the board did not come back from the warm
-  system reset (see "Linux reboot test" above). A `rst -por` would be a
-  different reset (cable POR line) and is still untested. JTAG remains the
-  path only for a board whose Linux is already dead.
-- Simpler independent options:
-  - a Home Assistant smart plug on the KR260's 12 V supply, for a true power
-    cycle;
-  - the Cadence watchdogs (`cdns-wdt`, currently unused:
-    `RuntimeWatchdogSec=0`), for self-reset. Check that a watchdog-driven
-    system reset does not preserve a debugger reset catch, as `rst -system`
-    would.
+- Normal restarts use kexec, validated 2026-10-29 including through Admin.
+  The warm reboot wedges the board.
+- Independent options:
+  - a Home Assistant smart plug on the 12 V supply, for a true power cycle;
+  - SW2, if it is POR_B as UG1092 says;
+  - the Cadence watchdogs (`RuntimeWatchdogSec=0`), whose expiry takes the
+    PMUFW path. They are not a recovery for the wedge.
