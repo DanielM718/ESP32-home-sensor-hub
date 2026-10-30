@@ -415,6 +415,19 @@ class ActionStateStore:
                 return float(created_at)
         return None
 
+    def last_finished_job(self, skills: tuple[str, ...]) -> dict[str, object] | None:
+        """The newest finished job of any of ``skills``, or None."""
+
+        marks = ",".join("?" * len(skills))
+        with self._lock, self._connect() as connection:
+            row = connection.execute(
+                f"SELECT * FROM action_jobs WHERE skill IN ({marks}) "
+                "AND state NOT IN ('queued','running','waiting') "
+                "ORDER BY created_at DESC LIMIT 1",
+                skills,
+            ).fetchone()
+        return None if row is None else _job(row)
+
     def audit(
         self,
         *,
