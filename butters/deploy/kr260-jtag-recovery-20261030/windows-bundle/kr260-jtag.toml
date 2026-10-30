@@ -1,0 +1,8 @@
+# KR260 JTAG recovery for the Desktop Agent. Reviewed 2026-10-30; installed
+# disabled. Enabling it is a separate, supervised step.
+schema_version = 1
+enabled = false
+cable_serial = "XFL11R5N0BBZA"
+board_address = "192.168.1.125"
+wrapper_sha256 = "ee16ce3344b07b2787f09b403bd68ebcb82dc0a4454fc9ff2c0618ff19844836"
+script_sha256 = "a7709d8fbdf1c65e5f6b6425f75e629838272c315a79fea3b260b96bb84d73da"
