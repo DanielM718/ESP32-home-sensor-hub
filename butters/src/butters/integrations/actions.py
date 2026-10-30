@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ClassVar
 
+from butters.actions.agent import AgentHub
 from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
@@ -275,6 +276,11 @@ class Kr260Adapter:
         # the quiet period after a restart both survive a Butters restart.
         self._persisted_reset_at: Callable[[], float | None] = lambda: None
         self._persisted_kexec_at: Callable[[], float | None] = lambda: None
+        # The newest finished JTAG job, read once to restore the Admin page's
+        # last attempt after a Butters restart. Display only: the waits above
+        # never depend on it.
+        self._persisted_attempt: Callable[[], dict[str, object] | None] = lambda: None
+        self._attempt_restored = False
         self._dark = kr260_jtag.DarkRun()
         self._recorded_at: object = None
         self._last_boot_id: str | None = None
@@ -285,8 +291,12 @@ class Kr260Adapter:
         *,
         persisted_reset_at: Callable[[], float | None] | None = None,
         persisted_kexec_at: Callable[[], float | None] | None = None,
+        persisted_attempt: Callable[[], dict[str, object] | None] | None = None,
     ) -> None:
         self.jtag = hub
+        if persisted_attempt is not None:
+            self._persisted_attempt = persisted_attempt
+            self._attempt_restored = False
         if persisted_reset_at is not None:
             self._persisted_reset_at = persisted_reset_at
         if persisted_kexec_at is not None:
@@ -570,10 +580,74 @@ class Kr260Adapter:
         }
         summary["reset_permitted"] = summary["reset_blocked_reason"] is None
         summary["check_permitted"] = summary["check_blocked_reason"] is None
-        attempt = self._jtag_attempt
+        attempt = self._jtag_attempt or self._restored_attempt(now)
         if attempt is not None:
             summary["last_attempt"] = self._attempt_view(attempt, value, now)
         return summary
+
+    def _restored_attempt(self, now: float) -> kr260_jtag.Attempt | None:
+        """The last attempt as the job store recorded it, once per process.
+
+        Every JTAG job after startup is recorded in memory, so the store is
+        read only until it has answered once. An unreadable or unrecognised
+        record shows no last attempt; it never affects a refusal.
+        """
+
+        if self._attempt_restored:
+            return None
+        try:
+            job = self._persisted_attempt()
+        except Exception:  # noqa: BLE001 - display only; fail to "no attempt".
+            return None
+        self._attempt_restored = True
+        attempt = self._attempt_from_job(job, now) if job else None
+        if attempt is not None and self._jtag_attempt is None:
+            self._jtag_attempt = attempt
+        return attempt
+
+    def _attempt_from_job(
+        self, job: dict[str, object], now: float
+    ) -> kr260_jtag.Attempt | None:
+        operation = {"reset_kr260_jtag": "reset", "check_kr260_jtag": "check"}.get(
+            str(job.get("skill"))
+        )
+        created = job.get("created_at")
+        state = job.get("state")
+        if (
+            operation is None
+            or state not in {"completed", "failed", "cancelled"}
+            or isinstance(created, bool)
+            or not isinstance(created, (int, float))
+            or not math.isfinite(created)
+        ):
+            return None
+        result = job.get("result") if isinstance(job.get("result"), dict) else {}
+        failure = job.get("failure_code")
+        error = (
+            None
+            if state == "completed"
+            else (failure if isinstance(failure, str) else "agent_action_failed")
+        )
+        code = result.get("jtag_result")
+        if not isinstance(code, str) and isinstance(error, str):
+            # A failed job keeps only its fixed code, e.g. jtag_refused_chain.
+            candidate = error.removeprefix("jtag_").upper()
+            code = candidate if error.startswith("jtag_") else None
+        if code not in AgentHub._KR260_JTAG_RESULTS:
+            code = None
+        previous = result.get("previous_boot_id")
+        issued = result.get("reset_issued_at")
+        return kr260_jtag.Attempt(
+            operation=operation,
+            at=self._latest(now, None, float(created)),
+            previous_boot_id=previous if isinstance(previous, str) else None,
+            may_have_reset=operation == "reset"
+            and (state == "completed" or error not in kr260_jtag.RESET_NOT_SENT),
+            error=error,
+            jtag_result=code,
+            issued_at=issued if isinstance(issued, str) else None,
+            restored=True,
+        )
 
     def _attempt_view(
         self, attempt: kr260_jtag.Attempt, value: dict[str, object], now: float
@@ -605,6 +679,7 @@ class Kr260Adapter:
             "reset_issued_at": attempt.issued_at,
             "previous_boot_id": attempt.previous_boot_id,
             "boot_id": value.get("boot_id") if value.get("identity_verified") else None,
+            "restored": attempt.restored,
         }
 
     @staticmethod

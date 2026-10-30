@@ -512,7 +512,7 @@ function renderKr260Jtag(recovery) {
     ["Recovery configured", recovery.configured?"yes":"no", recovery.configured?undefined:"Butters gate closed", recovery.configured?"good":"muted"],
     ["Desktop Agent", recovery.agent, undefined, recovery.agent==="connected"?"good":"muted"],
     ["Reset permitted", recovery.reset_permitted?"yes":"no", undefined, recovery.reset_permitted?"warn":"muted"],
-    ["Last JTAG request", attemptLabel, attempt?`${attempt.operation} · ${ago(attempt.age_seconds)}${attempt.evidence&&KR260_JTAG_EVIDENCE[attempt.evidence]?` · ${KR260_JTAG_EVIDENCE[attempt.evidence]}`:""}${attempt.jtag_result?` · XSDB ${attempt.jtag_result}`:""}${attempt.error?` · ${attempt.error}`:""}`:undefined, attemptTone],
+    ["Last JTAG request", attemptLabel, attempt?`${attempt.operation} · ${ago(attempt.age_seconds)}${attempt.evidence&&KR260_JTAG_EVIDENCE[attempt.evidence]?` · ${KR260_JTAG_EVIDENCE[attempt.evidence]}`:""}${attempt.jtag_result?` · XSDB ${attempt.jtag_result}`:""}${attempt.error?` · ${attempt.error}`:""}${attempt.restored?" · from job history":""}`:undefined, attemptTone],
   ]);
   const blocked=recovery.reset_blocked_reason;
   reason.textContent=recovery.reset_permitted

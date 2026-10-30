@@ -104,6 +104,8 @@ class Attempt:
     issued_at: str | None
     # Latched once boot evidence decides it: (state, evidence).
     final: tuple[str, str] | None = None
+    # Rebuilt from the job store after a Butters restart.
+    restored: bool = False
 
 
 @dataclass(slots=True)

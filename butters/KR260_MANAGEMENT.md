@@ -1218,6 +1218,13 @@ Evidence shown with it: `new_boot_id`, `same_boot_id`, `uptime_after_request`,
 `monitoring_unavailable`, `no_answer`. `RST_ISSUED` alone is never a success
 for the board: it is only `requested`.
 
+After a Butters restart, the row is rebuilt once from the newest finished
+`reset_kr260_jtag` or `check_kr260_jtag` job and marked "from job history".
+Its boot evidence is recomputed live, the age comes from the stored wall-clock
+time, and a failed job keeps only its fixed code. An unreadable or
+unrecognised record shows no row. This is display only: refusals come from the
+persisted interval lookups.
+
 Blocked reasons (`reset_blocked_reason`, explained on the page): `gate_closed`,
 `agent_unconfigured`, `agent_disconnected`, `agent_awaiting_heartbeat`,
 `agent_heartbeat_aging`, `agent_heartbeat_stale`, `agent_jtag_not_offered`

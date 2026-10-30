@@ -297,6 +297,9 @@ class BetaAssistantService:
                 persisted_kexec_at=lambda: self.action_state.last_job_that_may_have_run(
                     "reboot_kr260", not_run=Kr260Adapter.RESTART_NOT_SENT
                 ),
+                persisted_attempt=lambda: self.action_state.last_finished_job(
+                    ("reset_kr260_jtag", "check_kr260_jtag")
+                ),
             )
         self.nas_agent = NasAgentHub(settings.nas_agent_ingress)
         register_nas_agent_skills(
