@@ -43,6 +43,36 @@ _ADDRESS_RECORD = re.compile(
 # (no address, missing interface) leaves the next field glued to its line.
 _GLUED_FIELD = re.compile(r"[a-z][a-z0-9_]*=")
 _MAX_ADDRESSES = 16
+# Reviewed PL designs by the SHA-256 of their applied overlay (.dtbo): the same
+# allowlist as SAFE_OVERLAYS in config/kr260/kr260-kexec-restart.sh.
+_KNOWN_PL_DESIGNS = {
+    "1e998ffd5d33a05da3746df3603e65603e1628006bc878209a836cc9bd3c4ae1": (
+        "k26-starter-kits"
+    ),
+}
+# Linux FPGA Manager states (drivers/fpga/fpga-mgr.c).
+_FPGA_STATES = frozenset(
+    {
+        "unknown",
+        "power off",
+        "power up",
+        "reset",
+        "firmware request",
+        "firmware request error",
+        "write init",
+        "write init error",
+        "write",
+        "write error",
+        "write complete",
+        "write complete error",
+        "operating",
+    }
+)
+# "fpga_overlay=<configfs name> <status> <sha256 of /lib/firmware/<path>|->".
+_FPGA_OVERLAY = re.compile(
+    r"fpga_overlay=([A-Za-z0-9_.-]{1,64}) ([a-z_]{0,16}) ([0-9a-f]{64}|-)"
+)
+_MAX_OVERLAYS = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +184,7 @@ class Kr260Observer:
                 "rx_bytes": _int(parsed.get("if_rx")),
                 "tx_bytes": _int(parsed.get("if_tx")),
             },
+            "fpga": _fpga(parsed, telemetry),
             "reboot_required": parsed.get("reboot_required") == "true",
             "linux_state": parsed.get("system_state") or "unknown",
             "observed_at": observed_at,
@@ -258,6 +289,69 @@ def _addresses(output: str, version: int) -> list[str]:
         if len(found) >= _MAX_ADDRESSES:
             break
     return found
+
+
+def _fpga(parsed: dict[str, str], output: str) -> dict[str, object]:
+    """Read-only PL state: the FPGA Manager and the applied overlays.
+
+    The design is identified by its overlay's SHA-256 only; the bitstream the
+    overlay names is not hashed on every poll. Telemetry from a broker without
+    these lines reads as "unavailable".
+    """
+
+    if "fpga_state" not in parsed:
+        return {
+            "state": "unavailable",
+            "manager_state": None,
+            "overlays": [],
+            "design": None,
+            "starter_kit_loaded": False,
+            "status": None,
+        }
+    raw_state = parsed.get("fpga_state", "")
+    manager = raw_state if raw_state in _FPGA_STATES else None
+    status = parsed.get("fpga_status", "").strip()
+    overlays = []
+    for line in output.splitlines():
+        match = _FPGA_OVERLAY.fullmatch(line.strip())
+        if match is None:
+            continue
+        sha256 = None if match[3] == "-" else match[3]
+        overlays.append(
+            {
+                "name": match[1],
+                "status": match[2] or "unknown",
+                "sha256": sha256,
+                "design": _KNOWN_PL_DESIGNS.get(sha256 or ""),
+            }
+        )
+        if len(overlays) >= _MAX_OVERLAYS:
+            break
+    applied = [item for item in overlays if item["status"] == "applied"]
+    designs = {item["design"] for item in applied}
+    if manager is None:
+        state = "unavailable" if not raw_state else "unrecognized"
+    elif "error" in manager or status:
+        state = "error"
+    elif not applied:
+        state = (
+            "unconfigured" if manager != "operating" else "operating_without_overlay"
+        )
+    elif None in designs:
+        state = "unreviewed_design"
+    else:
+        state = manager
+    return {
+        "state": state,
+        "manager_state": manager,
+        # The ZynqMP driver's error text, letters and spaces only.
+        "status": status
+        if status.replace(" ", "").isalpha()
+        else ("" if not status else "unrecognized"),
+        "overlays": overlays,
+        "design": next(iter(designs)) if len(designs) == 1 else None,
+        "starter_kit_loaded": "k26-starter-kits" in designs and None not in designs,
+    }
 
 
 def _int(value: object) -> int | None:

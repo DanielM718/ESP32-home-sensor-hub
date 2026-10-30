@@ -6,6 +6,7 @@ import uuid
 import pytest
 from butters_agent.protocol import (
     MUTATIONS,
+    OPTIONAL,
     SCHEMAS,
     ProtocolError,
     ReplayCache,
@@ -124,8 +125,12 @@ def test_protocol_exposes_only_interactive_application_actions():
         "desktop.app.list",
         "desktop.app.status",
         "desktop.app.launch",
+        # Optional: advertised only when the agent-local KR260 gate is on.
+        "kr260.jtag_por.check",
+        "kr260.jtag_por.reset",
     }
-    assert MUTATIONS == {"desktop.app.launch"}
+    assert MUTATIONS == {"desktop.app.launch", "kr260.jtag_por.reset"}
+    assert OPTIONAL == {"kr260.jtag_por.check", "kr260.jtag_por.reset"}
 
 
 def test_idempotency_duplicate_returns_cached_terminal_result():

@@ -67,6 +67,8 @@ from butters.cloud.usage_admin_credential import (
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticRequest, RequestDepth
 from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
+from butters.integrations import kr260_jtag
+from butters.integrations.actions import Kr260Adapter
 from butters.planner.model import PlannerError, PlannerRequest
 from butters.planner.provider import DisabledPlannerProvider, PlannerProvider
 from butters.planner.validator import PlannerValidator
@@ -283,6 +285,19 @@ class BetaAssistantService:
         )
         self.passkeys = PasskeyManager(self.auth_state, settings.authentication)
         register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
+        if self.assistant.kr260_adapter is not None:
+            # KR260 JTAG recovery runs on the desktop's cable, through the agent.
+            # The reset interval and the quiet period after a kexec restart
+            # also count jobs from before a Butters restart.
+            self.assistant.kr260_adapter.attach_jtag(
+                self.desktop_agent,
+                persisted_reset_at=lambda: self.action_state.last_job_that_may_have_run(
+                    "reset_kr260_jtag", not_run=kr260_jtag.RESET_NOT_SENT
+                ),
+                persisted_kexec_at=lambda: self.action_state.last_job_that_may_have_run(
+                    "reboot_kr260", not_run=Kr260Adapter.RESTART_NOT_SENT
+                ),
+            )
         self.nas_agent = NasAgentHub(settings.nas_agent_ingress)
         register_nas_agent_skills(
             self.assistant.skills,
@@ -1621,6 +1636,29 @@ class BetaAssistantService:
             skill="reboot_kr260",
             arguments={},
             summary="Restart the identity-verified KR260 (kexec)",
+            subject="kr260",
+        )
+
+    def start_admin_kr260_jtag(
+        self, session: BrowserSession, *, operation: str, confirmed: bool
+    ) -> dict[str, object]:
+        skill, summary = {
+            "check": ("check_kr260_jtag", "Attach-only JTAG check of the dark KR260"),
+            "reset": ("reset_kr260_jtag", "JTAG power-on reset of the dark KR260"),
+        }.get(operation, (None, None))
+        if skill is None or summary is None:
+            raise ActionCoordinatorError(
+                "invalid_arguments", "KR260 JTAG operation must be check or reset"
+            )
+        if not confirmed:
+            raise ActionCoordinatorError(
+                "confirmation_required", "KR260 JTAG recovery requires confirmation"
+            )
+        return self._start_admin_action(
+            session,
+            skill=skill,
+            arguments={},
+            summary=summary,
             subject="kr260",
         )
 

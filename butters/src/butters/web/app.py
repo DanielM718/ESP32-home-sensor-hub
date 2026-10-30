@@ -1008,6 +1008,34 @@ def create_app(
         ) as exc:
             return _exception_response(exc)
 
+    async def kr260_tool_jtag(request: Request) -> Response:
+        try:
+            _admin_mutation(request, runtime, auth)
+            session = _bound_session(request, runtime, auth)
+            payload = await _json_body(request, configured.web.max_request_bytes)
+            if set(payload) != {"operation", "confirm"}:
+                raise ValueError(
+                    "KR260 JTAG recovery accepts only an operation and a confirmation"
+                )
+            operation = payload["operation"]
+            if operation not in {"check", "reset"}:
+                raise ValueError("KR260 JTAG operation must be check or reset")
+            return JSONResponse(
+                await run_blocking(
+                    runtime.start_admin_kr260_jtag,
+                    session,
+                    operation=operation,
+                    confirmed=payload["confirm"] is True,
+                )
+            )
+        except (
+            SecurityError,
+            SessionError,
+            ActionCoordinatorError,
+            ValueError,
+        ) as exc:
+            return _exception_response(exc)
+
     # ======================= Administrator Tools: NAS =======================
 
     async def nas_tool_status(request: Request) -> Response:
@@ -2676,6 +2704,11 @@ def create_app(
         Route(
             "/api/admin/tools/kr260/reboot",
             kr260_tool_reboot,
+            methods=["POST"],
+        ),
+        Route(
+            "/api/admin/tools/kr260/jtag",
+            kr260_tool_jtag,
             methods=["POST"],
         ),
         Route("/api/admin/tools/nas", nas_tool_status),

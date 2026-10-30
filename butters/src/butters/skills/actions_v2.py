@@ -100,6 +100,28 @@ class ActionSkillImplementations:
             "action_result", self.kr260.reboot(current_cancel_event())
         )
 
+    def check_kr260_jtag(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        return StructuredSkillResult(
+            "action_result", self.kr260.jtag_check(current_cancel_event())
+        )
+
+    def reset_kr260_jtag(self, _arguments: SkillArguments) -> SkillResult:
+        if self.kr260 is None:
+            raise RuntimeError("KR260 adapter is unavailable")
+        # A retried job reuses its agent idempotency key, so the agent returns
+        # the first result instead of pulsing the POR line again.
+        from butters.skills.desktop_agent import _job_idempotency_key
+
+        return StructuredSkillResult(
+            "action_result",
+            self.kr260.jtag_reset(
+                current_cancel_event(),
+                idempotency_key=_job_idempotency_key(current_job_id()),
+            ),
+        )
+
     def broker_action(self, operation: BrokerOperation) -> SkillResult:
         result = self.actions.execute(operation, cancel_event=current_cancel_event())
         return StructuredSkillResult("action_result", result)
@@ -431,6 +453,33 @@ def register_action_skills(
         local_console=False,
         schema=empty_schema,
         parser=_parse_none,
+    )
+    # JTAG recovery of a dead KR260 through the Desktop Agent. Both attach a
+    # debugger, so both need a fresh passkey; neither is conversational.
+    jtag_available = (
+        actions.kr260_jtag_recovery.enabled and actions.kr260_jtag_recovery.configured
+    )
+    action(
+        "check_kr260_jtag",
+        "Attach-only JTAG check of the KR260 after Butters has seen it dark for minutes.",
+        impl.check_kr260_jtag,
+        authentication=AuthenticationLevel.FRESH,
+        available=jtag_available,
+        local_console=False,
+        schema=empty_schema,
+        parser=_parse_none,
+        timeout=60,
+    )
+    action(
+        "reset_kr260_jtag",
+        "One JTAG power-on reset of the KR260 after Butters has seen it dark for minutes.",
+        impl.reset_kr260_jtag,
+        authentication=AuthenticationLevel.FRESH,
+        available=jtag_available,
+        local_console=False,
+        schema=empty_schema,
+        parser=_parse_none,
+        timeout=60,
     )
 
     for device, config in (

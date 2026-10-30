@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import base64
 import ctypes
+import hashlib
 import json
 import os
 import subprocess
+from contextlib import suppress
 from ctypes import wintypes as w
 from pathlib import Path
 
 PS = os.path.join(
     os.environ.get("SystemRoot", r"C:\Windows"),
     r"System32\WindowsPowerShell\v1.0\powershell.exe",
+)
+PING = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), r"System32\PING.EXE")
+TASKLIST = os.path.join(
+    os.environ.get("SystemRoot", r"C:\Windows"), r"System32\tasklist.exe"
+)
+TASKKILL = os.path.join(
+    os.environ.get("SystemRoot", r"C:\Windows"), r"System32\taskkill.exe"
 )
 
 
@@ -290,3 +299,88 @@ ConvertTo-Json -InputObject $safe -Compress
         )
         if safe is not True:
             raise ValueError("unsafe_registry_permissions")
+
+    # ----- KR260 JTAG recovery (butters_agent.kr260); fixed inputs only -----
+
+    def file_sha256(self, path):
+        return hashlib.sha256(Path(str(path)).read_bytes()).hexdigest()
+
+    def debuggers_running(self, images):
+        # Fails closed: an unreadable process list counts as a debugger.
+        try:
+            result = subprocess.run(
+                [TASKLIST, "/FO", "CSV", "/NH"],
+                capture_output=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        if result.returncode:
+            return True
+        names = {
+            line.split(",", 1)[0].strip('"').lower()
+            for line in result.stdout.decode("utf-8", errors="replace").splitlines()
+            if line.strip()
+        }
+        return bool(names & images)
+
+    def host_answers_ping(self, address):
+        # Windows ping exits 0 when this host itself reports "Destination host
+        # unreachable", so only an echo reply ("TTL=") counts. Fails closed.
+        try:
+            result = subprocess.run(
+                [PING, "-n", "2", "-w", "1000", address],
+                capture_output=True,
+                timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True
+        return b"TTL=" in result.stdout
+
+    def run_wrapper(self, path, arguments, timeout):
+        process = subprocess.Popen(
+            [
+                PS,
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(path),
+                *arguments,
+            ],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        try:
+            stdout, _ = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            # Killing PowerShell alone would orphan xsdb and hw_server.
+            self._taskkill(["/T", "/PID", str(process.pid)])
+            process.kill()
+            with suppress(subprocess.TimeoutExpired):
+                process.communicate(timeout=2)
+            raise
+        return process.returncode, stdout.decode("utf-8-sig", errors="replace")
+
+    def stop_debuggers(self, images):
+        for image in sorted(images):
+            self._taskkill(["/IM", image])
+
+    @staticmethod
+    def _taskkill(arguments):
+        with suppress(OSError, subprocess.SubprocessError):
+            subprocess.run(
+                [TASKKILL, "/F", *arguments],
+                capture_output=True,
+                timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+                check=False,
+            )
