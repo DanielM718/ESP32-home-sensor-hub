@@ -950,6 +950,107 @@ def test_a_persisted_reset_job_rate_limits_a_fresh_process():
     assert adapter.jtag_reset()["outcome"] == "reset_requested"
 
 
+def test_a_persisted_kexec_job_keeps_the_quiet_period_in_a_fresh_process():
+    # A kexec restart requested before a Butters restart: the new process has
+    # no in-memory record of it, but the job store does.
+    adapter, hub, _broker, clock = _adapter()
+    wall = {"now": 50_000.0}
+    adapter.clock = lambda: wall["now"]
+    adapter.attach_jtag(hub, persisted_kexec_at=lambda: wall["now"] - 360)
+    _dark_for(adapter, clock, 300)
+    summary = adapter.status()["jtag_recovery"]
+    assert summary["reset_blocked_reason"] == "restart_recent"
+    assert summary["check_blocked_reason"] == "restart_recent"
+    for run in (adapter.jtag_check, adapter.jtag_reset):
+        with pytest.raises(IntegrationError) as error:
+            run()
+        assert error.value.code == "restart_recent"
+    assert hub.calls == []
+    adapter.attach_jtag(
+        hub,
+        persisted_kexec_at=lambda: wall["now"] - kr260_jtag.KEXEC_QUIET_SECONDS - 1,
+    )
+    assert adapter.jtag_reset()["outcome"] == "reset_requested"
+
+
+def test_the_later_of_the_in_memory_and_persisted_kexec_times_counts():
+    adapter, hub, broker, clock = _adapter(broker=Broker())
+    wall = {"now": 50_000.0}
+    adapter.clock = lambda: wall["now"]
+    adapter.reboot()
+    broker.ok, broker.error_code = False, "host_unreachable"
+    clock.now += kr260_jtag.KEXEC_QUIET_SECONDS + 1
+    wall["now"] += kr260_jtag.KEXEC_QUIET_SECONDS + 1
+    # The in-memory restart is old enough; a newer stored one is not.
+    adapter.attach_jtag(hub, persisted_kexec_at=lambda: wall["now"] - 200)
+    _dark_for(adapter, clock, 300)
+    with pytest.raises(IntegrationError) as error:
+        adapter.jtag_reset()
+    assert error.value.code == "restart_recent"
+    assert hub.calls == []
+
+
+def test_store_finds_only_kexec_jobs_that_may_have_run(tmp_path):
+    from butters.actions.store import ActionStateStore
+
+    times = iter(range(1000, 2000, 10))
+    store = ActionStateStore(
+        tmp_path / "actions.sqlite3",
+        load_assistant_settings().actions,
+        clock=lambda: float(next(times)),
+    )
+
+    def job(skill, state, failure=None):
+        with store._lock, store._connect() as connection:
+            stamp = store.clock()
+            connection.execute(
+                "INSERT INTO action_jobs (job_id,plan_id,skill,summary,session_id,identity,"
+                "created_at,state,stage,failure_code) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (f"j{stamp}", "p", skill, "s", "s", "i", stamp, state, state, failure),
+            )
+            return stamp
+
+    lookup = lambda: store.last_job_that_may_have_run(
+        "reboot_kr260", not_run=Kr260Adapter.RESTART_NOT_SENT
+    )
+    assert lookup() is None
+    # Refused before anything reached the board: no quiet period.
+    for code in (
+        "identity_unverified",
+        "reboot_in_progress",
+        "host_unreachable",
+        "restart_already_staged",
+        "capability_unavailable",
+    ):
+        job("reboot_kr260", "failed", code)
+    job("reset_kr260_jtag", "completed")
+    assert lookup() is None
+    # Unknown outcomes count: a timeout, or a job interrupted by a restart.
+    timed_out = job("reboot_kr260", "failed", "timeout")
+    assert lookup() == timed_out
+    interrupted = job("reboot_kr260", "failed", "restart_recovery_required")
+    assert lookup() == interrupted
+    completed = job("reboot_kr260", "completed")
+    assert lookup() == completed
+
+
+def test_restart_not_sent_extends_the_broker_refusals_with_the_adapter_checks():
+    assert Kr260Adapter._NOT_SENT < Kr260Adapter.RESTART_NOT_SENT
+    assert Kr260Adapter.RESTART_NOT_SENT - Kr260Adapter._NOT_SENT == {
+        "capability_unavailable",
+        "identity_unverified",
+        "reboot_in_progress",
+    }
+    # Nothing that may have restarted the board is treated as not sent.
+    for code in (
+        "timeout",
+        "restart_recovery_required",
+        "internal_error",
+        "malformed_result",
+    ):
+        assert code not in Kr260Adapter.RESTART_NOT_SENT
+
+
 def test_store_finds_only_reset_jobs_that_may_have_run(tmp_path):
     from butters.actions.store import ActionStateStore
 

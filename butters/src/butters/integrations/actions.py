@@ -236,6 +236,11 @@ class Kr260Adapter:
             "cancelled",
         }
     )
+    # Failure codes of a reboot_kr260 job that sent nothing: the broker's
+    # refusals above plus this adapter's own checks before sending.
+    RESTART_NOT_SENT = _NOT_SENT | frozenset(
+        {"capability_unavailable", "identity_unverified", "reboot_in_progress"}
+    )
     _JTAG_CHECK = "kr260.jtag_por.check"
     _JTAG_RESET = "kr260.jtag_por.reset"
 
@@ -264,9 +269,11 @@ class Kr260Adapter:
         # The last JTAG attempt, and the last one that may have reset the board.
         self._jtag_attempt: kr260_jtag.Attempt | None = None
         self._last_jtag: kr260_jtag.Attempt | None = None
-        # Wall-clock time of the last reset job that may have run, from the
-        # persistent job store, so the interval survives a Butters restart.
+        # Wall-clock times of the last reset and the last kexec restart job
+        # that may have run, from the persistent job store, so the interval and
+        # the quiet period after a restart both survive a Butters restart.
         self._persisted_reset_at: Callable[[], float | None] = lambda: None
+        self._persisted_kexec_at: Callable[[], float | None] = lambda: None
         self._dark = kr260_jtag.DarkRun()
         self._recorded_at: object = None
         self._last_boot_id: str | None = None
@@ -276,10 +283,13 @@ class Kr260Adapter:
         hub: Any,
         *,
         persisted_reset_at: Callable[[], float | None] | None = None,
+        persisted_kexec_at: Callable[[], float | None] | None = None,
     ) -> None:
         self.jtag = hub
         if persisted_reset_at is not None:
             self._persisted_reset_at = persisted_reset_at
+        if persisted_kexec_at is not None:
+            self._persisted_kexec_at = persisted_kexec_at
 
     def _jtag_available(self) -> bool:
         return bool(
@@ -482,19 +492,32 @@ class Kr260Adapter:
 
     def _jtag_refusal(self, *, reset: bool) -> str | None:
         now = self.monotonic()
-        last_reset = self._last_jtag.at if self._last_jtag else None
-        persisted = self._persisted_reset_at()
-        if persisted is not None:
-            # Express the stored wall-clock time on this process's monotonic clock.
-            mirrored = now - max(0.0, self.clock() - persisted)
-            last_reset = mirrored if last_reset is None else max(last_reset, mirrored)
         return kr260_jtag.refusal(
             now=now,
             dark=self._dark,
-            last_kexec_at=self._last_reboot[0] if self._last_reboot else None,
-            last_reset_at=last_reset,
+            last_kexec_at=self._latest(
+                now,
+                self._last_reboot[0] if self._last_reboot else None,
+                self._persisted_kexec_at(),
+            ),
+            last_reset_at=self._latest(
+                now,
+                self._last_jtag.at if self._last_jtag else None,
+                self._persisted_reset_at(),
+            ),
             reset=reset,
         )
+
+    def _latest(
+        self, now: float, in_memory: float | None, persisted: float | None
+    ) -> float | None:
+        """The later of an in-memory monotonic time and a stored wall time."""
+
+        if persisted is None:
+            return in_memory
+        # Express the stored wall-clock time on this process's monotonic clock.
+        mirrored = now - max(0.0, self.clock() - persisted)
+        return mirrored if in_memory is None else max(in_memory, mirrored)
 
     def _jtag_summary(self, value: dict[str, object]) -> dict[str, object]:
         """What the Admin page shows; it derives nothing itself."""
