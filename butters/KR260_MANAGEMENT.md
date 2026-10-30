@@ -1333,8 +1333,14 @@ as a branch**. Build the candidate on the production line instead:
    - write `C:\ProgramData\Butters\DesktopAgent\kr260-jtag.toml` (next to
      `agent.toml`, Administrators/SYSTEM-owned) with `enabled = false` and
      both hashes;
-   - back up `venv\Lib\site-packages\butters_agent`, then `pip install
-     --force-reinstall --no-deps` the candidate's `butters-agent` package;
+   - back up `venv\Lib\site-packages\butters_agent`, then install the
+     agent **from local branch `deploy/desktop-agent-kr260-jtag` (`f2f216d`)**,
+     not from the candidate. The desktop runs `origin/main`'s agent, and the
+     candidate's agent would also ship PR #5's batched `desktop.app.list`
+     snapshot (`7682879`, `d3f3be5`), which has never run on Windows.
+     `f2f216d` is `origin/main` plus exactly PR #9's agent diff. Install it as
+     an offline wheel: `pip install --no-index --no-deps --force-reinstall`.
+     The kit is in `kr260-diagnostics/2026-10-30-deploy/windows-bundle/`;
    - restart only the Desktop Agent process: `Stop-ScheduledTask` then
      `Start-ScheduledTask -TaskPath '\Butters\' -TaskName DesktopAgent`. The
      task runs at `LeastPrivilege` as the logged-on user, ignores a second
@@ -1357,6 +1363,14 @@ agent installed on the desktop, production `ba675b4` and the candidate:
 | candidate, agent gate on | production | **rejected at hello**: the whole agent disconnects |
 
 So close the agent gate before any Butters rollback.
+
+**Deployed 2026-10-30 03:03Z (Butters only).**
+- **Production:** `040ca84`, tree digest `7cd33ea1…`; `/opt/butters.previous` is `ba675b4`.
+- **Backup:** `/var/backups/butters-predeploy-20261030T030059Z`.
+- **Approvals:** the installer preserved all 50, and the 47 existing effective ones are unchanged.
+- **Gates:** `kr260.status=true`, `kr260.reboot=false`, `desktop.wake=false`; JTAG recovery `gate_closed`.
+- **Health:** FPGA telemetry `operating`; the Desktop Agent reconnected 17 s after the restart.
+- **Not done:** the Windows agent is not installed.
 
 ##### Rollback (no Windows restart)
 
