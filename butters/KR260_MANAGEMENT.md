@@ -1110,6 +1110,8 @@ Conclusion:
 #### Butters → Desktop Agent recovery (PR #9: implemented, gated off, not live-validated)
 
 Branch `feature/kr260-jtag-recovery-agent`, draft PR #9, stacked on PR #8.
+The Windows Desktop Agent side is owned by Windows Codex. Its integration
+contract is `KR260_JTAG_AGENT_HANDOFF.md`.
 Nothing is installed on the desktop and nothing is deployed. Both gates ship
 closed. All reset paths have run only against simulated hardware.
 
