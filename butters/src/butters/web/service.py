@@ -67,6 +67,8 @@ from butters.cloud.usage_admin_credential import (
 from butters.diagnostics.engine import DiagnosticEngine
 from butters.diagnostics.model import DiagnosticRequest, RequestDepth
 from butters.diagnostics.sanitizer import sanitize_text, sanitize_value
+from butters.integrations import kr260_jtag
+from butters.integrations.actions import Kr260Adapter
 from butters.planner.model import PlannerError, PlannerRequest
 from butters.planner.provider import DisabledPlannerProvider, PlannerProvider
 from butters.planner.validator import PlannerValidator
@@ -76,7 +78,6 @@ from butters.routing.compound import CompoundPlan, plan_compound_request
 from butters.routing.conversation import route_conversation_turn
 from butters.routing.model import RoutedIntent
 from butters.routing.router import END_REMOTE_SESSION
-from butters.integrations import kr260_jtag
 from butters.skills.desktop_agent import register_desktop_agent_skills
 from butters.skills.model import (
     ActionAuthorization,
@@ -286,11 +287,15 @@ class BetaAssistantService:
         register_desktop_agent_skills(self.assistant.skills, self.desktop_agent)
         if self.assistant.kr260_adapter is not None:
             # KR260 JTAG recovery runs on the desktop's cable, through the agent.
-            # The reset interval also counts reset jobs from before a restart.
+            # The reset interval and the quiet period after a kexec restart
+            # also count jobs from before a Butters restart.
             self.assistant.kr260_adapter.attach_jtag(
                 self.desktop_agent,
                 persisted_reset_at=lambda: self.action_state.last_job_that_may_have_run(
                     "reset_kr260_jtag", not_run=kr260_jtag.RESET_NOT_SENT
+                ),
+                persisted_kexec_at=lambda: self.action_state.last_job_that_may_have_run(
+                    "reboot_kr260", not_run=Kr260Adapter.RESTART_NOT_SENT
                 ),
             )
         self.nas_agent = NasAgentHub(settings.nas_agent_ingress)

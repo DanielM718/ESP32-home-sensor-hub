@@ -247,6 +247,35 @@ def _jtag_application(tmp_path):
     return app, service, hub
 
 
+def test_the_service_counts_a_stored_kexec_restart_job(tmp_path) -> None:
+    # The web service wires the job store into the quiet period after a kexec
+    # restart, exactly as it does for the reset interval.
+    _app, service, hub = _jtag_application(tmp_path)
+    adapter = service.assistant.kr260_adapter
+    assert adapter._persisted_kexec_at() is None
+    store = service.action_state
+    with store._lock, store._connect() as connection:
+        connection.execute(
+            "INSERT INTO action_jobs (job_id,plan_id,skill,summary,session_id,identity,"
+            "created_at,state,stage,failure_code) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "j1",
+                "p",
+                "reboot_kr260",
+                "s",
+                "s",
+                "i",
+                store.clock(),
+                "completed",
+                "completed",
+                None,
+            ),
+        )
+    assert adapter._persisted_kexec_at() is not None
+    assert adapter.status()["jtag_recovery"]["reset_blocked_reason"] == "restart_recent"
+    assert hub.calls == []
+
+
 async def _passkey(http, mutation, plan):
     from test_nas_admin_controls import _credential
 

@@ -1156,7 +1156,7 @@ Butters status(): new boot ID from the identity-verified board ⇒ confirmed
 | Condition | Butters | Agent | Script |
 |---|---|---|---|
 | Board unreachable | dark (no ping and SSH `host_unreachable`/`ssh_timeout`) for ≥300 s over ≥2 probes, re-probed at execution | no ICMP echo reply from Windows, checked after the slow checks, immediately before PowerShell | no TCP answer from port 22 immediately before attaching and again immediately before `CHECK_OK`/`rst -por` |
-| Not just restarted | no kexec request in the last 600 s | — | — |
+| Not just restarted | no kexec request that may have run in the last 600 s, in memory and from the persistent job table (survives a Butters restart) | — | — |
 | One reset per 30 min | in memory and from the persistent job table (survives a Butters restart) | in memory | one `rst -por` per process |
 | Exact hardware | — | cable serial from local config | exactly one `SCK-KR` cable with that serial; the exact chain; PSU selected |
 | Approved code | — | SHA-256 of `.ps1` and `.tcl`, admin-only ACL, before every run | — |
@@ -1256,7 +1256,7 @@ supervised run also keep the COM5 log and use `kr260-reset-verdict` as in Step
 | What | Value |
 |---|---|
 | Dark period before recovery | 300 s, ≥2 probes (observer probes at most every 10 s on refresh, 45 s by poll) |
-| After a kexec request | 600 s |
+| After a kexec request | 600 s (Butters, persisted) |
 | Between reset attempts | 1800 s (Butters, persisted; and the agent) |
 | Confirmation window | 300 s, then `unconfirmed` (a late new boot still confirms) |
 | Agent request window | 30 s: ≤5 s checks, XSDB 19 s inside a 21 s process deadline, ≤2 s cleanup, 2 s left for the transport |
