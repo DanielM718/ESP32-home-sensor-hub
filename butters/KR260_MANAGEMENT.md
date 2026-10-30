@@ -1259,6 +1259,7 @@ supervised run also keep the COM5 log and use `kr260-reset-verdict` as in Step
 |---|---|
 | Dark period before recovery | 300 s, ≥2 probes (observer probes at most every 10 s on refresh, 45 s by poll) |
 | After a kexec request | 600 s (Butters, persisted) |
+| Stored job history unreadable or malformed | counts as a job just now: both waits stay in force; the status view keeps working |
 | Between reset attempts | 1800 s (Butters, persisted; and the agent) |
 | Confirmation window | 300 s, then `unconfirmed` (a late new boot still confirms) |
 | Agent request window | 30 s: ≤5 s checks, XSDB 19 s inside a 21 s process deadline, ≤2 s cleanup, 2 s left for the transport |
@@ -1405,6 +1406,12 @@ So close the agent gate before any Butters rollback.
   the agent's token is unverified.
 - The agent's 30-minute latch is in memory: an agent restart clears it, while
   Butters' persisted check remains.
+- The persisted waits use wall-clock job times. This Pi 4 has no RTC, and
+  `butters-web` is not ordered after `time-sync.target`. A job recorded after
+  a Pi boot but before NTP sync carries an early timestamp, so if Butters
+  later restarts, that job looks older than it is. Within one Butters process
+  the in-memory monotonic time still governs. A time ahead of the clock always
+  counts as just now.
 - FSBL-banner evidence needs COM5, which is not wired into the agent.
 - A slow `hw_server` start can exceed the 19 s XSDB deadline (expected run
   about 16.5 s). That gives `NO_RESULT`, which counts as possibly reset.

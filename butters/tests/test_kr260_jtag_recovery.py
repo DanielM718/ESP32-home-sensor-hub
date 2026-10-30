@@ -990,6 +990,117 @@ def test_the_later_of_the_in_memory_and_persisted_kexec_times_counts():
     assert hub.calls == []
 
 
+def _raises():
+    import sqlite3
+
+    raise sqlite3.OperationalError("database is locked")
+
+
+def test_an_unreadable_job_store_refuses_without_breaking_status():
+    adapter, hub, _broker, clock = _adapter()
+    adapter.attach_jtag(hub, persisted_kexec_at=_raises, persisted_reset_at=_raises)
+    _dark_for(adapter, clock, 300)
+    # Monitoring keeps working; both operations are refused as if a restart
+    # and a reset had just happened.
+    status = adapter.status()
+    assert status["jtag_recovery"]["board"] == "unreachable_confirmed"
+    assert status["jtag_recovery"]["reset_blocked_reason"] == "restart_recent"
+    assert status["jtag_recovery"]["check_blocked_reason"] == "restart_recent"
+    for run in (adapter.jtag_check, adapter.jtag_reset):
+        with pytest.raises(IntegrationError) as error:
+            run()
+        assert error.value.code == "restart_recent"
+    assert hub.calls == []
+
+
+def test_an_unreadable_reset_history_keeps_the_reset_interval():
+    adapter, hub, _broker, clock = _adapter()
+    adapter.attach_jtag(hub, persisted_reset_at=_raises)
+    _dark_for(adapter, clock, 300)
+    summary = adapter.status()["jtag_recovery"]
+    assert summary["reset_blocked_reason"] == "reset_rate_limited"
+    # A check never resets, so the reset interval does not block it.
+    assert summary["check_permitted"] is True
+    with pytest.raises(IntegrationError) as error:
+        adapter.jtag_reset()
+    assert error.value.code == "reset_rate_limited"
+    assert hub.calls == []
+
+
+@pytest.mark.parametrize(
+    "stored", ["1000", True, float("nan"), float("-inf"), float("inf"), object()]
+)
+@pytest.mark.parametrize(
+    "which, code",
+    [
+        ("persisted_kexec_at", "restart_recent"),
+        ("persisted_reset_at", "reset_rate_limited"),
+    ],
+)
+def test_a_malformed_stored_time_is_never_trusted_to_be_old(stored, which, code):
+    adapter, hub, _broker, clock = _adapter()
+    adapter.attach_jtag(hub, **{which: lambda: stored})
+    _dark_for(adapter, clock, 300)
+    with pytest.raises(IntegrationError) as error:
+        adapter.jtag_reset()
+    assert error.value.code == code
+    assert hub.calls == []
+
+
+@pytest.mark.parametrize(
+    "which, code",
+    [
+        ("persisted_kexec_at", "restart_recent"),
+        ("persisted_reset_at", "reset_rate_limited"),
+    ],
+)
+def test_a_stored_time_ahead_of_the_clock_never_shortens_a_wait(which, code):
+    # The wall clock stepped back after the job was stored: the job counts as
+    # just now, not as negative age.
+    adapter, hub, _broker, clock = _adapter()
+    wall = {"now": 50_000.0}
+    adapter.clock = lambda: wall["now"]
+    adapter.attach_jtag(hub, **{which: lambda: wall["now"] + 86_400})
+    _dark_for(adapter, clock, 300)
+    with pytest.raises(IntegrationError) as error:
+        adapter.jtag_reset()
+    assert error.value.code == code
+    assert hub.calls == []
+
+
+def test_a_kexec_job_survives_a_store_reopen_and_an_interrupted_restart(tmp_path):
+    from butters.actions.store import ActionStateStore
+
+    path = tmp_path / "actions.sqlite3"
+    actions = load_assistant_settings().actions
+    lookup_args = ("reboot_kr260",)
+    first = ActionStateStore(path, actions, clock=lambda: 1000.0)
+    with first._lock, first._connect() as connection:
+        connection.execute(
+            "INSERT INTO action_jobs (job_id,plan_id,skill,summary,session_id,identity,"
+            "created_at,state,stage) VALUES (?,?,?,?,?,?,?,?,?)",
+            ("j1", "p", "reboot_kr260", "s", "s", "i", 1000.0, "running", "running"),
+        )
+    # Still running in that process: not counted (the caller is usually one).
+    assert (
+        first.last_job_that_may_have_run(
+            *lookup_args, not_run=Kr260Adapter.RESTART_NOT_SENT
+        )
+        is None
+    )
+    # Butters restarts: the web service fails interrupted jobs at startup, and
+    # an interrupted restart may have run.
+    second = ActionStateStore(path, actions, clock=lambda: 1300.0)
+    assert second.recover_interrupted_jobs(local_console=False) == 1
+    third = ActionStateStore(path, actions, clock=lambda: 1400.0)
+    assert (
+        third.last_job_that_may_have_run(
+            *lookup_args, not_run=Kr260Adapter.RESTART_NOT_SENT
+        )
+        == 1000.0
+    )
+
+
 def test_store_finds_only_kexec_jobs_that_may_have_run(tmp_path):
     from butters.actions.store import ActionStateStore
 

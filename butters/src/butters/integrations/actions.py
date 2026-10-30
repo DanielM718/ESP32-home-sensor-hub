@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 import secrets
 import shutil
@@ -498,15 +499,37 @@ class Kr260Adapter:
             last_kexec_at=self._latest(
                 now,
                 self._last_reboot[0] if self._last_reboot else None,
-                self._persisted_kexec_at(),
+                self._stored(self._persisted_kexec_at),
             ),
             last_reset_at=self._latest(
                 now,
                 self._last_jtag.at if self._last_jtag else None,
-                self._persisted_reset_at(),
+                self._stored(self._persisted_reset_at),
             ),
             reset=reset,
         )
+
+    def _stored(self, lookup: Callable[[], float | None]) -> float | None:
+        """A stored job time; an unreadable job store counts as a job just now.
+
+        Failing closed here keeps both intervals in force and the status view
+        working when the database is locked or damaged.
+        """
+
+        try:
+            value = lookup()
+        except Exception:  # noqa: BLE001 - any failure must refuse, not raise.
+            return self.clock()
+        if value is None:
+            return None
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            # Malformed: never trust it to be old.
+            return self.clock()
+        return float(value)
 
     def _latest(
         self, now: float, in_memory: float | None, persisted: float | None
