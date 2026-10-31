@@ -17,6 +17,17 @@ early. So Butters starts or times a KR260 recovery operation only while:
 Synchronized earlier this boot and offline now is trusted: the clock keeps
 running from the sync, with drift of seconds per day. Every failure to read
 or interpret this state is untrusted. Nothing here changes the clock.
+
+With a ``baseline`` record (the web service passes one in its state
+directory), the anchor also survives a Butters restart. It stores the boot ID,
+boot time and wall time of the last trusted anchor:
+
+* A new process on the same boot checks the clock against it, so a step made
+  while Butters was down, or just before a restart, is still caught.
+* A new boot must not have a wall clock earlier than the stored one.
+* A missing or unreadable baseline cannot rule out an earlier step, so the
+  clock stays untrusted until timesyncd's next sync.
+* A detected step is stored too, so it stays latched across a restart.
 """
 
 from __future__ import annotations
@@ -26,15 +37,28 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from butters.integrations.safety_state import SafetyRecord, finite_time
+
 MARKER = Path("/run/systemd/timesync/synchronized")
 # Slack for comparing the marker with the boot and with now.
 MARKER_TOLERANCE_SECONDS = 5.0
 # Largest wall-versus-monotonic difference that is not a step.
 STEP_SECONDS = 2.0
+# Allowed drift per elapsed second when comparing with a stored baseline,
+# across NTP corrections made while Butters was down (100 ppm).
+DRIFT_PER_SECOND = 1e-4
+BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
 def _boottime() -> float:
     return time.clock_gettime(time.CLOCK_BOOTTIME)
+
+
+def _boot_id() -> str:
+    value = BOOT_ID.read_text(encoding="ascii").strip()
+    if not value:
+        raise ValueError("empty boot id")
+    return value
 
 
 class ClockTrust:
@@ -46,6 +70,8 @@ class ClockTrust:
         wall: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
         boottime: Callable[[], float] = _boottime,
+        baseline: SafetyRecord | None = None,
+        boot_id: Callable[[], str] = _boot_id,
     ) -> None:
         # Read at construction, so tests can point the default elsewhere.
         self.marker = MARKER if marker is None else marker
@@ -53,6 +79,8 @@ class ClockTrust:
         self._wall = wall
         self._monotonic = monotonic
         self._boottime = boottime
+        self.baseline = baseline
+        self._boot_id = boot_id
         # (marker mtime, wall, monotonic) when the marker was last seen change.
         self._anchor: tuple[float, float, float] | None = None
         self._stepped = False
@@ -77,16 +105,90 @@ class ClockTrust:
             # Not from this boot, or ahead of the clock: the clock or the
             # marker has moved since. Latched like a step, so putting the
             # clock back by hand does not restore trust; the next sync does.
-            if self._anchor is not None:
+            if self._anchor is not None and not self._stepped:
                 self._stepped = True
+                self._remember_step()
             return False
         anchor = self._anchor
         if anchor is None or anchor[0] != synced_at:
+            first_look = anchor is None
             self._anchor = (synced_at, wall, mono)
             self._stepped = False
-            return True
+            if self.baseline is not None:
+                self._stepped = not self._baseline_allows(
+                    synced_at, wall, booted_for, first_look=first_look
+                )
+            return not self._stepped
         skew = (wall - anchor[1]) - (mono - anchor[2])
-        if abs(skew) > STEP_SECONDS:
-            # Latched until the next sync re-anchors.
+        if abs(skew) > STEP_SECONDS and not self._stepped:
+            # Latched until the next sync re-anchors, also across a restart.
             self._stepped = True
+            self._remember_step()
         return not self._stepped
+
+    def _baseline_allows(
+        self, synced_at: float, wall: float, booted_for: float, *, first_look: bool
+    ) -> bool:
+        """Check a new anchor against the stored one, and store it if trusted."""
+
+        assert self.baseline is not None
+        try:
+            boot = self._boot_id()
+        except Exception:  # noqa: BLE001 - an unknown boot is untrusted.
+            return False
+        stored = self.baseline.read()
+        if not isinstance(stored, dict):
+            # Missing or corrupt: a step before this process started cannot be
+            # ruled out. Only a sync seen by this process re-establishes trust.
+            return not first_look and self._store(boot, synced_at, wall, booted_for)
+        stored_wall = finite_time(stored.get("wall"))
+        stored_boottime = finite_time(stored.get("boottime"))
+        stored_marker = finite_time(stored.get("marker"))
+        if stored_wall is None or stored_boottime is None or stored_marker is None:
+            return not first_look and self._store(boot, synced_at, wall, booted_for)
+        if stored.get("boot_id") == boot:
+            if stored.get("stepped") is True and stored_marker == synced_at:
+                return False
+            elapsed = booted_for - stored_boottime
+            if elapsed < -STEP_SECONDS:
+                return False
+            expected = stored_wall + elapsed
+            allowed = STEP_SECONDS + DRIFT_PER_SECOND * max(0.0, elapsed)
+            if abs(wall - expected) > allowed:
+                return False
+            if stored_marker == synced_at:
+                return True  # a restart: keep the original reference
+        elif wall < stored_wall - MARKER_TOLERANCE_SECONDS:
+            # A new boot whose synchronized clock is earlier than a trusted
+            # time already seen: one of the two is wrong.
+            return False
+        return self._store(boot, synced_at, wall, booted_for)
+
+    def _store(
+        self, boot: str, synced_at: float, wall: float, booted_for: float
+    ) -> bool:
+        assert self.baseline is not None
+        try:
+            self.baseline.write(
+                {
+                    "boot_id": boot,
+                    "marker": synced_at,
+                    "wall": wall,
+                    "boottime": booted_for,
+                    "stepped": False,
+                }
+            )
+        except OSError:
+            # Unprotected across a restart: do not trust.
+            return False
+        return True
+
+    def _remember_step(self) -> None:
+        if self.baseline is None:
+            return
+        stored = self.baseline.read()
+        if isinstance(stored, dict):
+            try:
+                self.baseline.write({**stored, "stepped": True})
+            except OSError:
+                pass  # still latched in this process
