@@ -23,7 +23,14 @@ directory), the anchor also survives a Butters restart. It stores the boot ID,
 boot time and wall time of the last trusted anchor:
 
 * A new process on the same boot checks the clock against it, so a step made
-  while Butters was down, or just before a restart, is still caught.
+  while Butters was down, or just before a restart, is still caught. With no
+  sync since the baseline, wall and boot time cannot legitimately diverge
+  (NTP slewing moves both), so the tolerance is STEP_SECONDS however long
+  ago that was. After syncs it missed, NTP may have stepped the clock by
+  accumulated drift: 100 ppm of the elapsed time, capped at
+  RESTART_SYNC_ALLOWANCE_SECONDS.
+* A sync this process sees live is trusted and becomes the new baseline:
+  timesyncd has just set the time.
 * A new boot must not have a wall clock earlier than the stored one.
 * A missing or unreadable baseline cannot rule out an earlier step, so the
   clock stays untrusted until timesyncd's next sync.
@@ -33,6 +40,7 @@ boot time and wall time of the last trusted anchor:
 from __future__ import annotations
 
 import os
+import threading
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -45,8 +53,12 @@ MARKER_TOLERANCE_SECONDS = 5.0
 # Largest wall-versus-monotonic difference that is not a step.
 STEP_SECONDS = 2.0
 # Allowed drift per elapsed second when comparing with a stored baseline,
-# across NTP corrections made while Butters was down (100 ppm).
+# across NTP corrections made while Butters was down (100 ppm), capped.
 DRIFT_PER_SECOND = 1e-4
+RESTART_SYNC_ALLOWANCE_SECONDS = 30.0
+# The largest clock error this module can fail to detect. Persisted waits are
+# lengthened by it, so no undetected error can end one early.
+MAX_UNDETECTED_SECONDS = RESTART_SYNC_ALLOWANCE_SECONDS + STEP_SECONDS
 BOOT_ID = Path("/proc/sys/kernel/random/boot_id")
 
 
@@ -84,11 +96,17 @@ class ClockTrust:
         # (marker mtime, wall, monotonic) when the marker was last seen change.
         self._anchor: tuple[float, float, float] | None = None
         self._stepped = False
+        # Status views and requests call this from different threads.
+        self._lock = threading.Lock()
 
     def __call__(self) -> bool:
         return self.trusted()
 
     def trusted(self) -> bool:
+        with self._lock:
+            return self._trusted()
+
+    def _trusted(self) -> bool:
         try:
             synced_at = float(self._stat(self.marker).st_mtime)
             wall = float(self._wall())
@@ -136,16 +154,19 @@ class ClockTrust:
             boot = self._boot_id()
         except Exception:  # noqa: BLE001 - an unknown boot is untrusted.
             return False
+        if not first_look:
+            # A sync seen live: timesyncd has just set the time.
+            return self._store(boot, synced_at, wall, booted_for)
         stored = self.baseline.read()
         if not isinstance(stored, dict):
             # Missing or corrupt: a step before this process started cannot be
             # ruled out. Only a sync seen by this process re-establishes trust.
-            return not first_look and self._store(boot, synced_at, wall, booted_for)
+            return False
         stored_wall = finite_time(stored.get("wall"))
         stored_boottime = finite_time(stored.get("boottime"))
         stored_marker = finite_time(stored.get("marker"))
         if stored_wall is None or stored_boottime is None or stored_marker is None:
-            return not first_look and self._store(boot, synced_at, wall, booted_for)
+            return False
         if stored.get("boot_id") == boot:
             if stored.get("stepped") is True and stored_marker == synced_at:
                 return False
@@ -153,7 +174,14 @@ class ClockTrust:
             if elapsed < -STEP_SECONDS:
                 return False
             expected = stored_wall + elapsed
-            allowed = STEP_SECONDS + DRIFT_PER_SECOND * max(0.0, elapsed)
+            allowed = (
+                STEP_SECONDS
+                if stored_marker == synced_at
+                else min(
+                    STEP_SECONDS + DRIFT_PER_SECOND * max(0.0, elapsed),
+                    RESTART_SYNC_ALLOWANCE_SECONDS,
+                )
+            )
             if abs(wall - expected) > allowed:
                 return False
             if stored_marker == synced_at:
@@ -186,9 +214,11 @@ class ClockTrust:
     def _remember_step(self) -> None:
         if self.baseline is None:
             return
-        stored = self.baseline.read()
-        if isinstance(stored, dict):
-            try:
-                self.baseline.write({**stored, "stepped": True})
-            except OSError:
-                pass  # still latched in this process
+        try:
+            self.baseline.update(
+                lambda stored: (
+                    {**stored, "stepped": True} if isinstance(stored, dict) else None
+                )
+            )
+        except OSError:
+            pass  # still latched in this process

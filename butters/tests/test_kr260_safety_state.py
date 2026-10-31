@@ -19,7 +19,7 @@ from test_kr260_jtag_recovery import _adapter, _dark_for
 from test_kr260_management import Broker
 
 from butters.integrations import kr260_jtag
-from butters.integrations.clock_trust import ClockTrust
+from butters.integrations.clock_trust import MAX_UNDETECTED_SECONDS, ClockTrust
 from butters.integrations.model import IntegrationError
 from butters.integrations.safety_state import CORRUPT, SafetyRecord
 
@@ -283,13 +283,13 @@ def test_a_missing_history_costs_one_full_interval(tmp_path):
     stored = _events(tmp_path)
     assert stored["reason"] == "history_unknown"
     assert stored["kexec_at"] == stored["reset_at"] == pytest.approx(wall["now"])
-    _advance(clock, wall, kr260_jtag.KEXEC_QUIET_SECONDS + 1)
+    _advance(clock, wall, kr260_jtag.KEXEC_QUIET_SECONDS + MAX_UNDETECTED_SECONDS + 1)
     adapter.status(refresh=True)
     assert adapter.jtag_check()["outcome"] == "check_passed"
     with pytest.raises(IntegrationError) as error:
         adapter.jtag_reset()
     assert error.value.code == "reset_rate_limited"
-    _advance(clock, wall, kr260_jtag.POR_INTERVAL_SECONDS)
+    _advance(clock, wall, kr260_jtag.POR_INTERVAL_SECONDS)  # the margin is covered
     adapter.status(refresh=True)
     assert adapter.jtag_reset()["outcome"] == "reset_requested"
     # Writing it down once means a restart does not start the wait again.
@@ -396,7 +396,7 @@ def test_recording_into_a_lost_record_keeps_the_other_wait(tmp_path):
     )
     _dark_for(adapter, clock, 300)
     (tmp_path / "kr260-recovery-events.json").write_bytes(b"lost")
-    adapter._record_event("reset_at")
+    adapter._write_ahead("reset_at")
     stored = _events(tmp_path)
     # The kexec time was unknown too, so it is recorded as just now.
     assert stored["kexec_at"] == stored["reset_at"] == pytest.approx(wall["now"])

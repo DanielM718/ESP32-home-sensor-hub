@@ -1442,6 +1442,34 @@ So close the agent gate before any Butters rollback.
     - Only an existing record with no event adds no wait.
     - A malformed time counts as just now.
 
+  Write-ahead:
+  - A kexec request and a JTAG reset are written to the events record
+    **before** they are sent.
+  - If that write fails, the operation is refused with
+    `safety_state_unavailable`, and nothing is sent.
+  - A crash, a timeout or a lost reply after the write keeps the time.
+  - Only a definite "not sent" outcome puts back the previous time, and only
+    if the record still holds this request's time, so a newer event is never
+    lost. If that undo fails, the longer wait stays.
+  - Updates take a per-path thread lock plus `flock`, and use unique
+    temporary files and complete writes.
+  - A full disk, or a read-only state directory, raises and leaves the
+    previous record intact.
+  - The JTAG attach-only check sends no reset and records nothing.
+
+  Clock baseline tolerance:
+  - **No sync since the baseline:** 2 s. Wall and boot time cannot
+    legitimately diverge then, however long the Pi has been offline.
+  - **Syncs missed while Butters was down:** 100 ppm of the elapsed time,
+    capped at 30 s. Anything larger waits for a sync this process sees.
+  - **A sync seen live:** trusted, and it becomes the new baseline.
+  - **Stored wall times** are treated as 32 s later
+    (`MAX_UNDETECTED_SECONDS`), so no error the check can miss ends a wait
+    early.
+
+  The checksum detects accidental damage, not tampering. Anyone who can
+  write `/var/lib/butters` can forge a record, or restore an older copy.
+
   On first deployment both records are absent. Recovery and kexec therefore
   stay blocked until timesyncd's next poll (up to about 34 min), and the waits
   then run once. The gates are closed today.

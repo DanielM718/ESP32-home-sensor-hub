@@ -171,6 +171,7 @@ RESET_NOT_SENT = frozenset(
         "restart_recent",
         "reset_rate_limited",
         "clock_unsynchronized",
+        "safety_state_unavailable",
         "invalid_action",
         "invalid_parameter",
         "invalid_request_id",
