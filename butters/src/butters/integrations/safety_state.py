@@ -5,19 +5,33 @@ Each record is one JSON file in the Butters state directory, written atomically
 canonical body. A file that is missing reads as None; a file that is truncated,
 unparsable, of another schema, or whose checksum does not match reads as
 ``CORRUPT``. Callers treat both as "unknown", which always means "wait".
+
+``update`` is a read-modify-write under an exclusive lock: a per-path thread
+lock plus ``flock`` on a sidecar lock file, for other processes. Writers use
+unique temporary files and write until every byte is out. A full disk or a
+read-only directory raises OSError and leaves the previous record intact.
+
+The checksum detects accidental damage only. Anyone who can write the state
+directory can forge a record, or restore an older one.
 """
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import math
 import os
+import tempfile
+import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final
 
 SCHEMA: Final = 1
 CORRUPT: Final = object()
+_THREAD_LOCKS: dict[Path, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 def _digest(body: dict[str, object]) -> str:
@@ -55,13 +69,19 @@ class SafetyRecord:
 
         document = {"schema": SCHEMA, "body": body, "sha256": _digest(body)}
         data = json.dumps(document, sort_keys=True).encode("utf-8")
-        temporary = self.path.with_name(f".{self.path.name}.{os.getpid()}.tmp")
+        # Unique per writer (mkstemp creates it 0600), never shared.
+        descriptor, name = tempfile.mkstemp(
+            prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+        )
+        temporary = Path(name)
         try:
-            descriptor = os.open(
-                temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600
-            )
             try:
-                os.write(descriptor, data)
+                view = memoryview(data)
+                while view:
+                    written = os.write(descriptor, view)
+                    if written <= 0:
+                        raise OSError("short write")
+                    view = view[written:]
                 os.fsync(descriptor)
             finally:
                 os.close(descriptor)
@@ -73,6 +93,35 @@ class SafetyRecord:
                 os.close(directory)
         finally:
             temporary.unlink(missing_ok=True)
+
+    def update(
+        self,
+        change: Callable[[dict[str, object] | None | object], dict[str, object] | None],
+    ) -> dict[str, object] | None:
+        """Read, change and write under an exclusive lock.
+
+        ``change`` receives the current body (or None / CORRUPT) and returns
+        the new body, or None to leave the record as it is. Raises OSError if
+        the lock or the write fails; the record is then unchanged.
+        """
+
+        with _thread_lock(self.path):
+            lock_path = self.path.with_name(f".{self.path.name}.lock")
+            descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+                new = change(self.read())
+                if new is not None:
+                    self.write(new)
+                return new
+            finally:
+                os.close(descriptor)  # releases the flock
+
+
+def _thread_lock(path: Path) -> threading.Lock:
+    key = Path(path).absolute()
+    with _THREAD_LOCKS_GUARD:
+        return _THREAD_LOCKS.setdefault(key, threading.Lock())
 
 
 def finite_time(value: object) -> float | None:

@@ -18,7 +18,7 @@ from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
 from butters.integrations import kr260_jtag
-from butters.integrations.clock_trust import ClockTrust
+from butters.integrations.clock_trust import MAX_UNDETECTED_SECONDS, ClockTrust
 from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
 from butters.integrations.nas_status import NasStatusObserver
@@ -247,6 +247,7 @@ class Kr260Adapter:
             "identity_unverified",
             "reboot_in_progress",
             "clock_unsynchronized",
+            "safety_state_unavailable",
         }
     )
     _JTAG_CHECK = "kr260.jtag_por.check"
@@ -402,19 +403,23 @@ class Kr260Adapter:
                     "reboot_in_progress",
                     "a KR260 reboot was already requested and has not completed",
                 )
+            # Written down before it is sent: a crash, a lost reply or a timeout
+            # after this point leaves the quiet period in force.
+            ahead = self._write_ahead("kexec_at")
             try:
                 result = self.actions.execute(
                     BrokerOperation.KR260_REBOOT, cancel_event=cancel_event
                 )
             except IntegrationError as exc:
-                if exc.code not in self._NOT_SENT:
+                if exc.code in self._NOT_SENT:
+                    # Refused before anything reached the board.
+                    self._undo_write_ahead(ahead)
+                else:
                     # The outcome is unknown, so treat it as possibly sent.
                     self._last_reboot = (self.monotonic(), _boot_id(before))
-                    self._record_event("kexec_at")
                     self.observer.invalidate()
                 raise
             self._last_reboot = (self.monotonic(), _boot_id(before))
-            self._record_event("kexec_at")
             self.observer.invalidate()
         return {
             **result,
@@ -477,6 +482,9 @@ class Kr260Adapter:
                 raise IntegrationError(code, "KR260 JTAG recovery precondition failed")
             previous = self._last_boot_id
             action = self._JTAG_RESET if operation == "reset" else self._JTAG_CHECK
+            # A reset is written down before it is sent (see kexec above). A
+            # check only attaches; it starts no interval.
+            ahead = self._write_ahead("reset_at") if operation == "reset" else None
             # Before sending: a reset happens during the request, and uptime is
             # compared with the time since this moment.
             sent_at = self.monotonic()
@@ -506,8 +514,10 @@ class Kr260Adapter:
             self._jtag_attempt = attempt
             if may_have_reset:
                 self._last_jtag = attempt
-                self._record_event("reset_at")
                 self.observer.invalidate()
+            else:
+                # The agent or the wrapper refused before rst -por.
+                self._undo_write_ahead(ahead)
         finally:
             self._lock.release()
         if error is not None:
@@ -574,29 +584,80 @@ class Kr260Adapter:
             return times
         if trusted:
             try:
-                self._events.write(
-                    {"kexec_at": now, "reset_at": now, "reason": "history_unknown"}
+                self._events.update(
+                    lambda current: (
+                        None
+                        if isinstance(current, dict)
+                        else {
+                            "kexec_at": now,
+                            "reset_at": now,
+                            "reason": "history_unknown",
+                        }
+                    )
                 )
             except OSError:
                 pass  # re-evaluated, and still "just now", next time
         return {"kexec_at": now, "reset_at": now}
 
-    def _record_event(self, key: str) -> None:
+    def _write_ahead(self, key: str) -> tuple[str, object, float] | None:
+        """Record that ``key`` may happen now, before it is sent.
+
+        Keeps the later of any stored time and now, so a newer event is never
+        overwritten. Raises ``safety_state_unavailable`` (nothing sent) if the
+        record cannot be written: an operation whose interval could be lost is
+        not started.
+        """
+
         if self._events is None:
-            return
-        body = self._events.read()
-        now = self.clock()
-        # A lost record leaves the other event unknown too: just now.
-        current = (
-            dict(body) if isinstance(body, dict) else {"kexec_at": now, "reset_at": now}
-        )
-        previous = finite_time(current.get(key))
-        current[key] = now if previous is None else max(previous, now)
-        current.pop("reason", None)
+            return None
+        stamp = self.clock()
+        noted: dict[str, object] = {}
+
+        def change(body: object) -> dict[str, object]:
+            if isinstance(body, dict):
+                current = dict(body)
+                noted["previous"] = current.get(key)
+            else:
+                # Lost: both events are unknown, so both count as just now.
+                current = {"kexec_at": stamp, "reset_at": stamp}
+                noted["previous"] = stamp
+            prior = finite_time(current.get(key))
+            current[key] = stamp if prior is None else max(prior, stamp)
+            current.pop("reason", None)
+            noted["written"] = current[key]
+            return current
+
         try:
-            self._events.write(current)
+            self._events.update(change)
         except OSError:
-            pass  # the job store still has it; the in-memory time governs
+            raise IntegrationError(
+                "safety_state_unavailable",
+                "the KR260 recovery record cannot be written; nothing was sent",
+            ) from None
+        return key, noted["previous"], float(noted["written"])
+
+    def _undo_write_ahead(self, ahead: tuple[str, object, float] | None) -> None:
+        """Put back the previous time after a definite refusal.
+
+        Only if the record still holds what this request wrote, so a newer
+        event is never lost, and never earlier than what was there before. If
+        this fails the request's time stays: a longer wait, never a shorter
+        one.
+        """
+
+        if ahead is None or self._events is None:
+            return
+        key, previous, written = ahead
+
+        def change(body: object) -> dict[str, object] | None:
+            if not isinstance(body, dict) or finite_time(body.get(key)) != written:
+                return None
+            return {**body, key: previous}
+
+        try:
+            self._events.update(change)
+        except OSError:
+            pass
 
     def _clock_is_trusted(self) -> bool:
         try:
@@ -633,8 +694,10 @@ class Kr260Adapter:
 
         if persisted is None:
             return in_memory
-        # Express the stored wall-clock time on this process's monotonic clock.
-        mirrored = now - max(0.0, self.clock() - persisted)
+        # Express the stored wall-clock time on this process's monotonic clock,
+        # as if it were MAX_UNDETECTED_SECONDS later: no clock error the trust
+        # check can miss may end a wait early.
+        mirrored = now - max(0.0, self.clock() - persisted - MAX_UNDETECTED_SECONDS)
         return mirrored if in_memory is None else max(in_memory, mirrored)
 
     def _jtag_summary(self, value: dict[str, object]) -> dict[str, object]:

@@ -24,6 +24,7 @@ from butters.assistant_config import AgentIngressSettings, load_assistant_settin
 from butters.config_overlay import GATE_KEYS
 from butters.integrations import kr260_jtag
 from butters.integrations.actions import Kr260Adapter
+from butters.integrations.clock_trust import MAX_UNDETECTED_SECONDS
 from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError
 
@@ -952,7 +953,10 @@ def test_a_persisted_reset_job_rate_limits_a_fresh_process():
         adapter.jtag_reset()
     assert error.value.code == "reset_rate_limited"
     assert hub.calls == []
-    adapter.attach_jtag(hub, persisted_reset_at=lambda: wall["now"] - 1801)
+    # Persisted times count MAX_UNDETECTED_SECONDS later (clock_trust.py).
+    adapter.attach_jtag(
+        hub, persisted_reset_at=lambda: wall["now"] - 1801 - MAX_UNDETECTED_SECONDS
+    )
     assert adapter.jtag_reset()["outcome"] == "reset_requested"
 
 
@@ -974,7 +978,9 @@ def test_a_persisted_kexec_job_keeps_the_quiet_period_in_a_fresh_process():
     assert hub.calls == []
     adapter.attach_jtag(
         hub,
-        persisted_kexec_at=lambda: wall["now"] - kr260_jtag.KEXEC_QUIET_SECONDS - 1,
+        persisted_kexec_at=lambda: (
+            wall["now"] - kr260_jtag.KEXEC_QUIET_SECONDS - MAX_UNDETECTED_SECONDS - 1
+        ),
     )
     assert adapter.jtag_reset()["outcome"] == "reset_requested"
 
@@ -1158,6 +1164,7 @@ def test_restart_not_sent_extends_the_broker_refusals_with_the_adapter_checks():
         "identity_unverified",
         "reboot_in_progress",
         "clock_unsynchronized",
+        "safety_state_unavailable",
     }
     # Nothing that may have restarted the board is treated as not sent.
     for code in (
