@@ -83,7 +83,12 @@ def _adapter(*, broker=None, hub=None, enabled=True, ping=1):
         monotonic=clock,
     )
     adapter = Kr260Adapter(
-        observer, Actions(), reboot, jtag_settings=gate, monotonic=clock
+        observer,
+        Actions(),
+        reboot,
+        jtag_settings=gate,
+        monotonic=clock,
+        clock_trusted=lambda: True,
     )
     hub = Hub() if hub is None else hub
     adapter.attach_jtag(hub)
@@ -172,6 +177,7 @@ def test_refusal_rules(count, seconds, last_kexec, last_reset, reset, expected):
             last_kexec_at=None if last_kexec is None else now - last_kexec,
             last_reset_at=None if last_reset is None else now - last_reset,
             reset=reset,
+            clock_trusted=True,
         )
         == expected
     )
@@ -1151,6 +1157,7 @@ def test_restart_not_sent_extends_the_broker_refusals_with_the_adapter_checks():
         "capability_unavailable",
         "identity_unverified",
         "reboot_in_progress",
+        "clock_unsynchronized",
     }
     # Nothing that may have restarted the board is treated as not sent.
     for code in (

@@ -21,6 +21,8 @@ KEXEC_QUIET_SECONDS = 600.0
 POR_INTERVAL_SECONDS = 1800.0
 # The POR on 2026-10-29 had SSH back after 77 s. Unconfirmed after this.
 CONFIRM_SECONDS = 300.0
+# The Pi has no RTC: persisted waits are only as good as its wall clock, so no
+# recovery operation starts while the clock is untrusted (clock_trust.py).
 # Broker failures that mean the board itself did not answer. A broker outage,
 # an authentication failure or an identity mismatch is not a dark board.
 DARK_ERRORS = frozenset({"host_unreachable", "ssh_timeout"})
@@ -75,6 +77,7 @@ BLOCKED_REASONS = frozenset(
         "agent_jtag_not_offered",
         "board_reachable",
         "offline_not_established",
+        "clock_unsynchronized",
         "restart_recent",
         "reset_rate_limited",
     }
@@ -132,6 +135,7 @@ def refusal(
     last_kexec_at: float | None,
     last_reset_at: float | None,
     reset: bool,
+    clock_trusted: bool,
 ) -> str | None:
     """The fixed refusal code for a check (``reset=False``) or reset, or None."""
 
@@ -141,6 +145,10 @@ def refusal(
     # outage, and nothing is inferred from a single sample.
     if dark.count < 2 or dark.seconds(now) < DARK_SECONDS:
         return "offline_not_established"
+    # The waits below compare stored wall-clock times; never with a clock that
+    # may jump forward later and make them look older.
+    if not clock_trusted:
+        return "clock_unsynchronized"
     if last_kexec_at is not None and now - last_kexec_at < KEXEC_QUIET_SECONDS:
         return "restart_recent"
     if (
@@ -162,6 +170,7 @@ RESET_NOT_SENT = frozenset(
         "offline_not_established",
         "restart_recent",
         "reset_rate_limited",
+        "clock_unsynchronized",
         "invalid_action",
         "invalid_parameter",
         "invalid_request_id",

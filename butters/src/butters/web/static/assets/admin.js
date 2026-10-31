@@ -468,6 +468,7 @@ const KR260_JTAG_REASON = {
   board_reachable:"The KR260 answers, so it does not need a power-on reset. Use the kexec restart if it needs restarting.",
   offline_not_established:"The KR260 has not yet been unreachable for five minutes over at least two observations.",
   restart_recent:"A kexec restart was requested in the last ten minutes; the board may still be booting.",
+  clock_unsynchronized:"The Butters clock has not synchronized since boot, or it stepped since, so recovery waits cannot be trusted yet. Recovery stays blocked until the next NTP sync.",
   reset_rate_limited:"A JTAG reset was attempted in the last thirty minutes. Investigate in person before another.",
   busy:"Another KR260 operation is running.",
 };
