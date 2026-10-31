@@ -18,6 +18,7 @@ from butters.actions.broker import BrokerClient, BrokerError, BrokerOperation
 from butters.actions.store import ActionStateStore
 from butters.assistant_config import ActionSettings, BrokerSettings, KnownDeviceSettings
 from butters.integrations import kr260_jtag
+from butters.integrations.clock_trust import ClockTrust
 from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
 from butters.integrations.nas_status import NasStatusObserver
@@ -240,7 +241,12 @@ class Kr260Adapter:
     # Failure codes of a reboot_kr260 job that sent nothing: the broker's
     # refusals above plus this adapter's own checks before sending.
     RESTART_NOT_SENT = _NOT_SENT | frozenset(
-        {"capability_unavailable", "identity_unverified", "reboot_in_progress"}
+        {
+            "capability_unavailable",
+            "identity_unverified",
+            "reboot_in_progress",
+            "clock_unsynchronized",
+        }
     )
     _JTAG_CHECK = "kr260.jtag_por.check"
     _JTAG_RESET = "kr260.jtag_por.reset"
@@ -254,8 +260,11 @@ class Kr260Adapter:
         jtag_settings: KnownDeviceSettings | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         clock: Callable[[], float] = time.time,
+        clock_trusted: Callable[[], bool] | None = None,
     ) -> None:
         self.observer = observer
+        # Whether stored wall-clock times can be compared with now (no RTC).
+        self.clock_trusted = ClockTrust() if clock_trusted is None else clock_trusted
         self.actions = actions
         self.reboot_settings = reboot_settings
         self.jtag_settings = jtag_settings or KnownDeviceSettings()
@@ -351,6 +360,14 @@ class Kr260Adapter:
         if not self.reboot_settings.enabled or not self.reboot_settings.configured:
             raise IntegrationError(
                 "capability_unavailable", "KR260 reboot is not configured"
+            )
+        # Its job time starts the post-kexec quiet period for JTAG recovery,
+        # so it is recorded only by a trusted clock. Synchronized earlier this
+        # boot and offline now still counts as trusted.
+        if not self._clock_is_trusted():
+            raise IntegrationError(
+                "clock_unsynchronized",
+                "the Butters clock has not synchronized since boot",
             )
         # Serialized, so two concurrent requests cannot both pass the checks.
         with self._lock:
@@ -507,7 +524,14 @@ class Kr260Adapter:
                 self._stored(self._persisted_reset_at),
             ),
             reset=reset,
+            clock_trusted=self._clock_is_trusted(),
         )
+
+    def _clock_is_trusted(self) -> bool:
+        try:
+            return self.clock_trusted() is True
+        except Exception:  # noqa: BLE001 - an unknown clock is untrusted.
+            return False
 
     def _stored(self, lookup: Callable[[], float | None]) -> float | None:
         """A stored job time; an unreadable job store counts as a job just now.

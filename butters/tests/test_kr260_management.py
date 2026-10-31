@@ -686,7 +686,10 @@ def _adapter(tmp_path, actions, broker=None, *, enabled=True):
     observer = Kr260Observer(
         settings(tmp_path), broker=broker or Broker(), runner=Runner(), monotonic=clock
     )
-    return Kr260Adapter(observer, actions, reboot, monotonic=clock), clock
+    adapter = Kr260Adapter(
+        observer, actions, reboot, monotonic=clock, clock_trusted=lambda: True
+    )
+    return adapter, clock
 
 
 def test_disabled_reboot_takes_no_probe_or_action(tmp_path) -> None:

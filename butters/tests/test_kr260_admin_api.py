@@ -237,6 +237,8 @@ def _jtag_application(tmp_path):
     finally:
         nas_tests.load_assistant_settings = original
     adapter = service.assistant.kr260_adapter
+    # This machine's NTP state is not under test here (tests/conftest.py).
+    adapter.clock_trusted = lambda: True
     adapter.observer = _DarkObserver(adapter.observer.settings)
     hub = _AgentHub()
     persisted = adapter._persisted_reset_at
