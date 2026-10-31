@@ -289,6 +289,8 @@ class BetaAssistantService:
             # KR260 JTAG recovery runs on the desktop's cable, through the agent.
             # The reset interval and the quiet period after a kexec restart
             # also count jobs from before a Butters restart.
+            # Durable clock baseline and recovery events beside the job store.
+            self.assistant.kr260_adapter.attach_safety_state(self.state_dir)
             self.assistant.kr260_adapter.attach_jtag(
                 self.desktop_agent,
                 persisted_reset_at=lambda: self.action_state.last_job_that_may_have_run(

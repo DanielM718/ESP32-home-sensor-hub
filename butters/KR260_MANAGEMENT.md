@@ -1422,12 +1422,34 @@ So close the agent gate before any Butters rollback.
   restart stays available during an Internet outage. `butters-web` startup is
   not delayed.
 
+  Two durable records in the state directory, beside but independent of the
+  job store, close the restart and database-loss cases. Both are written
+  atomically (temporary file, fsync, rename, fsync of the directory) with a
+  SHA-256 checksum; missing, damaged or edited reads as unknown.
+  - `kr260-clock-baseline.json` holds the boot ID, boot time, wall time and
+    marker time of the last trusted anchor, and a step flag.
+    - A restarted Butters on the same boot checks the clock against it, so a
+      step made while Butters was down, or just before a restart, is still
+      caught (100 ppm drift allowance across syncs it missed).
+    - A new boot must not have an earlier clock than the stored one.
+    - Missing, corrupt or unwritable: untrusted until a sync this process
+      sees.
+  - `kr260-recovery-events.json` holds the latest kexec request and reset
+    that may have run. The waits use the later of it and the job store.
+    - Missing or corrupt means the history is unknown: both count as just
+      now, written down once the clock is trusted. A lost history therefore
+      costs one full interval, never a shorter one.
+    - Only an existing record with no event adds no wait.
+    - A malformed time counts as just now.
+
+  On first deployment both records are absent. Recovery and kexec therefore
+  stay blocked until timesyncd's next poll (up to about 34 min), and the waits
+  then run once. The gates are closed today.
+
   Residual cases:
-  - A manual clock step followed by a Butters restart before the next sync is
-    caught only if the step exceeds the uptime at the last sync (the marker
-    then predates the boot).
-  - Recovery history that is wiped (a deleted or recreated
-    `actions.sqlite3`) forgets its waits.
+  - Wiping the whole state directory resets the clock baseline too. It is
+    then untrusted until the next sync, after which a full interval
+    applies.
   - Records stamped before this policy existed are trusted. Production had
     one, the 2026-10-28 kexec restart, stamped after that boot's sync.
 - FSBL-banner evidence needs COM5, which is not wired into the agent.

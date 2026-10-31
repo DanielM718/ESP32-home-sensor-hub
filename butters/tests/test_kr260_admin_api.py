@@ -239,6 +239,13 @@ def _jtag_application(tmp_path):
     adapter = service.assistant.kr260_adapter
     # This machine's NTP state is not under test here (tests/conftest.py).
     adapter.clock_trusted = lambda: True
+    # A known history with no recovery event yet. Without it the service sees
+    # an unknown history and waits a full interval (test_kr260_safety_state).
+    from butters.integrations.safety_state import SafetyRecord
+
+    SafetyRecord(service.state_dir / "kr260-recovery-events.json").write(
+        {"kexec_at": None, "reset_at": None}
+    )
     adapter.observer = _DarkObserver(adapter.observer.settings)
     hub = _AgentHub()
     persisted = adapter._persisted_reset_at

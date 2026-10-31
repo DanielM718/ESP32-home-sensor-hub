@@ -22,6 +22,7 @@ from butters.integrations.clock_trust import ClockTrust
 from butters.integrations.kr260 import Kr260Observer
 from butters.integrations.model import IntegrationError, SensorSnapshotProvider
 from butters.integrations.nas_status import NasStatusObserver
+from butters.integrations.safety_state import SafetyRecord, finite_time
 
 
 class HostStatusAdapter:
@@ -265,6 +266,9 @@ class Kr260Adapter:
         self.observer = observer
         # Whether stored wall-clock times can be compared with now (no RTC).
         self.clock_trusted = ClockTrust() if clock_trusted is None else clock_trusted
+        # Durable copy of the latest kexec request and reset that may have run,
+        # independent of the job store (attach_safety_state). None: no copy.
+        self._events: SafetyRecord | None = None
         self.actions = actions
         self.reboot_settings = reboot_settings
         self.jtag_settings = jtag_settings or KnownDeviceSettings()
@@ -287,6 +291,18 @@ class Kr260Adapter:
         self._dark = kr260_jtag.DarkRun()
         self._recorded_at: object = None
         self._last_boot_id: str | None = None
+
+    def attach_safety_state(self, state_dir: Path) -> None:
+        """Durable clock baseline and recovery events in the state directory.
+
+        The job store alone can be lost or recreated. These records let a lost
+        history, or a clock step across a restart, only ever lengthen a wait.
+        """
+
+        self.clock_trusted = ClockTrust(
+            baseline=SafetyRecord(Path(state_dir) / "kr260-clock-baseline.json")
+        )
+        self._events = SafetyRecord(Path(state_dir) / "kr260-recovery-events.json")
 
     def attach_jtag(
         self,
@@ -394,9 +410,11 @@ class Kr260Adapter:
                 if exc.code not in self._NOT_SENT:
                     # The outcome is unknown, so treat it as possibly sent.
                     self._last_reboot = (self.monotonic(), _boot_id(before))
+                    self._record_event("kexec_at")
                     self.observer.invalidate()
                 raise
             self._last_reboot = (self.monotonic(), _boot_id(before))
+            self._record_event("kexec_at")
             self.observer.invalidate()
         return {
             **result,
@@ -488,6 +506,7 @@ class Kr260Adapter:
             self._jtag_attempt = attempt
             if may_have_reset:
                 self._last_jtag = attempt
+                self._record_event("reset_at")
                 self.observer.invalidate()
         finally:
             self._lock.release()
@@ -510,22 +529,74 @@ class Kr260Adapter:
 
     def _jtag_refusal(self, *, reset: bool) -> str | None:
         now = self.monotonic()
+        trusted = self._clock_is_trusted()
+        events = self._event_times(trusted)
         return kr260_jtag.refusal(
             now=now,
             dark=self._dark,
             last_kexec_at=self._latest(
                 now,
                 self._last_reboot[0] if self._last_reboot else None,
-                self._stored(self._persisted_kexec_at),
+                _later(self._stored(self._persisted_kexec_at), events["kexec_at"]),
             ),
             last_reset_at=self._latest(
                 now,
                 self._last_jtag.at if self._last_jtag else None,
-                self._stored(self._persisted_reset_at),
+                _later(self._stored(self._persisted_reset_at), events["reset_at"]),
             ),
             reset=reset,
-            clock_trusted=self._clock_is_trusted(),
+            clock_trusted=trusted,
         )
+
+    def _event_times(self, trusted: bool) -> dict[str, float | None]:
+        """The durable event times; a lost record counts as both just now.
+
+        Missing or corrupt means the history is unknown, so both waits start
+        over. That is written down once the clock is trusted, so a lost record
+        costs one full interval, never a shorter one. An empty record ("no
+        event yet") is the only state that adds no wait.
+        """
+
+        if self._events is None:
+            return {"kexec_at": None, "reset_at": None}
+        body = self._events.read()
+        now = self.clock()
+        if isinstance(body, dict):
+            times: dict[str, float | None] = {}
+            for key in ("kexec_at", "reset_at"):
+                value = body.get(key)
+                # Absent or null: no such event yet. Anything else that is not
+                # a finite time is never trusted to be old.
+                stored = finite_time(value)
+                times[key] = (
+                    None if value is None else (now if stored is None else stored)
+                )
+            return times
+        if trusted:
+            try:
+                self._events.write(
+                    {"kexec_at": now, "reset_at": now, "reason": "history_unknown"}
+                )
+            except OSError:
+                pass  # re-evaluated, and still "just now", next time
+        return {"kexec_at": now, "reset_at": now}
+
+    def _record_event(self, key: str) -> None:
+        if self._events is None:
+            return
+        body = self._events.read()
+        now = self.clock()
+        # A lost record leaves the other event unknown too: just now.
+        current = (
+            dict(body) if isinstance(body, dict) else {"kexec_at": now, "reset_at": now}
+        )
+        previous = finite_time(current.get(key))
+        current[key] = now if previous is None else max(previous, now)
+        current.pop("reason", None)
+        try:
+            self._events.write(current)
+        except OSError:
+            pass  # the job store still has it; the in-memory time governs
 
     def _clock_is_trusted(self) -> bool:
         try:
@@ -863,3 +934,9 @@ def _temperature() -> float | None:
         if value is not None:
             return round(value / 1000 if value > 200 else value, 2)
     return None
+
+
+def _later(first: float | None, second: float | None) -> float | None:
+    if first is None:
+        return second
+    return first if second is None else max(first, second)
