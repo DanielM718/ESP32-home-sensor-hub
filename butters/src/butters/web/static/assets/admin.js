@@ -505,7 +505,8 @@ function renderKr260Jtag(recovery) {
   const [board,boardTone]=KR260_JTAG_BOARD[recovery.board]||[recovery.board||"Unknown","muted"];
   const dark=Math.round(recovery.dark_seconds||0);
   const attempt=recovery.last_attempt;
-  const [attemptLabel,attemptTone,attemptNote]=attempt?(KR260_JTAG_ATTEMPT[attempt.state]||[attempt.state,"muted",""]):["None","muted",""];
+  let [attemptLabel,attemptTone,attemptNote]=attempt?(KR260_JTAG_ATTEMPT[attempt.state]||[attempt.state,"muted",""]):["None","muted",""];
+  if(attempt&&attempt.restored&&attempt.state==="unconfirmed"){attemptTone="muted";attemptNote="Restored from job history after a Butters restart: a later boot cannot be attributed to this reset.";}
   summary.textContent=recovery.reset_permitted?"Recovery permitted by policy":"Recovery blocked";
   axis(document.querySelector("#kr260-jtag-status"), [
     ["Board", board, recovery.board==="unreachable"||recovery.board==="unreachable_confirmed"?`dark ${dark}s of ${Math.round(recovery.required_dark_seconds)}s · ${recovery.dark_probes} probes`:undefined, boardTone],

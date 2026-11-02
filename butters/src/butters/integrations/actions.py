@@ -797,7 +797,8 @@ class Kr260Adapter:
         issued = result.get("reset_issued_at")
         return kr260_jtag.Attempt(
             operation=operation,
-            at=self._latest(now, None, float(created)),
+            # The displayed age only: _latest()'s safety margin is for waits.
+            at=now - max(0.0, self.clock() - float(created)),
             previous_boot_id=previous if isinstance(previous, str) else None,
             may_have_reset=operation == "reset"
             and (state == "completed" or error not in kr260_jtag.RESET_NOT_SENT),
@@ -823,6 +824,18 @@ class Kr260Adapter:
             state, evidence = kr260_jtag.reset_state(
                 value, age_seconds=age, previous_boot_id=attempt.previous_boot_id
             )
+            if (
+                attempt.restored
+                and state in {"confirmed", "booted", "no_effect"}
+                and evidence != "same_boot_id"
+            ):
+                # First seen after a Butters restart, possibly boots later: a
+                # different boot, or uptime against a stored wall-clock time,
+                # cannot be attributed to this reset. Only the same boot ID
+                # still proves something (no effect).
+                state = (
+                    "requested" if age < kr260_jtag.CONFIRM_SECONDS else "unconfirmed"
+                )
             # Evidence of a boot (or of none) is kept, even if the board later
             # goes dark again; "unconfirmed" can still become "confirmed".
             if state in {"confirmed", "booted", "no_effect"}:

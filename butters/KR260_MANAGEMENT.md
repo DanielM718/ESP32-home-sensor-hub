@@ -1219,9 +1219,15 @@ for the board: it is only `requested`.
 After a Butters restart, the row is rebuilt once from the newest finished
 `reset_kr260_jtag` or `check_kr260_jtag` job and marked "from job history".
 Its boot evidence is recomputed live, the age comes from the stored wall-clock
-time, and a failed job keeps only its fixed code. An unreadable or
-unrecognised record shows no row. This is display only: refusals come from the
-persisted interval lookups.
+time (without the waits' `MAX_UNDETECTED_SECONDS` margin; a stored time ahead
+of the clock reads as just now), and a failed job keeps only its fixed code.
+A restored reset is never `confirmed` or `booted`: it is first seen after the
+restart, possibly boots later, so a different boot ID or an uptime compared
+with a stored time cannot be attributed to it. It stays `requested`, then
+`unconfirmed`, with the live evidence shown; only the same boot ID still gives
+`no_effect`. An unreadable or unrecognised record shows no row. This is display
+only: refusals come from the persisted interval lookups and the durable safety
+records, and the restore calls neither.
 
 Blocked reasons (`reset_blocked_reason`, explained on the page): `gate_closed`,
 `agent_unconfigured`, `agent_disconnected`, `agent_awaiting_heartbeat`,

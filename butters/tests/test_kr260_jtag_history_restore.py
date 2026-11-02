@@ -42,7 +42,7 @@ def _restoring(job, *, broker=None):
     return adapter, hub, broker, clock, calls
 
 
-def test_a_confirmed_reset_from_before_the_restart_is_shown_confirmed():
+def test_a_reset_from_before_the_restart_keeps_its_details_and_true_age():
     job = _job(
         result={
             "success": True,
@@ -57,7 +57,8 @@ def test_a_confirmed_reset_from_before_the_restart_is_shown_confirmed():
     )
     attempt = adapter.status(refresh=True)["jtag_recovery"]["last_attempt"]
     assert attempt["operation"] == "reset"
-    assert attempt["state"] == "confirmed"
+    # The new boot is shown, but a restored reset is never confirmed by it.
+    assert attempt["state"] == "requested"
     assert attempt["evidence"] == "new_boot_id"
     assert attempt["restored"] is True
     assert attempt["jtag_result"] == "RST_ISSUED"
@@ -224,3 +225,100 @@ def test_the_admin_page_marks_a_restored_row():
         Path(__file__).resolve().parents[1] / "src/butters/web/static/assets/admin.js"
     )
     assert 'attempt.restored?" · from job history":""' in script.read_text()
+
+
+# A restored reset is first evaluated after a Butters restart, possibly many
+# boots later (a kexec restart, a 12 V power cycle). Only the same boot ID still
+# proves something; a different boot, or uptime against a stored wall-clock
+# time, cannot be attributed to this reset and is never a confirmation.
+def _sent_reset(age, previous=OLD_BOOT):
+    return _job(
+        age=age,
+        result={
+            "success": True,
+            "jtag_result": "RST_ISSUED",
+            "previous_boot_id": previous,
+            "outcome": "reset_requested",
+        },
+    )
+
+
+@pytest.mark.parametrize(
+    ("age", "previous", "output", "expected"),
+    [
+        # Days old, the board on another boot: maybe a later power cycle.
+        (172_800.0, OLD_BOOT, NEW_BOOT, ("unconfirmed", "new_boot_id")),
+        # Recent: still only requested until the confirmation window ends.
+        (100.0, OLD_BOOT, NEW_BOOT, ("requested", "new_boot_id")),
+        # Previous boot unknown: uptime against a stored wall time decides nothing.
+        (172_800.0, None, NEW_BOOT, ("unconfirmed", "uptime_after_request")),
+        (100.0, None, None, ("requested", "uptime_before_request")),
+    ],
+    ids=["old-new-boot", "recent-new-boot", "old-uptime-after", "recent-uptime-before"],
+)
+def test_a_restored_reset_is_never_confirmed_by_a_later_boot(
+    age, previous, output, expected
+):
+    broker = Broker() if output is None else Broker(output=output)
+    adapter, *_ = _restoring(_sent_reset(age, previous), broker=broker)
+    for _ in range(2):  # not latched as a confirmation on a later read either
+        attempt = adapter.status(refresh=True)["jtag_recovery"]["last_attempt"]
+        assert (attempt["state"], attempt["evidence"]) == expected
+        assert attempt["restored"] is True
+
+
+def test_a_restored_reset_on_the_same_boot_is_still_no_effect():
+    adapter, *_ = _restoring(_sent_reset(172_800.0), broker=Broker())
+    attempt = adapter.status(refresh=True)["jtag_recovery"]["last_attempt"]
+    assert (attempt["state"], attempt["evidence"]) == ("no_effect", "same_boot_id")
+
+
+def test_the_admin_page_explains_an_unattributable_restored_reset():
+    script = (
+        Path(__file__).resolve().parents[1] / "src/butters/web/static/assets/admin.js"
+    ).read_text()
+    assert "cannot be attributed to this reset" in script
+
+
+def test_a_stored_time_ahead_of_the_clock_reads_as_just_now_and_unconfirmed():
+    # The Pi has no RTC: after a reboot its clock can lag the stored time.
+    adapter, *_ = _restoring(_sent_reset(-3600.0), broker=Broker(output=NEW_BOOT))
+    attempt = adapter.status(refresh=True)["jtag_recovery"]["last_attempt"]
+    assert attempt["age_seconds"] == pytest.approx(0.0, abs=1)
+    assert attempt["state"] == "requested"
+
+
+def test_restoring_history_leaves_the_durable_safety_records_alone(
+    tmp_path, monkeypatch
+):
+    # The same status reads, with and without a restored row, touch the clock
+    # baseline and recovery-event records identically: the display adds no
+    # read or write of either, and both directories end the same.
+    from butters.integrations.safety_state import SafetyRecord
+
+    calls = []
+    for name in ("read", "write", "update"):
+        original = getattr(SafetyRecord, name)
+
+        def spy(self, *args, _name=name, _original=original, **kwargs):
+            calls.append((_name, self.path.name))
+            return _original(self, *args, **kwargs)
+
+        monkeypatch.setattr(SafetyRecord, name, spy)
+
+    def records(directory, job):
+        directory.mkdir()
+        calls.clear()
+        adapter, hub, _broker, clock = _adapter(broker=Broker(output=NEW_BOOT))
+        adapter.clock = lambda: WALL
+        adapter.attach_safety_state(directory)
+        adapter.attach_jtag(hub, persisted_attempt=lambda: job)
+        _dark_for(adapter, clock, 300)  # gate open: refusals read the records
+        for _ in range(3):
+            adapter.status(refresh=True)
+        return list(calls), {p.name: p.read_bytes() for p in directory.iterdir()}
+
+    with_history = records(tmp_path / "with", _sent_reset(100.0))
+    without_history = records(tmp_path / "without", None)
+    assert with_history[0], "the refusal path should read the records"
+    assert with_history == without_history
